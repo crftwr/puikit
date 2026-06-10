@@ -123,13 +123,15 @@ event.hints   # backend-specific additional info
 
 ### 6. System Integration
 
-| Feature            | TUI      | GUI-Desktop     | GUI-Web          |
-|--------------------|----------|-----------------|------------------|
-| Clipboard          | Text only | Rich formats   | Security-limited |
-| Drag & Drop        | None     | OS-integrated   | Limited          |
-| IME / CJK input    | Limited  | Full            | Full             |
-| Native file dialog | None     | Available       | None             |
-| System tray        | None     | Available       | None             |
+| Feature            | TUI      | GUI-Desktop     | GUI-Web          | Mobile           | Game (OpenGL)    |
+|--------------------|----------|-----------------|------------------|------------------|------------------|
+| Clipboard          | Text only | Rich formats   | Security-limited | Limited          | None             |
+| Drag & Drop        | None     | OS-integrated   | Limited          | None             | None             |
+| IME / CJK input    | Limited  | Full            | Full             | Full (virtual KB)| None             |
+| Native file dialog | None     | Available       | None             | None             | None             |
+| System tray        | None     | Available       | None             | None             | None             |
+| Touch / gestures   | None     | None            | Limited          | Full             | Partial          |
+| Gamepad input      | None     | None            | None             | None             | Full             |
 
 ---
 
@@ -176,9 +178,37 @@ PROFILE_GUI_DESKTOP = {
     "gpu_acceleration": True,
     "media_keys": True,
 }
+
+PROFILE_MOBILE = {
+    **PROFILE_GUI_WEB,
+    "system_tray": False,
+    "media_keys": False,
+    "native_file_dialog": False,
+    "touch": True,
+    "virtual_keyboard": True,
+    "gpu_acceleration": True,
+}
+
+PROFILE_GAME = {
+    "pixel_layout": True,
+    "layering": True,
+    "transparency": True,
+    "shadow": False,          # app-rendered if needed
+    "animation": True,
+    "drag_and_drop": False,
+    "ime": False,
+    "clipboard_rich": False,
+    "native_file_dialog": False,
+    "system_tray": False,
+    "hover": True,
+    "media_keys": False,
+    "touch": True,            # platform-dependent
+    "gamepad": True,
+    "gpu_acceleration": True,
+}
 ```
 
-Expressiveness ranking: `TUI < GUI-Web < GUI-Desktop`
+Expressiveness ranking: `TUI < GUI-Web ≈ Mobile < GUI-Desktop`; Game backends are a separate axis (GPU-first, input-rich, no OS shell integration).
 
 ---
 
@@ -210,6 +240,11 @@ class Panel:
 4. `Win32Backend` — Windows GUI
 5. `GTKBackend` — Linux GUI
 
+### Further future
+6. `UIKitBackend` — iOS (Swift/ObjC + Python bridge)
+7. `AndroidBackend` — Android (Kotlin/JNI + Python bridge)
+8. `OpenGLBackend` — Game / embedded platforms (OpenGL or OpenGL ES; Python + C++)
+
 ---
 
 ## Directory Structure (draft)
@@ -224,7 +259,7 @@ puikit/
 │   ├── event.py          # Event model
 │   ├── widgets/          # Shared widget library
 │   │   ├── __init__.py
-│   │   ├── file_list.py
+│   │   ├── list.py
 │   │   ├── scroll_bar.py
 │   │   └── ...
 │   └── backends/
@@ -232,6 +267,8 @@ puikit/
 │       ├── curses_backend.py
 │       └── coregraphics_backend.py
 ├── examples/
+│   ├── hello_world/      # minimal single-label app
+│   ├── demo_catalog/     # widget showcase
 │   └── file_manager/     # tfm reimplemented on PuiKit
 ├── tests/
 ├── CLAUDE.md             # this file
@@ -242,8 +279,56 @@ puikit/
 
 ---
 
+## Reference Implementation
+
+[tfm/ttk](https://github.com/crftwr/tfm/tree/main/ttk) is the direct predecessor to PuiKit and the primary design reference.
+
+Key takeaways from ttk:
+
+- `Renderer` is an abstract base class with drawing primitives (`draw_text`, `draw_hline`, `draw_vline`, `draw_rect`) and two event loop modes (`run_event_loop` / `run_event_loop_iteration`)
+- `TextAttribute` (IntEnum) handles style flags via bitwise OR — carry this pattern forward
+- `EventCallback` interface decouples event delivery from rendering
+- Color pairs (foreground + background RGB) are managed by the backend, not the widget layer
+- The CoreGraphics backend splits responsibility across two languages:
+  - **Python** (`coregraphics_backend.py`): window/view lifecycle via PyObjC, event handling, character grid, color management
+  - **C++** (`coregraphics_render.cpp`): high-performance CoreText rendering, glyph/font caching, draw batching — compiled as a Python extension module (`ttk_coregraphics_render`)
+  - If the C++ extension is unavailable, Python falls back to PyObjC rendering gracefully
+
+---
+
+## Multi-Language Policy
+
+PuiKit is primarily Python, but backends may include compiled components in other languages.
+
+- **C++ extension modules** are used for performance-critical GPU/native rendering (e.g., CoreGraphics backend)
+- The Python backend class always owns lifecycle and high-level logic; the compiled layer handles only the hot rendering path
+- Compiled extensions are optional where possible — the Python backend falls back gracefully if the extension is missing
+- Build tooling (Makefile or `pyproject.toml` with a C extension) lives inside the relevant backend directory
+- Supported language mix per backend:
+  - `CursesBackend`: pure Python
+  - `CoreGraphicsBackend`: Python + C++ (PyObjC + compiled extension)
+  - Future backends may add Swift, Rust, or JS as appropriate
+
+---
+
 ## Development Policy
 
 - Use tfm as the first real user; validate the design by migrating it to PuiKit incrementally
 - Widget tests should be written in a way that runs identically on TUI and GUI
 - Package structure should be ready for PyPI publication from the start
+
+---
+
+## Language Policy
+
+- All documents, code, comments, and commit messages are written in **English**
+- The user may give instructions in Japanese; Claude should respond in English and implement accordingly
+
+---
+
+## Examples
+
+Two canonical examples live under `examples/`:
+
+1. **`hello_world/`** — minimal app; renders a single text label on both TUI and GUI backends
+2. **`demo_catalog/`** — widget showcase; one screen per widget type, switchable at runtime
