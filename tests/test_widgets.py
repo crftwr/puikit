@@ -68,6 +68,43 @@ def test_listview_enter_triggers_on_select(backend):
     assert selections == [(1, "b")]
 
 
+def test_listview_mouse_scroll_moves_viewport_not_selection(backend):
+    panel = Panel(backend)
+    listview = ListView([f"item{i}" for i in range(20)])
+    panel.add(listview, x=0, y=0, w=10, h=5)
+    panel.render()
+    panel.dispatch_event(Event(type=EventType.MOUSE_SCROLL, x=1, y=1, scroll=-3))
+    assert listview.offset == 3
+    assert listview.selected == 0  # selection stays put
+    # The scrolled view survives a render even though the selection is off-screen.
+    panel.render()
+    assert listview.offset == 3
+    assert backend.snapshot()[0].startswith("item3")
+
+
+def test_listview_mouse_scroll_clamps_at_bounds(backend):
+    panel = Panel(backend)
+    listview = ListView([f"item{i}" for i in range(20)])
+    panel.add(listview, x=0, y=0, w=10, h=5)
+    panel.render()
+    panel.dispatch_event(Event(type=EventType.MOUSE_SCROLL, x=1, y=1, scroll=5))
+    assert listview.offset == 0  # already at the top
+    panel.dispatch_event(Event(type=EventType.MOUSE_SCROLL, x=1, y=1, scroll=-100))
+    assert listview.offset == 15  # bottom: len(items) - viewport_h
+
+
+def test_listview_keyboard_pulls_selection_back_into_view(backend):
+    panel = Panel(backend)
+    listview = ListView([f"item{i}" for i in range(20)])
+    panel.add(listview, x=0, y=0, w=10, h=5)
+    panel.render()
+    panel.dispatch_event(Event(type=EventType.MOUSE_SCROLL, x=1, y=1, scroll=-10))
+    assert listview.offset == 10
+    panel.dispatch_event(Event(type=EventType.KEY, key="down"))
+    assert listview.selected == 1
+    assert listview.offset == 1  # viewport follows the selection again
+
+
 def test_scrollbar_thumb_position(backend):
     panel = Panel(backend)
     panel.add(ScrollBar(pos=1.0, ratio=0.3), x=0, y=0, w=1, h=10)

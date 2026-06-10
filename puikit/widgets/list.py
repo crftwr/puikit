@@ -31,7 +31,11 @@ class ListView(Widget):
     def draw(self, ctx: DrawContext) -> None:
         h = ctx.height
         self._viewport_h = h
-        self._clamp(h)
+        if self.items:
+            self.selected = max(0, min(self.selected, len(self.items) - 1))
+        else:
+            self.selected = 0
+        self._clamp_offset(h)
 
         show_bar = len(self.items) > h
         text_w = ctx.width - (1 if show_bar else 0)
@@ -50,7 +54,10 @@ class ListView(Widget):
             pos = self.offset / denominator if denominator > 0 else 0.0
             ctx.draw_scrollbar(ctx.width - 1, 0, h, pos, ratio, self.style)
 
-    def _clamp(self, viewport_h: int) -> None:
+    def _clamp_offset(self, viewport_h: int) -> None:
+        self.offset = max(0, min(self.offset, max(0, len(self.items) - viewport_h)))
+
+    def _ensure_selected_visible(self, viewport_h: int) -> None:
         if not self.items:
             self.selected = 0
             self.offset = 0
@@ -60,6 +67,11 @@ class ListView(Widget):
             self.offset = self.selected
         elif self.selected >= self.offset + viewport_h:
             self.offset = self.selected - viewport_h + 1
+
+    def scroll_by(self, lines: int) -> None:
+        """Scroll the viewport without changing the selection."""
+        self.offset += lines
+        self._clamp_offset(self._viewport_h)
 
     # --- events ----------------------------------------------------------------
 
@@ -74,8 +86,8 @@ class ListView(Widget):
                 return True
             return False
         if event.type is EventType.MOUSE_SCROLL:
-            self.selected -= event.scroll
-            self._clamp(self._viewport_h)
+            # Scrolling moves the viewport only; the selection stays put.
+            self.scroll_by(-event.scroll)
             return True
         return False
 
@@ -98,7 +110,7 @@ class ListView(Widget):
             self._select()
         else:
             return False
-        self._clamp(self._viewport_h)
+        self._ensure_selected_visible(self._viewport_h)
         return True
 
     def _select(self) -> None:
