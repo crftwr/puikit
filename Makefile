@@ -3,22 +3,24 @@ VENV := .venv
 VENV_PYTHON := $(VENV)/bin/python
 VENV_PIP := $(VENV)/bin/pip
 
-.PHONY: help venv install test hello demo clean
+.PHONY: help venv install test hello demo hello-gui demo-gui clean
 
 help:
 	@echo "PuiKit utility commands:"
-	@echo "  make venv     - create the virtualenv ($(VENV)/, $(PYTHON))"
-	@echo "  make install  - install puikit into the venv (editable, with dev deps)"
-	@echo "  make test     - run the test suite"
-	@echo "  make hello    - run the hello_world example (TUI)"
-	@echo "  make demo     - run the demo_catalog example (TUI)"
-	@echo "  make clean    - remove build artifacts and caches"
+	@echo "  make venv      - create the virtualenv ($(VENV)/, $(PYTHON))"
+	@echo "  make install   - install puikit into the venv (editable, with dev/macos deps)"
+	@echo "  make test      - run the test suite"
+	@echo "  make hello     - run the hello_world example (TUI)"
+	@echo "  make demo      - run the demo_catalog example (TUI)"
+	@echo "  make hello-gui - run the hello_world example (macOS GUI)"
+	@echo "  make demo-gui  - run the demo_catalog example (macOS GUI)"
+	@echo "  make clean     - remove build artifacts and caches"
 
 venv:
 	$(PYTHON) -m venv $(VENV)
 
 install:
-	$(VENV_PIP) install -e ".[dev]"
+	$(VENV_PIP) install -e ".[dev,macos]"
 
 test:
 	$(VENV_PYTHON) -m pytest
@@ -28,6 +30,12 @@ hello:
 
 demo:
 	$(VENV_PYTHON) examples/demo_catalog/main.py
+
+hello-gui:
+	$(VENV_PYTHON) examples/hello_world/main.py --backend gui
+
+demo-gui:
+	$(VENV_PYTHON) examples/demo_catalog/main.py --backend gui
 
 clean:
 	rm -rf build dist *.egg-info

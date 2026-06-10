@@ -233,7 +233,7 @@ class Panel:
 
 ### MVP (implement first)
 1. `CursesBackend` — TUI, all platforms
-2. `CoreGraphicsBackend` — macOS native GUI (PyObjC)
+2. `MacOSBackend` — macOS native GUI (PyObjC; AppKit, CoreGraphics, CoreText, and other frameworks as needed)
 
 ### Future
 3. `CanvasBackend` — Web (browser Canvas)
@@ -265,7 +265,7 @@ puikit/
 │   └── backends/
 │       ├── __init__.py
 │       ├── curses_backend.py
-│       └── coregraphics_backend.py
+│       └── macos_backend.py
 ├── examples/
 │   ├── hello_world/      # minimal single-label app
 │   ├── demo_catalog/     # widget showcase
@@ -300,13 +300,13 @@ Key takeaways from ttk:
 
 PuiKit is primarily Python, but backends may include compiled components in other languages.
 
-- **C++ extension modules** are used for performance-critical GPU/native rendering (e.g., CoreGraphics backend)
+- **C++ extension modules** are used for performance-critical GPU/native rendering (e.g., macOS backend)
 - The Python backend class always owns lifecycle and high-level logic; the compiled layer handles only the hot rendering path
 - Compiled extensions are optional where possible — the Python backend falls back gracefully if the extension is missing
 - Build tooling (Makefile or `pyproject.toml` with a C extension) lives inside the relevant backend directory
 - Supported language mix per backend:
   - `CursesBackend`: pure Python
-  - `CoreGraphicsBackend`: Python + C++ (PyObjC + compiled extension)
+  - `MacOSBackend`: Python + C++ (PyObjC + compiled extension)
   - Future backends may add Swift, Rust, or JS as appropriate
 
 ---

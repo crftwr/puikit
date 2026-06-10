@@ -6,7 +6,8 @@ from ..backend import Backend
 
 
 def create_backend(name: str, **kwargs) -> Backend:
-    """Create a backend by name: "curses" (alias "tui") or "memory".
+    """Create a backend by name: "curses" (alias "tui"), "macos"
+    (alias "gui"), or "memory".
 
     Backends are imported lazily so that platform-specific modules are only
     loaded when actually requested.
@@ -16,6 +17,10 @@ def create_backend(name: str, **kwargs) -> Backend:
         from .curses_backend import CursesBackend
 
         return CursesBackend(**kwargs)
+    if name in ("macos", "gui"):
+        from .macos_backend import MacOSBackend
+
+        return MacOSBackend(**kwargs)
     if name == "memory":
         from .memory_backend import MemoryBackend
 

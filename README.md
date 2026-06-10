@@ -17,8 +17,11 @@ Early development. Currently implemented:
 
 - Core framework: `Panel`, `Backend` interface, capability profiles, event model
 - Widgets: `Label`, `ListView`, `ScrollBar`
-- Backends: `CursesBackend` (TUI), `MemoryBackend` (headless, for tests)
-- Planned next: `CoreGraphicsBackend` (macOS native GUI)
+- Backends:
+  - `CursesBackend` — TUI, all platforms
+  - `MacOSBackend` — macOS native GUI (PyObjC; install with `pip install -e ".[macos]"`)
+  - `MemoryBackend` — headless, for tests
+- Planned next: C++ CoreText render extension, `CanvasBackend` (web)
 
 ## Quick start
 
@@ -29,6 +32,10 @@ python3.14 -m venv .venv
 # Run the examples (in a terminal)
 .venv/bin/python examples/hello_world/main.py
 .venv/bin/python examples/demo_catalog/main.py
+
+# On macOS, the same examples in a native window
+.venv/bin/python examples/hello_world/main.py --backend gui
+.venv/bin/python examples/demo_catalog/main.py --backend gui
 
 # Run the tests
 .venv/bin/python -m pytest
