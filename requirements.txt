@@ -1,0 +1,3 @@
+# Runtime dependencies: none (the core framework is pure Python).
+# Development dependencies:
+pytest>=8
