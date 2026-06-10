@@ -92,6 +92,51 @@ def test_topmost_layer_receives_events_exclusively():
     assert dialog.events and not below.events
 
 
+class BoxWidget(Widget):
+    def draw(self, ctx):
+        ctx.draw_box(0, 0, ctx.width, ctx.height, hints={"fill": True})
+
+
+def test_dim_below_dims_underlying_content():
+    backend = MemoryBackend(width=20, height=10)
+    panel = Panel(backend)
+    panel.add(Label("below"), x=0, y=0, w=10, h=1)
+    panel.push_layer(BoxWidget(), z=10, hints={"dim_below": True, "w": 8, "h": 4})
+    panel.render()
+    from puikit import TextAttribute
+
+    assert backend.style_at(0, 0).attr & TextAttribute.DIM  # under the layer
+    # The layer itself is drawn after dimming, so its cells are not dimmed.
+    cx, cy = (20 - 8) // 2, (10 - 4) // 2
+    assert not backend.style_at(cx, cy).attr & TextAttribute.DIM
+
+
+def test_shadow_hint_respects_capability():
+    # TUI profile: shadow unsupported, primitive must not be called.
+    backend = MemoryBackend(width=20, height=10)
+    panel = Panel(backend)
+    panel.push_layer(BoxWidget(), z=10, hints={"shadow": True, "w": 8, "h": 4})
+    panel.render()
+    assert backend.shadow_calls == []
+    # GUI profile: shadow drawn at the layer's rect.
+    backend = MemoryBackend(width=20, height=10, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    panel.push_layer(BoxWidget(), z=10, hints={"shadow": True, "w": 8, "h": 4})
+    panel.render()
+    assert backend.shadow_calls == [(6, 3, 8, 4)]
+
+
+def test_box_fill_clears_interior():
+    backend = MemoryBackend(width=20, height=10)
+    panel = Panel(backend)
+    panel.add(Label("below content"), x=0, y=2, w=15, h=1)
+    panel.push_layer(BoxWidget(), z=10, hints={"x": 0, "y": 0, "w": 10, "h": 5})
+    panel.render()
+    line = backend.snapshot()[2]
+    assert line[1:9] == " " * 8  # interior overwritten by the filled box
+    assert line[0] == "│" and line[9] == "│"
+
+
 def test_pop_layer_restores_event_flow():
     backend = MemoryBackend(width=20, height=10)
     panel = Panel(backend)

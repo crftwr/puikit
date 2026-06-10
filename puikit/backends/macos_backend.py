@@ -41,7 +41,11 @@ from AppKit import (
     NSFontWeightRegular,
     NSForegroundColorAttributeName,
     NSImage,
+    NSCompositingOperationSourceOver,
+    NSGraphicsContext,
     NSRectFill,
+    NSRectFillUsingOperation,
+    NSShadow,
     NSUnderlineStyleAttributeName,
     NSUnderlineStyleSingle,
     NSView,
@@ -51,7 +55,7 @@ from AppKit import (
     NSWindowStyleMaskResizable,
     NSWindowStyleMaskTitled,
 )
-from Foundation import NSMakeRect, NSObject, NSString, NSZeroPoint
+from Foundation import NSMakeRect, NSMakeSize, NSObject, NSString, NSZeroPoint
 
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
@@ -299,8 +303,22 @@ class MacOSBackend(Backend):
     def draw_text(self, x: int, y: int, text: str, style: Style = DEFAULT_STYLE) -> None:
         self._back.append(("text", x, y, text, style))
 
-    def draw_box(self, x: int, y: int, w: int, h: int, style: Style = DEFAULT_STYLE) -> None:
-        self._back.append(("box", x, y, w, h, style))
+    def draw_box(
+        self,
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        style: Style = DEFAULT_STYLE,
+        hints: dict[str, Any] | None = None,
+    ) -> None:
+        self._back.append(("box", x, y, w, h, style, hints or {}))
+
+    def dim_rect(self, x: int, y: int, w: int, h: int) -> None:
+        self._back.append(("dim", x, y, w, h))
+
+    def draw_shadow(self, x: int, y: int, w: int, h: int) -> None:
+        self._back.append(("shadow", x, y, w, h))
 
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float, style: Style = DEFAULT_STYLE
@@ -336,6 +354,10 @@ class MacOSBackend(Backend):
                 self._render_scrollbar(*command[1:])
             elif kind == "image":
                 self._render_image(*command[1:])
+            elif kind == "dim":
+                self._render_dim(*command[1:])
+            elif kind == "shadow":
+                self._render_shadow(*command[1:])
 
     def _cell_rect(self, x: int, y: int, w_cells: int, h_cells: int):
         return NSMakeRect(
@@ -364,8 +386,13 @@ class MacOSBackend(Backend):
         point = self._cell_rect(x, y, 1, 1).origin
         NSString.stringWithString_(text).drawAtPoint_withAttributes_(point, attrs)
 
-    def _render_box(self, x: int, y: int, w: int, h: int, style: Style) -> None:
+    def _render_box(
+        self, x: int, y: int, w: int, h: int, style: Style, hints: dict[str, Any]
+    ) -> None:
         rect = self._cell_rect(x, y, w, h)
+        if hints.get("fill"):
+            _ns_color(style.bg or _DEFAULT_BG).setFill()
+            NSRectFill(rect)
         # Inset by half the line width so the 1px stroke lands on the pixel grid.
         rect = NSMakeRect(
             rect.origin.x + 0.5, rect.origin.y + 0.5, rect.size.width - 1, rect.size.height - 1
@@ -374,6 +401,26 @@ class MacOSBackend(Backend):
         path = NSBezierPath.bezierPathWithRect_(rect)
         path.setLineWidth_(1.0)
         path.stroke()
+
+    def _render_dim(self, x: int, y: int, w: int, h: int) -> None:
+        # Real transparency: a translucent dark overlay on whatever was
+        # already drawn below.
+        _ns_color((0, 0, 0), 0.45).setFill()
+        NSRectFillUsingOperation(self._cell_rect(x, y, w, h), NSCompositingOperationSourceOver)
+
+    def _render_shadow(self, x: int, y: int, w: int, h: int) -> None:
+        # Fill the layer's rect with the window background while an NSShadow
+        # is active; the blurred shadow remains visible around the layer
+        # content drawn on top.
+        NSGraphicsContext.saveGraphicsState()
+        shadow = NSShadow.alloc().init()
+        shadow.setShadowOffset_(NSMakeSize(4.0, 6.0))
+        shadow.setShadowBlurRadius_(12.0)
+        shadow.setShadowColor_(_ns_color((0, 0, 0), 0.7))
+        shadow.set()
+        _ns_color(_DEFAULT_BG).setFill()
+        NSRectFill(self._cell_rect(x, y, w, h))
+        NSGraphicsContext.restoreGraphicsState()
 
     def _render_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float, style: Style

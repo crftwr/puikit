@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections import deque
 from typing import Any
 
-from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style
+from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute
 from ..capability import PROFILE_TUI, CapabilityProfile
 from ..event import Event
 
@@ -33,6 +33,7 @@ class MemoryBackend(Backend):
         self._quit_requested = False
         self.icon_calls: list[tuple[int, int, str]] = []
         self.image_calls: list[tuple[int, int, str]] = []
+        self.shadow_calls: list[tuple[int, int, int, int]] = []
         self.present_count = 0
         self.clear()
 
@@ -69,14 +70,33 @@ class MemoryBackend(Backend):
                 self._grid[y][cx] = ch
                 self._styles[y][cx] = style
 
-    def draw_box(self, x: int, y: int, w: int, h: int, style: Style = DEFAULT_STYLE) -> None:
+    def draw_box(
+        self,
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        style: Style = DEFAULT_STYLE,
+        hints: dict[str, Any] | None = None,
+    ) -> None:
         if w < 2 or h < 2:
             return
         self.draw_text(x, y, "┌" + "─" * (w - 2) + "┐", style)
         for row in range(1, h - 1):
             self.draw_text(x, y + row, "│", style)
+            if hints and hints.get("fill"):
+                self.draw_text(x + 1, y + row, " " * (w - 2), style)
             self.draw_text(x + w - 1, y + row, "│", style)
         self.draw_text(x, y + h - 1, "└" + "─" * (w - 2) + "┘", style)
+
+    def dim_rect(self, x: int, y: int, w: int, h: int) -> None:
+        for row in range(max(0, y), min(self._height, y + h)):
+            for col in range(max(0, x), min(self._width, x + w)):
+                old = self._styles[row][col]
+                self._styles[row][col] = Style(old.fg, old.bg, old.attr | TextAttribute.DIM)
+
+    def draw_shadow(self, x: int, y: int, w: int, h: int) -> None:
+        self.shadow_calls.append((x, y, w, h))
 
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float, style: Style = DEFAULT_STYLE

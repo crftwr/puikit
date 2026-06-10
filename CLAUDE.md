@@ -62,12 +62,14 @@ Drawing primitives are implemented by the backend. Core APIs are shared across T
 ```python
 # Core (all backends implement)
 backend.draw_text(x, y, text, style)
-backend.draw_box(x, y, w, h)
+backend.draw_box(x, y, w, h)         # hints={"fill": True} fills the interior
 backend.draw_scrollbar(x, y, h, pos, ratio)
+backend.dim_rect(x, y, w, h)         # GUI: translucent overlay; TUI: dim attrs
 
 # Extended (GUI only; TUI falls back)
 backend.draw_icon(x, y, icon_name)   # TUI: text emoji fallback
 backend.draw_image(x, y, path)       # TUI: no-op
+backend.draw_shadow(x, y, w, h)      # TUI: ignored
 ```
 
 TUI examples:

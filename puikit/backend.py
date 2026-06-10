@@ -94,7 +94,23 @@ class Backend(ABC):
     def draw_text(self, x: int, y: int, text: str, style: Style = DEFAULT_STYLE) -> None: ...
 
     @abstractmethod
-    def draw_box(self, x: int, y: int, w: int, h: int, style: Style = DEFAULT_STYLE) -> None: ...
+    def draw_box(
+        self,
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        style: Style = DEFAULT_STYLE,
+        hints: dict[str, Any] | None = None,
+    ) -> None:
+        """Rectangle outline. With hints={"fill": True} the interior is
+        filled (TUI: spaces with the style's background; GUI: filled rect)."""
+
+    @abstractmethod
+    def dim_rect(self, x: int, y: int, w: int, h: int) -> None:
+        """Dim already-drawn content in the region, e.g. below a dialog layer.
+        GUI: translucent dark overlay; TUI: approximated with dim/dark
+        attributes."""
 
     @abstractmethod
     def draw_scrollbar(
@@ -111,6 +127,9 @@ class Backend(ABC):
 
     def draw_icon(self, x: int, y: int, icon_name: str, style: Style = DEFAULT_STYLE) -> None:
         raise CapabilityNotSupported("icons")
+
+    def draw_shadow(self, x: int, y: int, w: int, h: int) -> None:
+        raise CapabilityNotSupported("shadow")
 
     def draw_image(self, x: int, y: int, path: str, hints: dict[str, Any] | None = None) -> None:
         raise CapabilityNotSupported("images")

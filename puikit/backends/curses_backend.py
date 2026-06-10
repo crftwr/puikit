@@ -117,14 +117,40 @@ class CursesBackend(Backend):
             # off-screen; the cell itself is drawn, so this is safe to ignore.
             pass
 
-    def draw_box(self, x: int, y: int, w: int, h: int, style: Style = DEFAULT_STYLE) -> None:
+    def draw_box(
+        self,
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        style: Style = DEFAULT_STYLE,
+        hints: dict[str, Any] | None = None,
+    ) -> None:
         if w < 2 or h < 2:
             return
         self.draw_text(x, y, "┌" + "─" * (w - 2) + "┐", style)
         for row in range(1, h - 1):
             self.draw_text(x, y + row, "│", style)
+            if hints and hints.get("fill"):
+                self.draw_text(x + 1, y + row, " " * (w - 2), style)
             self.draw_text(x + w - 1, y + row, "│", style)
         self.draw_text(x, y + h - 1, "└" + "─" * (w - 2) + "┘", style)
+
+    def dim_rect(self, x: int, y: int, w: int, h: int) -> None:
+        # TUI approximation of "dim below": restyle already-drawn cells with
+        # A_DIM. Colors are reset to the default pair, which is acceptable
+        # for content sitting under a modal layer.
+        assert self._stdscr is not None
+        sw, sh = self.size
+        x0 = max(0, x)
+        width = min(sw, x + w) - x0
+        if width <= 0:
+            return
+        for row in range(max(0, y), min(sh, y + h)):
+            try:
+                self._stdscr.chgat(row, x0, width, curses.A_DIM)
+            except curses.error:
+                pass
 
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float, style: Style = DEFAULT_STYLE

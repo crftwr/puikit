@@ -1,6 +1,7 @@
 """PuiKit widget catalog: one screen per widget type.
 
-Switch screens with the left/right arrow keys (or 1..9), quit with q.
+Switch screens with the left/right arrow keys (or 1..9), open a layered
+dialog with d, quit with q.
 
     python examples/demo_catalog/main.py
 """
@@ -9,7 +10,28 @@ import argparse
 
 from puikit import EventType, Panel, Style, TextAttribute
 from puikit.backends import create_backend
-from puikit.widgets import Label, ListView, ScrollBar
+from puikit.widgets import Label, ListView, ScrollBar, Widget
+
+
+class DemoDialog(Widget):
+    """A modal dialog layer. Pushed with shadow/dim_below hints: GUI backends
+    render a drop shadow and a translucent dim overlay, TUI approximates the
+    dim with dark attributes and skips the shadow."""
+
+    def __init__(self, on_close):
+        self.on_close = on_close
+
+    def draw(self, ctx):
+        ctx.draw_box(0, 0, ctx.width, ctx.height, hints={"fill": True})
+        ctx.draw_icon(2, 1, "info")
+        ctx.draw_text(5, 1, "A layered dialog", Style(attr=TextAttribute.BOLD))
+        ctx.draw_text(2, 3, "The content below is dimmed.")
+        ctx.draw_text(2, ctx.height - 2, "esc / enter: close", Style(attr=TextAttribute.DIM))
+
+    def handle_event(self, event):
+        if event.type is EventType.KEY and event.key in ("escape", "enter"):
+            self.on_close()
+        return True  # modal: swallow everything
 
 
 def build_label_screen(panel: Panel) -> None:
@@ -66,15 +88,35 @@ def main() -> None:
                 f"[{n}]" if i == index else f" {n} " for i, (n, _) in enumerate(SCREENS)
             )
             panel.add(Label(tabs, Style(attr=TextAttribute.BOLD)), x=2, y=1, w=70, h=1)
-            panel.add(Label("left/right: switch screen, q: quit"), x=2, y=2, w=70, h=1)
+            panel.add(
+                Label("left/right: switch screen, d: dialog, q: quit"), x=2, y=2, w=70, h=1
+            )
             builder(panel)
             panel.render()
 
+        def close_dialog() -> None:
+            panel.pop_layer()
+
+        def open_dialog() -> None:
+            panel.push_layer(
+                DemoDialog(close_dialog),
+                z=10,
+                hints={"shadow": True, "dim_below": True, "w": 36, "h": 7},
+            )
+
         def on_event(event) -> None:
             nonlocal current
+            # Let an open dialog take the event first (modal).
+            if panel.dispatch_event(event):
+                panel.render()
+                return
             if event.type is EventType.KEY:
                 if event.key in ("q", "escape"):
                     backend.quit()
+                    return
+                if event.key == "d":
+                    open_dialog()
+                    panel.render()
                     return
                 if event.key == "right":
                     current = (current + 1) % len(SCREENS)
@@ -90,8 +132,6 @@ def main() -> None:
                         current = index
                         show_screen(current)
                         return
-            panel.dispatch_event(event)
-            panel.render()
 
         show_screen(current)
         backend.run_event_loop(on_event)

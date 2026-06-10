@@ -64,8 +64,16 @@ class DrawContext:
             return
         self._backend.draw_text(self._rect.x + x, self._rect.y + y, text, style)
 
-    def draw_box(self, x: int, y: int, w: int, h: int, style: Style = DEFAULT_STYLE) -> None:
-        self._backend.draw_box(self._rect.x + x, self._rect.y + y, w, h, style)
+    def draw_box(
+        self,
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        style: Style = DEFAULT_STYLE,
+        hints: dict[str, Any] | None = None,
+    ) -> None:
+        self._backend.draw_box(self._rect.x + x, self._rect.y + y, w, h, style, hints)
 
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float, style: Style = DEFAULT_STYLE
@@ -171,10 +179,19 @@ class Panel:
         for slot in self._children:
             slot.widget.draw(self._context_for(slot))
         for slot in self._layers:
-            # TUI approximation: "shadow" and "dim_below" hints are ignored;
-            # layers reduce to plain draw order.
-            slot.widget.draw(self._context_for(slot))
+            self._render_layer(slot)
         self.backend.present()
+
+    def _render_layer(self, slot: _Slot) -> None:
+        if slot.hints.get("dim_below"):
+            # Every backend implements dim_rect; TUI approximates with dim
+            # attributes, GUI draws a translucent overlay.
+            sw, sh = self.backend.size
+            self.backend.dim_rect(0, 0, sw, sh)
+        if slot.hints.get("shadow") and self.backend.capabilities.supports("shadow"):
+            rect = slot.rect
+            self.backend.draw_shadow(rect.x, rect.y, rect.w, rect.h)
+        slot.widget.draw(self._context_for(slot))
 
     def _context_for(self, slot: _Slot) -> DrawContext:
         return DrawContext(self.backend, slot.rect, self.backend.capabilities)
