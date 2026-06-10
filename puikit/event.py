@@ -6,6 +6,7 @@ travel in ``hints`` so the core model stays uniform.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -37,16 +38,20 @@ class Event:
     modifiers: frozenset[str] = frozenset()
     hints: dict[str, Any] = field(default_factory=dict)
 
-    def translated(self, dx: int, dy: int) -> "Event":
-        """A copy with mouse coordinates shifted by (dx, dy)."""
+    def translated(self, dx: float, dy: float) -> "Event":
+        """A copy with mouse coordinates shifted by (dx, dy).
+
+        Results are floored to whole cells, so a widget placed at a
+        fractional cell origin (pixel layout) still receives integer
+        widget-local cell coordinates."""
         if self.x is None or self.y is None:
             return self
         return Event(
             type=self.type,
             key=self.key,
             char=self.char,
-            x=self.x + dx,
-            y=self.y + dy,
+            x=math.floor(self.x + dx),
+            y=math.floor(self.y + dy),
             button=self.button,
             scroll=self.scroll,
             modifiers=self.modifiers,

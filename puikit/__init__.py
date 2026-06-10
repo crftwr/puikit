@@ -16,6 +16,7 @@ from .capability import (
     PROFILE_TUI,
 )
 from .event import Event, EventType
+from .layout import HSplit, Item, VSplit
 from .panel import DrawContext, Panel, Rect
 
 __version__ = "0.1.0"
@@ -28,6 +29,8 @@ __all__ = [
     "DrawContext",
     "Event",
     "EventType",
+    "HSplit",
+    "Item",
     "Panel",
     "PROFILE_GAME",
     "PROFILE_GUI_DESKTOP",
@@ -37,4 +40,5 @@ __all__ = [
     "Rect",
     "Style",
     "TextAttribute",
+    "VSplit",
 ]

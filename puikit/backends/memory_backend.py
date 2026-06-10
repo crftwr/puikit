@@ -62,6 +62,9 @@ class MemoryBackend(Backend):
         self._styles = [[DEFAULT_STYLE] * self._width for _ in range(self._height)]
 
     def draw_text(self, x: int, y: int, text: str, style: Style = DEFAULT_STYLE) -> None:
+        # Pixel-layout rects may carry fractional cell coordinates; this
+        # backend renders on a character grid, so round to the nearest cell.
+        x, y = round(x), round(y)
         if not 0 <= y < self._height:
             return
         for i, ch in enumerate(text):
@@ -79,6 +82,7 @@ class MemoryBackend(Backend):
         style: Style = DEFAULT_STYLE,
         hints: dict[str, Any] | None = None,
     ) -> None:
+        x, y, w, h = round(x), round(y), round(w), round(h)
         if w < 2 or h < 2:
             return
         self.draw_text(x, y, "┌" + "─" * (w - 2) + "┐", style)
@@ -90,6 +94,7 @@ class MemoryBackend(Backend):
         self.draw_text(x, y + h - 1, "└" + "─" * (w - 2) + "┘", style)
 
     def dim_rect(self, x: int, y: int, w: int, h: int) -> None:
+        x, y, w, h = round(x), round(y), round(w), round(h)
         for row in range(max(0, y), min(self._height, y + h)):
             for col in range(max(0, x), min(self._width, x + w)):
                 old = self._styles[row][col]
@@ -101,6 +106,7 @@ class MemoryBackend(Backend):
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float, style: Style = DEFAULT_STYLE
     ) -> None:
+        x, y, h = round(x), round(y), round(h)
         thumb_h = max(1, round(h * ratio))
         thumb_y = round((h - thumb_h) * pos)
         for row in range(h):

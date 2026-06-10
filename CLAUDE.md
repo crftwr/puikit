@@ -86,12 +86,26 @@ Coordinates are cell-based (TUI-compatible). GUI backends convert to pixels.
 
 ```python
 panel.add(widget, x=0, y=0, w=30, h=20, hints={"min_px": 200})
+
+# or declaratively (puikit.layout): weighted splits with min hints
+panel.set_layout(VSplit(
+    Item(header, size=3),
+    Item(HSplit(
+        Item(sidebar, weight=1, hints={"min_px": 220, "min_cells": 18}),
+        Item(main, weight=2),
+    )),
+))
 ```
 
 - TUI: cell coordinates passed directly to curses
 - GUI: cell coordinates × cell_size → pixel coordinates; hints used for flexible layout
 
 The backend owns `cell_size`. GUI backends treat cell coordinates as **hints**, not hard constraints.
+
+Layout resolution is capability-based: backends with `pixel_layout` get
+fractional cell boundaries (exact pixels); others have every boundary snapped
+to whole cells. Layouts re-resolve from the backend size on each render, so
+they follow window resizes.
 
 ### 3. Layering
 
@@ -330,7 +344,8 @@ PuiKit is primarily Python, but backends may include compiled components in othe
 
 ## Examples
 
-Two canonical examples live under `examples/`:
+Canonical examples live under `examples/`:
 
 1. **`hello_world/`** — minimal app; renders a single text label on both TUI and GUI backends
 2. **`demo_catalog/`** — widget showcase; one screen per widget type, switchable at runtime
+3. **`layout_demo/`** — layout system showcase; the same split layout snapped to cells on TUI and resolved at pixel granularity on GUI

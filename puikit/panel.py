@@ -27,12 +27,14 @@ ICON_TEXT_FALLBACKS = {
 
 @dataclass(frozen=True)
 class Rect:
-    x: int
-    y: int
-    w: int
-    h: int
+    # Cell coordinates. Fractional values are produced by the layout system
+    # on pixel_layout-capable backends; cell-grid backends only see integers.
+    x: float
+    y: float
+    w: float
+    h: float
 
-    def contains(self, x: int, y: int) -> bool:
+    def contains(self, x: float, y: float) -> bool:
         return self.x <= x < self.x + self.w and self.y <= y < self.y + self.h
 
 
@@ -47,19 +49,29 @@ class DrawContext:
 
     @property
     def width(self) -> int:
-        return self._rect.w
+        return int(self._rect.w)
 
     @property
     def height(self) -> int:
-        return self._rect.h
+        return int(self._rect.h)
+
+    @property
+    def size_cells(self) -> tuple[float, float]:
+        """Exact extent in cells; fractional on pixel-aware backends."""
+        return (self._rect.w, self._rect.h)
+
+    @property
+    def cell_size(self) -> tuple[int, int]:
+        """Pixel size of one cell, as declared by the backend."""
+        return self._backend.cell_size
 
     def draw_text(self, x: int, y: int, text: str, style: Style = DEFAULT_STYLE) -> None:
-        if not 0 <= y < self._rect.h:
+        if not 0 <= y < int(self._rect.h):
             return
         if x < 0:
             text = text[-x:]
             x = 0
-        text = text[: max(0, self._rect.w - x)]
+        text = text[: max(0, int(self._rect.w) - x)]
         if not text:
             return
         self._backend.draw_text(self._rect.x + x, self._rect.y + y, text, style)
@@ -119,6 +131,7 @@ class Panel:
         self._children: list[_Slot] = []
         self._layers: list[_Slot] = []
         self._focused: Any | None = None
+        self._layout: Any | None = None
 
     # --- layout management ---------------------------------------------------
 
@@ -139,6 +152,32 @@ class Panel:
         self._children.clear()
         self._layers.clear()
         self._focused = None
+        self._layout = None
+
+    def set_layout(self, layout: Any) -> None:
+        """Use a declarative layout (see puikit.layout) instead of manual
+        add() calls. Rects are recomputed from the backend size on every
+        render, so the layout follows window resizes."""
+        self._layout = layout
+        self._apply_layout()
+
+    def _apply_layout(self) -> None:
+        from .layout import LayoutContext
+
+        sw, sh = self.backend.size
+        cw, ch = self.backend.cell_size
+        snap = not self.backend.capabilities.supports("pixel_layout")
+        placements = self._layout.resolve(
+            0.0, 0.0, float(sw), float(sh), LayoutContext(cw, ch, snap)
+        )
+        focused = self._focused
+        self._children = [_Slot(w, rect, hints) for w, rect, hints in placements]
+        widgets = [slot.widget for slot in self._children]
+        if focused not in widgets:
+            focused = next(
+                (w for w in widgets if getattr(w, "focusable", False)), None
+            )
+        self._focused = focused
 
     # --- layer management ------------------------------------------------------
 
@@ -175,6 +214,8 @@ class Panel:
     # --- rendering --------------------------------------------------------------
 
     def render(self) -> None:
+        if self._layout is not None:
+            self._apply_layout()
         self.backend.clear()
         for slot in self._children:
             slot.widget.draw(self._context_for(slot))

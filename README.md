@@ -16,6 +16,8 @@ See [CLAUDE.md](CLAUDE.md) for the full design document.
 Early development. Currently implemented:
 
 - Core framework: `Panel`, `Backend` interface, capability profiles, event model
+- Layout system: `HSplit` / `VSplit` / `Item` with weights and `min_px` / `min_cells`
+  hints — snapped to whole cells on TUI, resolved at pixel granularity on GUI
 - Widgets: `Label`, `ListView`, `ScrollBar`
 - Backends:
   - `CursesBackend` — TUI, all platforms
@@ -32,10 +34,12 @@ python3.14 -m venv .venv
 # Run the examples (in a terminal)
 .venv/bin/python examples/hello_world/main.py
 .venv/bin/python examples/demo_catalog/main.py
+.venv/bin/python examples/layout_demo/main.py
 
 # On macOS, the same examples in a native window
 .venv/bin/python examples/hello_world/main.py --backend gui
 .venv/bin/python examples/demo_catalog/main.py --backend gui
+.venv/bin/python examples/layout_demo/main.py --backend gui
 
 # Run the tests
 .venv/bin/python -m pytest
