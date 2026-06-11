@@ -18,12 +18,14 @@ class ListView(Widget):
         items: Sequence[str],
         style: Style = DEFAULT_STYLE,
         on_select: Callable[[int, str], None] | None = None,
+        on_change: Callable[[int, str], None] | None = None,
     ):
         self.items = list(items)
         self.style = style
         self.selected = 0
         self.offset = 0  # index of the first visible item
-        self.on_select = on_select
+        self.on_select = on_select  # enter or mouse click
+        self.on_change = on_change  # whenever the selection moves
         self._viewport_h = 1  # updated on draw, used by paging keys
 
     # --- drawing -------------------------------------------------------------
@@ -76,6 +78,13 @@ class ListView(Widget):
     # --- events ----------------------------------------------------------------
 
     def handle_event(self, event: Event) -> bool:
+        before = self.selected
+        consumed = self._handle(event)
+        if consumed and self.selected != before and self.on_change is not None:
+            self.on_change(self.selected, self.items[self.selected])
+        return consumed
+
+    def _handle(self, event: Event) -> bool:
         if event.type is EventType.KEY:
             return self._handle_key(event.key)
         if event.type is EventType.MOUSE_CLICK:

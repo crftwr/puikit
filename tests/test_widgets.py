@@ -105,6 +105,22 @@ def test_listview_keyboard_pulls_selection_back_into_view(backend):
     assert listview.offset == 1  # viewport follows the selection again
 
 
+def test_listview_on_change_fires_only_when_selection_moves(backend):
+    changes = []
+    panel = Panel(backend)
+    listview = ListView(["a", "b", "c"], on_change=lambda i, t: changes.append((i, t)))
+    panel.add(listview, x=0, y=0, w=10, h=3)
+    panel.render()  # establish the viewport
+    panel.dispatch_event(Event(type=EventType.KEY, key="down"))
+    assert changes == [(1, "b")]
+    panel.dispatch_event(Event(type=EventType.KEY, key="enter"))  # no move
+    assert changes == [(1, "b")]
+    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=1, y=0, button="left"))
+    assert changes == [(1, "b"), (0, "a")]
+    panel.dispatch_event(Event(type=EventType.KEY, key="up"))  # clamped at top
+    assert changes == [(1, "b"), (0, "a")]
+
+
 def test_scrollbar_thumb_position(backend):
     panel = Panel(backend)
     panel.add(ScrollBar(pos=1.0, ratio=0.3), x=0, y=0, w=1, h=10)

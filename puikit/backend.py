@@ -128,6 +128,11 @@ class Backend(ABC):
         ``ratio`` (0..1) is the visible fraction of the content."""
 
     @abstractmethod
+    def fill_rect(self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE) -> None:
+        """Fill the region with the style's background color (TUI: spaces
+        with the background; GUI: solid rect). Used for pane backgrounds."""
+
+    @abstractmethod
     def push_clip(self, x: float, y: float, w: float, h: float) -> None:
         """Restrict subsequent drawing to the rect, intersected with any
         enclosing clip. On GUI backends the rect lives in the current

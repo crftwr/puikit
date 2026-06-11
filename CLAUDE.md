@@ -64,6 +64,7 @@ Drawing primitives are implemented by the backend. Core APIs are shared across T
 backend.draw_text(x, y, text, style)
 backend.draw_box(x, y, w, h)         # hints={"fill": True} fills the interior
 backend.draw_scrollbar(x, y, h, pos, ratio)
+backend.fill_rect(x, y, w, h, style) # pane background fill
 backend.dim_rect(x, y, w, h)         # GUI: translucent overlay; TUI: dim attrs
 
 # Extended (GUI only; TUI falls back)

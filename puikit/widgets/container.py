@@ -46,6 +46,10 @@ class Container(Widget):
         if self._focused is widget:
             self._focused = None
 
+    def clear(self) -> None:
+        self._children.clear()
+        self._focused = None
+
     def focus(self, widget: Any) -> None:
         self._focused = widget
 
@@ -53,7 +57,10 @@ class Container(Widget):
 
     def draw(self, ctx: DrawContext) -> None:
         for slot in self._children:
-            ctx.draw_child(slot.widget, slot.rect.x, slot.rect.y, slot.rect.w, slot.rect.h)
+            ctx.draw_child(
+                slot.widget, slot.rect.x, slot.rect.y, slot.rect.w, slot.rect.h,
+                hints=slot.hints,
+            )
 
     # --- events --------------------------------------------------------------------
 

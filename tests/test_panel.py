@@ -137,6 +137,44 @@ def test_box_fill_clears_interior():
     assert line[0] == "│" and line[9] == "│"
 
 
+def test_pane_background_fills_and_text_inherits():
+    backend = MemoryBackend(width=20, height=6)
+    panel = Panel(backend)
+    panel.add(Label("hi"), x=2, y=1, w=10, h=3, hints={"bg": (10, 20, 30)})
+    panel.render()
+    # Empty pane cells are filled with the background...
+    assert backend.style_at(8, 2).bg == (10, 20, 30)
+    # ...text without an explicit bg inherits it...
+    assert backend.snapshot()[1][2:4] == "hi"
+    assert backend.style_at(2, 1).bg == (10, 20, 30)
+    # ...and cells outside the pane are untouched.
+    assert backend.style_at(0, 0).bg is None
+
+
+def test_explicit_style_bg_beats_pane_bg():
+    from puikit import Style
+
+    backend = MemoryBackend(width=20, height=6)
+    panel = Panel(backend)
+    panel.add(Label("x", Style(bg=(99, 0, 0))), x=0, y=0, w=5, h=1, hints={"bg": (10, 20, 30)})
+    panel.render()
+    assert backend.style_at(0, 0).bg == (99, 0, 0)
+
+
+def test_container_child_bg_overrides_and_inherits():
+    from puikit.widgets import Container
+
+    backend = MemoryBackend(width=30, height=8)
+    panel = Panel(backend)
+    container = Container()
+    container.add(Label("a"), x=1, y=1, w=5, h=1)  # inherits container pane bg
+    container.add(Label("b"), x=1, y=3, w=5, h=1, hints={"bg": (1, 2, 3)})
+    panel.add(container, x=0, y=0, w=20, h=6, hints={"bg": (10, 20, 30)})
+    panel.render()
+    assert backend.style_at(1, 1).bg == (10, 20, 30)
+    assert backend.style_at(1, 3).bg == (1, 2, 3)
+
+
 def test_animate_gated_by_capability():
     widget = Label("x")
     # TUI profile: no animation capability, backend must not be called.

@@ -381,6 +381,9 @@ class MacOSBackend(Backend):
     ) -> None:
         self._back.append(("box", x, y, w, h, style, hints or {}))
 
+    def fill_rect(self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE) -> None:
+        self._back.append(("fill", x, y, w, h, style))
+
     def dim_rect(self, x: int, y: int, w: int, h: int) -> None:
         self._back.append(("dim", x, y, w, h))
 
@@ -474,6 +477,8 @@ class MacOSBackend(Backend):
                 self._render_scrollbar(*command[1:])
             elif kind == "image":
                 self._render_image(*command[1:])
+            elif kind == "fill":
+                self._render_fill(*command[1:])
             elif kind == "dim":
                 self._render_dim(*command[1:])
             elif kind == "shadow":
@@ -589,6 +594,10 @@ class MacOSBackend(Backend):
         path = NSBezierPath.bezierPathWithRect_(rect)
         path.setLineWidth_(1.0)
         path.stroke()
+
+    def _render_fill(self, x: float, y: float, w: float, h: float, style: Style) -> None:
+        _ns_color(style.bg or _DEFAULT_BG).setFill()
+        NSRectFill(self._cell_rect(x, y, w, h))
 
     def _render_dim(self, x: int, y: int, w: int, h: int) -> None:
         # Real transparency: a translucent dark overlay on whatever was

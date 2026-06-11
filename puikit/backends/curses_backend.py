@@ -163,6 +163,11 @@ class CursesBackend(Backend):
             self.draw_text(x + w - 1, y + row, "│", style)
         self.draw_text(x, y + h - 1, "└" + "─" * (w - 2) + "┘", style)
 
+    def fill_rect(self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE) -> None:
+        x, y, w, h = round(x), round(y), round(w), round(h)
+        for row in range(h):
+            self.draw_text(x, y + row, " " * w, style)
+
     def dim_rect(self, x: int, y: int, w: int, h: int) -> None:
         # TUI approximation of "dim below": restyle already-drawn cells with
         # A_DIM. Colors are reset to the default pair, which is acceptable
@@ -219,11 +224,32 @@ class CursesBackend(Backend):
 
     @staticmethod
     def _nearest_color(rgb: tuple[int, int, int]) -> int:
+        if getattr(curses, "COLORS", 8) >= 256:
+            return CursesBackend._xterm256_index(rgb)
         r, g, b = rgb
         return min(
             _BASIC_COLORS,
             key=lambda c: (c[1][0] - r) ** 2 + (c[1][1] - g) ** 2 + (c[1][2] - b) ** 2,
         )[0]
+
+    @staticmethod
+    def _xterm256_index(rgb: tuple[int, int, int]) -> int:
+        """Map RGB to the xterm-256 palette: the 24-step grayscale ramp for
+        near-gray colors (much finer than the 6x6x6 cube for subtle pane
+        backgrounds), the color cube otherwise."""
+        r, g, b = rgb
+        if max(r, g, b) - min(r, g, b) < 12:
+            gray = (r + g + b) // 3
+            if gray < 5:
+                return 16  # cube black
+            if gray > 243:
+                return 231  # cube white
+            return 232 + min(23, (gray - 5) // 10)
+
+        def channel(v: int) -> int:
+            return 0 if v < 48 else 1 if v < 115 else min(5, (v - 35) // 40)
+
+        return 16 + 36 * channel(r) + 6 * channel(g) + channel(b)
 
     # --- event loop ----------------------------------------------------------------
 

@@ -59,12 +59,20 @@ class DrawContext:
         capabilities: CapabilityProfile,
         clip: Rect | None = None,
         panel: "Panel | None" = None,
+        background: tuple[int, int, int] | None = None,
     ):
         self._backend = backend
         self._rect = rect
         self._caps = capabilities
         self._clip = clip if clip is not None else rect
         self._panel = panel
+        self._background = background
+
+    def _resolve(self, style: Style) -> Style:
+        """Styles without an explicit background inherit the pane's."""
+        if self._background is not None and style.bg is None:
+            return Style(style.fg, self._background, style.attr)
+        return style
 
     @property
     def width(self) -> int:
@@ -93,7 +101,7 @@ class DrawContext:
         text = text[: max(0, int(self._rect.w) - x)]
         if not text:
             return
-        self._backend.draw_text(self._rect.x + x, self._rect.y + y, text, style)
+        self._backend.draw_text(self._rect.x + x, self._rect.y + y, text, self._resolve(style))
 
     def draw_box(
         self,
@@ -104,7 +112,9 @@ class DrawContext:
         style: Style = DEFAULT_STYLE,
         hints: dict[str, Any] | None = None,
     ) -> None:
-        self._backend.draw_box(self._rect.x + x, self._rect.y + y, w, h, style, hints)
+        self._backend.draw_box(
+            self._rect.x + x, self._rect.y + y, w, h, self._resolve(style), hints
+        )
 
     def draw_border(
         self, style: Style = DEFAULT_STYLE, hints: dict[str, Any] | None = None
@@ -113,13 +123,15 @@ class DrawContext:
         width/height (whole cells), this covers fractional edges on
         pixel-layout backends, so adjacent widgets meet without gaps."""
         self._backend.draw_box(
-            self._rect.x, self._rect.y, self._rect.w, self._rect.h, style, hints
+            self._rect.x, self._rect.y, self._rect.w, self._rect.h, self._resolve(style), hints
         )
 
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float, style: Style = DEFAULT_STYLE
     ) -> None:
-        self._backend.draw_scrollbar(self._rect.x + x, self._rect.y + y, h, pos, ratio, style)
+        self._backend.draw_scrollbar(
+            self._rect.x + x, self._rect.y + y, h, pos, ratio, self._resolve(style)
+        )
 
     def draw_icon(
         self,
@@ -130,7 +142,9 @@ class DrawContext:
         hints: dict[str, Any] | None = None,
     ) -> None:
         if self._caps.supports("icons"):
-            self._backend.draw_icon(self._rect.x + x, self._rect.y + y, icon_name, style)
+            self._backend.draw_icon(
+                self._rect.x + x, self._rect.y + y, icon_name, self._resolve(style)
+            )
             return
         hints = hints or {}
         fallback = hints.get("fallback_text") or ICON_TEXT_FALLBACKS.get(icon_name, "?")
@@ -144,14 +158,22 @@ class DrawContext:
         # TUI fallback: no-op
 
     def draw_child(
-        self, widget: Any, x: float, y: float, w: float, h: float
+        self,
+        widget: Any,
+        x: float,
+        y: float,
+        w: float,
+        h: float,
+        hints: dict[str, Any] | None = None,
     ) -> None:
         """Draw a child widget at (x, y, w, h) in this context's coordinates.
 
         The child is clipped to the intersection of its rect with all
         enclosing clips, and gets its own animation group, so a parent's
         transition cascades to children while children can also animate
-        individually."""
+        individually. A "bg" hint fills the child's pane; otherwise the
+        parent's background is inherited."""
+        hints = hints or {}
         rect = Rect(self._rect.x + x, self._rect.y + y, w, h)
         if self._panel is not None:
             rect = self._panel._interpolate_rect(widget, rect)
@@ -161,8 +183,14 @@ class DrawContext:
         self._backend.begin_group(widget, rect)
         # The clip is set inside the group so GUI transforms carry it along.
         self._backend.push_clip(clip.x, clip.y, clip.w, clip.h)
+        background = hints.get("bg", self._background)
+        if hints.get("bg") is not None:
+            self._backend.fill_rect(rect.x, rect.y, rect.w, rect.h, Style(bg=background))
         widget.draw(
-            DrawContext(self._backend, rect, self._caps, clip=clip, panel=self._panel)
+            DrawContext(
+                self._backend, rect, self._caps,
+                clip=clip, panel=self._panel, background=background,
+            )
         )
         self._backend.pop_clip()
         self._backend.end_group(widget)
@@ -306,8 +334,14 @@ class Panel:
         rect = self._interpolate_rect(slot.widget, slot.rect)
         self.backend.begin_group(slot.widget, rect)
         self.backend.push_clip(rect.x, rect.y, rect.w, rect.h)
+        background = slot.hints.get("bg")
+        if background is not None:
+            self.backend.fill_rect(rect.x, rect.y, rect.w, rect.h, Style(bg=background))
         slot.widget.draw(
-            DrawContext(self.backend, rect, self.backend.capabilities, panel=self)
+            DrawContext(
+                self.backend, rect, self.backend.capabilities,
+                panel=self, background=background,
+            )
         )
         self.backend.pop_clip()
         self.backend.end_group(slot.widget)
@@ -324,8 +358,14 @@ class Panel:
         if slot.hints.get("shadow") and self.backend.capabilities.supports("shadow"):
             self.backend.draw_shadow(rect.x, rect.y, rect.w, rect.h)
         self.backend.push_clip(rect.x, rect.y, rect.w, rect.h)
+        background = slot.hints.get("bg")
+        if background is not None:
+            self.backend.fill_rect(rect.x, rect.y, rect.w, rect.h, Style(bg=background))
         slot.widget.draw(
-            DrawContext(self.backend, rect, self.backend.capabilities, panel=self)
+            DrawContext(
+                self.backend, rect, self.backend.capabilities,
+                panel=self, background=background,
+            )
         )
         self.backend.pop_clip()
         self.backend.end_group(slot.widget)

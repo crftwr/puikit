@@ -1,16 +1,33 @@
-"""PuiKit widget catalog: one screen per widget type.
+"""PuiKit widget catalog with a left navigation pane.
 
-Switch screens with the left/right arrow keys (or 1..9), open a layered
-dialog with d, quit with q.
+The pages are listed in the navigation on the left; moving the selection
+(up/down or mouse) switches the content pane on the right. The whole shell
+is built with the layout system, so it follows window resizes; pages are
+Containers, so their widgets are clipped and animate as a tree.
 
-    python examples/demo_catalog/main.py
+Keys: up/down in the nav switch pages, tab moves focus between the nav and
+the page, 1..9 jump to a page, d opens a layered dialog, q quits.
+
+    python examples/demo_catalog/main.py                  # TUI
+    python examples/demo_catalog/main.py --backend gui    # macOS GUI
 """
 
 import argparse
 
-from puikit import EventType, Panel, Style, TextAttribute
+from puikit import EventType, HSplit, Item, Panel, Style, TextAttribute, VSplit
 from puikit.backends import create_backend
 from puikit.widgets import Container, Label, ListView, ScrollBar, Widget
+
+DIM = Style(attr=TextAttribute.DIM)
+BOLD = Style(attr=TextAttribute.BOLD)
+
+# Pane background colors: title/status bars, navigation, and content are
+# visually separated. GUI renders the exact RGB; TUI approximates via the
+# xterm-256 palette.
+TITLE_BG = (52, 62, 88)
+NAV_BG = (38, 44, 60)
+CONTENT_BG = (26, 28, 34)
+CARD_BG = (42, 46, 56)
 
 
 class DemoDialog(Widget):
@@ -24,9 +41,9 @@ class DemoDialog(Widget):
     def draw(self, ctx):
         ctx.draw_box(0, 0, ctx.width, ctx.height, hints={"fill": True})
         ctx.draw_icon(2, 1, "info")
-        ctx.draw_text(5, 1, "A layered dialog", Style(attr=TextAttribute.BOLD))
+        ctx.draw_text(5, 1, "A layered dialog", BOLD)
         ctx.draw_text(2, 3, "The content below is dimmed.")
-        ctx.draw_text(2, ctx.height - 2, "esc / enter: close", Style(attr=TextAttribute.DIM))
+        ctx.draw_text(2, ctx.height - 2, "esc / enter: close", DIM)
 
     def handle_event(self, event):
         if event.type is EventType.KEY and event.key in ("escape", "enter"):
@@ -34,26 +51,32 @@ class DemoDialog(Widget):
         return True  # modal: swallow everything
 
 
-def build_label_screen(panel: Panel) -> None:
-    panel.add(Label("Plain label"), x=4, y=4, w=40, h=1)
-    panel.add(Label("Bold label", Style(attr=TextAttribute.BOLD)), x=4, y=6, w=40, h=1)
-    panel.add(
-        Label("Reverse label", Style(attr=TextAttribute.REVERSE)), x=4, y=8, w=40, h=1
-    )
-    panel.add(
-        Label("Colored label", Style(fg=(13, 188, 121))), x=4, y=10, w=40, h=1
-    )
+# --- pages ---------------------------------------------------------------------
 
 
-def build_list_screen(panel: Panel) -> None:
+def build_label_page(page: Container, panel: Panel) -> None:
+    page.add(Label("Plain label"), x=2, y=1, w=40, h=1)
+    page.add(Label("Bold label", BOLD), x=2, y=3, w=40, h=1)
+    page.add(Label("Reverse label", Style(attr=TextAttribute.REVERSE)), x=2, y=5, w=40, h=1)
+    page.add(Label("Colored label", Style(fg=(13, 188, 121))), x=2, y=7, w=40, h=1)
+
+
+def build_list_page(page: Container, panel: Panel) -> None:
     items = [f"Item {i:03d}" for i in range(50)]
-    status = Label("Use arrows / page keys; enter to select")
+    status = Label("Use arrows / page keys; enter to select", DIM)
     listview = ListView(
         items, on_select=lambda i, text: setattr(status, "text", f"Selected: {text}")
     )
-    panel.add(listview, x=4, y=4, w=30, h=12)
-    panel.add(status, x=4, y=17, w=50, h=1)
-    panel.focus(listview)
+    page.add(listview, x=2, y=1, w=30, h=12)
+    page.add(status, x=2, y=14, w=50, h=1)
+    page.focus(listview)
+
+
+def build_scrollbar_page(page: Container, panel: Panel) -> None:
+    page.add(Label("Standalone scroll bars (pos / ratio):"), x=2, y=1, w=50, h=1)
+    for i, (pos, ratio) in enumerate([(0.0, 0.3), (0.5, 0.3), (1.0, 0.3), (0.0, 0.8)]):
+        page.add(Label(f"{pos:.1f} / {ratio:.1f}"), x=2 + i * 12, y=3, w=10, h=1)
+        page.add(ScrollBar(pos, ratio), x=6 + i * 12, y=5, w=1, h=10)
 
 
 class AnimTarget(Container):
@@ -63,18 +86,19 @@ class AnimTarget(Container):
     def __init__(self):
         super().__init__()
         self.last_label = Label("none yet", Style(fg=(13, 188, 121)))
-        self.add(Label("Target", Style(attr=TextAttribute.BOLD)), x=5, y=1, w=12, h=1)
+        self.add(Label("Target", BOLD), x=5, y=1, w=12, h=1)
         self.add(Label("Last transition:"), x=2, y=3, w=20, h=1)
         self.add(self.last_label, x=2, y=4, w=22, h=1)
         # Wider than the card on purpose: clipped at the container edge.
         self.add(
-            Label("This long child label is clipped at the card edge",
-                  Style(attr=TextAttribute.DIM)),
+            Label("This long child label is clipped at the card edge", DIM),
             x=2, y=6, w=50, h=1,
         )
 
     def draw(self, ctx) -> None:
-        ctx.draw_border(Style(fg=(36, 114, 200)), hints={"fill": True})
+        # The card's pane background comes from its slot's "bg" hint, which
+        # children inherit; the border just frames it.
+        ctx.draw_border(Style(fg=(36, 114, 200)))
         ctx.draw_icon(2, 1, "check")
         super().draw(ctx)  # children, each clipped to the card
 
@@ -90,7 +114,7 @@ ANIMATIONS = [
 ]
 
 
-def build_animation_screen(panel: Panel) -> None:
+def build_animation_page(page: Container, panel: Panel) -> None:
     target = AnimTarget()
 
     def run(index: int, name: str) -> None:
@@ -98,53 +122,53 @@ def build_animation_screen(panel: Panel) -> None:
         panel.animate(target, hints=dict(ANIMATIONS[index][1]))
 
     listview = ListView([name for name, _ in ANIMATIONS], on_select=run)
-    panel.add(
-        Label("Pick a transition, press enter (GUI animates; TUI switches instantly)"),
-        x=4, y=4, w=70, h=1,
-    )
-    panel.add(listview, x=4, y=6, w=24, h=8)
-    panel.add(target, x=34, y=6, w=26, h=8)
-    panel.focus(listview)
+    page.add(Label("Pick a transition, press enter", DIM), x=2, y=1, w=50, h=1)
+    page.add(listview, x=2, y=3, w=24, h=8)
+    page.add(target, x=30, y=3, w=28, h=9, hints={"bg": CARD_BG})
+    page.focus(listview)
 
 
-def build_scrollbar_screen(panel: Panel) -> None:
-    panel.add(Label("Standalone scroll bars (pos / ratio):"), x=4, y=4, w=50, h=1)
-    for i, (pos, ratio) in enumerate([(0.0, 0.3), (0.5, 0.3), (1.0, 0.3), (0.0, 0.8)]):
-        panel.add(Label(f"{pos:.1f} / {ratio:.1f}"), x=4 + i * 12, y=6, w=10, h=1)
-        panel.add(ScrollBar(pos, ratio), x=8 + i * 12, y=8, w=1, h=10)
-
-
-SCREENS = [
-    ("Label", build_label_screen),
-    ("ListView", build_list_screen),
-    ("ScrollBar", build_scrollbar_screen),
-    ("Animation", build_animation_screen),
+PAGES = [
+    ("Label", build_label_page),
+    ("ListView", build_list_page),
+    ("ScrollBar", build_scrollbar_page),
+    ("Animation", build_animation_page),
 ]
+
+
+# --- application shell -----------------------------------------------------------
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="PuiKit widget catalog")
-    parser.add_argument("--backend", default="tui", help="backend name (tui, memory)")
+    parser.add_argument("--backend", default="tui", help="backend name (tui, gui, memory)")
     args = parser.parse_args()
 
     backend = create_backend(args.backend)
-    current = 0
-
     with backend:
         panel = Panel(backend)
+        content = Container()
+        status = Label("", DIM)
 
-        def show_screen(index: int) -> None:
-            panel.clear()
-            name, builder = SCREENS[index]
-            tabs = "  ".join(
-                f"[{n}]" if i == index else f" {n} " for i, (n, _) in enumerate(SCREENS)
+        def show_page(index: int, name: str) -> None:
+            content.clear()
+            PAGES[index][1](content, panel)
+            status.text = f" {name} — tab: focus page/nav, d: dialog, q: quit"
+
+        nav = ListView([name for name, _ in PAGES], on_change=show_page)
+
+        panel.set_layout(
+            VSplit(
+                Item(Label(" PuiKit Demo Catalog", BOLD), size=1, hints={"bg": TITLE_BG}),
+                Item(
+                    HSplit(
+                        Item(nav, size=18, hints={"min_cells": 12, "bg": NAV_BG}),
+                        Item(content, weight=1, hints={"min_px": 300, "bg": CONTENT_BG}),
+                    )
+                ),
+                Item(status, size=1, hints={"bg": TITLE_BG}),
             )
-            panel.add(Label(tabs, Style(attr=TextAttribute.BOLD)), x=2, y=1, w=70, h=1)
-            panel.add(
-                Label("left/right: switch screen, d: dialog, q: quit"), x=2, y=2, w=70, h=1
-            )
-            builder(panel)
-            panel.render()
+        )
 
         def close_dialog() -> None:
             panel.pop_layer()
@@ -160,8 +184,8 @@ def main() -> None:
             panel.animate(dialog, hints={"transition": "fade", "duration_ms": 200})
 
         def on_event(event) -> None:
-            nonlocal current
-            # Let an open dialog take the event first (modal).
+            # Focused widget (nav or page) gets the event first; a modal
+            # dialog takes it exclusively.
             if panel.dispatch_event(event):
                 panel.render()
                 return
@@ -173,22 +197,21 @@ def main() -> None:
                     open_dialog()
                     panel.render()
                     return
-                if event.key == "right":
-                    current = (current + 1) % len(SCREENS)
-                    show_screen(current)
-                    return
-                if event.key == "left":
-                    current = (current - 1) % len(SCREENS)
-                    show_screen(current)
+                if event.key == "tab":
+                    panel.focus(content if panel.focused is nav else nav)
                     return
                 if event.key and event.key.isdigit():
                     index = int(event.key) - 1
-                    if 0 <= index < len(SCREENS):
-                        current = index
-                        show_screen(current)
+                    if 0 <= index < len(PAGES):
+                        nav.selected = index
+                        show_page(index, PAGES[index][0])
+                        panel.render()
                         return
+            if event.type is EventType.RESIZE:
+                panel.render()
 
-        show_screen(current)
+        show_page(0, PAGES[0][0])
+        panel.render()
         backend.run_event_loop(on_event)
 
 

@@ -115,6 +115,11 @@ class MemoryBackend(Backend):
             self.draw_text(x + w - 1, y + row, "│", style)
         self.draw_text(x, y + h - 1, "└" + "─" * (w - 2) + "┘", style)
 
+    def fill_rect(self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE) -> None:
+        x, y, w, h = round(x), round(y), round(w), round(h)
+        for row in range(h):
+            self.draw_text(x, y + row, " " * w, style)
+
     def dim_rect(self, x: int, y: int, w: int, h: int) -> None:
         x, y, w, h = round(x), round(y), round(w), round(h)
         for row in range(max(0, y), min(self._height, y + h)):
