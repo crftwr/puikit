@@ -32,7 +32,8 @@ class Item:
     weight  share of the remaining space (flex)
     hints   "min_cells": minimum length in cells
             "min_px": minimum length in pixels, converted via the backend's
-            cell size — only meaningful on pixel-aware backends
+            cell size; applies only on pixel-layout backends — cell-grid
+            backends (TUI) ignore it and use min_cells
     """
 
     def __init__(
@@ -47,9 +48,9 @@ class Item:
         self.weight = weight if size is None else 0.0
         self.hints = hints or {}
 
-    def min_size(self, cell_px: int) -> float:
+    def min_size(self, cell_px: int, px_aware: bool) -> float:
         minimum = float(self.hints.get("min_cells", 0.0))
-        if "min_px" in self.hints and cell_px > 0:
+        if px_aware and "min_px" in self.hints and cell_px > 0:
             minimum = max(minimum, self.hints["min_px"] / cell_px)
         return minimum
 
@@ -78,7 +79,7 @@ class Split:
         horizontal = self._axis == "x"
         total = w if horizontal else h
         cell_px = ctx.cell_w if horizontal else ctx.cell_h
-        sizes = self._sizes(total, cell_px)
+        sizes = self._sizes(total, cell_px, px_aware=not ctx.snap)
 
         placements: list[tuple[Any, Rect, dict[str, Any]]] = []
         cursor = 0.0
@@ -91,16 +92,19 @@ class Split:
                 rect = (x + start, y, end - start, h)
             else:
                 rect = (x, y + start, w, end - start)
+            if ctx.snap:
+                # Cell-grid backends must see true integers, not whole floats.
+                rect = tuple(round(v) for v in rect)
             if isinstance(item.content, Split):
                 placements.extend(item.content.resolve(*rect, ctx))
             else:
                 placements.append((item.content, Rect(*rect), item.hints))
         return placements
 
-    def _sizes(self, total: float, cell_px: int) -> list[float]:
+    def _sizes(self, total: float, cell_px: int, px_aware: bool) -> list[float]:
         gaps = self.gap * (len(self.items) - 1)
         avail = max(0.0, total - gaps)
-        mins = [item.min_size(cell_px) for item in self.items]
+        mins = [item.min_size(cell_px, px_aware) for item in self.items]
 
         fixed_sum = sum(
             max(item.size, minimum)

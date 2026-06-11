@@ -27,9 +27,12 @@ def test_fixed_and_weighted_vsplit_snapped():
 def test_snapped_boundaries_tile_exactly():
     widgets = [Label(str(i)) for i in range(3)]
     layout = HSplit(*widgets)  # equal weights over 10 cells: 3.33 each
-    placements = layout.resolve(0, 0, 10, 5, SNAP)
+    # Float inputs, as the Panel passes them: snap must still yield true ints.
+    placements = layout.resolve(0.0, 0.0, 10.0, 5.0, SNAP)
     result = rects(placements)
-    assert all(isinstance(r.x, int) and isinstance(r.w, int) for r in result)
+    assert all(
+        isinstance(v, int) for r in result for v in (r.x, r.y, r.w, r.h)
+    )
     assert [r.w for r in result] == [3, 4, 3]  # boundary rounding, no gaps
     assert result[0].x + result[0].w == result[1].x
     assert result[1].x + result[1].w == result[2].x
@@ -51,6 +54,24 @@ def test_min_px_converted_via_cell_size():
     result = rects(layout.resolve(0.0, 0.0, 20.0, 5.0, PIXEL))
     # weight share would be 2.0 cells; min_px 55 at 10px cells means 5.5
     assert result[0].w == pytest.approx(5.5)
+
+
+def test_min_px_ignored_on_cell_grid_backends():
+    # Regression: on TUI (cell size 1x1) a min_px hint must not turn into a
+    # huge min_cells value that starves the other items.
+    sidebar, main, inspector = Label("side"), Label("main"), Label("insp")
+    layout = HSplit(
+        Item(sidebar, weight=1, hints={"min_px": 220, "min_cells": 18}),
+        Item(main, weight=2),
+        Item(inspector, weight=1),
+    )
+    rs, rm, ri = rects(layout.resolve(0, 0, 80, 20, SNAP))
+    assert rs.w == 20  # weight share; min_cells=18 not binding, min_px ignored
+    assert rm.w == 40
+    assert ri.w == 20
+    # min_cells still applies when it is the binding constraint.
+    rs, rm, ri = rects(layout.resolve(0, 0, 40, 20, SNAP))
+    assert rs.w == 18
 
 
 def test_minimums_shrink_other_items_to_fit():

@@ -103,6 +103,8 @@ class CursesBackend(Backend):
 
     def draw_text(self, x: int, y: int, text: str, style: Style = DEFAULT_STYLE) -> None:
         assert self._stdscr is not None
+        # Defensive: widgets or layouts may hand us whole-valued floats.
+        x, y = round(x), round(y)
         w, h = self.size
         if not 0 <= y < h or x >= w:
             return
@@ -126,6 +128,7 @@ class CursesBackend(Backend):
         style: Style = DEFAULT_STYLE,
         hints: dict[str, Any] | None = None,
     ) -> None:
+        x, y, w, h = round(x), round(y), round(w), round(h)
         if w < 2 or h < 2:
             return
         self.draw_text(x, y, "┌" + "─" * (w - 2) + "┐", style)
@@ -141,6 +144,7 @@ class CursesBackend(Backend):
         # A_DIM. Colors are reset to the default pair, which is acceptable
         # for content sitting under a modal layer.
         assert self._stdscr is not None
+        x, y, w, h = round(x), round(y), round(w), round(h)
         sw, sh = self.size
         x0 = max(0, x)
         width = min(sw, x + w) - x0
@@ -155,6 +159,7 @@ class CursesBackend(Backend):
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float, style: Style = DEFAULT_STYLE
     ) -> None:
+        x, y, h = round(x), round(y), round(h)
         thumb_h = max(1, round(h * ratio))
         thumb_y = round((h - thumb_h) * pos)
         for row in range(h):
