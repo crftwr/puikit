@@ -29,21 +29,24 @@ class Region(Widget):
         self.note = note
 
     def draw(self, ctx) -> None:
-        ctx.draw_box(0, 0, ctx.width, ctx.height, Style(fg=self.color), hints={"fill": True})
+        # draw_border frames the exact (possibly fractional) extent, so
+        # adjacent regions meet with no gap on pixel-layout backends.
+        ctx.draw_border(Style(fg=self.color), hints={"fill": True})
         w_cells, h_cells = ctx.size_cells
         cw, ch = ctx.cell_size
-        geometry = (
-            f"{w_cells:.2f} x {h_cells:.2f} cells = "
-            f"{w_cells * cw:.0f} x {h_cells * ch:.0f} px"
-        )
-        if ctx.height >= 6:
+        cells_line = f"{w_cells:.2f} x {h_cells:.2f} cells"
+        px_line = f"= {w_cells * cw:.0f} x {h_cells * ch:.0f} px"
+        if ctx.height >= 7:
             ctx.draw_text(2, 1, self.name, Style(fg=self.color, attr=TextAttribute.BOLD))
-            ctx.draw_text(2, 3, geometry)
+            ctx.draw_text(2, 3, cells_line)
+            ctx.draw_text(2, 4, px_line)
             if self.note:
-                ctx.draw_text(2, 4, self.note, Style(attr=TextAttribute.DIM))
+                ctx.draw_text(2, 5, self.note, Style(attr=TextAttribute.DIM))
         else:
             # Compact regions: everything on one line inside the border.
-            line = f"{self.name}  {geometry}" + (f"  ({self.note})" if self.note else "")
+            line = f"{self.name}  {cells_line} {px_line}" + (
+                f"  ({self.note})" if self.note else ""
+            )
             ctx.draw_text(2, 1, line)
 
 

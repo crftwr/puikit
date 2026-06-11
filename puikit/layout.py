@@ -3,8 +3,8 @@
 Apps describe layout intent in cell units (fixed sizes, weights, and hints
 like min_px); resolution depends on the backend's capabilities:
 
-- pixel_layout backends keep fractional cell coordinates, which map to exact
-  pixel positions (a 1:2 split lands on the real pixel boundary)
+- pixel_layout backends keep fractional cell coordinates, snapped to the
+  device-pixel grid (a 1:2 split lands on a real, whole-pixel boundary)
 - cell-grid backends (TUI) snap every boundary to whole cells
 
 Widgets never see the difference — they just get their DrawContext.
@@ -88,6 +88,11 @@ class Split:
             cursor = end + self.gap
             if ctx.snap:
                 start, end = round(start), round(end)
+            elif cell_px > 0:
+                # Pixel granularity means whole device pixels: fractional
+                # cells are fine, fractional pixels are not.
+                start = round(start * cell_px) / cell_px
+                end = round(end * cell_px) / cell_px
             if horizontal:
                 rect = (x + start, y, end - start, h)
             else:

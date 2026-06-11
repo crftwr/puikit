@@ -41,11 +41,25 @@ def test_snapped_boundaries_tile_exactly():
 
 def test_pixel_layout_keeps_fractional_cells():
     widgets = [Label(str(i)) for i in range(3)]
+    layout = HSplit(*widgets)  # 10 cells x 10px: 100px split as 33/34/33
+    result = rects(layout.resolve(0.0, 0.0, 10.0, 5.0, PIXEL))
+    assert result[0].w == pytest.approx(3.3)
+    assert result[1].x == pytest.approx(3.3)
+    assert result[1].w == pytest.approx(3.4)
+    assert sum(r.w for r in result) == pytest.approx(10.0)
+
+
+def test_pixel_layout_boundaries_land_on_whole_pixels():
+    widgets = [Label(str(i)) for i in range(3)]
     layout = HSplit(*widgets)
     result = rects(layout.resolve(0.0, 0.0, 10.0, 5.0, PIXEL))
-    assert result[0].w == pytest.approx(10 / 3)
-    assert result[1].x == pytest.approx(10 / 3)
-    assert sum(r.w for r in result) == pytest.approx(10.0)
+    for rect in result:
+        # cell_w is 10: every boundary must be a whole number of pixels
+        assert (rect.x * 10) == pytest.approx(round(rect.x * 10))
+        assert (rect.w * 10) == pytest.approx(round(rect.w * 10))
+    # Adjacent rects share their boundary exactly: no gaps, no overlap.
+    assert result[0].x + result[0].w == pytest.approx(result[1].x)
+    assert result[1].x + result[1].w == pytest.approx(result[2].x)
 
 
 def test_min_px_converted_via_cell_size():
@@ -144,7 +158,7 @@ def test_panel_layout_pixel_vs_snap():
     panel = Panel(backend)
     panel.set_layout(HSplit(*probes_gui))
     panel.render()
-    assert probes_gui[0].size_cells[0] == pytest.approx(10 / 3)
+    assert probes_gui[0].size_cells[0] == pytest.approx(3.3)  # 33 of 100px
 
     probes_tui = [GeometryProbe() for _ in range(3)]
     backend = MemoryBackend(width=10, height=6)  # TUI profile: snap

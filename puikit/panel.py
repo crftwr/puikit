@@ -87,6 +87,16 @@ class DrawContext:
     ) -> None:
         self._backend.draw_box(self._rect.x + x, self._rect.y + y, w, h, style, hints)
 
+    def draw_border(
+        self, style: Style = DEFAULT_STYLE, hints: dict[str, Any] | None = None
+    ) -> None:
+        """Box around the widget's exact extent. Unlike draw_box with
+        width/height (whole cells), this covers fractional edges on
+        pixel-layout backends, so adjacent widgets meet without gaps."""
+        self._backend.draw_box(
+            self._rect.x, self._rect.y, self._rect.w, self._rect.h, style, hints
+        )
+
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float, style: Style = DEFAULT_STYLE
     ) -> None:
