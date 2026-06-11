@@ -18,6 +18,10 @@ Early development. Currently implemented:
 - Core framework: `Panel`, `Backend` interface, capability profiles, event model
 - Layout system: `HSplit` / `VSplit` / `Item` with weights and `min_px` / `min_cells`
   hints — snapped to whole cells on TUI, resolved at pixel granularity on GUI
+- Animation: `panel.animate(widget, hints={"transition": "fade", "duration_ms": 200})`
+  — transitions `fade` (opacity), `slide` (position), `scale` (visual zoom),
+  `size` (layout reflow), and `highlight` (color) rendered on the macOS
+  backend; immediate switch on TUI
 - Widgets: `Label`, `ListView`, `ScrollBar`
 - Backends:
   - `CursesBackend` — TUI, all platforms

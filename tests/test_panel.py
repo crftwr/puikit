@@ -137,6 +137,65 @@ def test_box_fill_clears_interior():
     assert line[0] == "│" and line[9] == "│"
 
 
+def test_animate_gated_by_capability():
+    widget = Label("x")
+    # TUI profile: no animation capability, backend must not be called.
+    backend = MemoryBackend(width=20, height=10)
+    panel = Panel(backend)
+    panel.animate(widget, hints={"transition": "fade", "duration_ms": 200})
+    assert backend.animate_calls == []
+    # GUI profile: the intent reaches the backend untouched.
+    backend = MemoryBackend(width=20, height=10, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    panel.animate(widget, hints={"transition": "fade", "duration_ms": 200})
+    assert backend.animate_calls == [
+        (widget, {"transition": "fade", "duration_ms": 200})
+    ]
+
+
+class SizeProbe(Widget):
+    def __init__(self):
+        self.seen = None
+
+    def draw(self, ctx):
+        self.seen = ctx.size_cells
+
+
+def test_size_animation_redraws_at_intermediate_sizes():
+    backend = MemoryBackend(width=40, height=20, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    probe = SizeProbe()
+    panel.add(probe, x=2, y=2, w=30, h=10)
+    panel.animate(probe, hints={"transition": "size", "duration_ms": 60_000, "from_w": 10, "from_h": 4})
+    assert backend.tick_callbacks  # panel registered for animation frames
+    backend.run_animation_ticks()
+    w, h = probe.seen
+    # Freshly started, eased progress is ~0: the rect is near (10, 4) and
+    # certainly far from the final (30, 10).
+    assert 10 <= w < 12 and 4 <= h < 5
+
+    # Jump the clock to the end: the animation finishes, the widget gets its
+    # assigned rect back, and the callback unregisters.
+    panel._size_anims[probe].start -= 120.0
+    backend.run_animation_ticks()
+    assert probe.seen == (30, 10)
+    assert probe not in panel._size_anims
+    assert backend.tick_callbacks == []
+
+
+def test_size_animation_is_layout_level_not_backend():
+    backend = MemoryBackend(width=40, height=20, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    probe = SizeProbe()
+    panel.add(probe, x=0, y=0, w=20, h=10)
+    panel.animate(probe, hints={"transition": "size", "from_w": 5, "from_h": 5})
+    # Handled by the Panel: the backend's render-level animate is not used.
+    assert backend.animate_calls == []
+    # Render-level transitions still go to the backend.
+    panel.animate(probe, hints={"transition": "fade"})
+    assert len(backend.animate_calls) == 1
+
+
 def test_pop_layer_restores_event_flow():
     backend = MemoryBackend(width=20, height=10)
     panel = Panel(backend)

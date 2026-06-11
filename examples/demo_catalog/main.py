@@ -56,6 +56,48 @@ def build_list_screen(panel: Panel) -> None:
     panel.focus(listview)
 
 
+class AnimTarget(Widget):
+    """The widget that gets animated on the Animation screen."""
+
+    def __init__(self):
+        self.last = "none yet"
+
+    def draw(self, ctx) -> None:
+        ctx.draw_border(Style(fg=(36, 114, 200)), hints={"fill": True})
+        ctx.draw_icon(2, 1, "check")
+        ctx.draw_text(5, 1, "Target", Style(attr=TextAttribute.BOLD))
+        ctx.draw_text(2, 3, "Last transition:")
+        ctx.draw_text(2, 4, self.last, Style(fg=(13, 188, 121)))
+
+
+ANIMATIONS = [
+    ("Fade (opacity)", {"transition": "fade", "duration_ms": 500}),
+    ("Slide (position)", {"transition": "slide", "duration_ms": 500, "from_dx": -8, "from_dy": 0}),
+    ("Drop (position)", {"transition": "slide", "duration_ms": 500, "from_dx": 0, "from_dy": -4}),
+    ("Scale (visual zoom)", {"transition": "scale", "duration_ms": 500, "from_scale": 0.5}),
+    ("Size (layout reflow)", {"transition": "size", "duration_ms": 500, "from_w": 8, "from_h": 3}),
+    ("Highlight (color)", {"transition": "highlight", "duration_ms": 700, "color": (229, 229, 16)}),
+    ("Flash red (color)", {"transition": "highlight", "duration_ms": 700, "color": (205, 49, 49), "strength": 0.6}),
+]
+
+
+def build_animation_screen(panel: Panel) -> None:
+    target = AnimTarget()
+
+    def run(index: int, name: str) -> None:
+        target.last = name
+        panel.animate(target, hints=dict(ANIMATIONS[index][1]))
+
+    listview = ListView([name for name, _ in ANIMATIONS], on_select=run)
+    panel.add(
+        Label("Pick a transition, press enter (GUI animates; TUI switches instantly)"),
+        x=4, y=4, w=70, h=1,
+    )
+    panel.add(listview, x=4, y=6, w=24, h=8)
+    panel.add(target, x=34, y=6, w=26, h=8)
+    panel.focus(listview)
+
+
 def build_scrollbar_screen(panel: Panel) -> None:
     panel.add(Label("Standalone scroll bars (pos / ratio):"), x=4, y=4, w=50, h=1)
     for i, (pos, ratio) in enumerate([(0.0, 0.3), (0.5, 0.3), (1.0, 0.3), (0.0, 0.8)]):
@@ -67,6 +109,7 @@ SCREENS = [
     ("Label", build_label_screen),
     ("ListView", build_list_screen),
     ("ScrollBar", build_scrollbar_screen),
+    ("Animation", build_animation_screen),
 ]
 
 
@@ -98,11 +141,14 @@ def main() -> None:
             panel.pop_layer()
 
         def open_dialog() -> None:
+            dialog = DemoDialog(close_dialog)
             panel.push_layer(
-                DemoDialog(close_dialog),
+                dialog,
                 z=10,
                 hints={"shadow": True, "dim_below": True, "w": 36, "h": 7},
             )
+            # GUI: fades in over 200ms; TUI: appears immediately.
+            panel.animate(dialog, hints={"transition": "fade", "duration_ms": 200})
 
         def on_event(event) -> None:
             nonlocal current

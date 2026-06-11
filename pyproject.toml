@@ -20,7 +20,7 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
-macos = ["pyobjc-framework-Cocoa>=10"]
+macos = ["pyobjc-framework-Cocoa>=10", "pyobjc-framework-Quartz>=10"]
 
 [project.urls]
 Homepage = "https://github.com/crftwr/puikit"

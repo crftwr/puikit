@@ -139,6 +139,29 @@ class Backend(ABC):
     def draw_shadow(self, x: int, y: int, w: int, h: int) -> None:
         raise CapabilityNotSupported("shadow")
 
+    # --- animation (capability "animation"; Panel gates the calls) -----------
+
+    def animate(self, widget: Any, hints: dict[str, Any] | None = None) -> None:
+        """Start a render-level transition for the widget's next appearance,
+        e.g. hints={"transition": "fade", "duration_ms": 200}."""
+        raise CapabilityNotSupported("animation")
+
+    def request_animation_ticks(self, callback: Callable[[], bool]) -> None:
+        """Register a callback invoked on each animation frame (~60fps) for
+        layout-level animations driven above the backend (e.g. the Panel's
+        "size" transition). The callback returns False to unregister."""
+        raise CapabilityNotSupported("animation")
+
+    # --- command grouping ----------------------------------------------------
+
+    def begin_group(self, key: Any, rect: Any = None) -> None:
+        """Called by the Panel before a widget draws, with the widget's rect
+        in cells. Backends that render per-widget effects (animation alpha,
+        transforms, ...) use the markers; the default is a no-op."""
+
+    def end_group(self, key: Any) -> None:
+        """Counterpart of begin_group."""
+
     def draw_image(self, x: int, y: int, path: str, hints: dict[str, Any] | None = None) -> None:
         raise CapabilityNotSupported("images")
 

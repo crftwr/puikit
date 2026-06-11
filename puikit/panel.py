@@ -7,6 +7,7 @@ chains so widget code never branches on TUI/GUI.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -133,6 +134,27 @@ class _Slot:
     z: int = 0
 
 
+@dataclass
+class _SizeAnimation:
+    """Layout-level transition: the widget's rect grows from (from_w, from_h)
+    to its assigned size, and the widget re-draws at each intermediate size
+    (true size change, unlike the render-level "scale" zoom)."""
+
+    start: float
+    duration: float
+    from_w: float
+    from_h: float
+
+    def progress(self, now: float) -> float:
+        if self.duration <= 0:
+            return 1.0
+        return min(1.0, max(0.0, (now - self.start) / self.duration))
+
+    def eased(self, now: float) -> float:
+        p = self.progress(now)
+        return 1.0 - (1.0 - p) ** 2  # ease-out
+
+
 class Panel:
     """Owns widget layout, layers, focus, and event routing for one screen."""
 
@@ -142,6 +164,7 @@ class Panel:
         self._layers: list[_Slot] = []
         self._focused: Any | None = None
         self._layout: Any | None = None
+        self._size_anims: dict[Any, _SizeAnimation] = {}
 
     # --- layout management ---------------------------------------------------
 
@@ -228,10 +251,19 @@ class Panel:
             self._apply_layout()
         self.backend.clear()
         for slot in self._children:
-            slot.widget.draw(self._context_for(slot))
+            self._draw_slot(slot)
         for slot in self._layers:
             self._render_layer(slot)
         self.backend.present()
+
+    def _draw_slot(self, slot: _Slot) -> None:
+        # Group markers let the backend apply per-widget effects (e.g. the
+        # alpha or transform of a running transition) to exactly these
+        # commands; the rect gives transforms their pivot.
+        rect = self._effective_rect(slot)
+        self.backend.begin_group(slot.widget, rect)
+        slot.widget.draw(DrawContext(self.backend, rect, self.backend.capabilities))
+        self.backend.end_group(slot.widget)
 
     def _render_layer(self, slot: _Slot) -> None:
         if slot.hints.get("dim_below"):
@@ -239,23 +271,66 @@ class Panel:
             # attributes, GUI draws a translucent overlay.
             sw, sh = self.backend.size
             self.backend.dim_rect(0, 0, sw, sh)
+        rect = self._effective_rect(slot)
+        self.backend.begin_group(slot.widget, rect)
         if slot.hints.get("shadow") and self.backend.capabilities.supports("shadow"):
-            rect = slot.rect
             self.backend.draw_shadow(rect.x, rect.y, rect.w, rect.h)
-        slot.widget.draw(self._context_for(slot))
-
-    def _context_for(self, slot: _Slot) -> DrawContext:
-        return DrawContext(self.backend, slot.rect, self.backend.capabilities)
+        slot.widget.draw(DrawContext(self.backend, rect, self.backend.capabilities))
+        self.backend.end_group(slot.widget)
 
     # --- animation ----------------------------------------------------------------
 
     def animate(self, widget: Any, hints: dict[str, Any] | None = None) -> None:
         # Without animation capability the change is applied immediately on
-        # the next render; capable backends will get a real transition here.
-        if self.backend.capabilities.supports("animation"):
-            animate = getattr(self.backend, "animate", None)
-            if animate is not None:
-                animate(widget, hints or {})
+        # the next render; capable backends render a real transition.
+        hints = hints or {}
+        if not self.backend.capabilities.supports("animation"):
+            return
+        if hints.get("transition") == "size":
+            # Layout-level: the Panel animates the rect itself, the widget
+            # re-draws at each intermediate size.
+            self._start_size_animation(widget, hints)
+        else:
+            self.backend.animate(widget, hints)
+
+    def _start_size_animation(self, widget: Any, hints: dict[str, Any]) -> None:
+        slot = next(
+            (s for s in self._children + self._layers if s.widget is widget), None
+        )
+        if slot is None:
+            return
+        self._size_anims[widget] = _SizeAnimation(
+            start=time.monotonic(),
+            duration=hints.get("duration_ms", 200) / 1000.0,
+            from_w=float(hints.get("from_w", slot.rect.w)),
+            from_h=float(hints.get("from_h", slot.rect.h)),
+        )
+        self.backend.request_animation_ticks(self._animation_tick)
+
+    def _animation_tick(self) -> bool:
+        now = time.monotonic()
+        finished = [
+            widget
+            for widget, anim in self._size_anims.items()
+            if anim.progress(now) >= 1.0
+        ]
+        for widget in finished:
+            del self._size_anims[widget]
+        self.render()  # the final tick renders at the assigned rect
+        return bool(self._size_anims)
+
+    def _effective_rect(self, slot: _Slot) -> Rect:
+        anim = self._size_anims.get(slot.widget)
+        if anim is None:
+            return slot.rect
+        eased = anim.eased(time.monotonic())
+        rect = slot.rect
+        return Rect(
+            rect.x,
+            rect.y,
+            anim.from_w + (rect.w - anim.from_w) * eased,
+            anim.from_h + (rect.h - anim.from_h) * eased,
+        )
 
     # --- text input -----------------------------------------------------------------
 

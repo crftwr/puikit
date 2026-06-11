@@ -70,6 +70,61 @@ def test_profile_declares_gui_capabilities():
     assert profile.supports("pixel_layout")
     assert profile.supports("icons")
     assert profile.supports("images")
+    assert profile.supports("animation")
     # Not implemented yet in the MVP:
-    assert not profile.supports("animation")
     assert not profile.supports("system_tray")
+
+
+def test_animation_progress_and_easing():
+    from puikit.backends.macos_backend import Animation
+
+    anim = Animation(kind="fade", duration=0.2, start=100.0)
+    assert anim.progress(100.0) == 0.0
+    assert anim.eased(100.0) == 0.0
+    assert anim.progress(100.1) == pytest.approx(0.5)
+    assert anim.eased(100.1) == pytest.approx(0.75)  # ease-out is past linear
+    assert anim.progress(100.2) == 1.0
+    assert anim.eased(100.2) == 1.0
+    assert not anim.done(100.19)
+    assert anim.done(100.2)
+    # Zero duration completes immediately (defensive).
+    assert Animation(kind="fade", duration=0.0, start=100.0).done(100.0)
+
+
+def test_animate_registers_and_groups_wrap_commands():
+    backend = MacOSBackend()  # not opened: no window, no timer thread needed
+    widget = object()
+    backend.animate(widget, {"transition": "fade", "duration_ms": 150})
+    assert id(widget) in backend._animations
+    assert backend._animations[id(widget)].duration == pytest.approx(0.15)
+
+    backend.begin_group(widget)
+    backend.draw_text(0, 0, "hi")
+    backend.end_group(widget)
+    backend.present()
+    kinds = [cmd[0] for cmd in backend._front]
+    assert kinds == ["group_begin", "text", "group_end"]
+    assert backend._front[0][1] == id(widget)
+    backend.close()  # invalidates the animation timer
+
+
+def test_animation_kinds_carry_their_hints():
+    from puikit import Rect
+
+    backend = MacOSBackend()
+    slide_w, scale_w, color_w = object(), object(), object()
+    backend.animate(slide_w, {"transition": "slide", "from_dx": -8, "duration_ms": 300})
+    backend.animate(scale_w, {"transition": "scale", "from_scale": 0.5})
+    backend.animate(color_w, {"transition": "highlight", "color": (205, 49, 49)})
+    assert backend._animations[id(slide_w)].kind == "slide"
+    assert backend._animations[id(slide_w)].hints["from_dx"] == -8
+    assert backend._animations[id(scale_w)].hints["from_scale"] == 0.5
+    assert backend._animations[id(color_w)].hints["color"] == (205, 49, 49)
+
+    # Group markers carry the widget rect so transforms know their pivot.
+    rect = Rect(2, 3, 10, 5)
+    backend.begin_group(scale_w, rect)
+    backend.end_group(scale_w)
+    backend.present()
+    assert backend._front[0] == ("group_begin", id(scale_w), rect)
+    backend.close()

@@ -34,6 +34,8 @@ class MemoryBackend(Backend):
         self.icon_calls: list[tuple[int, int, str]] = []
         self.image_calls: list[tuple[int, int, str]] = []
         self.shadow_calls: list[tuple[int, int, int, int]] = []
+        self.animate_calls: list[tuple[Any, dict[str, Any]]] = []
+        self.tick_callbacks: list[Any] = []
         self.present_count = 0
         self.clear()
 
@@ -102,6 +104,17 @@ class MemoryBackend(Backend):
 
     def draw_shadow(self, x: int, y: int, w: int, h: int) -> None:
         self.shadow_calls.append((x, y, w, h))
+
+    def animate(self, widget: Any, hints: dict[str, Any] | None = None) -> None:
+        self.animate_calls.append((widget, hints or {}))
+
+    def request_animation_ticks(self, callback) -> None:
+        if callback not in self.tick_callbacks:
+            self.tick_callbacks.append(callback)
+
+    def run_animation_ticks(self) -> None:
+        """Test helper: run one tick round, dropping finished callbacks."""
+        self.tick_callbacks = [cb for cb in self.tick_callbacks if cb()]
 
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float, style: Style = DEFAULT_STYLE

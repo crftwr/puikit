@@ -17,6 +17,8 @@ unavailable.
 from __future__ import annotations
 
 import math
+import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from AppKit import (
@@ -36,6 +38,7 @@ from AppKit import (
     NSEventModifierFlagOption,
     NSEventModifierFlagShift,
     NSEventTypeApplicationDefined,
+    NSTimer,
     NSFont,
     NSFontAttributeName,
     NSFontWeightRegular,
@@ -60,6 +63,21 @@ from Foundation import NSMakeRect, NSMakeSize, NSObject, NSString, NSZeroPoint
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..event import Event, EventType
+
+try:
+    from Quartz import (
+        CGContextBeginTransparencyLayer,
+        CGContextEndTransparencyLayer,
+        CGContextRestoreGState,
+        CGContextSaveGState,
+        CGContextScaleCTM,
+        CGContextSetAlpha,
+        CGContextTranslateCTM,
+    )
+
+    _HAS_QUARTZ = True
+except ImportError:  # animation gracefully degrades to immediate switches
+    _HAS_QUARTZ = False
 
 _DEFAULT_FG = (230, 230, 230)
 _DEFAULT_BG = (24, 24, 24)
@@ -130,6 +148,32 @@ def _ns_color(rgb: tuple[int, int, int], alpha: float = 1.0):
     return NSColor.colorWithSRGBRed_green_blue_alpha_(r / 255, g / 255, b / 255, alpha)
 
 
+@dataclass
+class Animation:
+    """One running transition; progress is derived from wall-clock time.
+
+    Kinds: "fade" (alpha), "slide" (position, hints from_dx/from_dy in
+    cells), "scale" (size, hints from_scale), "highlight" (color overlay,
+    hints color/strength)."""
+
+    kind: str
+    duration: float  # seconds
+    start: float     # time.monotonic() timestamp
+    hints: dict[str, Any] = field(default_factory=dict)
+
+    def progress(self, now: float) -> float:
+        if self.duration <= 0:
+            return 1.0
+        return min(1.0, max(0.0, (now - self.start) / self.duration))
+
+    def eased(self, now: float) -> float:
+        p = self.progress(now)
+        return 1.0 - (1.0 - p) ** 2  # ease-out
+
+    def done(self, now: float) -> bool:
+        return self.progress(now) >= 1.0
+
+
 class _PuiKitView(NSView):
     """Renders the backend's display list; forwards input to the backend."""
 
@@ -198,7 +242,6 @@ class MacOSBackend(Backend):
         {
             **PROFILE_GUI_DESKTOP,
             # Not implemented yet in the MVP; flip these on as features land.
-            "animation": False,
             "drag_and_drop": False,
             "ime": False,
             "clipboard_rich": False,
@@ -208,6 +251,14 @@ class MacOSBackend(Backend):
             "gpu_acceleration": False,
         }
     )
+
+    @property
+    def capabilities(self) -> CapabilityProfile:
+        if _HAS_QUARTZ:
+            return self.PROFILE
+        # Without Quartz the fade effect cannot be rendered; declare honestly
+        # so the Panel falls back to immediate switches.
+        return CapabilityProfile({**self.PROFILE, "animation": False})
 
     def __init__(self, width: int = 100, height: int = 30, title: str = "PuiKit",
                  font_size: float = 14.0):
@@ -225,6 +276,9 @@ class MacOSBackend(Backend):
         self._fonts: dict[TextAttribute, Any] = {}
         self._cell_w = 1.0
         self._cell_h = 1.0
+        self._animations: dict[int, Animation] = {}  # keyed by id(widget)
+        self._anim_timer = None
+        self._tick_callbacks: list[Any] = []
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -259,6 +313,11 @@ class MacOSBackend(Backend):
         app.activateIgnoringOtherApps_(True)
 
     def close(self) -> None:
+        if self._anim_timer is not None:
+            self._anim_timer.invalidate()
+            self._anim_timer = None
+        self._animations.clear()
+        self._tick_callbacks.clear()
         if self._window is not None:
             self._window.setDelegate_(None)
             self._window.orderOut_(None)
@@ -327,6 +386,51 @@ class MacOSBackend(Backend):
     def draw_shadow(self, x: int, y: int, w: int, h: int) -> None:
         self._back.append(("shadow", x, y, w, h))
 
+    def begin_group(self, key: Any, rect: Any = None) -> None:
+        self._back.append(("group_begin", id(key), rect))
+
+    def end_group(self, key: Any) -> None:
+        self._back.append(("group_end", id(key)))
+
+    # --- animation -------------------------------------------------------------
+
+    def animate(self, widget: Any, hints: dict[str, Any] | None = None) -> None:
+        hints = hints or {}
+        self._animations[id(widget)] = Animation(
+            kind=hints.get("transition", "fade"),
+            duration=hints.get("duration_ms", 200) / 1000.0,
+            start=time.monotonic(),
+            hints=hints,
+        )
+        self._ensure_animation_timer()
+
+    def request_animation_ticks(self, callback) -> None:
+        if callback not in self._tick_callbacks:
+            self._tick_callbacks.append(callback)
+        self._ensure_animation_timer()
+
+    def _ensure_animation_timer(self) -> None:
+        if self._anim_timer is not None:
+            return
+        self._anim_timer = NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
+            1 / 60.0, True, self._on_animation_tick
+        )
+
+    def _on_animation_tick(self, timer) -> None:
+        now = time.monotonic()
+        self._animations = {
+            key: anim for key, anim in self._animations.items() if not anim.done(now)
+        }
+        # Layout-level animations (Panel "size" transitions) re-render the
+        # display list themselves; a callback returning False is done.
+        self._tick_callbacks = [cb for cb in self._tick_callbacks if cb()]
+        if self._view is not None:
+            self._view.setNeedsDisplay_(True)
+        if not self._animations and not self._tick_callbacks:
+            # One last redraw at the final state has been requested above.
+            timer.invalidate()
+            self._anim_timer = None
+
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float, style: Style = DEFAULT_STYLE
     ) -> None:
@@ -351,6 +455,8 @@ class MacOSBackend(Backend):
     def _render_into_view(self) -> None:
         _ns_color(_DEFAULT_BG).setFill()
         NSRectFill(self._view.bounds())
+        now = time.monotonic()
+        group_stack: list[tuple] = []  # (anim, rect, gstate_saved, layer_opened)
         for command in self._front:
             kind = command[0]
             if kind == "text":
@@ -365,6 +471,67 @@ class MacOSBackend(Backend):
                 self._render_dim(*command[1:])
             elif kind == "shadow":
                 self._render_shadow(*command[1:])
+            elif kind == "group_begin":
+                group_stack.append(self._begin_group_render(command[1], command[2], now))
+            elif kind == "group_end":
+                if group_stack:
+                    self._end_group_render(group_stack.pop(), now)
+
+    def _begin_group_render(self, key: int, rect: Any, now: float) -> tuple:
+        """Set up the group's transition effect (alpha or CTM transform).
+        Returns state for _end_group_render."""
+        animation = self._animations.get(key)
+        if animation is None or not _HAS_QUARTZ:
+            return (None, rect, False, False)
+        cg = NSGraphicsContext.currentContext().CGContext()
+        eased = animation.eased(now)
+        if animation.kind == "fade":
+            CGContextSaveGState(cg)
+            CGContextSetAlpha(cg, eased)
+            CGContextBeginTransparencyLayer(cg, None)
+            return (animation, rect, True, True)
+        if animation.kind == "slide":
+            # Position: start offset (in cells) decaying to the final place.
+            dx = animation.hints.get("from_dx", 0.0) * self._cell_w * (1.0 - eased)
+            dy = animation.hints.get("from_dy", 2.0) * self._cell_h * (1.0 - eased)
+            CGContextSaveGState(cg)
+            CGContextTranslateCTM(cg, dx, dy)
+            return (animation, rect, True, False)
+        if animation.kind == "scale" and rect is not None:
+            # Size: grow from from_scale to full size around the rect center.
+            from_scale = animation.hints.get("from_scale", 0.7)
+            scale = from_scale + (1.0 - from_scale) * eased
+            cx = (rect.x + rect.w / 2.0) * self._cell_w
+            cy = (rect.y + rect.h / 2.0) * self._cell_h
+            CGContextSaveGState(cg)
+            CGContextTranslateCTM(cg, cx, cy)
+            CGContextScaleCTM(cg, scale, scale)
+            CGContextTranslateCTM(cg, -cx, -cy)
+            return (animation, rect, True, False)
+        # "highlight" draws its color overlay at group end; unknown kinds no-op.
+        return (animation, rect, False, False)
+
+    def _end_group_render(self, state: tuple, now: float) -> None:
+        animation, rect, gstate_saved, layer_opened = state
+        if not _HAS_QUARTZ:
+            return
+        if layer_opened or gstate_saved:
+            cg = NSGraphicsContext.currentContext().CGContext()
+            if layer_opened:
+                CGContextEndTransparencyLayer(cg)
+            if gstate_saved:
+                CGContextRestoreGState(cg)
+        if animation is not None and animation.kind == "highlight" and rect is not None:
+            # Color: a tint over the widget that fades back to normal.
+            strength = animation.hints.get("strength", 0.45)
+            color = animation.hints.get("color", (229, 229, 16))
+            alpha = strength * (1.0 - animation.eased(now))
+            if alpha > 0:
+                _ns_color(color, alpha).setFill()
+                NSRectFillUsingOperation(
+                    self._cell_rect(rect.x, rect.y, rect.w, rect.h),
+                    NSCompositingOperationSourceOver,
+                )
 
     def _cell_rect(self, x: int, y: int, w_cells: int, h_cells: int):
         return NSMakeRect(
