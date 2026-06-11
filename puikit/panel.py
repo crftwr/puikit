@@ -39,14 +39,32 @@ class Rect:
         return self.x <= x < self.x + self.w and self.y <= y < self.y + self.h
 
 
+def _intersect(a: Rect, b: Rect) -> Rect | None:
+    x0, y0 = max(a.x, b.x), max(a.y, b.y)
+    x1 = min(a.x + a.w, b.x + b.w)
+    y1 = min(a.y + a.h, b.y + b.h)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return Rect(x0, y0, x1 - x0, y1 - y0)
+
+
 class DrawContext:
     """Drawing surface handed to a widget, translated to the widget's origin
     and clipped to its rectangle. Capability fallbacks live here."""
 
-    def __init__(self, backend: Backend, rect: Rect, capabilities: CapabilityProfile):
+    def __init__(
+        self,
+        backend: Backend,
+        rect: Rect,
+        capabilities: CapabilityProfile,
+        clip: Rect | None = None,
+        panel: "Panel | None" = None,
+    ):
         self._backend = backend
         self._rect = rect
         self._caps = capabilities
+        self._clip = clip if clip is not None else rect
+        self._panel = panel
 
     @property
     def width(self) -> int:
@@ -125,6 +143,30 @@ class DrawContext:
             self._backend.draw_image(self._rect.x + x, self._rect.y + y, path, hints)
         # TUI fallback: no-op
 
+    def draw_child(
+        self, widget: Any, x: float, y: float, w: float, h: float
+    ) -> None:
+        """Draw a child widget at (x, y, w, h) in this context's coordinates.
+
+        The child is clipped to the intersection of its rect with all
+        enclosing clips, and gets its own animation group, so a parent's
+        transition cascades to children while children can also animate
+        individually."""
+        rect = Rect(self._rect.x + x, self._rect.y + y, w, h)
+        if self._panel is not None:
+            rect = self._panel._interpolate_rect(widget, rect)
+        clip = _intersect(self._clip, rect)
+        if clip is None:
+            return
+        self._backend.begin_group(widget, rect)
+        # The clip is set inside the group so GUI transforms carry it along.
+        self._backend.push_clip(clip.x, clip.y, clip.w, clip.h)
+        widget.draw(
+            DrawContext(self._backend, rect, self._caps, clip=clip, panel=self._panel)
+        )
+        self._backend.pop_clip()
+        self._backend.end_group(widget)
+
 
 @dataclass
 class _Slot:
@@ -138,12 +180,13 @@ class _Slot:
 class _SizeAnimation:
     """Layout-level transition: the widget's rect grows from (from_w, from_h)
     to its assigned size, and the widget re-draws at each intermediate size
-    (true size change, unlike the render-level "scale" zoom)."""
+    (true size change, unlike the render-level "scale" zoom). A None
+    dimension stays at the assigned size."""
 
     start: float
     duration: float
-    from_w: float
-    from_h: float
+    from_w: float | None
+    from_h: float | None
 
     def progress(self, now: float) -> float:
         if self.duration <= 0:
@@ -260,9 +303,13 @@ class Panel:
         # Group markers let the backend apply per-widget effects (e.g. the
         # alpha or transform of a running transition) to exactly these
         # commands; the rect gives transforms their pivot.
-        rect = self._effective_rect(slot)
+        rect = self._interpolate_rect(slot.widget, slot.rect)
         self.backend.begin_group(slot.widget, rect)
-        slot.widget.draw(DrawContext(self.backend, rect, self.backend.capabilities))
+        self.backend.push_clip(rect.x, rect.y, rect.w, rect.h)
+        slot.widget.draw(
+            DrawContext(self.backend, rect, self.backend.capabilities, panel=self)
+        )
+        self.backend.pop_clip()
         self.backend.end_group(slot.widget)
 
     def _render_layer(self, slot: _Slot) -> None:
@@ -271,11 +318,16 @@ class Panel:
             # attributes, GUI draws a translucent overlay.
             sw, sh = self.backend.size
             self.backend.dim_rect(0, 0, sw, sh)
-        rect = self._effective_rect(slot)
+        rect = self._interpolate_rect(slot.widget, slot.rect)
         self.backend.begin_group(slot.widget, rect)
+        # The shadow blurs beyond the rect, so it is drawn before clipping.
         if slot.hints.get("shadow") and self.backend.capabilities.supports("shadow"):
             self.backend.draw_shadow(rect.x, rect.y, rect.w, rect.h)
-        slot.widget.draw(DrawContext(self.backend, rect, self.backend.capabilities))
+        self.backend.push_clip(rect.x, rect.y, rect.w, rect.h)
+        slot.widget.draw(
+            DrawContext(self.backend, rect, self.backend.capabilities, panel=self)
+        )
+        self.backend.pop_clip()
         self.backend.end_group(slot.widget)
 
     # --- animation ----------------------------------------------------------------
@@ -294,16 +346,13 @@ class Panel:
             self.backend.animate(widget, hints)
 
     def _start_size_animation(self, widget: Any, hints: dict[str, Any]) -> None:
-        slot = next(
-            (s for s in self._children + self._layers if s.widget is widget), None
-        )
-        if slot is None:
-            return
+        # Works for any widget in the tree: the target size is whatever rect
+        # the widget is given at draw time (Panel slot or Container child).
         self._size_anims[widget] = _SizeAnimation(
             start=time.monotonic(),
             duration=hints.get("duration_ms", 200) / 1000.0,
-            from_w=float(hints.get("from_w", slot.rect.w)),
-            from_h=float(hints.get("from_h", slot.rect.h)),
+            from_w=float(hints["from_w"]) if "from_w" in hints else None,
+            from_h=float(hints["from_h"]) if "from_h" in hints else None,
         )
         self.backend.request_animation_ticks(self._animation_tick)
 
@@ -319,17 +368,19 @@ class Panel:
         self.render()  # the final tick renders at the assigned rect
         return bool(self._size_anims)
 
-    def _effective_rect(self, slot: _Slot) -> Rect:
-        anim = self._size_anims.get(slot.widget)
+    def _interpolate_rect(self, widget: Any, rect: Rect) -> Rect:
+        """The widget's rect with any running size animation applied."""
+        anim = self._size_anims.get(widget)
         if anim is None:
-            return slot.rect
+            return rect
         eased = anim.eased(time.monotonic())
-        rect = slot.rect
+        from_w = anim.from_w if anim.from_w is not None else rect.w
+        from_h = anim.from_h if anim.from_h is not None else rect.h
         return Rect(
             rect.x,
             rect.y,
-            anim.from_w + (rect.w - anim.from_w) * eased,
-            anim.from_h + (rect.h - anim.from_h) * eased,
+            from_w + (rect.w - from_w) * eased,
+            from_h + (rect.h - from_h) * eased,
         )
 
     # --- text input -----------------------------------------------------------------

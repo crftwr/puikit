@@ -10,7 +10,7 @@ import argparse
 
 from puikit import EventType, Panel, Style, TextAttribute
 from puikit.backends import create_backend
-from puikit.widgets import Label, ListView, ScrollBar, Widget
+from puikit.widgets import Container, Label, ListView, ScrollBar, Widget
 
 
 class DemoDialog(Widget):
@@ -56,18 +56,27 @@ def build_list_screen(panel: Panel) -> None:
     panel.focus(listview)
 
 
-class AnimTarget(Widget):
-    """The widget that gets animated on the Animation screen."""
+class AnimTarget(Container):
+    """The animated target is a widget tree: transitions on the container
+    cascade to all children, and the overflowing child shows clipping."""
 
     def __init__(self):
-        self.last = "none yet"
+        super().__init__()
+        self.last_label = Label("none yet", Style(fg=(13, 188, 121)))
+        self.add(Label("Target", Style(attr=TextAttribute.BOLD)), x=5, y=1, w=12, h=1)
+        self.add(Label("Last transition:"), x=2, y=3, w=20, h=1)
+        self.add(self.last_label, x=2, y=4, w=22, h=1)
+        # Wider than the card on purpose: clipped at the container edge.
+        self.add(
+            Label("This long child label is clipped at the card edge",
+                  Style(attr=TextAttribute.DIM)),
+            x=2, y=6, w=50, h=1,
+        )
 
     def draw(self, ctx) -> None:
         ctx.draw_border(Style(fg=(36, 114, 200)), hints={"fill": True})
         ctx.draw_icon(2, 1, "check")
-        ctx.draw_text(5, 1, "Target", Style(attr=TextAttribute.BOLD))
-        ctx.draw_text(2, 3, "Last transition:")
-        ctx.draw_text(2, 4, self.last, Style(fg=(13, 188, 121)))
+        super().draw(ctx)  # children, each clipped to the card
 
 
 ANIMATIONS = [
@@ -85,7 +94,7 @@ def build_animation_screen(panel: Panel) -> None:
     target = AnimTarget()
 
     def run(index: int, name: str) -> None:
-        target.last = name
+        target.last_label.text = name
         panel.animate(target, hints=dict(ANIMATIONS[index][1]))
 
     listview = ListView([name for name, _ in ANIMATIONS], on_select=run)

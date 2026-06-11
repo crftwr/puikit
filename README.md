@@ -22,7 +22,10 @@ Early development. Currently implemented:
   — transitions `fade` (opacity), `slide` (position), `scale` (visual zoom),
   `size` (layout reflow), and `highlight` (color) rendered on the macOS
   backend; immediate switch on TUI
-- Widgets: `Label`, `ListView`, `ScrollBar`
+- Widgets: `Label`, `ListView`, `ScrollBar`, `Container`
+- Widget tree: containers nest widgets with hierarchical clipping; animations
+  on a parent cascade to all descendants, while children stay individually
+  animatable
 - Backends:
   - `CursesBackend` — TUI, all platforms
   - `MacOSBackend` — macOS native GUI (PyObjC; install with `pip install -e ".[macos]"`)

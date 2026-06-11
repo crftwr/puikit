@@ -46,6 +46,7 @@ from AppKit import (
     NSImage,
     NSCompositingOperationSourceOver,
     NSGraphicsContext,
+    NSRectClip,
     NSRectFill,
     NSRectFillUsingOperation,
     NSShadow,
@@ -392,6 +393,12 @@ class MacOSBackend(Backend):
     def end_group(self, key: Any) -> None:
         self._back.append(("group_end", id(key)))
 
+    def push_clip(self, x: float, y: float, w: float, h: float) -> None:
+        self._back.append(("clip_push", x, y, w, h))
+
+    def pop_clip(self) -> None:
+        self._back.append(("clip_pop",))
+
     # --- animation -------------------------------------------------------------
 
     def animate(self, widget: Any, hints: dict[str, Any] | None = None) -> None:
@@ -476,6 +483,13 @@ class MacOSBackend(Backend):
             elif kind == "group_end":
                 if group_stack:
                     self._end_group_render(group_stack.pop(), now)
+            elif kind == "clip_push":
+                # NSRectClip works in the current transform, so a clip set
+                # inside an animated group travels with the transition.
+                NSGraphicsContext.saveGraphicsState()
+                NSRectClip(self._cell_rect(*command[1:]))
+            elif kind == "clip_pop":
+                NSGraphicsContext.restoreGraphicsState()
 
     def _begin_group_render(self, key: int, rect: Any, now: float) -> tuple:
         """Set up the group's transition effect (alpha or CTM transform).

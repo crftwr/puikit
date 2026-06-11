@@ -61,6 +61,7 @@ class CursesBackend(Backend):
         self._quit_requested = False
         self._color_pairs: dict[tuple[int, int], int] = {}
         self._next_pair_id = 1
+        self._clip_stack: list[tuple[int, int, int, int]] = []  # x0, y0, x1, y1
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -101,10 +102,33 @@ class CursesBackend(Backend):
         assert self._stdscr is not None
         self._stdscr.erase()
 
+    def push_clip(self, x: float, y: float, w: float, h: float) -> None:
+        x0, y0 = round(x), round(y)
+        x1, y1 = round(x + w), round(y + h)
+        if self._clip_stack:
+            px0, py0, px1, py1 = self._clip_stack[-1]
+            x0, y0 = max(x0, px0), max(y0, py0)
+            x1, y1 = min(x1, px1), min(y1, py1)
+        self._clip_stack.append((x0, y0, x1, y1))
+
+    def pop_clip(self) -> None:
+        if self._clip_stack:
+            self._clip_stack.pop()
+
     def draw_text(self, x: int, y: int, text: str, style: Style = DEFAULT_STYLE) -> None:
         assert self._stdscr is not None
         # Defensive: widgets or layouts may hand us whole-valued floats.
         x, y = round(x), round(y)
+        if self._clip_stack:
+            x0, y0, x1, y1 = self._clip_stack[-1]
+            if not y0 <= y < y1:
+                return
+            if x < x0:
+                text = text[x0 - x:]
+                x = x0
+            text = text[: max(0, x1 - x)]
+            if not text:
+                return
         w, h = self.size
         if not 0 <= y < h or x >= w:
             return

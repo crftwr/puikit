@@ -128,6 +128,16 @@ class Backend(ABC):
         ``ratio`` (0..1) is the visible fraction of the content."""
 
     @abstractmethod
+    def push_clip(self, x: float, y: float, w: float, h: float) -> None:
+        """Restrict subsequent drawing to the rect, intersected with any
+        enclosing clip. On GUI backends the rect lives in the current
+        (possibly animated) transform, so clips travel with transitions."""
+
+    @abstractmethod
+    def pop_clip(self) -> None:
+        """Remove the most recent clip rect."""
+
+    @abstractmethod
     def present(self) -> None:
         """Flush pending drawing to the screen."""
 

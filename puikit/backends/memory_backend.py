@@ -37,6 +37,7 @@ class MemoryBackend(Backend):
         self.animate_calls: list[tuple[Any, dict[str, Any]]] = []
         self.tick_callbacks: list[Any] = []
         self.present_count = 0
+        self._clip_stack: list[tuple[int, int, int, int]] = []  # x0, y0, x1, y1
         self.clear()
 
     @property
@@ -63,6 +64,25 @@ class MemoryBackend(Backend):
         self._grid = [[" "] * self._width for _ in range(self._height)]
         self._styles = [[DEFAULT_STYLE] * self._width for _ in range(self._height)]
 
+    def push_clip(self, x: float, y: float, w: float, h: float) -> None:
+        x0, y0 = round(x), round(y)
+        x1, y1 = round(x + w), round(y + h)
+        if self._clip_stack:
+            px0, py0, px1, py1 = self._clip_stack[-1]
+            x0, y0 = max(x0, px0), max(y0, py0)
+            x1, y1 = min(x1, px1), min(y1, py1)
+        self._clip_stack.append((x0, y0, x1, y1))
+
+    def pop_clip(self) -> None:
+        if self._clip_stack:
+            self._clip_stack.pop()
+
+    def _cell_visible(self, x: int, y: int) -> bool:
+        if not self._clip_stack:
+            return True
+        x0, y0, x1, y1 = self._clip_stack[-1]
+        return x0 <= x < x1 and y0 <= y < y1
+
     def draw_text(self, x: int, y: int, text: str, style: Style = DEFAULT_STYLE) -> None:
         # Pixel-layout rects may carry fractional cell coordinates; this
         # backend renders on a character grid, so round to the nearest cell.
@@ -71,7 +91,7 @@ class MemoryBackend(Backend):
             return
         for i, ch in enumerate(text):
             cx = x + i
-            if 0 <= cx < self._width:
+            if 0 <= cx < self._width and self._cell_visible(cx, y):
                 self._grid[y][cx] = ch
                 self._styles[y][cx] = style
 
