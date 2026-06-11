@@ -144,6 +144,23 @@ def test_panel_layout_assigns_focus_and_routes_keys():
     assert listview.selected == 1
 
 
+def test_panel_layout_fills_fractional_backend_size():
+    # A window of 105px at 10px cells is 10.5 cells: the layout must extend
+    # to the exact window edge, not stop at the last whole cell.
+    class OddSizeBackend(FakeGuiBackend):
+        @property
+        def size_cells(self):
+            return (10.5, 6.0)
+
+    backend = OddSizeBackend(width=10, height=6)
+    panel = Panel(backend)
+    left, right = Label("l"), Label("r")
+    panel.set_layout(HSplit(left, right))
+    panel.render()
+    right_rect = panel._children[-1].rect
+    assert right_rect.x + right_rect.w == pytest.approx(10.5)
+
+
 class GeometryProbe(Widget):
     def __init__(self):
         self.size_cells = None

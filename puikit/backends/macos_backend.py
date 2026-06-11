@@ -292,6 +292,13 @@ class MacOSBackend(Backend):
         return (int(bounds.size.width // self._cell_w), int(bounds.size.height // self._cell_h))
 
     @property
+    def size_cells(self) -> tuple[float, float]:
+        if self._view is None:
+            return (float(self._initial_cells[0]), float(self._initial_cells[1]))
+        bounds = self._view.bounds()
+        return (bounds.size.width / self._cell_w, bounds.size.height / self._cell_h)
+
+    @property
     def cell_size(self) -> tuple[int, int]:
         return (int(self._cell_w), int(self._cell_h))
 

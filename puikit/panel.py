@@ -174,12 +174,12 @@ class Panel:
     def _apply_layout(self) -> None:
         from .layout import LayoutContext
 
-        sw, sh = self.backend.size
+        # size_cells is exact (fractional on pixel-layout backends), so the
+        # layout tracks window resizes pixel by pixel, not cell by cell.
+        sw, sh = self.backend.size_cells
         cw, ch = self.backend.cell_size
         snap = not self.backend.capabilities.supports("pixel_layout")
-        placements = self._layout.resolve(
-            0.0, 0.0, float(sw), float(sh), LayoutContext(cw, ch, snap)
-        )
+        placements = self._layout.resolve(0.0, 0.0, sw, sh, LayoutContext(cw, ch, snap))
         focused = self._focused
         self._children = [_Slot(w, rect, hints) for w, rect, hints in placements]
         widgets = [slot.widget for slot in self._children]

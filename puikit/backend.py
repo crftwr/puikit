@@ -78,7 +78,15 @@ class Backend(ABC):
     @property
     @abstractmethod
     def size(self) -> tuple[int, int]:
-        """Drawable area in cell coordinates (width, height)."""
+        """Drawable area in whole cells (width, height)."""
+
+    @property
+    def size_cells(self) -> tuple[float, float]:
+        """Exact drawable area in cells. Pixel-layout backends return
+        fractional values when the window is not a whole number of cells,
+        so layouts can fill it to the last pixel."""
+        w, h = self.size
+        return (float(w), float(h))
 
     @property
     def cell_size(self) -> tuple[int, int]:
