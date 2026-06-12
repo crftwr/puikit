@@ -96,7 +96,10 @@ def main() -> None:
                     hints={"surface": "status"},
                 ),
                 divider="subtle",
-            )
+            ),
+            # Breathing room inside the window frame: 8 device pixels on
+            # GUI; ignored on TUI, where it would cost whole cells.
+            margin_px=8,
         )
         panel.render()
 

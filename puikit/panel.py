@@ -250,6 +250,8 @@ class Panel:
         self._dividers: list[Any] = []
         self._focused: Any | None = None
         self._layout: Any | None = None
+        self._margin_px = 0.0
+        self._margin_cells = 0.0
         self._size_anims: dict[Any, _SizeAnimation] = {}
 
     # --- layout management ---------------------------------------------------
@@ -274,12 +276,36 @@ class Panel:
         self._focused = None
         self._layout = None
 
-    def set_layout(self, layout: Any) -> None:
+    def set_layout(
+        self, layout: Any, margin_px: float = 0.0, margin_cells: float = 0.0
+    ) -> None:
         """Use a declarative layout (see puikit.layout) instead of manual
         add() calls. Rects are recomputed from the backend size on every
-        render, so the layout follows window resizes."""
+        render, so the layout follows window resizes.
+
+        margin_px / margin_cells inset the layout from the window frame.
+        They follow the min_px/min_cells hint rules: the pixel margin
+        applies only on pixel-layout backends (it would cost whole cells on
+        a cell grid), margin_cells applies everywhere."""
         self._layout = layout
+        self._margin_px = float(margin_px)
+        self._margin_cells = float(margin_cells)
         self._apply_layout()
+
+    def _resolve_margin(
+        self, cell_w: int, cell_h: int, snap: bool
+    ) -> tuple[float, float]:
+        """Window margin in cells per axis, snapped to whole device pixels
+        on pixel-layout backends."""
+        if snap:
+            margin = round(self._margin_cells)
+            return (margin, margin)
+        mx, my = self._margin_cells, self._margin_cells
+        if cell_w > 0:
+            mx = round(max(mx, self._margin_px / cell_w) * cell_w) / cell_w
+        if cell_h > 0:
+            my = round(max(my, self._margin_px / cell_h) * cell_h) / cell_h
+        return (mx, my)
 
     def _apply_layout(self) -> None:
         from .layout import LayoutContext
@@ -289,10 +315,13 @@ class Panel:
         sw, sh = self.backend.size_cells
         cw, ch = self.backend.cell_size
         snap = not self.backend.capabilities.supports("pixel_layout")
+        mx, my = self._resolve_margin(cw, ch, snap)
         ctx = LayoutContext(
             cw, ch, snap, hairline=self.backend.capabilities.supports("hairline")
         )
-        placements = self._layout.resolve(0.0, 0.0, sw, sh, ctx)
+        placements = self._layout.resolve(
+            mx, my, max(0.0, sw - 2 * mx), max(0.0, sh - 2 * my), ctx
+        )
         self._dividers = ctx.dividers
         focused = self._focused
         self._children = [_Slot(w, rect, hints) for w, rect, hints in placements]

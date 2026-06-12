@@ -198,6 +198,45 @@ def test_panel_layout_fills_fractional_backend_size():
     assert right_rect.x + right_rect.w == pytest.approx(10.5)
 
 
+def test_layout_margin_px_insets_on_pixel_backends():
+    backend = FakeGuiBackend(width=10, height=6)  # 100 x 120 px
+    panel = Panel(backend)
+    left, right = Label("l"), Label("r")
+    panel.set_layout(HSplit(left, right), margin_px=8)
+    panel.render()
+    first = panel._children[0].rect
+    last = panel._children[-1].rect
+    assert first.x == pytest.approx(0.8)  # 8px at 10px cells
+    assert first.y == pytest.approx(0.4)  # 8px at 20px cells
+    assert last.x + last.w == pytest.approx(10 - 0.8)
+    assert first.y + first.h == pytest.approx(6 - 0.4)
+
+
+def test_layout_margin_px_ignored_on_cell_grid():
+    # A pixel margin would cost whole cells on TUI; like min_px, it only
+    # applies on pixel-layout backends.
+    backend = MemoryBackend(width=20, height=10)
+    panel = Panel(backend)
+    panel.set_layout(HSplit(Label("l"), Label("r")), margin_px=8)
+    panel.render()
+    first = panel._children[0].rect
+    last = panel._children[-1].rect
+    assert (first.x, first.y) == (0, 0)
+    assert last.x + last.w == 20
+
+
+def test_layout_margin_cells_applies_on_cell_grid():
+    backend = MemoryBackend(width=20, height=10)
+    panel = Panel(backend)
+    panel.set_layout(HSplit(Label("l"), Label("r")), margin_cells=1)
+    panel.render()
+    first = panel._children[0].rect
+    last = panel._children[-1].rect
+    assert (first.x, first.y) == (1, 1)
+    assert last.x + last.w == 19
+    assert first.y + first.h == 9
+
+
 class GeometryProbe(Widget):
     def __init__(self):
         self.size_cells = None

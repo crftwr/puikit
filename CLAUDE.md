@@ -108,6 +108,11 @@ fractional cell boundaries (exact pixels); others have every boundary snapped
 to whole cells. Layouts re-resolve from the backend size on each render, so
 they follow window resizes.
 
+`set_layout(layout, margin_px=8)` insets the whole layout from the window
+frame. Margins follow the `min_px`/`min_cells` rules: `margin_px` applies
+only on pixel-layout backends (it would cost whole cells on a cell grid);
+`margin_cells` applies everywhere.
+
 **Region separation** is intent, not geometry. A drawn separator costs one
 device pixel on GUI but a whole cell row/column on TUI, so the idiomatic
 solution differs per backend (GUI: hairline; TUI: background contrast) and
