@@ -244,3 +244,26 @@ def test_pop_layer_restores_event_flow():
     assert panel.pop_layer() is dialog
     panel.dispatch_event(Event(type=EventType.KEY, key="enter"))
     assert below.events and not dialog.events
+
+
+def test_text_renders_in_fractional_height_pane():
+    # Regression: on pixel-layout backends, rounding can squeeze a fixed
+    # 1-cell pane (e.g. a status bar) to slightly under one cell. Its text
+    # must be drawn and clipped by the backend, not silently dropped.
+    from puikit import DrawContext, Rect
+
+    backend = MemoryBackend(width=20, height=10, capabilities=PROFILE_GUI_DESKTOP)
+    ctx = DrawContext(backend, Rect(0, 9, 20, 0.97), PROFILE_GUI_DESKTOP)
+    ctx.draw_text(0, 0, "status")
+    assert backend.snapshot()[9].startswith("status")
+
+
+def test_text_extends_into_partial_last_column():
+    # A pane 5.5 cells wide shows 6 columns of text (the last one partial,
+    # clipped at the pane edge by the backend).
+    from puikit import DrawContext, Rect
+
+    backend = MemoryBackend(width=20, height=5, capabilities=PROFILE_GUI_DESKTOP)
+    ctx = DrawContext(backend, Rect(0, 0, 5.5, 1.0), PROFILE_GUI_DESKTOP)
+    ctx.draw_text(0, 0, "0123456789")
+    assert backend.snapshot()[0] == "012345" + " " * 14

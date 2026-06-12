@@ -7,6 +7,7 @@ chains so widget code never branches on TUI/GUI.
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -94,12 +95,16 @@ class DrawContext:
         return self._backend.cell_size
 
     def draw_text(self, x: int, y: int, text: str, style: Style = DEFAULT_STYLE) -> None:
-        if not 0 <= y < int(self._rect.h):
+        # Gate on the exact (possibly fractional) extent and let the
+        # backend's clip rect cut the overflow: a pane squeezed to 0.97
+        # cells by pixel rounding must still render its row 0, clipped at
+        # the pane edge, not drop it.
+        if not 0 <= y < self._rect.h:
             return
         if x < 0:
             text = text[-x:]
             x = 0
-        text = text[: max(0, int(self._rect.w) - x)]
+        text = text[: max(0, math.ceil(self._rect.w) - x)]
         if not text:
             return
         self._backend.draw_text(self._rect.x + x, self._rect.y + y, text, self._resolve(style))
