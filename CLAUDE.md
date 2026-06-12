@@ -111,7 +111,10 @@ they follow window resizes.
 `set_layout(layout, margin_px=8)` insets the whole layout from the window
 frame. Margins follow the `min_px`/`min_cells` rules: `margin_px` applies
 only on pixel-layout backends (it would cost whole cells on a cell grid);
-`margin_cells` applies everywhere.
+`margin_cells` applies everywhere. The margin reads as pane padding, not as
+a bare frame: edge panes' surface backgrounds and the dividers bleed across
+the margin to the window edges, so the backend's default background never
+shows through.
 
 **Region separation** is intent, not geometry. A drawn separator costs one
 device pixel on GUI but a whole cell row/column on TUI, so the idiomatic

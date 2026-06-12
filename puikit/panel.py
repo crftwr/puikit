@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .backend import Backend, DEFAULT_STYLE, Style
@@ -212,6 +212,26 @@ class _Slot:
     rect: Rect
     hints: dict[str, Any] = field(default_factory=dict)
     z: int = 0
+    # Background fill extent. Differs from rect only for layout panes on the
+    # window edge: their fill bleeds across the window margin so the frame
+    # never shows the backend's default background.
+    fill: Rect | None = None
+
+
+def _bleed_to_window(
+    rect: Rect, mx: float, my: float, sw: float, sh: float, snap: bool
+) -> Rect:
+    """Extend the sides of ``rect`` that lie on the margin bounds out to the
+    window edges. Interior boundaries are untouched."""
+    eps = 1e-6
+    x0 = 0.0 if rect.x <= mx + eps else rect.x
+    y0 = 0.0 if rect.y <= my + eps else rect.y
+    x1 = sw if rect.x + rect.w >= sw - mx - eps else rect.x + rect.w
+    y1 = sh if rect.y + rect.h >= sh - my - eps else rect.y + rect.h
+    if snap:
+        # Cell-grid backends must keep true integer coordinates.
+        x0, y0, x1, y1 = (round(v) for v in (x0, y0, x1, y1))
+    return Rect(x0, y0, x1 - x0, y1 - y0)
 
 
 @dataclass
@@ -322,9 +342,19 @@ class Panel:
         placements = self._layout.resolve(
             mx, my, max(0.0, sw - 2 * mx), max(0.0, sh - 2 * my), ctx
         )
-        self._dividers = ctx.dividers
+        # Edge panes' backgrounds and the dividers bleed across the window
+        # margin: the margin reads as pane padding, never as a bare frame.
+        from .layout import Divider
+
+        self._dividers = [
+            Divider(_bleed_to_window(d.rect, mx, my, sw, sh, snap), d.vertical, d.level)
+            for d in ctx.dividers
+        ]
         focused = self._focused
-        self._children = [_Slot(w, rect, hints) for w, rect, hints in placements]
+        self._children = [
+            _Slot(w, rect, hints, fill=_bleed_to_window(rect, mx, my, sw, sh, snap))
+            for w, rect, hints in placements
+        ]
         widgets = [slot.widget for slot in self._children]
         if focused not in widgets:
             focused = next(
@@ -410,10 +440,13 @@ class Panel:
         # commands; the rect gives transforms their pivot.
         rect = self._interpolate_rect(slot.widget, slot.rect)
         self.backend.begin_group(slot.widget, rect)
-        self.backend.push_clip(rect.x, rect.y, rect.w, rect.h)
         background = self._pane_background(slot.hints)
         if background is not None:
-            self.backend.fill_rect(rect.x, rect.y, rect.w, rect.h, Style(bg=background))
+            # The fill may bleed past the widget's rect (window margin), so
+            # it is drawn before the content clip is applied.
+            fill = slot.fill if slot.fill is not None else rect
+            self.backend.fill_rect(fill.x, fill.y, fill.w, fill.h, Style(bg=background))
+        self.backend.push_clip(rect.x, rect.y, rect.w, rect.h)
         slot.widget.draw(
             DrawContext(
                 self.backend, rect, self.backend.capabilities,
@@ -518,12 +551,15 @@ class Panel:
 
         if event.type in (EventType.MOUSE_CLICK, EventType.MOUSE_DRAG, EventType.MOUSE_SCROLL):
             for slot in reversed(self._children):
-                if event.x is not None and slot.rect.contains(event.x, event.y):
+                # Hit-test against the fill extent: a click in the bled
+                # window margin belongs to the pane that visually owns it.
+                hit = slot.fill if slot.fill is not None else slot.rect
+                if event.x is not None and hit.contains(event.x, event.y):
                     if event.type is EventType.MOUSE_CLICK and getattr(
                         slot.widget, "focusable", False
                     ):
                         self._focused = slot.widget
-                    return self._deliver(slot, event)
+                    return self._deliver(slot, event, clamp=True)
             return False
 
         if self._focused is not None:
@@ -532,6 +568,14 @@ class Panel:
                     return self._deliver(slot, event)
         return False
 
-    def _deliver(self, slot: _Slot, event: Event) -> bool:
+    def _deliver(self, slot: _Slot, event: Event, clamp: bool = False) -> bool:
         local = event.translated(-slot.rect.x, -slot.rect.y)
+        if clamp and local.x is not None:
+            # Margin clicks land outside the content rect; act on the
+            # nearest content cell instead of handing widgets coordinates
+            # they never drew.
+            x = min(max(local.x, 0), max(0, math.ceil(slot.rect.w) - 1))
+            y = min(max(local.y, 0), max(0, math.ceil(slot.rect.h) - 1))
+            if (x, y) != (local.x, local.y):
+                local = replace(local, x=x, y=y)
         return bool(slot.widget.handle_event(local))

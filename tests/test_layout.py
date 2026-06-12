@@ -225,6 +225,68 @@ def test_layout_margin_px_ignored_on_cell_grid():
     assert last.x + last.w == 20
 
 
+def test_layout_margin_backgrounds_bleed_to_window_edges():
+    # The margin must read as pane padding, not as a bare frame: edge panes
+    # fill across the margin while their content rect stays inset.
+    backend = FakeGuiBackend(width=10, height=6)  # 100 x 120 px
+    panel = Panel(backend)
+    left, right = Label("l"), Label("r")
+    panel.set_layout(
+        HSplit(
+            Item(left, hints={"surface": "content"}),
+            Item(right, hints={"surface": "sidebar"}),
+        ),
+        margin_px=8,
+    )
+    panel.render()
+    first, last = panel._children[0], panel._children[-1]
+    assert (first.fill.x, first.fill.y) == (0, 0)
+    assert first.fill.y + first.fill.h == pytest.approx(6.0)
+    assert last.fill.x + last.fill.w == pytest.approx(10.0)
+    # The interior boundary between the panes is not extended.
+    assert first.fill.x + first.fill.w == pytest.approx(first.rect.x + first.rect.w)
+    assert last.fill.x == pytest.approx(last.rect.x)
+
+
+def test_layout_margin_dividers_extend_to_window_edges():
+    backend = FakeGuiBackend(width=10, height=6)
+    panel = Panel(backend)
+    panel.set_layout(HSplit(Label("l"), Label("r"), divider="strong"), margin_px=8)
+    panel.render()
+    (divider,) = panel._dividers
+    assert divider.rect.y == 0
+    assert divider.rect.y + divider.rect.h == pytest.approx(6.0)
+
+
+def test_margin_clicks_route_to_edge_pane_with_clamped_coords():
+    from puikit import Event, EventType
+
+    class ClickProbe(Widget):
+        focusable = True
+
+        def __init__(self):
+            self.events = []
+
+        def draw(self, ctx):
+            pass
+
+        def handle_event(self, event):
+            self.events.append(event)
+            return True
+
+    backend = FakeGuiBackend(width=10, height=6)  # 100 x 120 px
+    panel = Panel(backend)
+    left, right = ClickProbe(), ClickProbe()
+    panel.set_layout(HSplit(left, right), margin_px=8)
+    panel.render()
+    # Cell (0, 0) lies in the bled margin (content starts at 0.8, 0.4): the
+    # click must reach the left pane, clamped to its first content cell.
+    assert panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=0, y=0, button="left"))
+    assert panel.focused is left
+    (event,) = left.events
+    assert (event.x, event.y) == (0, 0)
+
+
 def test_layout_margin_cells_applies_on_cell_grid():
     backend = MemoryBackend(width=20, height=10)
     panel = Panel(backend)
