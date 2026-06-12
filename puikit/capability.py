@@ -20,6 +20,7 @@ class CapabilityProfile(dict):
 
 PROFILE_TUI = CapabilityProfile(
     pixel_layout=False,
+    hairline=False,  # sub-cell divider lines (zero cell cost)
     layering=False,
     transparency=False,
     shadow=False,
@@ -37,6 +38,7 @@ PROFILE_TUI = CapabilityProfile(
 
 PROFILE_GUI_WEB = CapabilityProfile(
     pixel_layout=True,
+    hairline=True,
     layering=True,
     transparency=True,
     shadow=True,
@@ -77,6 +79,7 @@ PROFILE_MOBILE = CapabilityProfile(
 
 PROFILE_GAME = CapabilityProfile(
     pixel_layout=True,
+    hairline=True,
     layering=True,
     transparency=True,
     shadow=False,          # app-rendered if needed

@@ -18,6 +18,7 @@ from .capability import (
 from .event import Event, EventType
 from .layout import HSplit, Item, VSplit
 from .panel import DrawContext, Panel, Rect
+from .theme import THEME_GUI, THEME_TUI, Theme, theme_for
 
 __version__ = "0.1.0"
 
@@ -40,5 +41,9 @@ __all__ = [
     "Rect",
     "Style",
     "TextAttribute",
+    "THEME_GUI",
+    "THEME_TUI",
+    "Theme",
+    "theme_for",
     "VSplit",
 ]

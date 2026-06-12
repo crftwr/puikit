@@ -108,6 +108,29 @@ fractional cell boundaries (exact pixels); others have every boundary snapped
 to whole cells. Layouts re-resolve from the backend size on each render, so
 they follow window resizes.
 
+**Region separation** is intent, not geometry. A drawn separator costs one
+device pixel on GUI but a whole cell row/column on TUI, so the idiomatic
+solution differs per backend (GUI: hairline; TUI: background contrast) and
+the choice is made by the layout/Panel layer, never the app:
+
+```python
+panel.set_layout(VSplit(
+    Item(main, hints={"surface": "content"}),
+    Item(status, size=1, hints={"surface": "status"}),
+    divider="subtle",
+))
+```
+
+- `divider="subtle"` — `hairline` backends reserve 1 device pixel (zero cell
+  cost) and draw a divider line; cell-grid backends reserve nothing — the
+  theme guarantees adjacent surface roles contrasting backgrounds instead
+- `divider="strong"` — cell-grid backends spend one whole cell on a
+  box-drawing line, because the app declared the separation worth the space
+- `hints={"surface": role}` — semantic surface roles (`content`, `sidebar`,
+  `header`, `status`) resolved to colors by a per-backend `Theme`
+  (puikit.theme); an explicit `bg` hint overrides the theme, at the price of
+  owning separation quality on TUI
+
 ### 3. Layering
 
 Z-order and overlay management.
@@ -159,6 +182,7 @@ Profiles are declared per backend type, using inheritance and overrides.
 ```python
 PROFILE_TUI = {
     "pixel_layout": False,
+    "hairline": False,        # sub-cell divider lines (zero cell cost)
     "layering": False,
     "transparency": False,
     "shadow": False,
@@ -174,6 +198,7 @@ PROFILE_TUI = {
 
 PROFILE_GUI_WEB = {
     "pixel_layout": True,
+    "hairline": True,
     "layering": True,
     "transparency": True,
     "shadow": True,
@@ -208,6 +233,7 @@ PROFILE_MOBILE = {
 
 PROFILE_GAME = {
     "pixel_layout": True,
+    "hairline": True,
     "layering": True,
     "transparency": True,
     "shadow": False,          # app-rendered if needed
@@ -273,6 +299,7 @@ puikit/
 │   ├── panel.py          # Panel / Layout / Layer management
 │   ├── backend.py        # Backend interface definition
 │   ├── capability.py     # CapabilityProfile definitions
+│   ├── theme.py          # surface roles → per-backend colors
 │   ├── event.py          # Event model
 │   ├── widgets/          # Shared widget library
 │   │   ├── __init__.py

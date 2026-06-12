@@ -109,6 +109,43 @@ def test_nested_split_recurses():
     assert (rc.x, rc.w) == (5, 5)
 
 
+def test_divider_subtle_costs_nothing_on_cell_grid():
+    a, b = Label("a"), Label("b")
+    layout = HSplit(Item(a), Item(b), divider="subtle")
+    ctx = LayoutContext(cell_w=1, cell_h=1, snap=True)
+    ra, rb = rects(layout.resolve(0, 0, 80, 24, ctx))
+    # No cells reserved, no divider emitted: background contrast (surface
+    # roles) is what separates the panes on cell-grid backends.
+    assert ra.w + rb.w == 80
+    assert ctx.dividers == []
+
+
+def test_divider_strong_spends_one_cell_on_cell_grid():
+    a, b = Label("a"), Label("b")
+    layout = HSplit(Item(a), Item(b), divider="strong")
+    ctx = LayoutContext(cell_w=1, cell_h=1, snap=True)
+    ra, rb = rects(layout.resolve(0, 0, 81, 24, ctx))
+    assert (ra.w, rb.w) == (40, 40)
+    assert rb.x == 41
+    (divider,) = ctx.dividers
+    assert divider.vertical and divider.level == "strong"
+    assert (divider.rect.x, divider.rect.y) == (40, 0)
+    assert (divider.rect.w, divider.rect.h) == (1, 24)
+
+
+def test_divider_hairline_costs_one_device_pixel():
+    a, b = Label("a"), Label("b")
+    layout = HSplit(Item(a), Item(b), divider="subtle")
+    ctx = LayoutContext(cell_w=10, cell_h=20, snap=False, hairline=True)
+    ra, rb = rects(layout.resolve(0.0, 0.0, 10.0, 5.0, ctx))
+    (divider,) = ctx.dividers
+    assert divider.rect.w * 10 == pytest.approx(1)  # one device pixel
+    # The divider tiles exactly between the panes: no gap, no overlap.
+    assert divider.rect.x == pytest.approx(ra.x + ra.w)
+    assert rb.x == pytest.approx(divider.rect.x + divider.rect.w)
+    assert rb.x + rb.w == pytest.approx(10.0)
+
+
 class FakeGuiBackend(MemoryBackend):
     """Memory backend that claims pixel layout and a real cell size."""
 

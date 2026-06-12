@@ -14,6 +14,7 @@ from typing import Any
 from .backend import Backend, DEFAULT_STYLE, Style
 from .capability import CapabilityProfile
 from .event import Event, EventType
+from .theme import Theme, theme_for
 
 # Text fallbacks used when a backend cannot draw real icons.
 ICON_TEXT_FALLBACKS = {
@@ -171,8 +172,9 @@ class DrawContext:
         The child is clipped to the intersection of its rect with all
         enclosing clips, and gets its own animation group, so a parent's
         transition cascades to children while children can also animate
-        individually. A "bg" hint fills the child's pane; otherwise the
-        parent's background is inherited."""
+        individually. A "bg" hint (or the theme color of a "surface" role)
+        fills the child's pane; otherwise the parent's background is
+        inherited."""
         hints = hints or {}
         rect = Rect(self._rect.x + x, self._rect.y + y, w, h)
         if self._panel is not None:
@@ -183,9 +185,12 @@ class DrawContext:
         self._backend.begin_group(widget, rect)
         # The clip is set inside the group so GUI transforms carry it along.
         self._backend.push_clip(clip.x, clip.y, clip.w, clip.h)
-        background = hints.get("bg", self._background)
-        if hints.get("bg") is not None:
-            self._backend.fill_rect(rect.x, rect.y, rect.w, rect.h, Style(bg=background))
+        pane_bg = hints.get("bg")
+        if pane_bg is None and "surface" in hints and self._panel is not None:
+            pane_bg = self._panel.theme.surface_bg(hints["surface"])
+        background = pane_bg if pane_bg is not None else self._background
+        if pane_bg is not None:
+            self._backend.fill_rect(rect.x, rect.y, rect.w, rect.h, Style(bg=pane_bg))
         widget.draw(
             DrawContext(
                 self._backend, rect, self._caps,
@@ -229,10 +234,15 @@ class _SizeAnimation:
 class Panel:
     """Owns widget layout, layers, focus, and event routing for one screen."""
 
-    def __init__(self, backend: Backend):
+    def __init__(self, backend: Backend, theme: Theme | None = None):
         self.backend = backend
+        # The theme encodes the backend's region-separation strategy: GUI
+        # themes separate surfaces with hairlines, TUI themes with
+        # background contrast (a line would cost a whole cell row/column).
+        self.theme = theme if theme is not None else theme_for(backend.capabilities)
         self._children: list[_Slot] = []
         self._layers: list[_Slot] = []
+        self._dividers: list[Any] = []
         self._focused: Any | None = None
         self._layout: Any | None = None
         self._size_anims: dict[Any, _SizeAnimation] = {}
@@ -255,6 +265,7 @@ class Panel:
     def clear(self) -> None:
         self._children.clear()
         self._layers.clear()
+        self._dividers.clear()
         self._focused = None
         self._layout = None
 
@@ -273,7 +284,11 @@ class Panel:
         sw, sh = self.backend.size_cells
         cw, ch = self.backend.cell_size
         snap = not self.backend.capabilities.supports("pixel_layout")
-        placements = self._layout.resolve(0.0, 0.0, sw, sh, LayoutContext(cw, ch, snap))
+        ctx = LayoutContext(
+            cw, ch, snap, hairline=self.backend.capabilities.supports("hairline")
+        )
+        placements = self._layout.resolve(0.0, 0.0, sw, sh, ctx)
+        self._dividers = ctx.dividers
         focused = self._focused
         self._children = [_Slot(w, rect, hints) for w, rect, hints in placements]
         widgets = [slot.widget for slot in self._children]
@@ -323,9 +338,37 @@ class Panel:
         self.backend.clear()
         for slot in self._children:
             self._draw_slot(slot)
+        for divider in self._dividers:
+            self._draw_divider(divider)
         for slot in self._layers:
             self._render_layer(slot)
         self.backend.present()
+
+    def _pane_background(self, hints: dict[str, Any]) -> tuple[int, int, int] | None:
+        """Pane background: explicit "bg" hint, else the theme color of the
+        "surface" role. Roles let each backend pick its own separation
+        strategy (TUI: contrasting backgrounds; GUI: shared background plus
+        hairlines)."""
+        background = hints.get("bg")
+        if background is None and "surface" in hints:
+            background = self.theme.surface_bg(hints["surface"])
+        return background
+
+    def _draw_divider(self, divider: Any) -> None:
+        rect = divider.rect
+        if self.backend.capabilities.supports("hairline"):
+            self.backend.fill_rect(
+                rect.x, rect.y, rect.w, rect.h, Style(bg=self.theme.divider_color)
+            )
+            return
+        # Cell-grid backends only ever get "strong" dividers (one whole
+        # cell); render them with box-drawing characters.
+        style = Style(fg=self.theme.divider_color)
+        if divider.vertical:
+            for row in range(int(rect.h)):
+                self.backend.draw_text(rect.x, rect.y + row, "│", style)
+        else:
+            self.backend.draw_text(rect.x, rect.y, "─" * int(rect.w), style)
 
     def _draw_slot(self, slot: _Slot) -> None:
         # Group markers let the backend apply per-widget effects (e.g. the
@@ -334,7 +377,7 @@ class Panel:
         rect = self._interpolate_rect(slot.widget, slot.rect)
         self.backend.begin_group(slot.widget, rect)
         self.backend.push_clip(rect.x, rect.y, rect.w, rect.h)
-        background = slot.hints.get("bg")
+        background = self._pane_background(slot.hints)
         if background is not None:
             self.backend.fill_rect(rect.x, rect.y, rect.w, rect.h, Style(bg=background))
         slot.widget.draw(
@@ -358,7 +401,7 @@ class Panel:
         if slot.hints.get("shadow") and self.backend.capabilities.supports("shadow"):
             self.backend.draw_shadow(rect.x, rect.y, rect.w, rect.h)
         self.backend.push_clip(rect.x, rect.y, rect.w, rect.h)
-        background = slot.hints.get("bg")
+        background = self._pane_background(slot.hints)
         if background is not None:
             self.backend.fill_rect(rect.x, rect.y, rect.w, rect.h, Style(bg=background))
         slot.widget.draw(
