@@ -41,6 +41,7 @@ from AppKit import (
     NSTimer,
     NSFont,
     NSFontAttributeName,
+    NSFontWeightBold,
     NSFontWeightRegular,
     NSForegroundColorAttributeName,
     NSImage,
@@ -332,9 +333,12 @@ class MacOSBackend(Backend):
         )
         if regular is None:
             regular = NSFont.fontWithName_size_("Menlo", self._font_size)
-        bold = NSFont.fontWithName_size_(
-            regular.fontName() + "-Bold", self._font_size
-        ) or NSFont.boldSystemFontOfSize_(self._font_size)
+        # The bold weight must stay monospaced and share the regular glyph
+        # advance; appending "-Bold" to the system monospaced font name fails
+        # and silently falls back to the proportional bold system font.
+        bold = NSFont.monospacedSystemFontOfSize_weight_(
+            self._font_size, NSFontWeightBold
+        ) or NSFont.fontWithName_size_("Menlo-Bold", self._font_size)
         self._fonts = {TextAttribute.NORMAL: regular, TextAttribute.BOLD: bold}
         size = NSString.stringWithString_("M").sizeWithAttributes_(
             {NSFontAttributeName: regular}
@@ -564,9 +568,8 @@ class MacOSBackend(Backend):
             fg, bg = (bg or _DEFAULT_BG), (style.fg or _DEFAULT_FG)
         alpha = 0.55 if style.attr & TextAttribute.DIM else 1.0
 
-        font = self._fonts[
-            TextAttribute.BOLD if style.attr & TextAttribute.BOLD else TextAttribute.NORMAL
-        ]
+        weight = TextAttribute.BOLD if style.attr & TextAttribute.BOLD else TextAttribute.NORMAL
+        font = self._fonts[weight]
         attrs = {
             NSFontAttributeName: font,
             NSForegroundColorAttributeName: _ns_color(fg, alpha),

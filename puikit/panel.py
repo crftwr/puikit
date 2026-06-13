@@ -69,6 +69,9 @@ class DrawContext:
         self._clip = clip if clip is not None else rect
         self._panel = panel
         self._background = background
+        # Backend clips this context pushed itself (e.g. draw_border's
+        # interior clip); the Panel pops them when the widget's draw returns.
+        self._pushed_clips = 0
 
     def _resolve(self, style: Style) -> Style:
         """Styles without an explicit background inherit the pane's."""
@@ -125,12 +128,44 @@ class DrawContext:
     def draw_border(
         self, style: Style = DEFAULT_STYLE, hints: dict[str, Any] | None = None
     ) -> None:
-        """Box around the widget's exact extent. Unlike draw_box with
-        width/height (whole cells), this covers fractional edges on
-        pixel-layout backends, so adjacent widgets meet without gaps."""
+        """Box around the widget's exact extent, framing it. Unlike draw_box
+        with width/height (whole cells), this covers fractional edges on
+        pixel-layout backends, so adjacent widgets meet without gaps.
+
+        The frame owns its outline, so everything drawn afterwards on this
+        context (text, children) is clipped to the interior: the box's stroke
+        is one device pixel on pixel-layout backends and one cell on cell-grid
+        backends, and the content clip is inset by exactly that, at pixel
+        granularity. Content can fill right up to the inner edge of the frame
+        but never paints over the frame line itself."""
         self._backend.draw_box(
             self._rect.x, self._rect.y, self._rect.w, self._rect.h, self._resolve(style), hints
         )
+        # Inset the content region by the stroke width: one device pixel on
+        # pixel-layout backends, one whole cell on cell-grid backends.
+        if self._caps.supports("pixel_layout"):
+            cw, ch = self._backend.cell_size
+            ix = 1.0 / cw if cw else 0.0
+            iy = 1.0 / ch if ch else 0.0
+        else:
+            ix = iy = 1.0
+        interior = Rect(
+            self._rect.x + ix, self._rect.y + iy,
+            max(0.0, self._rect.w - 2 * ix), max(0.0, self._rect.h - 2 * iy),
+        )
+        clip = _intersect(self._clip, interior)
+        if clip is None:
+            clip = Rect(interior.x, interior.y, 0.0, 0.0)
+        self._backend.push_clip(clip.x, clip.y, clip.w, clip.h)
+        self._clip = clip
+        self._pushed_clips += 1
+
+    def _close(self) -> None:
+        """Pop any backend clips this context pushed (see draw_border).
+        Called by the Panel once the widget's draw returns."""
+        for _ in range(self._pushed_clips):
+            self._backend.pop_clip()
+        self._pushed_clips = 0
 
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float, style: Style = DEFAULT_STYLE
@@ -196,12 +231,12 @@ class DrawContext:
         background = pane_bg if pane_bg is not None else self._background
         if pane_bg is not None:
             self._backend.fill_rect(rect.x, rect.y, rect.w, rect.h, Style(bg=pane_bg))
-        widget.draw(
-            DrawContext(
-                self._backend, rect, self._caps,
-                clip=clip, panel=self._panel, background=background,
-            )
+        child_ctx = DrawContext(
+            self._backend, rect, self._caps,
+            clip=clip, panel=self._panel, background=background,
         )
+        widget.draw(child_ctx)
+        child_ctx._close()
         self._backend.pop_clip()
         self._backend.end_group(widget)
 
@@ -447,12 +482,12 @@ class Panel:
             fill = slot.fill if slot.fill is not None else rect
             self.backend.fill_rect(fill.x, fill.y, fill.w, fill.h, Style(bg=background))
         self.backend.push_clip(rect.x, rect.y, rect.w, rect.h)
-        slot.widget.draw(
-            DrawContext(
-                self.backend, rect, self.backend.capabilities,
-                panel=self, background=background,
-            )
+        slot_ctx = DrawContext(
+            self.backend, rect, self.backend.capabilities,
+            panel=self, background=background,
         )
+        slot.widget.draw(slot_ctx)
+        slot_ctx._close()
         self.backend.pop_clip()
         self.backend.end_group(slot.widget)
 
@@ -471,12 +506,12 @@ class Panel:
         background = self._pane_background(slot.hints)
         if background is not None:
             self.backend.fill_rect(rect.x, rect.y, rect.w, rect.h, Style(bg=background))
-        slot.widget.draw(
-            DrawContext(
-                self.backend, rect, self.backend.capabilities,
-                panel=self, background=background,
-            )
+        layer_ctx = DrawContext(
+            self.backend, rect, self.backend.capabilities,
+            panel=self, background=background,
         )
+        slot.widget.draw(layer_ctx)
+        layer_ctx._close()
         self.backend.pop_clip()
         self.backend.end_group(slot.widget)
 
