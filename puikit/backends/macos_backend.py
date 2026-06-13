@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -27,7 +28,6 @@ from AppKit import (
     NSApplicationActivationPolicyRegular,
     NSBackingStoreBuffered,
     NSBezierPath,
-    NSBackgroundColorAttributeName,
     NSColor,
     NSDate,
     NSDefaultRunLoopMode,
@@ -143,6 +143,34 @@ def translate_key(characters: str, modifier_flags: int = 0) -> Event | None:
     if ch.isprintable():
         return Event(type=EventType.KEY, key=ch, char=ch, modifiers=modifiers)
     return None
+
+
+_ZWJ = "‍"  # zero-width joiner
+
+
+def _attaches_to_base(ch: str) -> bool:
+    """True for a code point that renders on the previous base character
+    rather than in its own cell: combining marks, variation selectors
+    (U+FE00..U+FE0F, e.g. the one that turns "⚠" into the emoji "⚠️"), and
+    the zero-width joiner."""
+    return bool(
+        unicodedata.combining(ch)
+        or "︀" <= ch <= "️"
+        or ch == _ZWJ
+    )
+
+
+def _cell_runs(text: str) -> list[str]:
+    """Split a string into one substring per display cell, keeping each glyph
+    (base character plus any attaching marks / ZWJ sequence) whole so the
+    per-cell renderer never splits a single glyph across two cells."""
+    cells: list[str] = []
+    for ch in text:
+        if cells and (_attaches_to_base(ch) or cells[-1].endswith(_ZWJ)):
+            cells[-1] += ch
+        else:
+            cells.append(ch)
+    return cells
 
 
 def _ns_color(rgb: tuple[int, int, int], alpha: float = 1.0):
@@ -569,18 +597,31 @@ class MacOSBackend(Backend):
         alpha = 0.55 if style.attr & TextAttribute.DIM else 1.0
 
         weight = TextAttribute.BOLD if style.attr & TextAttribute.BOLD else TextAttribute.NORMAL
-        font = self._fonts[weight]
         attrs = {
-            NSFontAttributeName: font,
+            NSFontAttributeName: self._fonts[weight],
             NSForegroundColorAttributeName: _ns_color(fg, alpha),
         }
-        if bg is not None:
-            attrs[NSBackgroundColorAttributeName] = _ns_color(bg)
         if style.attr & TextAttribute.UNDERLINE:
             attrs[NSUnderlineStyleAttributeName] = NSUnderlineStyleSingle
 
-        point = self._cell_rect(x, y, 1, 1).origin
-        NSString.stringWithString_(text).drawAtPoint_withAttributes_(point, attrs)
+        # The cell width is the glyph advance rounded *up* (see _init_fonts),
+        # so a run drawn as one NSString flows narrower than the cell grid and
+        # drifts left a fraction of a pixel per glyph — over a wide pane the
+        # drift accumulates to whole cells, so cell-based clipping/truncation
+        # cuts text that visually still fits. Place every glyph on its own
+        # cell instead: columns stay aligned and the clip rect trims the
+        # boundary glyph at the exact pane edge, matching the cell coordinates
+        # the rest of the framework works in. The run's background fills whole
+        # cells (not just glyph advances) so reversed/selected runs have no
+        # sub-pixel seams.
+        runs = _cell_runs(text)
+        if bg is not None:
+            _ns_color(bg).setFill()
+            NSRectFill(self._cell_rect(x, y, len(runs), 1))
+        for i, cell in enumerate(runs):
+            NSString.stringWithString_(cell).drawAtPoint_withAttributes_(
+                self._cell_rect(x + i, y, 1, 1).origin, attrs
+            )
 
     def _render_box(
         self, x: int, y: int, w: int, h: int, style: Style, hints: dict[str, Any]
