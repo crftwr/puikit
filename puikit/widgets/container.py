@@ -30,6 +30,9 @@ class Container(Widget):
     def __init__(self):
         self._children: list[_ChildSlot] = []
         self._focused: Any | None = None
+        # Container extent (cells) from the last draw; lets stretched slots
+        # be hit-tested at the size they were actually drawn.
+        self._size: tuple[float, float] = (0.0, 0.0)
 
     # --- tree management -------------------------------------------------------
 
@@ -37,6 +40,10 @@ class Container(Widget):
         self, widget: Any, x: float, y: float, w: float, h: float,
         hints: dict[str, Any] | None = None,
     ) -> None:
+        """Place a child at fixed cell coordinates. With hints={"stretch":
+        True} the child instead fills the container from (x, y) to the far
+        edge at draw time, so it tracks the container's own resizing (w/h are
+        then ignored)."""
         self._children.append(_ChildSlot(widget, Rect(x, y, w, h), hints or {}))
         if self._focused is None and getattr(widget, "focusable", False):
             self._focused = widget
@@ -55,12 +62,17 @@ class Container(Widget):
 
     # --- drawing -----------------------------------------------------------------
 
+    def _slot_rect(self, slot: _ChildSlot) -> Rect:
+        if slot.hints.get("stretch"):
+            cw, ch = self._size
+            return Rect(slot.rect.x, slot.rect.y, cw - slot.rect.x, ch - slot.rect.y)
+        return slot.rect
+
     def draw(self, ctx: DrawContext) -> None:
+        self._size = ctx.size_cells
         for slot in self._children:
-            ctx.draw_child(
-                slot.widget, slot.rect.x, slot.rect.y, slot.rect.w, slot.rect.h,
-                hints=slot.hints,
-            )
+            r = self._slot_rect(slot)
+            ctx.draw_child(slot.widget, r.x, r.y, r.w, r.h, hints=slot.hints)
 
     # --- events --------------------------------------------------------------------
 
@@ -69,12 +81,13 @@ class Container(Widget):
             EventType.MOUSE_CLICK, EventType.MOUSE_DRAG, EventType.MOUSE_SCROLL
         ):
             for slot in reversed(self._children):
-                if event.x is not None and slot.rect.contains(event.x, event.y):
+                rect = self._slot_rect(slot)
+                if event.x is not None and rect.contains(event.x, event.y):
                     if event.type is EventType.MOUSE_CLICK and getattr(
                         slot.widget, "focusable", False
                     ):
                         self._focused = slot.widget
-                    local = event.translated(-slot.rect.x, -slot.rect.y)
+                    local = event.translated(-rect.x, -rect.y)
                     return bool(slot.widget.handle_event(local))
             return False
         if self._focused is not None:

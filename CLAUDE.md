@@ -383,5 +383,4 @@ PuiKit is primarily Python, but backends may include compiled components in othe
 Canonical examples live under `examples/`:
 
 1. **`hello_world/`** — minimal app; renders a single text label on both TUI and GUI backends
-2. **`demo_catalog/`** — widget showcase; one screen per widget type, switchable at runtime
-3. **`layout_demo/`** — layout system showcase; the same split layout snapped to cells on TUI and resolved at pixel granularity on GUI
+2. **`demo_catalog/`** — widget showcase; one screen per widget type, switchable at runtime. Its **Layout** page is the layout-system showcase (`LayoutView`): the same split layout snapped to cells on TUI and resolved at pixel granularity on GUI, with surface roles and dividers

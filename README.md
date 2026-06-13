@@ -41,12 +41,10 @@ python3.14 -m venv .venv
 # Run the examples (in a terminal)
 .venv/bin/python examples/hello_world/main.py
 .venv/bin/python examples/demo_catalog/main.py
-.venv/bin/python examples/layout_demo/main.py
 
 # On macOS, the same examples in a native window
 .venv/bin/python examples/hello_world/main.py --backend gui
 .venv/bin/python examples/demo_catalog/main.py --backend gui
-.venv/bin/python examples/layout_demo/main.py --backend gui
 
 # Run the tests
 .venv/bin/python -m pytest

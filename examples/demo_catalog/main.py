@@ -3,7 +3,10 @@
 The pages are listed in the navigation on the left; moving the selection
 (up/down or mouse) switches the content pane on the right. The whole shell
 is built with the layout system, so it follows window resizes; pages are
-Containers, so their widgets are clipped and animate as a tree.
+Containers, so their widgets are clipped and animate as a tree. The Layout
+page nests the same layout system inside a page (LayoutView): one split
+definition snapped to cells on TUI and resolved at pixel granularity on GUI,
+with surface roles and dividers.
 
 Keys: up/down in the nav switch pages, tab moves focus between the nav and
 the page, 1..9 jump to a page, d opens a layered dialog, q quits.
@@ -16,7 +19,7 @@ import argparse
 
 from puikit import EventType, HSplit, Item, Panel, Style, TextAttribute, VSplit
 from puikit.backends import create_backend
-from puikit.widgets import Container, Label, ListView, ScrollBar, Widget
+from puikit.widgets import Container, Label, LayoutView, ListView, ScrollBar, Widget
 
 DIM = Style(attr=TextAttribute.DIM)
 BOLD = Style(attr=TextAttribute.BOLD)
@@ -128,11 +131,87 @@ def build_animation_page(page: Container, panel: Panel) -> None:
     page.focus(listview)
 
 
+class Region(Widget):
+    """A layout region that reports its own computed geometry. Regions draw
+    no borders: the surface backgrounds and the layout dividers separate
+    them. The cell extent is fractional on pixel-layout backends and whole on
+    TUI, so the same layout reads differently per backend."""
+
+    def __init__(self, name: str, color: tuple[int, int, int], note: str = ""):
+        self.name = name
+        self.color = color
+        self.note = note
+
+    def draw(self, ctx) -> None:
+        w_cells, h_cells = ctx.size_cells
+        cw, ch = ctx.cell_size
+        cells_line = f"{w_cells:.2f} x {h_cells:.2f} cells"
+        px_line = f"= {w_cells * cw:.0f} x {h_cells * ch:.0f} px"
+        if ctx.height >= 5:
+            ctx.draw_text(1, 0, self.name, Style(fg=self.color, attr=TextAttribute.BOLD))
+            ctx.draw_text(1, 2, cells_line)
+            ctx.draw_text(1, 3, px_line)
+            if self.note:
+                ctx.draw_text(1, 4, self.note, Style(attr=TextAttribute.DIM))
+        else:
+            line = f"{self.name}  {cells_line} {px_line}" + (
+                f"  ({self.note})" if self.note else ""
+            )
+            ctx.draw_text(1, 0, line, Style(fg=self.color))
+
+
+def build_layout_page(page: Container, panel: Panel) -> None:
+    # One layout definition, resolved at the page's own granularity: every
+    # boundary snaps to whole cells on TUI, lands on device pixels on GUI.
+    # Header/status use divider="subtle" (a GUI hairline, nothing on TUI —
+    # the themed surface backgrounds carry the contrast); the body panes use
+    # divider="strong" (a hairline on GUI, one whole │ cell column on TUI).
+    page.add(Label("One layout, two granularities — resize the window", DIM), x=2, y=1, w=60, h=1)
+    board = LayoutView(
+        VSplit(
+            Item(
+                Region("Header", (229, 229, 16), "fixed: 1 cell"),
+                size=1,
+                hints={"surface": "header"},
+            ),
+            Item(
+                HSplit(
+                    Item(
+                        Region("Sidebar", (13, 188, 121), "weight 1, min 220px"),
+                        weight=1,
+                        hints={"min_px": 220, "min_cells": 18, "surface": "sidebar"},
+                    ),
+                    Item(
+                        Region("Main", (36, 114, 200), "weight 2"),
+                        weight=2,
+                        hints={"surface": "content"},
+                    ),
+                    Item(
+                        Region("Inspector", (188, 63, 188), "weight 1"),
+                        weight=1,
+                        hints={"surface": "sidebar"},
+                    ),
+                    divider="strong",
+                )
+            ),
+            Item(
+                Region("Status", (220, 220, 220)),
+                size=1,
+                hints={"surface": "status"},
+            ),
+            divider="subtle",
+        )
+    )
+    # stretch: the board fills the page below the caption and tracks resizes.
+    page.add(board, x=2, y=3, w=0, h=0, hints={"stretch": True})
+
+
 PAGES = [
     ("Label", build_label_page),
     ("ListView", build_list_page),
     ("ScrollBar", build_scrollbar_page),
     ("Animation", build_animation_page),
+    ("Layout", build_layout_page),
 ]
 
 

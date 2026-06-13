@@ -97,6 +97,24 @@ class DrawContext:
         """Pixel size of one cell, as declared by the backend."""
         return self._backend.cell_size
 
+    @property
+    def theme(self) -> "Theme | None":
+        return self._panel.theme if self._panel is not None else None
+
+    def layout_context(self) -> "Any":
+        """Build a LayoutContext matching this backend's capabilities, so a
+        widget can resolve a nested puikit.layout Split against its own rect
+        with the same cell-vs-pixel rules the Panel uses for the top level.
+        Capability resolution stays here, not in the widget."""
+        from .layout import LayoutContext
+
+        cw, ch = self._backend.cell_size
+        return LayoutContext(
+            cw, ch,
+            snap=not self._caps.supports("pixel_layout"),
+            hairline=self._caps.supports("hairline"),
+        )
+
     def draw_text(self, x: int, y: int, text: str, style: Style = DEFAULT_STYLE) -> None:
         # Gate on the exact (possibly fractional) extent and let the
         # backend's clip rect cut the overflow: a pane squeezed to 0.97
@@ -197,6 +215,31 @@ class DrawContext:
         if self._caps.supports("images"):
             self._backend.draw_image(self._rect.x + x, self._rect.y + y, path, hints)
         # TUI fallback: no-op
+
+    def fill_rect(
+        self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE
+    ) -> None:
+        self._backend.fill_rect(
+            self._rect.x + x, self._rect.y + y, w, h, self._resolve(style)
+        )
+
+    def draw_divider(self, divider: "Any") -> None:
+        """Render a layout Divider in this context's coordinates, mirroring
+        the Panel's top-level divider drawing: a hairline on hairline-capable
+        backends, box-drawing line cells otherwise. The hairline/cell choice
+        is made here, so the hosting widget never branches on capability."""
+        theme = self.theme
+        color = theme.divider_color if theme is not None else (110, 110, 124)
+        rect = divider.rect
+        if self._caps.supports("hairline"):
+            self.fill_rect(rect.x, rect.y, rect.w, rect.h, Style(bg=color))
+            return
+        style = Style(fg=color)
+        if divider.vertical:
+            for row in range(int(rect.h)):
+                self.draw_text(int(rect.x), int(rect.y) + row, "│", style)
+        else:
+            self.draw_text(int(rect.x), int(rect.y), "─" * int(rect.w), style)
 
     def draw_child(
         self,
