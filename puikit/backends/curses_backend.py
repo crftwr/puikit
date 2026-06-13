@@ -52,6 +52,10 @@ _ATTR_MAP = [
 
 _BUTTON5_PRESSED = getattr(curses, "BUTTON5_PRESSED", 0x200000)
 
+# Scroll bar colors (shared intent with the GUI backends).
+_SCROLLBAR_THUMB = (150, 150, 150)
+_SCROLLBAR_TRACK = (60, 60, 60)
+
 
 class CursesBackend(Backend):
     PROFILE = PROFILE_TUI
@@ -191,9 +195,15 @@ class CursesBackend(Backend):
         x, y, h = round(x), round(y), round(h)
         thumb_h = max(1, round(h * ratio))
         thumb_y = round((h - thumb_h) * pos)
+        # Paint the bar with cell *background* colors rather than block glyphs:
+        # the cell background fills the full row height (including the
+        # terminal's line spacing), so the thumb reads as one continuous bar
+        # with no gaps, whereas a stacked `█` glyph leaves inter-line gaps.
+        thumb_style = Style(bg=style.fg or _SCROLLBAR_THUMB)
+        track_style = Style(bg=_SCROLLBAR_TRACK)
         for row in range(h):
-            ch = "▓" if thumb_y <= row < thumb_y + thumb_h else "░"
-            self.draw_text(x, y + row, ch, style)
+            in_thumb = thumb_y <= row < thumb_y + thumb_h
+            self.draw_text(x, y + row, " ", thumb_style if in_thumb else track_style)
 
     def present(self) -> None:
         assert self._stdscr is not None

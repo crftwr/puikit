@@ -669,10 +669,13 @@ class MacOSBackend(Backend):
         track = self._cell_rect(x, y, 1, h)
         _ns_color((60, 60, 60)).setFill()
         NSRectFill(track)
-        thumb_h = max(1, round(h * ratio))
-        thumb_y = round((h - thumb_h) * pos)
+        # Pixel-level thumb: size and position are computed in device pixels
+        # (not snapped to whole cells), so the scroll position is exact.
+        track_h = track.size.height
+        thumb_h = max(2.0, track_h * ratio)
+        thumb_y = track.origin.y + (track_h - thumb_h) * pos
         _ns_color(style.fg or (150, 150, 150)).setFill()
-        NSRectFill(self._cell_rect(x, y + thumb_y, 1, thumb_h))
+        NSRectFill(NSMakeRect(track.origin.x, thumb_y, track.size.width, thumb_h))
 
     def _render_image(self, x: int, y: int, path: str, hints: dict[str, Any]) -> None:
         image = NSImage.alloc().initWithContentsOfFile_(path)

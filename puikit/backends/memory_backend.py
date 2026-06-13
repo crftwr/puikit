@@ -14,6 +14,10 @@ from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute
 from ..capability import PROFILE_TUI, CapabilityProfile
 from ..event import Event
 
+# Scroll bar colors (shared intent with the curses/GUI backends).
+_SCROLLBAR_THUMB = (150, 150, 150)
+_SCROLLBAR_TRACK = (60, 60, 60)
+
 
 class MemoryBackend(Backend):
     PROFILE = PROFILE_TUI
@@ -147,9 +151,14 @@ class MemoryBackend(Backend):
         x, y, h = round(x), round(y), round(h)
         thumb_h = max(1, round(h * ratio))
         thumb_y = round((h - thumb_h) * pos)
+        # Mirror the curses backend: the bar is painted with cell background
+        # colors (a space glyph), not block characters, so the thumb fills the
+        # full row height with no inter-line gaps. Tests inspect style_at().
+        thumb_style = Style(bg=style.fg or _SCROLLBAR_THUMB)
+        track_style = Style(bg=_SCROLLBAR_TRACK)
         for row in range(h):
-            ch = "▓" if thumb_y <= row < thumb_y + thumb_h else "░"
-            self.draw_text(x, y + row, ch, style)
+            in_thumb = thumb_y <= row < thumb_y + thumb_h
+            self.draw_text(x, y + row, " ", thumb_style if in_thumb else track_style)
 
     def draw_icon(self, x: int, y: int, icon_name: str, style: Style = DEFAULT_STYLE) -> None:
         self.icon_calls.append((x, y, icon_name))

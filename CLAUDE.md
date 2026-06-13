@@ -75,7 +75,8 @@ backend.draw_shadow(x, y, w, h)      # TUI: ignored
 
 TUI examples:
 - `draw_box` → rendered with `┌─┐└─┘`
-- `draw_scrollbar` → rendered with `│▓░`
+- `draw_scrollbar` → thumb/track painted with cell background colors (a
+  space glyph), so the bar fills the full row height with no inter-line gaps
 
 GUI examples:
 - `draw_box` → rendered as rectangle lines
