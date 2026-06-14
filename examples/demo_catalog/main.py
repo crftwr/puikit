@@ -97,14 +97,24 @@ class LayerCard(Widget):
 
     def draw(self, ctx):
         ctx.draw_box(0, 0, ctx.width, ctx.height, hints={"fill": True})
+        # Content sits at x=2; keep every line inside the right border (at
+        # column width-1) with a one-column pad, so text never overwrites the
+        # frame. The Panel clips to the full rect — the border included — so
+        # the inset is the card's own responsibility.
+        inner = max(0, ctx.width - 2 - 2)
+
+        def line(x, y, text, style=None):
+            avail = max(0, inner - (x - 2))
+            ctx.draw_text(x, y, text[:avail], style) if style else ctx.draw_text(x, y, text[:avail])
+
         ctx.draw_icon(2, 1, "info")
-        ctx.draw_text(5, 1, self.title, BOLD)
+        line(5, 1, self.title, BOLD)
         for i, note in enumerate(self.notes):
-            ctx.draw_text(2, 3 + i, note)
+            line(2, 3 + i, note)
         hint = "esc / enter: close top layer"
         if self.on_open is not None:
-            hint = "o: open another on top    " + hint
-        ctx.draw_text(2, ctx.height - 2, hint, DIM)
+            hint = "o: open another, " + hint
+        line(2, ctx.height - 2, hint, DIM)
 
     def handle_event(self, event):
         if event.type is EventType.KEY:
