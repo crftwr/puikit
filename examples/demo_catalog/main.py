@@ -79,6 +79,42 @@ class DemoDialog(Widget):
         return True  # modal: swallow everything
 
 
+class LayerCard(Widget):
+    """A demo overlay layer for the Layering page. Each card names the hints it
+    was pushed with and closes itself on esc/enter. It is the *same* push_layer
+    intent as DemoDialog: GUI composites a real layer (translucent dim, drop
+    shadow), TUI falls back to draw order, approximates dim with attributes, and
+    skips the shadow — one intent, two fidelities. The card never branches on
+    the backend; the Panel layer resolves the capability."""
+
+    def __init__(self, title, notes, on_close, on_open=None):
+        self.title = title
+        self.notes = notes
+        self.on_close = on_close
+        # When set, the card can spawn a *new* layer on top of itself: a layer
+        # opened from within a previous layer, stacked by z-order.
+        self.on_open = on_open
+
+    def draw(self, ctx):
+        ctx.draw_box(0, 0, ctx.width, ctx.height, hints={"fill": True})
+        ctx.draw_icon(2, 1, "info")
+        ctx.draw_text(5, 1, self.title, BOLD)
+        for i, note in enumerate(self.notes):
+            ctx.draw_text(2, 3 + i, note)
+        hint = "esc / enter: close top layer"
+        if self.on_open is not None:
+            hint = "o: open another on top    " + hint
+        ctx.draw_text(2, ctx.height - 2, hint, DIM)
+
+    def handle_event(self, event):
+        if event.type is EventType.KEY:
+            if event.key in ("escape", "enter"):
+                self.on_close()
+            elif event.key == "o" and self.on_open is not None:
+                self.on_open()
+        return True  # modal: the topmost layer swallows everything
+
+
 # --- pages ---------------------------------------------------------------------
 
 
@@ -457,11 +493,114 @@ def build_color_page(panel: Panel) -> VSplit:
     )
 
 
+# Each scenario is (nav name, card title, note lines, push hints). A None hints
+# marks the special "stacked" scenario, which pushes several layers at once.
+LAYER_SCENARIOS = [
+    (
+        "Plain overlay", "Plain overlay",
+        ["A bare layer over the page.", "Draw order only — no effects."],
+        {"w": 44, "h": 8},
+    ),
+    (
+        "Drop shadow", "Drop shadow",
+        ["GUI renders a real drop shadow;", "TUI ignores the shadow hint."],
+        {"w": 44, "h": 8, "shadow": True},
+    ),
+    (
+        "Dim below", "Dim below",
+        ["GUI dims the page with a translucent", "overlay; TUI uses dim attributes."],
+        {"w": 44, "h": 8, "dim_below": True},
+    ),
+    (
+        "Modal dialog", "Modal dialog",
+        ["shadow + dim_below together — the", "canonical modal: raised, isolating."],
+        {"w": 44, "h": 8, "shadow": True, "dim_below": True},
+    ),
+    ("Stacked z-order", None, None, None),
+    ("Open from layer", None, None, None),
+]
+
+
+def build_layer_page(panel: Panel) -> VSplit:
+    # Layers are pushed onto the Panel, not placed by the page: push_layer
+    # overlays the whole screen above the content. The page only declares the
+    # intent (hints); the Panel resolves the capability per backend.
+    status = Label("Pick a layer scenario, press enter", DIM)
+
+    def push(title, notes, hints, z) -> None:
+        card = LayerCard(title, notes, panel.pop_layer)
+        panel.push_layer(card, z=z, hints=hints)
+        # GUI fades the layer in over 150ms; TUI shows it immediately.
+        panel.animate(card, hints={"transition": "fade", "duration_ms": 150})
+
+    def open_nested(depth: int) -> None:
+        # A layer opened from within the previous layer: the active card's
+        # 'o' handler calls this, pushing a new card one z above itself. Each
+        # is modal, so events go to the top; esc pops back down the stack.
+        card = LayerCard(
+            f"Nested layer (depth {depth + 1})",
+            ["Opened from the layer below it.",
+             "Press 'o' again to go deeper, esc to back out."],
+            panel.pop_layer,
+            on_open=lambda: open_nested(depth + 1),
+        )
+        panel.push_layer(
+            card,
+            z=10 + depth,
+            hints={"w": 38, "h": 8, "x": 4 + depth * 4, "y": 2 + depth * 2, "shadow": True},
+        )
+        panel.animate(card, hints={"transition": "fade", "duration_ms": 150})
+
+    def open_scenario(index: int, name: str) -> None:
+        _, title, notes, hints = LAYER_SCENARIOS[index]
+        if name == "Stacked z-order":  # push three layers at once
+            for i in range(3):
+                push(
+                    f"Stacked layer (z={10 + i})",
+                    [f"Card {i + 1} of 3 — the overlap shows z-order.",
+                     "esc pops the top, revealing the one below."],
+                    {"w": 34, "h": 7, "x": 6 + i * 5, "y": 3 + i * 2, "shadow": True},
+                    z=10 + i,
+                )
+            status.text = "Three layers stacked by z — esc pops them in turn"
+            return
+        if name == "Open from layer":  # the layer itself opens the next one
+            open_nested(0)
+            status.text = "Press 'o' inside the layer to open another on top"
+            return
+        push(title, notes, hints, z=10)
+        status.text = f"Pushed {name} — esc / enter closes it"
+
+    listview = ListView([name for name, *_ in LAYER_SCENARIOS], on_select=open_scenario)
+    explainer = TextBlock(
+        "Layers are pushed onto the Panel, not placed by the page.\n"
+        "One push_layer intent composites differently per backend:\n"
+        "GUI does real layer compositing — translucent dim, drop\n"
+        "shadows, z-ordered overlap; TUI falls back to draw order,\n"
+        "approximates dim with attributes, and skips shadows.\n"
+        "The page never branches on the capability.",
+    )
+    return VSplit(
+        Item(Label("Pushed layers overlay the whole panel, above the page", DIM), size=1),
+        Item(
+            HSplit(
+                Item(listview, size=24),
+                Item(explainer, weight=1, hints={"surface": "content"}),
+                gap=2,
+            ),
+            weight=1,
+        ),
+        Item(status, size=1),
+        gap=1,
+    )
+
+
 PAGES = [
     ("Label", build_label_page),
     ("ListView", build_list_page),
     ("ScrollBar", build_scrollbar_page),
     ("Animation", build_animation_page),
+    ("Layering", build_layer_page),
     ("Layout", build_layout_page),
     ("Intrinsic", build_intrinsic_page),
     ("Fonts", build_fonts_page),
