@@ -124,6 +124,30 @@ class DrawContext:
         return self._focused
 
     @property
+    def hovered(self) -> bool:
+        """True when the mouse pointer is over this widget's visible rect.
+        Drives modern hover styling; resolved by pure geometry against the
+        Panel's last pointer position, so widgets never track the mouse."""
+        if self._panel is None or self._panel.pointer is None:
+            return False
+        px, py = self._panel.pointer
+        return self._rect.contains(px, py) and self._clip.contains(px, py)
+
+    @property
+    def panel(self) -> "Panel | None":
+        """The owning Panel — the one API a widget talks to for layers
+        (push_layer for a popup) and text input (request_text_input for IME).
+        Captured by widgets during draw and used later in event handling."""
+        return self._panel
+
+    @property
+    def screen_rect(self) -> tuple[float, float, float, float]:
+        """This widget's absolute rect in base units (x, y, w, h). A widget
+        uses it to position a popup layer under itself or to tell the backend
+        where its text cursor is for the IME candidate window."""
+        return (self._rect.x, self._rect.y, self._rect.w, self._rect.h)
+
+    @property
     def theme(self) -> "Theme | None":
         return self._panel.theme if self._panel is not None else None
 
@@ -392,6 +416,9 @@ class Panel:
         self._margin_px = 0.0
         self._margin_units = 0.0
         self._size_anims: dict[Any, _SizeAnimation] = {}
+        # Last known pointer position in screen base units, fed by every mouse
+        # event. DrawContext.hovered reads it to resolve hover styling.
+        self._pointer: tuple[float, float] | None = None
 
     # --- layout management ---------------------------------------------------
 
@@ -519,6 +546,11 @@ class Panel:
     @property
     def focused(self) -> Any | None:
         return self._focused
+
+    @property
+    def pointer(self) -> tuple[float, float] | None:
+        """Last pointer position in screen base units, or None."""
+        return self._pointer
 
     # --- rendering --------------------------------------------------------------
 
@@ -674,6 +706,17 @@ class Panel:
 
     def dispatch_event(self, event: Event) -> bool:
         """Route an event to widgets. Returns True if it was consumed."""
+        # Track the pointer for hover styling on any positioned mouse event.
+        if event.x is not None and event.type in (
+            EventType.MOUSE_CLICK, EventType.MOUSE_DRAG,
+            EventType.MOUSE_MOVE, EventType.MOUSE_SCROLL,
+        ):
+            self._pointer = (event.x, event.y)
+        # Plain hover movement updates the pointer but is not delivered to a
+        # widget; the caller re-renders to reflect the new hover state.
+        if event.type is EventType.MOUSE_MOVE:
+            return False
+
         # The topmost layer gets events exclusively (modal behavior).
         if self._layers:
             slot = self._layers[-1]

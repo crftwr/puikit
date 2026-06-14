@@ -5,6 +5,7 @@ import pytest
 from puikit import Event, EventType, Panel, PROFILE_GUI_DESKTOP, PROFILE_TUI, TextAttribute
 from puikit.backends.memory_backend import MemoryBackend
 from puikit.widgets import (
+    Button,
     Checkbox,
     DropDown,
     Label,
@@ -32,8 +33,8 @@ def test_checkbox_renders_state_and_focus_cue(backend):
     panel.add(box, x=0, y=0, w=12, h=1)
     panel.render()
     assert backend.snapshot()[0].startswith("[x] Enable")
-    # The single focusable widget holds focus, so its mark is reversed.
-    assert backend.style_at(0, 0).attr & TextAttribute.REVERSE
+    # The single focusable widget holds focus: its mark gets the accent ring.
+    assert backend.style_at(0, 0).bg == panel.theme.accent
 
 
 def test_checkbox_unfocused_mark_is_plain(backend):
@@ -101,43 +102,50 @@ def test_radiogroup_renders_marks(backend):
 # --- DropDown ----------------------------------------------------------------
 
 
-def test_dropdown_opens_grows_and_commits(backend):
+def test_dropdown_opens_as_layer_and_commits(backend):
     changes = []
     panel = Panel(backend)
     dd = DropDown(["Red", "Green", "Blue"], on_change=lambda i, t: changes.append(t))
-    panel.add(dd, x=0, y=0, w=22, h=8)
-    assert dd.view_height() == 1
-    panel.dispatch_event(_key("enter"))  # open
+    panel.add(dd, x=0, y=0, w=22, h=1)
+    panel.render()  # let the field capture panel + screen_rect
+    assert dd.view_height() == 1  # the field never grows; the popup floats
+    panel.dispatch_event(_key("enter"))  # open -> pushes a popup layer
     assert dd.open is True
-    assert dd.view_height() == 1 + 3
-    panel.dispatch_event(_key("down"))  # cursor 0 -> 1
+    assert len(panel._layers) == 1
+    panel.dispatch_event(_key("down"))  # popup cursor 0 -> 1
     panel.dispatch_event(_key("enter"))  # commit Green
     assert dd.open is False
     assert dd.selected == 1
     assert changes == ["Green"]
+    assert panel._layers == []  # popup popped
 
 
 def test_dropdown_escape_closes_without_change(backend):
     panel = Panel(backend)
     dd = DropDown(["Red", "Green"], on_change=lambda i, t: pytest.fail("should not commit"))
-    panel.add(dd, x=0, y=0, w=22, h=8)
+    panel.add(dd, x=0, y=0, w=22, h=1)
+    panel.render()
     panel.dispatch_event(_key("down"))  # open via down
     assert dd.open is True
     panel.dispatch_event(_key("escape"))
     assert dd.open is False
     assert dd.selected == 0
+    assert panel._layers == []
 
 
 def test_dropdown_click_opens_then_selects_option(backend):
     panel = Panel(backend)
     dd = DropDown(["Red", "Green", "Blue"])
-    panel.add(dd, x=0, y=0, w=22, h=8)
+    panel.add(dd, x=0, y=0, w=22, h=1)
+    panel.render()
     panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=1, y=0, button="left"))
     assert dd.open is True
-    # Row 2 on screen is option index 1 (header occupies row 0).
+    panel.render()  # the popup draws and captures its width for hit-testing
+    # The popup layer sits at y=1; option index 1 is its local row 1.
     panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=2, y=2, button="left"))
     assert dd.open is False
     assert dd.selected == 1
+    assert panel._layers == []
 
 
 # --- TextEdit ----------------------------------------------------------------
@@ -182,6 +190,82 @@ def test_textedit_space_inserts_not_activates(backend):
     panel.add(field, x=0, y=0, w=12, h=1)
     panel.dispatch_event(_key("space", char=" "))
     assert field.text == "a "
+
+
+def test_textedit_ime_composition_then_commit(backend):
+    # Marked (preedit) text is shown without touching the buffer; a committed
+    # character (the shape insertText: produces) clears it and inserts.
+    panel = Panel(backend)
+    field = TextEdit("")
+    panel.add(field, x=0, y=0, w=16, h=1)
+    panel.dispatch_event(
+        Event(type=EventType.IME_COMPOSITION, hints={"preedit": "に", "caret": 1})
+    )
+    assert field._preedit == "に"
+    assert field.text == ""  # buffer untouched while composing
+    panel.dispatch_event(_key("本", char="本"))  # commit
+    assert field.text == "本"
+    assert field._preedit == ""
+
+
+def test_textedit_requests_input_position_when_focused(backend):
+    # While focused the field reports its caret to the backend (drives the IME
+    # candidate window). The memory backend records the call via Panel.
+    calls = []
+    backend.request_text_input = lambda x, y, hints: calls.append((x, y))
+    panel = Panel(backend)
+    field = TextEdit("hi")
+    panel.add(field, x=2, y=1, w=12, h=1)
+    panel.render()
+    assert calls  # at least one caret report from the focused field
+
+
+# --- hover / accent ----------------------------------------------------------
+
+
+def test_pointer_hover_tints_checkbox_row(backend):
+    panel = Panel(backend)
+    box = Checkbox("hover me")
+    panel.add(box, x=0, y=0, w=12, h=1)
+    panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=3, y=0))
+    panel.render()
+    assert backend.style_at(5, 0).bg == panel.theme.hover_bg
+
+
+def test_mouse_move_updates_pointer_but_is_not_consumed(backend):
+    panel = Panel(backend)
+    panel.add(Checkbox("x"), x=0, y=0, w=8, h=1)
+    consumed = panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=2, y=0))
+    assert consumed is False
+    assert panel.pointer == (2, 0)
+
+
+def test_button_focus_ring_and_hover(backend):
+    panel = Panel(backend)
+    btn = Button("OK")
+    panel.add(btn, x=0, y=0, w=10, h=1)
+    panel.render()
+    # Focused single-row button: accent fill, label underlined.
+    assert backend.style_at(0, 0).bg == panel.theme.button_bg
+    # Hover lightens the fill.
+    panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=3, y=0))
+    panel.render()
+    assert backend.style_at(0, 0).bg == panel.theme.button_hover_bg
+
+
+def test_dropdown_outside_click_dismisses(backend):
+    panel = Panel(backend)
+    dd = DropDown(["Red", "Green"])
+    panel.add(dd, x=0, y=0, w=22, h=1)
+    panel.render()
+    panel.dispatch_event(_key("down"))  # open
+    assert dd.open is True
+    panel.render()
+    # A click well outside the popup's rows cancels it without changing value.
+    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=2, y=15, button="left"))
+    assert dd.open is False
+    assert dd.selected == 0
+    assert panel._layers == []
 
 
 # --- ScrollView --------------------------------------------------------------
@@ -246,7 +330,7 @@ def test_scrollview_focused_child_shows_focus_cue(backend):
     scroller, cb1, cb2 = _scroller()
     panel.add(scroller, x=0, y=0, w=20, h=8)
     panel.render()
-    # cb1 is the focused child of the focused ScrollView: its mark is reversed.
-    # cb1 is at content/screen y=2.
-    assert backend.style_at(0, 2).attr & TextAttribute.REVERSE
-    assert not backend.style_at(0, 4).attr & TextAttribute.REVERSE  # cb2 not focused
+    # cb1 is the focused child of the focused ScrollView: its mark gets the
+    # accent ring. cb1 is at content/screen y=2.
+    assert backend.style_at(0, 2).bg == panel.theme.accent
+    assert backend.style_at(0, 4).bg != panel.theme.accent  # cb2 not focused

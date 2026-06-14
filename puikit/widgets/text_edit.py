@@ -1,27 +1,29 @@
-"""A single-line editable text field.
+"""A single-line editable text field with IME (e.g. Japanese) support.
 
-The field maintains a text buffer and a cursor; it inserts printable
-characters and supports the usual editing keys (left/right/home/end,
-backspace/delete). When the text is wider than the field it scrolls
-horizontally to keep the cursor visible. The cursor is drawn only while the
-field is focused (``ctx.focused``), so an unfocused field reads as static.
+The field keeps a text buffer and a cursor, inserts printable characters, and
+handles the usual editing keys. It renders flat, VS Code-style: a
+``control_bg`` field with an accent caret while focused.
+
+IME composition is first-class. Committed characters arrive as ordinary KEY
+events (the macOS backend routes ``insertText:`` through them); in-progress
+*marked* text arrives as ``IME_COMPOSITION`` events carrying the preedit
+string, which is drawn underlined at the cursor without touching the buffer
+until it commits. While focused the field calls ``panel.request_text_input``
+with the on-screen caret position so the backend can place the candidate
+window next to it (the ttk pattern: ``firstRectForCharacterRange``).
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import replace
 
 from ..backend import DEFAULT_STYLE, Style, TextAttribute
 from ..event import Event, EventType
 from ..layout import LayoutContext, SizeRequest
 from ..panel import DrawContext
+from ..theme import DEFAULT_THEME
 from ._input import typed_char
 from .base import Widget
-
-# Default field fill, so the editable area reads as an input box even before
-# the app themes it. An explicit style bg overrides it.
-_FIELD_BG = (50, 52, 62)
 
 
 class TextEdit(Widget):
@@ -41,8 +43,10 @@ class TextEdit(Widget):
         self.width = width
         self.style = style
         self.cursor = len(text)
-        # First visible character index; kept so the cursor stays on screen.
-        self._view = 0
+        self._view = 0          # first visible index into the displayed string
+        self._preedit = ""      # IME marked (composition) text, not yet committed
+        self._preedit_caret = 0  # caret offset within the preedit
+        self._panel = None
 
     # --- geometry -------------------------------------------------------------
 
@@ -55,47 +59,66 @@ class TextEdit(Widget):
     # --- drawing -------------------------------------------------------------
 
     def draw(self, ctx: DrawContext) -> None:
+        self._panel = ctx.panel
+        theme = ctx.theme or DEFAULT_THEME
         w = min(self.width, ctx.width)
         if w < 3:
             return
-        field_w = w - 2  # inside the [ ] brackets
+        field_w = w - 2  # one column of padding on each side
         self.cursor = max(0, min(self.cursor, len(self.text)))
-        self._scroll_into_view(field_w)
 
-        field_bg = self.style.bg if self.style.bg is not None else _FIELD_BG
-        ctx.fill_rect(1, 0, field_w, 1, Style(bg=field_bg))
-        bracket_style = self.style
-        if ctx.focused:
-            bracket_style = replace(
-                bracket_style, attr=bracket_style.attr | TextAttribute.BOLD
-            )
-        ctx.draw_text(0, 0, "[", bracket_style)
-        ctx.draw_text(w - 1, 0, "]", bracket_style)
+        # The displayed string has the preedit spliced in at the cursor.
+        disp = self.text[: self.cursor] + self._preedit + self.text[self.cursor :]
+        pre_start, pre_end = self.cursor, self.cursor + len(self._preedit)
+        caret = self.cursor + (self._preedit_caret if self._preedit else 0)
+        self._scroll_into_view(caret, field_w, len(disp))
 
-        visible = self.text[self._view : self._view + field_w]
-        text_style = replace(self.style, bg=field_bg) if self.style.bg is None else self.style
-        ctx.draw_text(1, 0, visible.ljust(field_w), text_style)
+        bg = theme.hover_bg if (ctx.hovered and not ctx.focused) else theme.control_bg
+        ctx.fill_rect(0, 0, min(float(self.width), ctx.size_units[0]), 1, Style(bg=bg))
 
-        if ctx.focused:
-            cx = 1 + (self.cursor - self._view)
-            if 1 <= cx <= field_w:
-                ch = self.text[self.cursor] if self.cursor < len(self.text) else " "
+        visible = disp[self._view : self._view + field_w].ljust(field_w)
+        ctx.draw_text(1, 0, visible, Style(fg=theme.text, bg=bg))
+        # Underline the marked (composition) text in the accent color.
+        for i, ch in enumerate(visible):
+            idx = self._view + i
+            if pre_start <= idx < pre_end:
                 ctx.draw_text(
-                    cx, 0, ch, replace(text_style, attr=text_style.attr | TextAttribute.REVERSE)
+                    1 + i, 0, ch,
+                    Style(fg=theme.accent, bg=bg, attr=TextAttribute.UNDERLINE),
                 )
 
-    def _scroll_into_view(self, field_w: int) -> None:
-        if self.cursor < self._view:
-            self._view = self.cursor
-        elif self.cursor > self._view + field_w - 1:
-            self._view = self.cursor - field_w + 1
-        self._view = max(0, min(self._view, max(0, len(self.text))))
+        if ctx.focused:
+            self._draw_caret(ctx, theme, disp, caret, field_w, bg)
+            self._notify_input_position(ctx, caret)
+
+    def _draw_caret(self, ctx, theme, disp, caret, field_w, bg) -> None:
+        cx = 1 + (caret - self._view)
+        if 1 <= cx <= field_w:
+            ch = disp[caret] if caret < len(disp) else " "
+            ctx.draw_text(cx, 0, ch, Style(fg=theme.control_bg, bg=theme.accent))
+
+    def _notify_input_position(self, ctx: DrawContext, caret: int) -> None:
+        if ctx.panel is None:
+            return
+        sx, sy, _sw, _sh = ctx.screen_rect
+        cx = 1 + (caret - self._view)
+        ctx.panel.request_text_input(int(sx + cx), int(sy), {})
+
+    def _scroll_into_view(self, caret: int, field_w: int, length: int) -> None:
+        if caret < self._view:
+            self._view = caret
+        elif caret > self._view + field_w - 1:
+            self._view = caret - field_w + 1
+        self._view = max(0, min(self._view, max(0, length)))
 
     # --- events --------------------------------------------------------------
 
     def handle_event(self, event: Event) -> bool:
+        if event.type is EventType.IME_COMPOSITION:
+            self._preedit = event.hints.get("preedit", "")
+            self._preedit_caret = event.hints.get("caret", len(self._preedit))
+            return True
         if event.type is EventType.MOUSE_CLICK:
-            # Place the cursor near the click within the visible window.
             col = int(event.x or 0) - 1
             self.cursor = max(0, min(len(self.text), self._view + max(0, col)))
             return True
@@ -129,13 +152,15 @@ class TextEdit(Widget):
         elif key == "enter":
             if self.on_submit is not None:
                 self.on_submit(self.text)
-            # Let enter bubble when no submit handler is interested.
             return self.on_submit is not None
         else:
             return False
         return True
 
     def _insert(self, ch: str) -> None:
+        # A committed character ends any composition.
+        self._preedit = ""
+        self._preedit_caret = 0
         self.text = self.text[: self.cursor] + ch + self.text[self.cursor :]
         self.cursor += 1
         self._changed()

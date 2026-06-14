@@ -54,6 +54,12 @@ from AppKit import (
     NSRectFill,
     NSRectFillUsingOperation,
     NSShadow,
+    NSTextInputContext,
+    NSTrackingActiveInKeyWindow,
+    NSTrackingArea,
+    NSTrackingInVisibleRect,
+    NSTrackingMouseEnteredAndExited,
+    NSTrackingMouseMoved,
     NSUnderlineStyleAttributeName,
     NSUnderlineStyleSingle,
     NSView,
@@ -63,7 +69,17 @@ from AppKit import (
     NSWindowStyleMaskResizable,
     NSWindowStyleMaskTitled,
 )
-from Foundation import NSMakeRect, NSMakeSize, NSObject, NSString, NSZeroPoint
+from Foundation import (
+    NSAttributedString,
+    NSMakeRange,
+    NSMakeRect,
+    NSMakeSize,
+    NSNotFound,
+    NSObject,
+    NSString,
+    NSZeroPoint,
+)
+import objc
 
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
@@ -209,7 +225,15 @@ class Animation:
 
 
 class _PuiKitView(NSView):
-    """Renders the backend's display list; forwards input to the backend."""
+    """Renders the backend's display list; forwards input to the backend.
+
+    Implements the NSTextInputClient protocol so macOS IME (e.g. Japanese)
+    works: every keyDown is routed through the text input system, committed
+    characters arrive via insertText: (delivered as KEY events with a char),
+    in-progress composition arrives via setMarkedText: (delivered as
+    IME_COMPOSITION events), and non-text commands (arrows, enter, ...) arrive
+    via doCommandBySelector: (re-translated from the current key event). This
+    mirrors the ttk CoreGraphics backend's input pipeline."""
 
     backend = None  # set right after alloc/init
 
@@ -223,12 +247,159 @@ class _PuiKitView(NSView):
         if self.backend is not None:
             self.backend._render_into_view()
 
+    # --- IME state (set by the backend right after the view is created) -------
+
+    def _ensure_ime_state(self) -> None:
+        # Lazily initialize composition state, so the protocol methods are safe
+        # even if called before the backend wired the view up.
+        if not hasattr(self, "marked_text"):
+            self.marked_text = ""
+            self.marked_range = NSMakeRange(NSNotFound, 0)
+            self.selected_range = NSMakeRange(0, 0)
+
     def keyDown_(self, ns_event):
-        event = translate_key(
-            ns_event.charactersIgnoringModifiers(), ns_event.modifierFlags()
+        # Standard Cocoa text input: hand every key to the input context. It
+        # either composes (setMarkedText:), commits text (insertText:), or
+        # issues a command (doCommandBySelector:) — never a raw key here.
+        self.interpretKeyEvents_([ns_event])
+
+    def inputContext(self):
+        return getattr(self, "_input_context", None)
+
+    def becomeFirstResponder(self):
+        result = objc.super(_PuiKitView, self).becomeFirstResponder()
+        if result:
+            ctx = self.inputContext()
+            if ctx is not None:
+                ctx.activate()
+        return result
+
+    def resignFirstResponder(self):
+        ctx = self.inputContext()
+        if ctx is not None:
+            ctx.deactivate()
+        if self.hasMarkedText():
+            self.unmarkText()
+        return objc.super(_PuiKitView, self).resignFirstResponder()
+
+    # --- NSTextInputClient ---------------------------------------------------
+
+    @objc.typedSelector(b"B@:")
+    def hasMarkedText(self) -> bool:
+        self._ensure_ime_state()
+        return self.marked_range.location != NSNotFound
+
+    def markedRange(self):
+        self._ensure_ime_state()
+        return self.marked_range
+
+    def selectedRange(self):
+        self._ensure_ime_state()
+        return self.selected_range
+
+    def validAttributesForMarkedText(self):
+        return []
+
+    def setMarkedText_selectedRange_replacementRange_(
+        self, string, selected_range, replacement_range
+    ):
+        self._ensure_ime_state()
+        text = str(string.string()) if hasattr(string, "string") else str(string)
+        self.marked_text = text
+        if len(text) > 0:
+            self.marked_range = NSMakeRange(0, len(text))
+        else:
+            self.marked_range = NSMakeRange(NSNotFound, 0)
+        self.selected_range = selected_range
+        # Tell the widget about the in-progress composition (preedit).
+        caret = selected_range.location if selected_range.location != NSNotFound else len(text)
+        self.backend._dispatch(
+            Event(
+                type=EventType.IME_COMPOSITION,
+                hints={"preedit": text, "caret": int(caret)},
+            )
         )
-        if event is not None:
-            self.backend._dispatch(event)
+
+    def unmarkText(self):
+        self._ensure_ime_state()
+        self.marked_text = ""
+        self.marked_range = NSMakeRange(NSNotFound, 0)
+        self.selected_range = NSMakeRange(0, 0)
+        self.backend._dispatch(
+            Event(type=EventType.IME_COMPOSITION, hints={"preedit": "", "caret": 0})
+        )
+
+    def insertText_replacementRange_(self, string, replacement_range):
+        self._ensure_ime_state()
+        self.marked_text = ""
+        self.marked_range = NSMakeRange(NSNotFound, 0)
+        self.selected_range = NSMakeRange(0, 0)
+        text = str(string.string()) if hasattr(string, "string") else str(string)
+        if not text:
+            return
+        # A commit ends composition; clear any lingering preedit in the widget.
+        self.backend._dispatch(
+            Event(type=EventType.IME_COMPOSITION, hints={"preedit": "", "caret": 0})
+        )
+        # Each committed character is delivered as a KEY event with a char, the
+        # same shape ordinary typing produces.
+        for ch in text:
+            self.backend._dispatch(Event(type=EventType.KEY, key=ch, char=ch))
+
+    def doCommandBySelector_(self, selector):
+        # Non-text keys (arrows, enter, tab, delete, escape, ...). Re-translate
+        # the current key event rather than mapping every selector by hand.
+        ns_event = NSApp.currentEvent()
+        if ns_event is not None:
+            event = translate_key(
+                ns_event.charactersIgnoringModifiers(), ns_event.modifierFlags()
+            )
+            if event is not None:
+                self.backend._dispatch(event)
+
+    @objc.typedSelector(b"{CGRect={CGPoint=dd}{CGSize=dd}}@:{_NSRange=QQ}^{_NSRange=QQ}")
+    def firstRectForCharacterRange_actualRange_(self, char_range, actual_range):
+        # Position the candidate window at the widget's reported caret.
+        cx, cy = self.backend._input_caret
+        bw, bh = self.backend._base_w, self.backend._base_h
+        rect = NSMakeRect(cx * bw, cy * bh, bw, bh)
+        window_rect = self.convertRect_toView_(rect, None)
+        window = self.window()
+        if window is None:
+            return NSMakeRect(0, 0, 0, 0)
+        return window.convertRectToScreen_(window_rect)
+
+    @objc.typedSelector(b"@@:{_NSRange=QQ}^{_NSRange=QQ}")
+    def attributedSubstringForProposedRange_actualRange_(self, proposed_range, actual_range):
+        return None
+
+    def characterIndexForPoint_(self, point):
+        return NSNotFound
+
+    # --- hover ---------------------------------------------------------------
+
+    def updateTrackingAreas(self):
+        for area in list(self.trackingAreas()):
+            self.removeTrackingArea_(area)
+        options = (
+            NSTrackingMouseMoved
+            | NSTrackingMouseEnteredAndExited
+            | NSTrackingActiveInKeyWindow
+            | NSTrackingInVisibleRect
+        )
+        area = NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+            self.bounds(), options, self, None
+        )
+        self.addTrackingArea_(area)
+        objc.super(_PuiKitView, self).updateTrackingAreas()
+
+    def mouseMoved_(self, ns_event):
+        x, y = self._mouse_unit(ns_event)
+        self.backend._dispatch(Event(type=EventType.MOUSE_MOVE, x=x, y=y))
+
+    def mouseExited_(self, ns_event):
+        # Move the pointer off-canvas so nothing reads as hovered.
+        self.backend._dispatch(Event(type=EventType.MOUSE_MOVE, x=-1.0, y=-1.0))
 
     def _mouse_unit(self, ns_event) -> tuple[float, float]:
         # Carry the *fractional* base-unit position. Flooring here would quantize
@@ -291,7 +462,7 @@ class MacOSBackend(Backend):
             **PROFILE_GUI_DESKTOP,
             # Not implemented yet in the MVP; flip these on as features land.
             "drag_and_drop": False,
-            "ime": False,
+            "ime": True,
             "clipboard_rich": False,
             "native_file_dialog": False,
             "system_tray": False,
@@ -333,6 +504,9 @@ class MacOSBackend(Backend):
         self._animations: dict[int, Animation] = {}  # keyed by id(widget)
         self._anim_timer = None
         self._tick_callbacks: list[Any] = []
+        # On-screen caret position (base units) reported by the focused text
+        # widget; positions the IME candidate window.
+        self._input_caret: tuple[float, float] = (0.0, 0.0)
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -356,7 +530,13 @@ class MacOSBackend(Backend):
 
         self._view = _PuiKitView.alloc().initWithFrame_(NSMakeRect(0, 0, w_px, h_px))
         self._view.backend = self
+        # IME composition state + the text input context used by becomeFirstResponder.
+        self._view.marked_text = ""
+        self._view.marked_range = NSMakeRange(NSNotFound, 0)
+        self._view.selected_range = NSMakeRange(0, 0)
+        self._view._input_context = NSTextInputContext.alloc().initWithClient_(self._view)
         self._window.setContentView_(self._view)
+        self._window.setAcceptsMouseMovedEvents_(True)
         self._window.makeFirstResponder_(self._view)
 
         self._delegate = _PuiKitWindowDelegate.alloc().init()
@@ -798,6 +978,15 @@ class MacOSBackend(Backend):
         )
 
     # --- event loop ----------------------------------------------------------
+
+    def request_text_input(self, x: int, y: int, hints: dict[str, Any] | None = None) -> None:
+        """Record where the focused text widget's caret is (base units), so the
+        IME candidate window (firstRectForCharacterRange) appears next to it."""
+        self._input_caret = (float(x), float(y))
+        if self._view is not None:
+            ctx = self._view.inputContext()
+            if ctx is not None:
+                ctx.invalidateCharacterCoordinates()
 
     def _dispatch(self, event: Event) -> None:
         if self._handler is not None:

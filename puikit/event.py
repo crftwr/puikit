@@ -16,6 +16,7 @@ class EventType(str, Enum):
     KEY = "key"
     MOUSE_CLICK = "mouse_click"
     MOUSE_DRAG = "mouse_drag"
+    MOUSE_MOVE = "mouse_move"
     MOUSE_SCROLL = "mouse_scroll"
     IME_COMPOSITION = "ime_composition"
     RESIZE = "resize"

@@ -1,21 +1,20 @@
 """A labeled on/off checkbox.
 
 The checkbox draws a box mark plus a label and toggles on click or
-space/enter. Like every widget it draws through the DrawContext and reads
-``ctx.focused`` for its focus cue, so the one implementation runs on every
-backend — the Panel layer decides whether the cue is a reversed cell (TUI) or
-the same reversed attribute folded onto a GUI face.
+space/enter. A checked box reads in the theme accent color; focus draws an
+accent ring around the mark and hover tints the row. One implementation runs
+on every backend — the Panel layer folds the colors per backend.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import replace
 
-from ..backend import DEFAULT_STYLE, Style, TextAttribute
+from ..backend import DEFAULT_STYLE, Style
 from ..event import Event, EventType
 from ..layout import LayoutContext, SizeRequest
 from ..panel import DrawContext
+from ..theme import DEFAULT_THEME
 from ._input import is_activate
 from .base import Widget
 
@@ -44,14 +43,20 @@ class Checkbox(Widget):
     # --- drawing -------------------------------------------------------------
 
     def draw(self, ctx: DrawContext) -> None:
+        theme = ctx.theme or DEFAULT_THEME
+        row_bg = theme.hover_bg if ctx.hovered else None
+        if row_bg is not None:
+            ctx.fill_rect(0, 0, ctx.size_units[0], 1, Style(bg=row_bg))
+
         mark = _CHECKED if self.checked else _UNCHECKED
-        # The focus cue reverses just the mark, not the whole row, so it reads
-        # as "this control is active" without flooding the line.
-        mark_style = self.style
+        # A checked box reads in the accent color; focus draws a filled accent
+        # ring around the mark (row-friendly, no box needed).
         if ctx.focused:
-            mark_style = replace(mark_style, attr=mark_style.attr | TextAttribute.REVERSE)
+            mark_style = Style(fg=theme.button_text, bg=theme.accent)
+        else:
+            mark_style = Style(fg=theme.accent if self.checked else theme.text, bg=row_bg)
         ctx.draw_text(0, 0, mark, mark_style)
-        ctx.draw_text(len(mark) + len(_GAP), 0, self.label, self.style)
+        ctx.draw_text(len(mark) + len(_GAP), 0, self.label, Style(fg=theme.text, bg=row_bg))
 
     def measure(self, ctx: LayoutContext, axis: str, available: float) -> SizeRequest:
         if axis == "x":

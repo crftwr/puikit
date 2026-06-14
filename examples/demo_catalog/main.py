@@ -52,13 +52,15 @@ from puikit.widgets import (
 DIM = Style(attr=TextAttribute.DIM)
 BOLD = Style(attr=TextAttribute.BOLD)
 
-# Pane background colors: title/status bars, navigation, and content are
-# visually separated. GUI renders the exact RGB; TUI approximates via the
-# xterm-256 palette.
-TITLE_BG = (52, 62, 88)
-NAV_BG = (38, 44, 60)
-CONTENT_BG = (26, 28, 34)
-CARD_BG = (42, 46, 56)
+# Pane background colors, following the VS Code Dark+ palette: a dark title
+# bar, a slightly lighter sidebar, the near-black editor body, and an accent
+# blue status bar. GUI renders the exact RGB; TUI approximates via xterm-256.
+TITLE_BG = (60, 60, 60)      # title bar      #3C3C3C
+NAV_BG = (37, 37, 38)        # sidebar        #252526
+CONTENT_BG = (30, 30, 30)    # editor body    #1E1E1E
+CARD_BG = (45, 45, 45)
+STATUS_BG = (0, 122, 204)    # status bar      #007ACC (accent)
+STATUS_FG = Style(fg=(255, 255, 255), bg=STATUS_BG)
 # Button face: a lighter fill so buttons read as raised against a footer bar.
 BUTTON_FACE = Style(fg=(232, 234, 240), bg=(74, 88, 124))
 
@@ -178,9 +180,7 @@ def build_widgets_page(panel: Panel) -> VSplit:
         on_change=lambda s: set_status(f"TextEdit -> {s!r}"),
         on_submit=lambda s: set_status(f"TextEdit submitted -> {s!r}"),
     )
-    action = Button(
-        "Apply", on_click=lambda: set_status("Button 'Apply' clicked"), style=BUTTON_FACE
-    )
+    action = Button("Apply", on_click=lambda: set_status("Button 'Apply' clicked"))
 
     heading = lambda text: Label(text, BOLD)  # noqa: E731 - tiny local helper
     scroller = ScrollView(
@@ -190,12 +190,12 @@ def build_widgets_page(panel: Panel) -> VSplit:
             (hidden, 1),
             (heading("Radio buttons"), 1),
             (size, 3),
-            (heading("Drop-down (opens inline; the list pushes the rest down)"), 1),
-            (color, "auto"),
+            (heading("Drop-down (opens a floating popup over the page)"), 1),
+            (color, 1),
             (heading("Text edit"), 1),
             (name, 1),
             (heading("Button"), 1),
-            (action, 3),
+            (action, 1),
             (heading("Static text — single line (Label)"), 1),
             (Label("The quick brown fox jumps over the lazy dog."), 1),
             (heading("Static text — multi line (TextBlock)"), 1),
@@ -712,7 +712,7 @@ def main() -> None:
         # gives every page symmetric padding inside the content pane — declared,
         # not hand-placed (8px on GUI, 1 base unit on TUI).
         content = LayoutView(VSplit(), margin_px=8, margin_units=1)
-        status = Label("", DIM)
+        status = Label("", STATUS_FG)
 
         def show_page(index: int, name: str) -> None:
             content.set_layout(PAGES[index][1](panel))
@@ -729,7 +729,7 @@ def main() -> None:
                         Item(content, weight=1, hints={"min_px": 300, "bg": CONTENT_BG}),
                     )
                 ),
-                Item(status, size=1, hints={"bg": TITLE_BG}),
+                Item(status, size=1, hints={"bg": STATUS_BG}),
             ),
             # GUI: inset the whole layout 4px from the window frame. Edge panes
             # bleed their backgrounds across the margin, so it reads as padding,
@@ -751,6 +751,12 @@ def main() -> None:
             panel.animate(dialog, hints={"transition": "fade", "duration_ms": 200})
 
         def on_event(event) -> None:
+            # Pointer movement only updates hover state; re-render so controls
+            # under the cursor light up (GUI emits these; TUI does not).
+            if event.type is EventType.MOUSE_MOVE:
+                panel.dispatch_event(event)
+                panel.render()
+                return
             # Focused widget (nav or page) gets the event first; a modal
             # dialog takes it exclusively.
             if panel.dispatch_event(event):

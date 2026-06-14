@@ -105,6 +105,9 @@ class ScrollView(Widget):
             return self._handle_mouse(event)
         if event.type is EventType.KEY:
             return self._handle_key(event)
+        # Any other event (e.g. IME composition) goes to the focused child.
+        if self._focused is not None:
+            return bool(self._focused.handle_event(event))
         return False
 
     def _handle_mouse(self, event: Event) -> bool:

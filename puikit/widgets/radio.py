@@ -9,12 +9,12 @@ moves), a click selects the clicked row.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import replace
 
-from ..backend import DEFAULT_STYLE, Style, TextAttribute
+from ..backend import DEFAULT_STYLE, Style
 from ..event import Event, EventType
 from ..layout import LayoutContext, SizeRequest
 from ..panel import DrawContext
+from ..theme import DEFAULT_THEME
 from .base import Widget
 
 _SELECTED = "(•)"   # (•)
@@ -42,16 +42,35 @@ class RadioGroup(Widget):
     def draw(self, ctx: DrawContext) -> None:
         if self.options:
             self.selected = max(0, min(self.selected, len(self.options) - 1))
+        theme = ctx.theme or DEFAULT_THEME
+        hover_row = self._hover_row(ctx)
         for i, option in enumerate(self.options):
             if i >= ctx.height:
                 break  # taller than the slot: clip the overflow at the edge
+            row_bg = theme.hover_bg if i == hover_row else None
+            if row_bg is not None:
+                ctx.fill_rect(0, i, ctx.size_units[0], 1, Style(bg=row_bg))
             mark = _SELECTED if i == self.selected else _UNSELECTED
-            mark_style = self.style
-            # The selected row carries the focus cue when the group is focused.
+            # The selected dot reads in the accent color; focus draws an accent
+            # ring around the selected row's mark.
             if ctx.focused and i == self.selected:
-                mark_style = replace(mark_style, attr=mark_style.attr | TextAttribute.REVERSE)
+                mark_style = Style(fg=theme.button_text, bg=theme.accent)
+            else:
+                mark_style = Style(
+                    fg=theme.accent if i == self.selected else theme.text, bg=row_bg
+                )
             ctx.draw_text(0, i, mark, mark_style)
-            ctx.draw_text(len(mark) + len(_GAP), i, option, self.style)
+            ctx.draw_text(len(mark) + len(_GAP), i, option, Style(fg=theme.text, bg=row_bg))
+
+    def _hover_row(self, ctx: DrawContext) -> int | None:
+        panel = ctx.panel
+        if panel is None or panel.pointer is None:
+            return None
+        px, py = panel.pointer
+        rx, ry, rw, rh = ctx.screen_rect
+        if rx <= px < rx + rw and ry <= py < ry + rh:
+            return int(py - ry)
+        return None
 
     def measure(self, ctx: LayoutContext, axis: str, available: float) -> SizeRequest:
         if axis == "y":

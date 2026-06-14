@@ -24,10 +24,28 @@ from .capability import CapabilityProfile
 @dataclass(frozen=True)
 class Theme:
     """Maps surface roles to pane background colors, plus the divider color
-    used for layout dividers (hairlines on GUI, line base units on TUI)."""
+    used for layout dividers (hairlines on GUI, line base units on TUI).
+
+    The control palette below gives the interactive widgets a coherent,
+    VS Code-like look (flat fills, an accent focus color, hover/selection
+    tints) in one place. The defaults are shared by every backend; TUI snaps
+    each color to the nearest xterm-256 cell, GUI paints it exactly."""
 
     surfaces: dict[str, Color] = field(default_factory=dict)
     divider_color: Color = (110, 110, 124)
+
+    # --- control palette (VS Code Dark+) -------------------------------------
+    accent: Color = (0, 122, 204)          # focus ring / primary accent #007ACC
+    text: Color = (212, 212, 212)          # default control foreground  #D4D4D4
+    muted_text: Color = (157, 157, 157)    # secondary text              #9D9D9D
+    control_bg: Color = (60, 60, 60)       # text field / dropdown face  #3C3C3C
+    control_border: Color = (69, 69, 69)   # control outline             #454545
+    button_bg: Color = (14, 99, 156)       # primary button face         #0E639C
+    button_hover_bg: Color = (17, 119, 187)  # button hover              #1177BB
+    button_text: Color = (255, 255, 255)
+    selection_bg: Color = (9, 71, 113)     # active selection            #094771
+    hover_bg: Color = (42, 45, 46)         # row hover                   #2A2D2E
+    popup_bg: Color = (37, 37, 38)         # menu / popup surface        #252526
 
     def surface_bg(self, role: str) -> Color | None:
         return self.surfaces.get(role)
@@ -54,6 +72,11 @@ THEME_TUI = Theme(
     },
     divider_color=(128, 128, 144),
 )
+
+
+# Fallback palette for widgets drawn without a Panel/theme in reach (the
+# control colors are identical across themes, so the defaults suffice).
+DEFAULT_THEME = Theme()
 
 
 def theme_for(capabilities: CapabilityProfile) -> Theme:
