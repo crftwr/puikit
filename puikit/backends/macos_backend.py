@@ -70,7 +70,6 @@ from AppKit import (
     NSWindowStyleMaskTitled,
 )
 from Foundation import (
-    NSAttributedString,
     NSMakeRange,
     NSMakeRect,
     NSMakeSize,
@@ -103,6 +102,13 @@ except ImportError:  # animation gracefully degrades to immediate switches
 
 _DEFAULT_FG = (230, 230, 230)
 _DEFAULT_BG = (24, 24, 24)
+
+# Formal NSTextInputClient conformance: adopting the protocol makes PyObjC
+# apply Apple's own method signatures (NSRange struct args, the CGRect return
+# and the actualRange out-pointer), so the IME methods bridge correctly.
+# Hand-written signatures got these subtly wrong, which raised exceptions in
+# firstRectForCharacterRange: and mis-bridged insertText:'s range argument.
+_NS_TEXT_INPUT_CLIENT = objc.protocolNamed("NSTextInputClient")
 
 # Cocoa function-key code points -> PuiKit symbolic key names.
 _FUNCTION_KEYS = {
@@ -224,7 +230,7 @@ class Animation:
         return self.progress(now) >= 1.0
 
 
-class _PuiKitView(NSView):
+class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
     """Renders the backend's display list; forwards input to the backend.
 
     Implements the NSTextInputClient protocol so macOS IME (e.g. Japanese)
@@ -261,6 +267,9 @@ class _PuiKitView(NSView):
         # Standard Cocoa text input: hand every key to the input context. It
         # either composes (setMarkedText:), commits text (insertText:), or
         # issues a command (doCommandBySelector:) — never a raw key here.
+        # Stash the event so doCommandBySelector: can re-translate it (more
+        # reliable than NSApp.currentEvent()).
+        self._last_key_event = ns_event
         self.interpretKeyEvents_([ns_event])
 
     def inputContext(self):
@@ -284,7 +293,6 @@ class _PuiKitView(NSView):
 
     # --- NSTextInputClient ---------------------------------------------------
 
-    @objc.typedSelector(b"B@:")
     def hasMarkedText(self) -> bool:
         self._ensure_ime_state()
         return self.marked_range.location != NSNotFound
@@ -348,8 +356,8 @@ class _PuiKitView(NSView):
 
     def doCommandBySelector_(self, selector):
         # Non-text keys (arrows, enter, tab, delete, escape, ...). Re-translate
-        # the current key event rather than mapping every selector by hand.
-        ns_event = NSApp.currentEvent()
+        # the originating key event rather than mapping every selector by hand.
+        ns_event = getattr(self, "_last_key_event", None) or NSApp.currentEvent()
         if ns_event is not None:
             event = translate_key(
                 ns_event.charactersIgnoringModifiers(), ns_event.modifierFlags()
@@ -357,19 +365,30 @@ class _PuiKitView(NSView):
             if event is not None:
                 self.backend._dispatch(event)
 
-    @objc.typedSelector(b"{CGRect={CGPoint=dd}{CGSize=dd}}@:{_NSRange=QQ}^{_NSRange=QQ}")
     def firstRectForCharacterRange_actualRange_(self, char_range, actual_range):
-        # Position the candidate window at the widget's reported caret.
-        cx, cy = self.backend._input_caret
-        bw, bh = self.backend._base_w, self.backend._base_h
-        rect = NSMakeRect(cx * bw, cy * bh, bw, bh)
-        window_rect = self.convertRect_toView_(rect, None)
-        window = self.window()
-        if window is None:
+        # Position the candidate window at the widget's reported caret. This is
+        # called by the IME during composition; ANY exception here aborts the
+        # composition session (and macOS logs "Exception raised accessing first
+        # rect"), so the whole body is defensive and always returns a rect.
+        try:
+            cx, cy = self.backend._input_caret
+            bw, bh = self.backend._base_w, self.backend._base_h
+            rect = NSMakeRect(cx * bw, cy * bh, bw, bh)
+            window = self.window()
+            if window is None:
+                return NSMakeRect(0, 0, 0, 0)
+            window_rect = self.convertRect_toView_(rect, None)
+            screen_rect = window.convertRectToScreen_(window_rect)
+        except Exception:
             return NSMakeRect(0, 0, 0, 0)
-        return window.convertRectToScreen_(window_rect)
+        # Report the range we answered for, when the IME provided an out-pointer.
+        if actual_range is not None:
+            try:
+                actual_range[0] = char_range
+            except (TypeError, AttributeError, IndexError):
+                pass
+        return screen_rect
 
-    @objc.typedSelector(b"@@:{_NSRange=QQ}^{_NSRange=QQ}")
     def attributedSubstringForProposedRange_actualRange_(self, proposed_range, actual_range):
         return None
 
