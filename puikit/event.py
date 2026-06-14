@@ -28,9 +28,10 @@ class Event:
     key: str | None = None
     # KEY: printable character, if any
     char: str | None = None
-    # Mouse events: position in base-unit coordinates
-    x: int | None = None
-    y: int | None = None
+    # Mouse events: position in base-unit coordinates. May be fractional on
+    # pixel-layout backends until translated() floors to whole widget-local units.
+    x: float | None = None
+    y: float | None = None
     # MOUSE_CLICK / MOUSE_DRAG: "left", "middle", "right"
     button: str | None = None
     # MOUSE_SCROLL: positive = up/away, negative = down/toward

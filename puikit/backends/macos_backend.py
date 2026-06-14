@@ -230,10 +230,15 @@ class _PuiKitView(NSView):
         if event is not None:
             self.backend._dispatch(event)
 
-    def _mouse_unit(self, ns_event) -> tuple[int, int]:
+    def _mouse_unit(self, ns_event) -> tuple[float, float]:
+        # Carry the *fractional* base-unit position. Flooring here would quantize
+        # the click at the window origin, but panes are laid out at pixel-snapped,
+        # fractional base-unit origins (the layout margin offsets them). Let the
+        # single floor in Event.translated happen after the pane origin is
+        # subtracted, so the click grid stays aligned with the rendered grid.
         point = self.convertPoint_fromView_(ns_event.locationInWindow(), None)
         cw, ch = self.backend.base_size
-        return (int(point.x // cw), int(point.y // ch))
+        return (point.x / cw, point.y / ch)
 
     def mouseDown_(self, ns_event):
         x, y = self._mouse_unit(ns_event)
