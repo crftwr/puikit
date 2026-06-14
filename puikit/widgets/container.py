@@ -72,7 +72,10 @@ class Container(Widget):
         self._size = ctx.size_units
         for slot in self._children:
             r = self._slot_rect(slot)
-            ctx.draw_child(slot.widget, r.x, r.y, r.w, r.h, hints=slot.hints)
+            # Tell draw_child which child is focused, so the focus cue only
+            # lights up when this container itself is focused.
+            hints = {**slot.hints, "focused": slot.widget is self._focused}
+            ctx.draw_child(slot.widget, r.x, r.y, r.w, r.h, hints=hints)
 
     # --- events --------------------------------------------------------------------
 

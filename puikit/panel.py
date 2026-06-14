@@ -63,6 +63,7 @@ class DrawContext:
         clip: Rect | None = None,
         panel: "Panel | None" = None,
         background: tuple[int, int, int] | None = None,
+        focused: bool = False,
     ):
         self._backend = backend
         self._rect = rect
@@ -70,6 +71,11 @@ class DrawContext:
         self._clip = clip if clip is not None else rect
         self._panel = panel
         self._background = background
+        # Whether this widget currently holds the focus, resolved down the
+        # parent chain (a widget is focused only if every container above it is
+        # focused too). Interactive widgets read it to draw a focus cue; the
+        # Panel layer owns the resolution so widgets never touch focus state.
+        self._focused = focused
         # Backend clips this context pushed itself (e.g. draw_border's
         # interior clip); the Panel pops them when the widget's draw returns.
         self._pushed_clips = 0
@@ -109,6 +115,13 @@ class DrawContext:
     def base_size(self) -> tuple[int, int]:
         """Pixel size of one base unit, as declared by the backend."""
         return self._backend.base_size
+
+    @property
+    def focused(self) -> bool:
+        """True when this widget holds the keyboard focus. Interactive widgets
+        use it to draw a focus cue (a reversed marker, a cursor); the value is
+        resolved by the Panel/container chain, not by the widget."""
+        return self._focused
 
     @property
     def theme(self) -> "Theme | None":
@@ -298,9 +311,13 @@ class DrawContext:
         background = pane_bg if pane_bg is not None else self._background
         if pane_bg is not None:
             self._backend.fill_rect(rect.x, rect.y, rect.w, rect.h, Style(bg=pane_bg))
+        # A child is focused only if this context is focused and the parent
+        # marked this child as its focused one (hints["focused"]).
+        child_focused = self._focused and bool(hints.get("focused", False))
         child_ctx = DrawContext(
             self._backend, rect, self._caps,
             clip=clip, panel=self._panel, background=background,
+            focused=child_focused,
         )
         widget.draw(child_ctx)
         child_ctx._close()
@@ -559,6 +576,7 @@ class Panel:
         slot_ctx = DrawContext(
             self.backend, rect, self.backend.capabilities,
             panel=self, background=background,
+            focused=slot.widget is self._focused,
         )
         slot.widget.draw(slot_ctx)
         slot_ctx._close()
@@ -584,6 +602,8 @@ class Panel:
         layer_ctx = DrawContext(
             self.backend, rect, self.backend.capabilities,
             panel=self, background=background,
+            # The top-most layer is the active modal, so it holds the focus.
+            focused=bool(self._layers) and slot is self._layers[-1],
         )
         slot.widget.draw(layer_ctx)
         layer_ctx._close()

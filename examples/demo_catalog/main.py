@@ -35,12 +35,17 @@ from puikit import (
 from puikit.backends import create_backend
 from puikit.widgets import (
     Button,
+    Checkbox,
     Container,
+    DropDown,
     Label,
     LayoutView,
     ListView,
+    RadioGroup,
     ScrollBar,
+    ScrollView,
     TextBlock,
+    TextEdit,
     Widget,
 )
 
@@ -137,6 +142,78 @@ def build_label_page(panel: Panel) -> VSplit:
         Item(Label("Reverse label", Style(attr=TextAttribute.REVERSE)), size=1),
         Item(Label("Colored label", Style(fg=(13, 188, 121))), size=1),
         Item(Label(""), weight=1),
+        gap=1,
+    )
+
+
+def build_widgets_page(panel: Panel) -> VSplit:
+    # A form of basic interactive widgets, stacked in a ScrollView so the page
+    # scrolls when the controls outgrow the pane. Each control reports a state
+    # change into the shared status line. Focus moves with tab / shift+tab
+    # (the ScrollView cycles its focusable children and scrolls them into view);
+    # space / enter activates, arrows move within the focused control.
+    status = Label("tab: next field  ·  space/enter: activate  ·  arrows: adjust", DIM)
+
+    def set_status(msg: str) -> None:
+        status.text = msg
+
+    feature = Checkbox(
+        "Enable feature", checked=True,
+        on_change=lambda v: set_status(f"Checkbox 'Enable feature' -> {v}"),
+    )
+    hidden = Checkbox(
+        "Show hidden files",
+        on_change=lambda v: set_status(f"Checkbox 'Show hidden files' -> {v}"),
+    )
+    size = RadioGroup(
+        ["Small", "Medium", "Large"], selected=1,
+        on_change=lambda i, t: set_status(f"Radio -> {t}"),
+    )
+    color = DropDown(
+        ["Red", "Green", "Blue", "Magenta", "Cyan"],
+        on_change=lambda i, t: set_status(f"DropDown -> {t}"),
+    )
+    name = TextEdit(
+        "edit me",
+        on_change=lambda s: set_status(f"TextEdit -> {s!r}"),
+        on_submit=lambda s: set_status(f"TextEdit submitted -> {s!r}"),
+    )
+    action = Button(
+        "Apply", on_click=lambda: set_status("Button 'Apply' clicked"), style=BUTTON_FACE
+    )
+
+    heading = lambda text: Label(text, BOLD)  # noqa: E731 - tiny local helper
+    scroller = ScrollView(
+        [
+            (heading("Check boxes"), 1),
+            (feature, 1),
+            (hidden, 1),
+            (heading("Radio buttons"), 1),
+            (size, 3),
+            (heading("Drop-down (opens inline; the list pushes the rest down)"), 1),
+            (color, "auto"),
+            (heading("Text edit"), 1),
+            (name, 1),
+            (heading("Button"), 1),
+            (action, 3),
+            (heading("Static text — single line (Label)"), 1),
+            (Label("The quick brown fox jumps over the lazy dog."), 1),
+            (heading("Static text — multi line (TextBlock)"), 1),
+            (
+                TextBlock(
+                    "TextBlock reserves one row per line:\n"
+                    "  · it never reflows on the backend,\n"
+                    "  · it just clips at the pane edge,\n"
+                    "  · and the ScrollView scrolls past it.",
+                ),
+                4,
+            ),
+        ],
+        gap=1,
+    )
+    return VSplit(
+        Item(scroller, weight=1, hints={"surface": "content"}),
+        Item(status, size=1),
         gap=1,
     )
 
@@ -607,6 +684,7 @@ def build_layer_page(panel: Panel) -> VSplit:
 
 PAGES = [
     ("Label", build_label_page),
+    ("Widgets", build_widgets_page),
     ("ListView", build_list_page),
     ("ScrollBar", build_scrollbar_page),
     ("Animation", build_animation_page),

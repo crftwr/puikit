@@ -67,7 +67,8 @@ class LayoutView(Widget):
                 None,
             )
         for widget, rect, hints in placements:
-            ctx.draw_child(widget, rect.x, rect.y, rect.w, rect.h, hints=hints)
+            child_hints = {**hints, "focused": widget is self._focused}
+            ctx.draw_child(widget, rect.x, rect.y, rect.w, rect.h, hints=child_hints)
         for divider in lctx.dividers:
             ctx.draw_divider(divider)
 
