@@ -15,7 +15,10 @@ class ScrollBar(Widget):
         self.style = style
 
     def draw(self, ctx: DrawContext) -> None:
-        ctx.draw_scrollbar(0, 0, ctx.height, self.pos, self.ratio, self.style)
+        # Use the exact (possibly fractional) extent, not the truncated
+        # ctx.height: a pane 16.65 base units tall would otherwise leave the
+        # track ~0.65 units short of the pane edge on pixel-layout backends.
+        ctx.draw_scrollbar(0, 0, ctx.size_units[1], self.pos, self.ratio, self.style)
 
     def measure(self, ctx: LayoutContext, axis: str, available: float) -> SizeRequest:
         # Width is fixed by the backend, not by any font: min == pref == max,
