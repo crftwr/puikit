@@ -94,6 +94,41 @@ def test_listview_mouse_scroll_clamps_at_bounds(backend):
     assert listview.offset == 15  # bottom: len(items) - viewport_h
 
 
+def test_listview_smooth_scroll_accumulates_fractional_offset(backend):
+    # A backend whose scroll event carries a precise sub-unit delta (in hints)
+    # scrolls the viewport by that fraction of a row, not a whole row.
+    panel = Panel(backend)
+    listview = ListView([f"item{i}" for i in range(20)])
+    panel.add(listview, x=0, y=0, w=10, h=5)
+    panel.render()
+    panel.dispatch_event(
+        Event(type=EventType.MOUSE_SCROLL, x=1, y=1, scroll=-1, hints={"scroll_units": -0.5})
+    )
+    assert listview.offset == pytest.approx(0.5)
+    panel.dispatch_event(
+        Event(type=EventType.MOUSE_SCROLL, x=1, y=1, scroll=-1, hints={"scroll_units": -1.25})
+    )
+    assert listview.offset == pytest.approx(1.75)
+
+
+def test_listview_smooth_scroll_clamps_to_content(backend):
+    panel = Panel(backend)
+    listview = ListView([f"item{i}" for i in range(20)])
+    panel.add(listview, x=0, y=0, w=10, h=5)
+    panel.render()
+    # Overscroll past the bottom: clamped to content_h - viewport_h, even
+    # though the requested fractional delta runs well past it.
+    panel.dispatch_event(
+        Event(type=EventType.MOUSE_SCROLL, x=1, y=1, scroll=-1, hints={"scroll_units": -99.5})
+    )
+    assert listview.offset == pytest.approx(15.0)
+    # And back up past the top.
+    panel.dispatch_event(
+        Event(type=EventType.MOUSE_SCROLL, x=1, y=1, scroll=1, hints={"scroll_units": 99.5})
+    )
+    assert listview.offset == pytest.approx(0.0)
+
+
 def test_listview_keyboard_pulls_selection_back_into_view(backend):
     panel = Panel(backend)
     listview = ListView([f"item{i}" for i in range(20)])

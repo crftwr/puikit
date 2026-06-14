@@ -258,7 +258,16 @@ class _PuiKitView(NSView):
             return
         x, y = self._mouse_unit(ns_event)
         scroll = 1 if delta > 0 else -1
-        self.backend._dispatch(Event(type=EventType.MOUSE_SCROLL, x=x, y=y, scroll=scroll))
+        # A trackpad / precise wheel reports pixel-resolution deltas; convert
+        # them to base units so widgets can scroll at pixel granularity. A
+        # classic line wheel reports whole lines, so it stays a discrete notch
+        # (no scroll_units hint) and widgets fall back to ``scroll``.
+        hints = {}
+        if ns_event.hasPreciseScrollingDeltas():
+            hints["scroll_units"] = delta / self.backend._base_h
+        self.backend._dispatch(
+            Event(type=EventType.MOUSE_SCROLL, x=x, y=y, scroll=scroll, hints=hints)
+        )
 
 
 class _PuiKitWindowDelegate(NSObject):

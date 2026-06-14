@@ -137,12 +137,14 @@ class DrawContext:
         columns; the font is folded first, matching what draw_text will draw."""
         return self._backend.measure_text(text, self._resolve(style))
 
-    def draw_text(self, x: int, y: int, text: str, style: Style = DEFAULT_STYLE) -> None:
+    def draw_text(self, x: int, y: float, text: str, style: Style = DEFAULT_STYLE) -> None:
         # Gate on the exact (possibly fractional) extent and let the
         # backend's clip rect cut the overflow: a pane squeezed to 0.97
         # base units by pixel rounding must still render its row 0, clipped at
-        # the pane edge, not drop it.
-        if not 0 <= y < self._rect.h:
+        # the pane edge, not drop it. y may be fractional and is allowed to
+        # start within one unit above the pane (a row mid-scroll off the top,
+        # e.g. ListView's smooth scroll): its visible part is clipped in.
+        if not -1 < y < self._rect.h:
             return
         if x < 0:
             text = text[-x:]
