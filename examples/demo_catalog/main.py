@@ -18,6 +18,7 @@ the page, 1..9 jump to a page, d opens a layered dialog, q quits.
 """
 
 import argparse
+import colorsys
 
 from puikit import (
     EventType,
@@ -382,6 +383,80 @@ def build_fonts_page(panel: Panel) -> VSplit:
     )
 
 
+class Swatch(Widget):
+    """A filled color block labeled with its RGB. The app passes one RGB
+    intent; GUI paints the exact channel values, TUI approximates them through
+    the xterm-256 palette — the same color, two fidelities. No swatch branches
+    on the backend; the fill carries the difference."""
+
+    def __init__(self, color: tuple[int, int, int], name: str = ""):
+        self.color = color
+        self.name = name
+
+    def draw(self, ctx) -> None:
+        ctx.fill_rect(0, 0, ctx.width, ctx.height, Style(bg=self.color))
+        # A thin gradient cell has no room for a label: the color is the point.
+        if ctx.width < 6:
+            return
+        r, g, b = self.color
+        # Pick a legible foreground from the swatch's luminance, so the label
+        # stays readable on both light and dark fills.
+        lum = 0.299 * r + 0.587 * g + 0.114 * b
+        fg = (20, 20, 20) if lum > 140 else (235, 235, 235)
+        rgb_text = f"{r}, {g}, {b}"
+        if ctx.height >= 2 and self.name:
+            ctx.draw_text(1, 0, self.name, Style(fg=fg, bg=self.color, attr=TextAttribute.BOLD))
+            ctx.draw_text(1, 1, rgb_text, Style(fg=fg, bg=self.color))
+        else:
+            ctx.draw_text(1, 0, self.name or rgb_text, Style(fg=fg, bg=self.color))
+
+
+PALETTE = [
+    ("Red", (205, 49, 49)),
+    ("Green", (13, 188, 121)),
+    ("Yellow", (229, 229, 16)),
+    ("Blue", (36, 114, 200)),
+    ("Magenta", (188, 63, 188)),
+    ("Cyan", (17, 168, 205)),
+]
+
+
+def _hsv_rgb(h: float, s: float, v: float) -> tuple[int, int, int]:
+    r, g, b = colorsys.hsv_to_rgb(h, s, v)
+    return (round(r * 255), round(g * 255), round(b * 255))
+
+
+def build_color_page(panel: Panel) -> VSplit:
+    # One RGB intent per swatch; GUI paints exact channels, TUI snaps each to
+    # the nearest xterm-256 cell — same color, two fidelities (curses_backend
+    # ._xterm256_index). A 2D color table shows the difference plainly: hue
+    # sweeps across columns, brightness down rows. The grid reads as a smooth
+    # field on GUI and as discrete xterm-256 bands on TUI, where the palette
+    # quantizes it. The grid is built from the layout system — a VSplit of
+    # HSplit rows — so it re-resolves to fill the pane on every resize.
+    cols, rows = 32, 12
+
+    def cell(cx: int, cy: int) -> Swatch:
+        hue = cx / cols
+        value = 1.0 - 0.9 * (cy / (rows - 1))  # bright at top, dark at bottom
+        return Swatch(_hsv_rgb(hue, 1.0, value))
+
+    grid = VSplit(
+        *[
+            Item(HSplit(*[Item(cell(cx, cy), weight=1) for cx in range(cols)]), weight=1)
+            for cy in range(rows)
+        ]
+    )
+    return VSplit(
+        Item(Label("GUI paints exact RGB; TUI snaps to the xterm-256 palette", DIM), size=1),
+        # Named palette: each swatch is wide enough to label with its RGB.
+        Item(HSplit(*[Item(Swatch(c, n), weight=1) for n, c in PALETTE], gap=1), size=4),
+        Item(Label("Hue x brightness table (smooth on GUI, banded on TUI):", DIM), size=1),
+        Item(grid, weight=1),
+        gap=1,
+    )
+
+
 PAGES = [
     ("Label", build_label_page),
     ("ListView", build_list_page),
@@ -390,6 +465,7 @@ PAGES = [
     ("Layout", build_layout_page),
     ("Intrinsic", build_intrinsic_page),
     ("Fonts", build_fonts_page),
+    ("Color", build_color_page),
 ]
 
 
