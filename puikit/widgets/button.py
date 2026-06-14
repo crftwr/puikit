@@ -11,6 +11,7 @@ constant.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 
 from ..backend import DEFAULT_STYLE, Style, TextAttribute
 from ..event import Event, EventType
@@ -41,7 +42,9 @@ class Button(Widget):
         # Center the label within whatever rect the layout assigned.
         tx = max(0, (ctx.width - len(self.label)) // 2)
         ty = max(0, ctx.height // 2)
-        ctx.draw_text(tx, ty, self.label, Style(self.style.fg, self.style.bg, TextAttribute.BOLD))
+        # Bold the label, keeping the rest of the style (fg/bg/font) intact.
+        label_style = replace(self.style, attr=self.style.attr | TextAttribute.BOLD)
+        ctx.draw_text(tx, ty, self.label, label_style)
 
     def measure(self, ctx: LayoutContext, axis: str, available: float) -> SizeRequest:
         # Height = one text line + vertical padding; width = the label width +

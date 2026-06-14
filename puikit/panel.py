@@ -12,9 +12,10 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from .backend import Backend, DEFAULT_STYLE, Style
+from .backend import Backend, DEFAULT_STYLE, Style, TextAttribute
 from .capability import CapabilityProfile
 from .event import Event, EventType
+from .font import FontSlant, FontWeight
 from .theme import Theme, theme_for
 
 # Text fallbacks used when a backend cannot draw real icons.
@@ -74,10 +75,22 @@ class DrawContext:
         self._pushed_clips = 0
 
     def _resolve(self, style: Style) -> Style:
-        """Styles without an explicit background inherit the pane's."""
-        if self._background is not None and style.bg is None:
-            return Style(style.fg, self._background, style.attr)
-        return style
+        """The single seam every Style crosses before the backend sees it:
+        styles without an explicit background inherit the pane's, and a font
+        is folded down for backends that cannot render it (docs/font_system.md
+        §6) — weight/slant become bold/italic attributes, the rest is dropped."""
+        bg = self._background if (self._background is not None and style.bg is None) else style.bg
+        attr = style.attr
+        font = style.font
+        if font is not None and not self._caps.supports("fonts"):
+            if font.weight >= FontWeight.SEMI_BOLD:
+                attr |= TextAttribute.BOLD
+            if font.slant is FontSlant.ITALIC:
+                attr |= TextAttribute.ITALIC
+            font = None
+        if (bg, attr, font) == (style.bg, style.attr, style.font):
+            return style
+        return Style(style.fg, bg, attr, font)
 
     @property
     def width(self) -> int:
@@ -116,6 +129,13 @@ class DrawContext:
             measure=self._backend.measure_text,
             scrollbar_units=self._backend.scrollbar_units,
         )
+
+    def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
+        """Displayed width of ``text`` in this pane's unit (base units;
+        fractional on GUI), so a widget can center, right-align, or wrap
+        proportional text against its pane size. Whole-unit backends count
+        columns; the font is folded first, matching what draw_text will draw."""
+        return self._backend.measure_text(text, self._resolve(style))
 
     def draw_text(self, x: int, y: int, text: str, style: Style = DEFAULT_STYLE) -> None:
         # Gate on the exact (possibly fractional) extent and let the

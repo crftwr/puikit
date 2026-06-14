@@ -9,7 +9,7 @@ pytestmark = pytest.mark.skipif(
 )
 pytest.importorskip("AppKit", reason="pyobjc not installed")
 
-from puikit import Font, Style, TextAttribute  # noqa: E402
+from puikit import Font, FontSlant, FontWeight, Style, TextAttribute  # noqa: E402
 from puikit.backends.macos_backend import (  # noqa: E402
     MacOSBackend,
     translate_key,
@@ -29,6 +29,48 @@ def test_base_font_drives_base_unit():
     # A bigger base font means a bigger base unit, both axes.
     assert large.base_size[0] > small.base_size[0]
     assert large.base_size[1] > small.base_size[1]
+
+
+def test_resolve_font_honors_monospace_and_proportional():
+    # No family: monospace=True gives a fixed-advance face (the base grid font),
+    # monospace=False gives the proportional system UI font.
+    backend = MacOSBackend()
+    mono = backend.resolve_font(Font(monospace=True))
+    prop = backend.resolve_font(Font())  # default UI font
+    assert mono.isFixedPitch()
+    assert not prop.isFixedPitch()
+
+
+def test_resolve_font_applies_weight_and_slant():
+    backend = MacOSBackend()
+    bold = backend.resolve_font(Font(weight=FontWeight.BOLD))
+    italic = backend.resolve_font(Font(slant=FontSlant.ITALIC))
+    from AppKit import NSFontManager
+
+    mgr = NSFontManager.sharedFontManager()
+    assert mgr.traitsOfFont_(bold) & 0x2  # NSBoldFontMask
+    assert mgr.traitsOfFont_(italic) & 0x1  # NSItalicFontMask
+
+
+def test_style_font_is_cached():
+    backend = MacOSBackend()
+    style = Style(font=Font(family="Georgia", size=18))
+    first = backend._resolve_style_font(style)
+    assert backend._resolve_style_font(style) is first
+
+
+def test_measure_text_base_font_counts_columns():
+    backend = MacOSBackend()
+    backend._init_fonts()
+    assert backend.measure_text("hello") == 5.0
+
+
+def test_measure_text_proportional_is_not_column_count():
+    backend = MacOSBackend()
+    backend._init_fonts()
+    width = backend.measure_text("WWWWW", Style(font=Font()))
+    # A proportional run of wide glyphs measures wider than its column count.
+    assert width > 5.0
 
 
 def test_translate_arrow_key():

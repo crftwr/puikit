@@ -319,6 +319,8 @@ class MacOSBackend(Backend):
         self._back: list[tuple] = []
         self._front: list[tuple] = []
         self._fonts: dict[TextAttribute, Any] = {}
+        # Per-Style font cache: resolved NSFonts keyed by (Font, bold, italic).
+        self._style_fonts: dict[tuple, Any] = {}
         self._animations: dict[int, Animation] = {}  # keyed by id(widget)
         self._anim_timer = None
         self._tick_callbacks: list[Any] = []
@@ -370,12 +372,13 @@ class MacOSBackend(Backend):
 
     def resolve_font(self, font: Font, bold: bool = False, italic: bool = False) -> Any:
         """Turn a Font descriptor into a native NSFont. Shared by the base font
-        and (later) per-Style widget fonts, so both name fonts the same way.
+        and per-Style widget fonts, so both name fonts the same way.
 
-        ``family`` is honored if installed; otherwise — and whenever
-        ``monospace`` is set or no family is given — the system monospaced font
-        is used (the base font must stay fixed-advance to tile the grid).
-        ``bold``/``italic`` force those traits on top of the descriptor."""
+        ``family`` is honored if installed. With no family, ``monospace``
+        chooses between the system monospaced face (the base grid font, which
+        must stay fixed-advance to tile the grid) and the proportional system
+        UI font (``Font()`` defaults). ``bold``/``italic`` force those traits
+        on top of the descriptor."""
         size = float(font.size) if font.size is not None else 14.0
         want_bold = bold or font.bold
         weight = NSFontWeightBold if want_bold else NSFontWeightRegular
@@ -383,10 +386,13 @@ class MacOSBackend(Backend):
         if font.family:
             ns = NSFont.fontWithName_size_(font.family, size)
         if ns is None:
-            ns = (
-                NSFont.monospacedSystemFontOfSize_weight_(size, weight)
-                or NSFont.fontWithName_size_("Menlo", size)
-            )
+            if font.monospace:
+                ns = (
+                    NSFont.monospacedSystemFontOfSize_weight_(size, weight)
+                    or NSFont.fontWithName_size_("Menlo", size)
+                )
+            else:
+                ns = NSFont.systemFontOfSize_weight_(size, weight)
         # Apply traits a named family does not already encode.
         mask = 0
         if want_bold:
@@ -409,6 +415,32 @@ class MacOSBackend(Backend):
         ).width
         self._base_w = math.ceil(advance)
         self._base_h = math.ceil(regular.ascender() - regular.descender() + regular.leading())
+
+    def _resolve_style_font(self, style: Style) -> Any:
+        """The NSFont for a Style carrying a per-widget font, cached by request.
+        Attribute bold/italic compose with the font's own weight/slant (the
+        stronger wins; either italic source makes it italic — see §5)."""
+        font = style.font
+        bold = bool(style.attr & TextAttribute.BOLD)
+        italic = bool(style.attr & TextAttribute.ITALIC)
+        key = (font, bold, italic)
+        ns = self._style_fonts.get(key)
+        if ns is None:
+            ns = self.resolve_font(font, bold=bold, italic=italic)
+            self._style_fonts[key] = ns
+        return ns
+
+    def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
+        """Displayed width in base units. Base-font (font=None) text tiles the
+        grid one column per glyph; a real per-Style font is measured natively
+        and divided by the base unit width, so the result stays in base units."""
+        if style.font is None:
+            return float(len(text))
+        ns_font = self._resolve_style_font(style)
+        width = NSString.stringWithString_(text).sizeWithAttributes_(
+            {NSFontAttributeName: ns_font}
+        ).width
+        return width / self._base_w if self._base_w else float(len(text))
 
     # --- geometry ----------------------------------------------------------
 
@@ -632,6 +664,12 @@ class MacOSBackend(Backend):
             fg, bg = (bg or _DEFAULT_BG), (style.fg or _DEFAULT_FG)
         alpha = 0.55 if style.attr & TextAttribute.DIM else 1.0
 
+        # A per-Style font flows by its natural advances (proportional, sized,
+        # or a named family); the base grid font (font=None) tiles the grid.
+        if style.font is not None:
+            self._render_flow_text(x, y, text, style, fg, bg, alpha)
+            return
+
         weight = TextAttribute.BOLD if style.attr & TextAttribute.BOLD else TextAttribute.NORMAL
         attrs = {
             NSFontAttributeName: self._fonts[weight],
@@ -658,6 +696,28 @@ class MacOSBackend(Backend):
             NSString.stringWithString_(glyph).drawAtPoint_withAttributes_(
                 self._unit_rect(x + i, y, 1, 1).origin, attrs
             )
+
+    def _render_flow_text(
+        self, x: int, y: int, text: str, style: Style, fg, bg, alpha: float
+    ) -> None:
+        """Render text with a real per-Style font: a single run drawn at its
+        natural advances from the run origin (no per-glyph grid placement), so
+        proportional and sized text flow continuously; the pane clip trims the
+        overflow. This is the GUI "no text grid" path (docs/font_system.md §9)."""
+        ns_font = self._resolve_style_font(style)
+        attrs = {
+            NSFontAttributeName: ns_font,
+            NSForegroundColorAttributeName: _ns_color(fg, alpha),
+        }
+        if style.attr & TextAttribute.UNDERLINE:
+            attrs[NSUnderlineStyleAttributeName] = NSUnderlineStyleSingle
+        ns_text = NSString.stringWithString_(text)
+        origin = self._unit_rect(x, y, 1, 1).origin
+        if bg is not None:
+            width = ns_text.sizeWithAttributes_({NSFontAttributeName: ns_font}).width
+            _ns_color(bg).setFill()
+            NSRectFill(NSMakeRect(origin.x, origin.y, width, self._base_h))
+        ns_text.drawAtPoint_withAttributes_(origin, attrs)
 
     def _render_box(
         self, x: int, y: int, w: int, h: int, style: Style, hints: dict[str, Any]

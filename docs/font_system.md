@@ -1,6 +1,9 @@
 # PuiKit Font System — Design
 
-Status: **draft for review** (no implementation merged yet)
+Status: **implemented**. `Style.font`, the `fonts` / `proportional_text`
+capabilities, the Panel fold seam (§6), `measure_text` (§8), the macOS
+per-Style render/flow path (§9), and the `demo_catalog` **Fonts** page (§11)
+are merged. The base font / base-unit grounding (§3) was already in place.
 
 This document proposes how PuiKit expresses fonts — typeface, size, weight,
 slant, and proportional vs. monospaced text — across backends whose font

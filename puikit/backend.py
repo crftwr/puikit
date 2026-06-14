@@ -16,6 +16,7 @@ from typing import Any
 
 from .capability import CapabilityProfile
 from .event import Event
+from .font import Font
 
 
 class TextAttribute(IntFlag):
@@ -36,6 +37,12 @@ class Style:
     fg: Color | None = None
     bg: Color | None = None
     attr: TextAttribute = TextAttribute.NORMAL
+    # Optional font for text. None -> the backend's base monospaced grid font,
+    # so every existing widget renders unchanged. A `fonts`-capable backend
+    # renders a real face/size/weight/slant (proportional when monospace=False);
+    # backends without `fonts` have the Panel fold weight/slant into `attr` and
+    # drop the rest (see docs/font_system.md §6).
+    font: Font | None = None
 
 
 DEFAULT_STYLE = Style()

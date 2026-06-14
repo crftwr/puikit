@@ -19,7 +19,18 @@ the page, 1..9 jump to a page, d opens a layered dialog, q quits.
 
 import argparse
 
-from puikit import EventType, HSplit, Item, Panel, Style, TextAttribute, VSplit
+from puikit import (
+    EventType,
+    Font,
+    FontSlant,
+    FontWeight,
+    HSplit,
+    Item,
+    Panel,
+    Style,
+    TextAttribute,
+    VSplit,
+)
 from puikit.backends import create_backend
 from puikit.widgets import (
     Button,
@@ -336,6 +347,41 @@ def build_intrinsic_page(panel: Panel) -> VSplit:
     )
 
 
+def build_fonts_page(panel: Panel) -> VSplit:
+    # One widget vocabulary, two honest resolutions. On GUI each row renders a
+    # real face / size / weight / slant (proportional unless monospace=True);
+    # on TUI the Panel folds weight/slant into bold/italic attributes and drops
+    # face, size, and proportional flow — the same Style, degraded in one place
+    # (docs/font_system.md §6). No row branches on the backend.
+    def row(label: str, style: Style = Style(), size: float = 1) -> Item:
+        return Item(Label(label, style), size=size)
+
+    return VSplit(
+        Item(
+            Label("GUI renders faces, sizes, weights, slants; TUI folds them", DIM),
+            size=1,
+        ),
+        # font=None -> the base monospaced grid font (unchanged everywhere).
+        row("Base grid font (font=None) — monospaced, column-aligned"),
+        # Font() is the proportional system UI font on GUI; mono on TUI.
+        row("Proportional UI font — flows by natural advances", Style(font=Font())),
+        row("Monospaced UI font — fixed advance", Style(font=Font(monospace=True))),
+        # Weights: only >= SEMI_BOLD survives on TUI (as bold).
+        row("Light (300) — folds to plain on TUI", Style(font=Font(weight=FontWeight.LIGHT))),
+        row("Semibold (600) — folds to bold on TUI", Style(font=Font(weight=FontWeight.SEMI_BOLD))),
+        row("Bold (700)", Style(font=Font(weight=FontWeight.BOLD))),
+        # Slant: italic survives on TUI as the italic attribute.
+        row("Italic — folds to italic on TUI", Style(font=Font(slant=FontSlant.ITALIC))),
+        # A named installed family (GUI only; ignored on TUI).
+        row("Named family: Georgia, 16pt", Style(font=Font(family="Georgia", size=16)), size=2),
+        # Decorative size: it needs layout room to fit (size=3), else it clips
+        # at the pane edge like any overflow — size never reshapes implicitly.
+        row("Big Title — sized text", Style(font=Font(size=28, weight=FontWeight.SEMI_BOLD)), size=3),
+        Item(Label(""), weight=1),
+        gap=0,
+    )
+
+
 PAGES = [
     ("Label", build_label_page),
     ("ListView", build_list_page),
@@ -343,6 +389,7 @@ PAGES = [
     ("Animation", build_animation_page),
     ("Layout", build_layout_page),
     ("Intrinsic", build_intrinsic_page),
+    ("Fonts", build_fonts_page),
 ]
 
 
