@@ -208,6 +208,19 @@ def test_textedit_ime_composition_then_commit(backend):
     assert field._preedit == ""
 
 
+def test_textedit_wide_chars_advance_two_columns(backend):
+    # Wide (CJK) glyphs occupy two display columns, so the second glyph is
+    # placed two cells along, not one — no overlap.
+    panel = Panel(backend)
+    field = TextEdit("あい", width=12)
+    panel.add(field, x=0, y=0, w=12, h=1)
+    panel.render()
+    line = backend.snapshot()[0]
+    assert line[1] == "あ"
+    assert line[3] == "い"  # placed at column 1 + width("あ")=2
+    assert line[2] == " "   # the wide glyph's second cell, left blank on the grid
+
+
 def test_textedit_requests_input_position_when_focused(backend):
     # While focused the field reports its caret to the backend (drives the IME
     # candidate window). The memory backend records the call via Panel.

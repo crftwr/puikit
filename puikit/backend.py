@@ -109,11 +109,14 @@ class Backend(ABC):
 
     def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
         """Displayed width of ``text`` in base units (fractional on GUI). Whole-unit
-        backends count columns; GUI backends with a proportional or sized font
-        measure natively and divide by the base unit width, so the result stays in
-        the shared base unit unit. Used by widgets that size themselves to text
-        (a label, a button) — the layout never calls a font directly."""
-        return float(len(text))
+        backends count display columns (East Asian wide characters count as two);
+        GUI backends with a proportional or sized font measure natively and divide
+        by the base unit width, so the result stays in the shared base unit. Used
+        by widgets that size themselves to text (a label, a button) — the layout
+        never calls a font directly."""
+        from .text import display_width
+
+        return float(display_width(text))
 
     # --- core drawing primitives (all backends implement) -------------------
 

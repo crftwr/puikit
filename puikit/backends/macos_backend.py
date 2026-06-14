@@ -84,6 +84,7 @@ from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..event import Event, EventType
 from ..font import Font, FontWeight
+from ..text import display_width
 
 try:
     from Quartz import (
@@ -643,7 +644,7 @@ class MacOSBackend(Backend):
         grid one column per glyph; a real per-Style font is measured natively
         and divided by the base unit width, so the result stays in base units."""
         if style.font is None:
-            return float(len(text))
+            return float(display_width(text))
         ns_font = self._resolve_style_font(style)
         width = NSString.stringWithString_(text).sizeWithAttributes_(
             {NSFontAttributeName: ns_font}
@@ -896,14 +897,21 @@ class MacOSBackend(Backend):
         # the rest of the framework works in. The run's background fills whole
         # base units (not just glyph advances) so reversed/selected runs have no
         # sub-pixel seams.
+        # Advance by each glyph's display width (East Asian wide glyphs span two
+        # base units), so a wide CJK glyph gets a 2-cell slot and the next glyph
+        # does not overlap it.
         runs = _glyph_runs(text)
+        widths = [max(1, display_width(glyph)) for glyph in runs]
+        total = sum(widths)
         if bg is not None:
             _ns_color(bg).setFill()
-            NSRectFill(self._unit_rect(x, y, len(runs), 1))
-        for i, glyph in enumerate(runs):
+            NSRectFill(self._unit_rect(x, y, total, 1))
+        col = 0
+        for glyph, w in zip(runs, widths):
             NSString.stringWithString_(glyph).drawAtPoint_withAttributes_(
-                self._unit_rect(x + i, y, 1, 1).origin, attrs
+                self._unit_rect(x + col, y, w, 1).origin, attrs
             )
+            col += w
 
     def _render_flow_text(
         self, x: int, y: int, text: str, style: Style, fg, bg, alpha: float

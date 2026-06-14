@@ -21,6 +21,7 @@ from ..backend import DEFAULT_STYLE, Style, TextAttribute
 from ..event import Event, EventType
 from ..layout import LayoutContext, SizeRequest
 from ..panel import DrawContext
+from ..text import char_width, display_width
 from ..theme import DEFAULT_THEME
 from ._input import typed_char
 from .base import Widget
@@ -76,39 +77,49 @@ class TextEdit(Widget):
         bg = theme.hover_bg if (ctx.hovered and not ctx.focused) else theme.control_bg
         ctx.fill_rect(0, 0, min(float(self.width), ctx.size_units[0]), 1, Style(bg=bg))
 
-        visible = disp[self._view : self._view + field_w].ljust(field_w)
-        ctx.draw_text(1, 0, visible, Style(fg=theme.text, bg=bg))
-        # Underline the marked (composition) text in the accent color.
-        for i, ch in enumerate(visible):
-            idx = self._view + i
-            if pre_start <= idx < pre_end:
-                ctx.draw_text(
-                    1 + i, 0, ch,
-                    Style(fg=theme.accent, bg=bg, attr=TextAttribute.UNDERLINE),
-                )
+        # Lay out characters left to right in display columns (wide CJK glyphs
+        # take two), stopping at the field edge. The caret column is tracked the
+        # same way so it lands between the right glyphs.
+        col = 0
+        caret_col = None
+        for idx in range(self._view, len(disp)):
+            if idx == caret:
+                caret_col = col
+            ch = disp[idx]
+            cw = char_width(ch)
+            if col + cw > field_w:
+                break
+            marked = pre_start <= idx < pre_end
+            attr = TextAttribute.UNDERLINE if marked else TextAttribute.NORMAL
+            fg = theme.accent if marked else theme.text
+            ctx.draw_text(1 + col, 0, ch, Style(fg=fg, bg=bg, attr=attr))
+            col += cw
+        if caret_col is None:  # caret sits at/after the last visible glyph
+            caret_col = col
 
         if ctx.focused:
-            self._draw_caret(ctx, theme, disp, caret, field_w, bg)
-            self._notify_input_position(ctx, caret)
+            self._draw_caret(ctx, theme, disp, caret, caret_col, field_w, bg)
+            self._notify_input_position(ctx, caret_col)
 
-    def _draw_caret(self, ctx, theme, disp, caret, field_w, bg) -> None:
-        cx = 1 + (caret - self._view)
-        if 1 <= cx <= field_w:
+    def _draw_caret(self, ctx, theme, disp, caret, caret_col, field_w, bg) -> None:
+        if 0 <= caret_col < field_w:
             ch = disp[caret] if caret < len(disp) else " "
-            ctx.draw_text(cx, 0, ch, Style(fg=theme.control_bg, bg=theme.accent))
+            ctx.draw_text(1 + caret_col, 0, ch, Style(fg=theme.control_bg, bg=theme.accent))
 
-    def _notify_input_position(self, ctx: DrawContext, caret: int) -> None:
+    def _notify_input_position(self, ctx: DrawContext, caret_col: int) -> None:
         if ctx.panel is None:
             return
         sx, sy, _sw, _sh = ctx.screen_rect
-        cx = 1 + (caret - self._view)
-        ctx.panel.request_text_input(int(sx + cx), int(sy), {})
+        ctx.panel.request_text_input(int(sx + 1 + caret_col), int(sy), {})
 
     def _scroll_into_view(self, caret: int, field_w: int, length: int) -> None:
+        # Keep the start (a character index) such that the caret stays inside
+        # the field, measured in display columns (wide glyphs count as two).
+        disp = self.text[: self.cursor] + self._preedit + self.text[self.cursor :]
         if caret < self._view:
             self._view = caret
-        elif caret > self._view + field_w - 1:
-            self._view = caret - field_w + 1
+        while self._view < caret and display_width(disp[self._view : caret]) > field_w - 1:
+            self._view += 1
         self._view = max(0, min(self._view, max(0, length)))
 
     # --- events --------------------------------------------------------------
@@ -119,8 +130,13 @@ class TextEdit(Widget):
             self._preedit_caret = event.hints.get("caret", len(self._preedit))
             return True
         if event.type is EventType.MOUSE_CLICK:
-            col = int(event.x or 0) - 1
-            self.cursor = max(0, min(len(self.text), self._view + max(0, col)))
+            # Walk visible characters by display column to find the click target.
+            target = max(0, int(event.x or 0) - 1)
+            idx, col = self._view, 0
+            while idx < len(self.text) and col < target:
+                col += char_width(self.text[idx])
+                idx += 1
+            self.cursor = max(0, min(len(self.text), idx))
             return True
         if event.type is not EventType.KEY:
             return False

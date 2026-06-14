@@ -8,6 +8,7 @@ from typing import Any
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute
 from ..capability import PROFILE_TUI
 from ..event import Event, EventType
+from ..text import truncate_to_width as _truncate_to_width
 
 # RGB values of the 8 basic curses colors, used for nearest-color mapping.
 _BASIC_COLORS = [
@@ -130,7 +131,7 @@ class CursesBackend(Backend):
             if x < x0:
                 text = text[x0 - x:]
                 x = x0
-            text = text[: max(0, x1 - x)]
+            text = _truncate_to_width(text, max(0, x1 - x))
             if not text:
                 return
         w, h = self.size
@@ -139,7 +140,9 @@ class CursesBackend(Backend):
         if x < 0:
             text = text[-x:]
             x = 0
-        text = text[: w - x]
+        # Clip to the screen edge by display columns: wide (CJK) glyphs occupy
+        # two cells, so a character count would let text run past the edge.
+        text = _truncate_to_width(text, w - x)
         try:
             self._stdscr.addstr(y, x, text, self._to_curses_attr(style))
         except curses.error:
