@@ -1,21 +1,59 @@
-"""Declarative layout: weighted splits resolved by the Panel layer.
+"""Declarative layout: a region tree resolved by the Panel layer.
 
-Apps describe layout intent in cell units (fixed sizes, weights, and hints
-like min_px); resolution depends on the backend's capabilities:
+A widget tree never names a coordinate or a pixel. It describes *how regions
+divide space* with three kinds of intent, and each backend resolves that
+description with its own rules:
+
+- **Unitless intent** — alignment (left/center/right, top/center/bottom),
+  weight (a share of leftover space), and the split axis. These carry no
+  length at all, so nothing has to ground them in cells, pixels, or fonts.
+- **Length-bearing intent** — fixed sizes, minimums, gaps, and dividers.
+  Each is stated in the abstract *cell* unit, with an optional ``*_px``
+  companion that only applies on pixel-layout backends (see below).
+- **Intrinsic (measured) intent** — ``size="content"`` / ``min="content"``:
+  the widget measures *itself* (a button to its label, a scrollbar to a
+  backend-fixed thickness) and reports a length. The layout receives a
+  number; it never reads a font or a backend constant directly.
+
+Resolution differs per backend:
 
 - pixel_layout backends keep fractional cell coordinates, snapped to the
-  device-pixel grid (a 1:2 split lands on a real, whole-pixel boundary)
-- cell-grid backends (TUI) snap every boundary to whole cells
+  device-pixel grid (a 1:2 split lands on a real, whole-pixel boundary);
+- cell-grid backends (TUI) snap every boundary to whole cells.
 
-Widgets never see the difference — they just get their DrawContext.
+The *cell* is the abstract layout unit, not a character: on TUI it grounds in
+one terminal character; on GUI it grounds in a backend-configured block of
+logical pixels — never in a font metric. Widgets only ever see their resolved
+DrawContext; they never learn which resolution happened.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from .panel import Rect
+
+
+@dataclass(frozen=True)
+class SizeRequest:
+    """A widget's intrinsic size along one axis, in cells (fractional on GUI).
+
+    ``preferred`` is the natural size; ``min``/``max`` bound how far the
+    layout may shrink or grow it. A backend-fixed widget (a scrollbar) sets
+    ``min == preferred == max`` so it has zero slack and never yields space."""
+
+    min: float = 0.0
+    preferred: float = 0.0
+    max: float | None = None
+
+    def clamped(self, fallback: float | None = None) -> float:
+        """The preferred size clamped into [min, max]."""
+        hi = self.max if self.max is not None else fallback
+        value = self.preferred
+        if hi is not None:
+            value = min(value, hi)
+        return max(value, self.min)
 
 
 @dataclass(frozen=True)
@@ -24,8 +62,21 @@ class LayoutContext:
     cell_h: int
     snap: bool  # True: round all boundaries to whole cells (TUI)
     hairline: bool = False  # backend can draw sub-cell divider lines
+    # How a widget measures itself, supplied by the backend. measure_text
+    # returns a width in cells; scrollbar_cells is the backend's fixed
+    # scrollbar thickness. Both let intrinsic widgets size themselves
+    # without the layout ever touching the backend.
+    measure: Callable[[str, Any], float] | None = None
+    scrollbar_cells: float = 1.0
     # Divider rects emitted during resolve, for the Panel to draw.
     dividers: list[Divider] = field(default_factory=list)
+
+    def measure_text(self, text: str, style: Any = None) -> float:
+        """Width of ``text`` in cells. Falls back to the column count when the
+        backend supplies no measurer (cell-grid backends: one column/char)."""
+        if self.measure is not None:
+            return self.measure(text, style)
+        return float(len(text))
 
 
 @dataclass(frozen=True)
@@ -38,33 +89,82 @@ class Divider:
     level: str  # "subtle" | "strong"
 
 
+def _measure(content: Any, ctx: LayoutContext, axis: str, available: float) -> SizeRequest:
+    """Ask a widget for its intrinsic size along ``axis``; widgets without a
+    measure() (or nested splits) have no opinion."""
+    fn = getattr(content, "measure", None)
+    if fn is None:
+        return SizeRequest()
+    return fn(ctx, axis, available)
+
+
+def _align_offset(align: str, slack: float) -> float:
+    if align in ("center", "middle"):
+        return slack / 2.0
+    if align in ("end", "right", "bottom"):
+        return slack
+    return 0.0  # start / left / top
+
+
 class Item:
     """One slot in a split: a widget or a nested split, plus sizing intent.
 
-    size    fixed length in cells along the split axis (weight is ignored)
-    weight  share of the remaining space (flex)
-    hints   "min_cells": minimum length in cells
-            "min_px": minimum length in pixels, converted via the backend's
-            cell size; applies only on pixel-layout backends — cell-grid
-            backends (TUI) ignore it and use min_cells
+    size    main-axis length. A number is a fixed length in cells; the string
+            "content" makes the item *intrinsic* — the widget measures itself
+            and the layout reserves the measured length. Either way the item
+            does not flex.
+    size_px main-axis fixed length in pixels, used in place of ``size`` on
+            pixel-layout backends (cell-grid backends keep ``size``); the same
+            capability rule as ``min_px``.
+    weight  share of the remaining space, after fixed and intrinsic items.
+    align   cross-axis alignment of a shrink-to-content child within its slot:
+            "start"/"center"/"end". Only has an effect when the widget reports
+            an intrinsic cross size smaller than the slot (otherwise it fills).
+    hints   "min_cells": minimum length in cells, on every backend.
+            "min_px":    minimum in pixels; pixel-layout backends only.
+            "min":       "content" floors the item at its measured size, so a
+                         flex item never shrinks below what its content needs.
+            other hints (e.g. "surface", "bg") are forwarded to the placement.
     """
 
     def __init__(
         self,
         content: Any,
-        size: float | None = None,
+        size: float | str | None = None,
         weight: float = 1.0,
         hints: dict[str, Any] | None = None,
+        align: str | None = None,
+        size_px: float | None = None,
     ):
         self.content = content
         self.size = size
-        self.weight = weight if size is None else 0.0
+        self.size_px = size_px
+        # Fixed and intrinsic items do not flex.
+        flexes = size is None and size_px is None
+        self.weight = weight if flexes else 0.0
         self.hints = hints or {}
+        self.align = align
 
-    def min_size(self, cell_px: int, px_aware: bool) -> float:
+    @property
+    def category(self) -> str:
+        if self.size == "content":
+            return "content"
+        if self.size is not None or self.size_px is not None:
+            return "fixed"
+        return "flex"
+
+    def fixed_cells(self, cell_px: int, px_aware: bool) -> float:
+        """Resolved fixed length in cells (``size`` or ``size_px``)."""
+        if px_aware and self.size_px is not None and cell_px > 0:
+            return self.size_px / cell_px
+        return float(self.size) if isinstance(self.size, (int, float)) else 0.0
+
+    def min_cells(self, cell_px: int, px_aware: bool, req: SizeRequest | None) -> float:
         minimum = float(self.hints.get("min_cells", 0.0))
         if px_aware and "min_px" in self.hints and cell_px > 0:
             minimum = max(minimum, self.hints["min_px"] / cell_px)
+        if self.hints.get("min") == "content" and req is not None:
+            minimum = max(minimum, req.clamped())
         return minimum
 
 
@@ -102,10 +202,12 @@ class Split:
             return []
         horizontal = self._axis == "x"
         total = w if horizontal else h
+        cross_full = h if horizontal else w
+        cross_axis = "y" if horizontal else "x"
         cell_px = ctx.cell_w if horizontal else ctx.cell_h
         thickness = self._divider_thickness(cell_px, ctx)
         spacing = self.gap + thickness
-        sizes = self._sizes(total, cell_px, px_aware=not ctx.snap, spacing=spacing)
+        sizes = self._sizes(total, ctx, spacing=spacing, cross=cross_full)
 
         # Each item's start is anchored to the previous item's rounded end
         # plus the rounded spacing (not re-rounded from the accumulated
@@ -137,10 +239,21 @@ class Split:
 
         placements: list[tuple[Any, Rect, dict[str, Any]]] = []
         for item, (start, end) in zip(self.items, bounds):
+            main_size = end - start
+            # Cross axis: fill the slot, unless the item asks to shrink to its
+            # content and align within the slack (only meaningful when the
+            # measured size is smaller than the slot).
+            coff, csize = 0.0, cross_full
+            if item.align is not None and not isinstance(item.content, Split):
+                creq = _measure(item.content, ctx, cross_axis, main_size)
+                pref = creq.clamped(cross_full)
+                if 0.0 < pref < cross_full:
+                    csize = pref
+                    coff = _align_offset(item.align, cross_full - pref)
             if horizontal:
-                rect = (x + start, y, end - start, h)
+                rect = (x + start, y + coff, main_size, csize)
             else:
-                rect = (x, y + start, w, end - start)
+                rect = (x + coff, y + start, csize, main_size)
             if ctx.snap:
                 # Cell-grid backends must see true integers, not whole floats.
                 rect = tuple(round(v) for v in rect)
@@ -171,41 +284,80 @@ class Split:
         return 1.0 if self.divider == "strong" else 0.0
 
     def _sizes(
-        self, total: float, cell_px: int, px_aware: bool, spacing: float | None = None
+        self, total: float, ctx: LayoutContext, spacing: float, cross: float
     ) -> list[float]:
-        if spacing is None:
-            spacing = self.gap
+        """Main-axis lengths: fixed, then intrinsic (measured), then weighted,
+        then an overflow priority ladder. See the module docstring."""
+        horizontal = self._axis == "x"
+        cell_px = ctx.cell_w if horizontal else ctx.cell_h
+        px_aware = not ctx.snap
+
         gaps = spacing * (len(self.items) - 1)
         avail = max(0.0, total - gaps)
-        mins = [item.min_size(cell_px, px_aware) for item in self.items]
 
-        fixed_sum = sum(
-            max(item.size, minimum)
-            for item, minimum in zip(self.items, mins)
-            if item.size is not None
-        )
-        weight_sum = sum(item.weight for item in self.items if item.size is None)
-        flex_space = max(0.0, avail - fixed_sum)
-
-        sizes = []
-        for item, minimum in zip(self.items, mins):
-            if item.size is not None:
-                size = max(item.size, minimum)
-            elif weight_sum > 0:
-                size = max(flex_space * item.weight / weight_sum, minimum)
+        # 1. Measure the items whose size or floor is content-driven. A widget
+        #    reports a length; the layout never inspects why (font or const).
+        reqs: list[SizeRequest | None] = []
+        for item in self.items:
+            if item.category == "content" or item.hints.get("min") == "content":
+                reqs.append(_measure(item.content, ctx, self._axis, cross))
             else:
-                size = minimum
-            sizes.append(size)
+                reqs.append(None)
 
-        # Minimums can overflow the available space; shrink items that still
-        # have slack above their minimum, proportionally (single pass).
+        mins = [
+            item.min_cells(cell_px, px_aware, req)
+            for item, req in zip(self.items, reqs)
+        ]
+        cats = [item.category for item in self.items]
+
+        # 2. Reserve fixed and intrinsic items first; weight divides the rest.
+        reserved = 0.0
+        weight_sum = 0.0
+        bases: list[float | None] = []
+        for item, cat, minimum, req in zip(self.items, cats, mins, reqs):
+            if cat == "fixed":
+                base = max(item.fixed_cells(cell_px, px_aware), minimum)
+                reserved += base
+                bases.append(base)
+            elif cat == "content":
+                base = max(req.clamped(avail) if req else 0.0, minimum)
+                reserved += base
+                bases.append(base)
+            else:
+                weight_sum += item.weight
+                bases.append(None)
+
+        # 3. Distribute the remainder among flex items, each lifted to its min.
+        flex_space = max(0.0, avail - reserved)
+        sizes: list[float] = []
+        for item, cat, base, minimum in zip(self.items, cats, bases, mins):
+            if base is not None:
+                sizes.append(base)
+            elif weight_sum > 0:
+                sizes.append(max(flex_space * item.weight / weight_sum, minimum))
+            else:
+                sizes.append(minimum)
+
+        # 4. Overflow ladder: when reserved + flex minimums exceed the space,
+        #    space is taken back lowest-priority first — flex surplus, then
+        #    intrinsic, never fixed. Items at min==preferred==max (e.g. a
+        #    backend-fixed scrollbar) have zero slack and never yield.
         overflow = sum(sizes) - avail
-        if overflow > 0:
-            slack = [size - minimum for size, minimum in zip(sizes, mins)]
+        for tier in ("flex", "content"):
+            if overflow <= 1e-9:
+                break
+            slack = [
+                max(0.0, sizes[i] - mins[i]) if cats[i] == tier else 0.0
+                for i in range(len(sizes))
+            ]
             slack_sum = sum(slack)
-            if slack_sum > 0:
-                factor = min(1.0, overflow / slack_sum)
-                sizes = [size - s * factor for size, s in zip(sizes, slack)]
+            if slack_sum <= 0:
+                continue
+            factor = min(1.0, overflow / slack_sum)
+            for i, s in enumerate(slack):
+                shrink = s * factor
+                sizes[i] -= shrink
+                overflow -= shrink
         return sizes
 
 

@@ -25,8 +25,13 @@ stack. It follows the framework's existing rule: apps and widgets state
 - Rich text / per-run inline markup inside a single string.
 - Font fallback chains for missing glyphs (the backend's native fallback is
   used as-is).
-- Re-flowing the layout to a font's metrics (see §7 — font size is visual,
-  it does not redefine the positioning system).
+- *Implicit* re-flow of the layout to a font's metrics (see §7): a decorative
+  font size never reshapes a pane. Note this is **not** a ban on
+  content-driven sizing — a widget may *opt in* and size itself to its text
+  through the layout's measure protocol (a button to its label, a message
+  area to its line count). That path runs entirely through the widget's own
+  `measure`; the layout system still never reads a font (`docs/layout_system.md`
+  §6).
 
 ---
 
@@ -46,10 +51,14 @@ rules:
 
 So "grid" is a *TUI resolution* of the layout system, and "pixels" is a *GUI
 resolution* of the same layout system. The widget never sees either; it sees a
-pane with a size. The font system must respect this: **fonts are a property of
-text rendered inside a pane, and they never feed back into how panes are
-sized or placed.** A bigger font does not earn a widget more space — the
-layout system already decided the space.
+pane with a size. The font system must respect this: **a font is a property of
+text rendered inside a pane, and a font never feeds the layout *implicitly*.**
+A bigger *decorative* font does not earn a widget more space — it clips. A
+widget whose size genuinely *is* its content (a button, a message area) sizes
+itself **only** by opting into the layout's intrinsic sizing and reporting a
+measured length from its own `measure` (`docs/layout_system.md` §6). Even then
+the layout receives a number, never a font: the cell unit, and the cell
+metrics, stay font-independent.
 
 Consequence for text drawing: a widget draws text *within its pane* using the
 pane's own coordinate space. That space is expressed in cells for
@@ -59,9 +68,17 @@ from its origin; it is not quantized to columns. The pane's clip trims it at
 the pane edge. There is no GUI character grid.
 
 > The cell *unit* survives as the shared vocabulary that makes a widget
-> portable. The cell *grid* (whole-cell snapping, fixed advances) is a TUI-only
-> resolution of that vocabulary. Fonts live entirely on the GUI side of that
-> line, plus a narrow, honest degrade on TUI.
+> portable, and it is an **abstract logical length** — on GUI a
+> backend-configured block of pixels, never derived from a font. The cell
+> *grid* (whole-cell snapping, fixed advances) is a TUI-only resolution of
+> that vocabulary. Fonts live entirely on the GUI side of that line, plus a
+> narrow, honest degrade on TUI.
+
+Why font-independent? GUI fonts are flexible and proportional, so there is no
+canonical line height or column width to ground the unit in. The cell is the
+*primary* logical length; a monospaced base font is *fitted to it* so
+grid-aligned widgets (lists, tables) tile cleanly — the dependency runs
+cell → font, never font → cell.
 
 ---
 
@@ -98,10 +115,10 @@ Field semantics per backend:
 | `monospace` | choose monospaced vs. proportional UI font | ignored (always monospaced)    |
 
 `Font()` with all defaults means "the backend's default UI font" — which is
-**proportional** on GUI. The framework's *base* font (the one the cell metrics
-are derived from on GUI) is the monospaced grid font, and it is what text gets
-when a Style carries **no** font at all (`font=None`). That distinction keeps
-every existing widget rendering exactly as today until it opts in.
+**proportional** on GUI. The framework's *base* font (the monospaced grid font,
+*fitted to* the cell metrics on GUI — not their source, see §3) is what text
+gets when a Style carries **no** font at all (`font=None`). That distinction
+keeps every existing widget rendering exactly as today until it opts in.
 
 ---
 
@@ -165,19 +182,29 @@ and renders it natively. No widget ever asks "does this backend have fonts?".
 
 ---
 
-## 7. Font size does not reshape the layout
+## 7. Font size reshapes the layout only on explicit opt-in
 
-The layout system (§3) sized the pane. A font size is **visual emphasis
-inside that pane**, not a request for more space. So on GUI:
+The layout system (§3) sized the pane. A *decorative* font size is **visual
+emphasis inside that pane**, not an implicit request for more space. So on GUI:
 
 - Text renders at the requested point size.
-- Text that is taller or wider than its pane clips at the pane edge, exactly
-  like any other overflow — the same way an over-long string clips today.
+- Decorative text taller or wider than its pane clips at the pane edge,
+  exactly like any other overflow — the same way an over-long string clips.
 - A widget that wants its big title to fit asks the *layout system* for the
   room (`Item(title, size=3, ...)` or a `min_px` hint), never the font system.
 
-This keeps font size from leaking into layout, clipping, and hit-testing math,
-and preserves the single source of truth for geometry.
+What font size must **not** do is reshape the layout *implicitly* — every style
+tweak silently reflowing the tree. But a widget whose size genuinely *is* its
+content may reshape *explicitly*: it opts into intrinsic sizing
+(`Item(widget, size="content")` or a `min="content"` floor) and reports a
+measured length from its own `measure` (`docs/layout_system.md` §6). A button
+measures its label, a message area its line count. The measurement may consult
+a font, but it crosses into the layout as a plain number — the layout system
+never reads the font, and the cell unit stays font-independent.
+
+This keeps the single source of truth for geometry (the layout system), lets
+font metrics influence size only through a deliberate, per-widget door, and
+preserves the clipping/hit-testing math for everything that did not opt in.
 
 ---
 
@@ -195,7 +222,13 @@ Backend.measure_text(text, style=DEFAULT_STYLE) -> float
 
 - Default / cell-grid backends: `len(displayed columns)` — exact and cheap.
 - GUI with a proportional or sized font: native text measurement, divided by
-  the cell width, so the result stays in the shared cell unit.
+  the cell width, so the result stays in the shared cell unit. (The divisor is
+  the layout's cell width — a configured logical length, §3 — not a font
+  advance, so the unit a widget gets back never depends on which font measured
+  it.)
+
+This is the same hook intrinsic sizing uses (`docs/layout_system.md` §6): a
+widget sized to its text calls `measure_text` from inside its `measure`.
 
 A widget that only ever uses the base monospaced font can keep counting
 characters and never call this; it exists for widgets that opt into real
@@ -263,6 +296,8 @@ code and tests render identically.
    best-effort via the platform font manager, accept the native fallback.
 3. **`measure_text` unit** — cells (proposed, keeps one vocabulary) vs. pixels
    (more natural for proportional, but reintroduces a second unit for widgets).
-4. **Base GUI font configuration** — should the window's base monospaced font
-   (family + size, which sets the cell metrics) be configurable on the backend
-   constructor, separate from per-Style fonts? (Leaning yes, follow-up.)
+4. **Base GUI font configuration** — the cell metrics are a backend logical
+   length, *not* derived from the base font (§3). Open question: should the
+   cell size, and the base monospaced font *fitted to* it, be configurable on
+   the backend constructor, separate from per-Style fonts? (Leaning yes,
+   follow-up.)

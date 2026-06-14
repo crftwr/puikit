@@ -19,7 +19,16 @@ import argparse
 
 from puikit import EventType, HSplit, Item, Panel, Style, TextAttribute, VSplit
 from puikit.backends import create_backend
-from puikit.widgets import Container, Label, LayoutView, ListView, ScrollBar, Widget
+from puikit.widgets import (
+    Button,
+    Container,
+    Label,
+    LayoutView,
+    ListView,
+    ScrollBar,
+    TextBlock,
+    Widget,
+)
 
 DIM = Style(attr=TextAttribute.DIM)
 BOLD = Style(attr=TextAttribute.BOLD)
@@ -31,6 +40,8 @@ TITLE_BG = (52, 62, 88)
 NAV_BG = (38, 44, 60)
 CONTENT_BG = (26, 28, 34)
 CARD_BG = (42, 46, 56)
+# Button face: a lighter fill so buttons read as raised against a footer bar.
+BUTTON_FACE = Style(fg=(232, 234, 240), bg=(74, 88, 124))
 
 
 class DemoDialog(Widget):
@@ -206,12 +217,81 @@ def build_layout_page(page: Container, panel: Panel) -> None:
     page.add(board, x=2, y=3, w=0, h=0, hints={"stretch": True})
 
 
+def build_intrinsic_page(page: Container, panel: Panel) -> None:
+    # Three widgets that size *themselves*; the layout reserves what they
+    # report and the rest flexes around them. None of these sizes is named by
+    # the app — they come from the widget's own measure().
+    page.add(
+        Label("Widgets measure themselves; the layout reserves it", DIM),
+        x=2, y=1, w=60, h=1,
+    )
+    board = LayoutView(
+        VSplit(
+            # 1. Content HEIGHT: the message reserves exactly its line count.
+            Item(
+                TextBlock(
+                    "This message area is sized to its content:\n"
+                    "it reserves exactly as many lines as the\n"
+                    "text has — three here — no more, no less.",
+                ),
+                size="content",
+                hints={"surface": "content"},
+            ),
+            # 2. Backend-fixed WIDTH meets a weighted split: the scrollbar
+            #    claims its fixed width first, then main:side divide the rest
+            #    2:1. No conflict — weight only ever splits the remainder.
+            #    These panes are weight=1, so they flex to fill the window —
+            #    the open space below the captions is that flex, on purpose.
+            Item(
+                HSplit(
+                    Item(
+                        Region("Main", (36, 114, 200), "weight 2 · flexes to fill"),
+                        weight=2,
+                        hints={"surface": "content"},
+                    ),
+                    Item(
+                        Region("Side", (13, 188, 121), "weight 1 · resize the window"),
+                        weight=1,
+                        hints={"surface": "sidebar"},
+                    ),
+                    # Fixed width, reserved before the 2:1 split divides the rest.
+                    Item(ScrollBar(0.3, 0.4), size="content"),
+                ),
+                weight=1,
+            ),
+            # 3. Content WIDTH + cross-axis align: each button is as wide as
+            #    its label and centered in the taller row. An explicit footer
+            #    bg makes the action bar read as chrome (matching the title /
+            #    status bars), since the GUI theme keeps surface roles close.
+            Item(
+                HSplit(
+                    Item(
+                        Button("Cancel", style=BUTTON_FACE),
+                        size="content", align="center",
+                    ),
+                    Item(Label("", DIM), weight=1),  # flexible spacer
+                    Item(
+                        Button("OK", style=BUTTON_FACE),
+                        size="content", align="center",
+                    ),
+                    gap=1,
+                ),
+                size=5,
+                hints={"bg": TITLE_BG},
+            ),
+            divider="subtle",
+        )
+    )
+    page.add(board, x=2, y=3, w=0, h=0, hints={"stretch": True})
+
+
 PAGES = [
     ("Label", build_label_page),
     ("ListView", build_list_page),
     ("ScrollBar", build_scrollbar_page),
     ("Animation", build_animation_page),
     ("Layout", build_layout_page),
+    ("Intrinsic", build_intrinsic_page),
 ]
 
 

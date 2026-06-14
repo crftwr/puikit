@@ -5,7 +5,7 @@ import pytest
 from puikit import HSplit, Item, Panel, PROFILE_GUI_DESKTOP, VSplit
 from puikit.backends.memory_backend import MemoryBackend
 from puikit.layout import LayoutContext
-from puikit.widgets import Label, ListView, Widget
+from puikit.widgets import Button, Label, ListView, ScrollBar, TextBlock, Widget
 
 SNAP = LayoutContext(cell_w=1, cell_h=1, snap=True)
 PIXEL = LayoutContext(cell_w=10, cell_h=20, snap=False)
@@ -144,6 +144,109 @@ def test_divider_hairline_costs_one_device_pixel():
     assert divider.rect.x == pytest.approx(ra.x + ra.w)
     assert rb.x == pytest.approx(divider.rect.x + divider.rect.w)
     assert rb.x + rb.w == pytest.approx(10.0)
+
+
+# --- intrinsic (content-driven) sizing ------------------------------------------
+
+
+def test_content_item_reserves_measured_width():
+    # A button placed with size="content" measures itself (label + padding)
+    # and the layout reserves exactly that; the weighted item takes the rest.
+    btn = Button("OK")  # width = len("OK")=2 + 2*pad_x(2) = 6
+    layout = HSplit(Item(btn, size="content"), Item(Label("rest"), weight=1))
+    rb, rr = rects(layout.resolve(0, 0, 20, 5, SNAP))
+    assert rb.w == 6
+    assert (rr.x, rr.w) == (6, 14)
+
+
+def test_content_item_reserves_measured_height():
+    block = TextBlock("a\nb\nc")  # three lines -> height 3
+    layout = VSplit(Item(block, size="content"), Item(Label("below"), weight=1))
+    rblock, rbelow = rects(layout.resolve(0, 0, 10, 12, SNAP))
+    assert rblock.h == 3
+    assert (rbelow.y, rbelow.h) == (3, 9)
+
+
+def test_intrinsic_scrollbar_coexists_with_weighted_split():
+    # The worked example: a backend-fixed scrollbar takes its width first,
+    # then 1:2 divides the *remainder* — no conflict with the weighted split.
+    main, side, bar = Label("m"), Label("s"), ScrollBar()
+    layout = HSplit(
+        Item(main, weight=2), Item(side, weight=1), Item(bar, size="content")
+    )
+    rm, rs, rb = rects(layout.resolve(0.0, 0.0, 10.0, 5.0, PIXEL))
+    assert rb.w == pytest.approx(1.0)  # scrollbar_cells, font-independent
+    assert rm.w == pytest.approx(6.0)  # 2/3 of the remaining 9 cells
+    assert rs.w == pytest.approx(3.0)  # 1/3 of the remaining 9 cells
+
+
+def test_overflow_shrinks_content_but_never_fixed():
+    # Fixed chrome is incompressible; an intrinsic item shrinks toward its
+    # own minimum to make the layout fit.
+    top = Label("top")
+    block = TextBlock("\n".join("abcdef"))  # six lines: pref 6, min 1
+    layout = VSplit(Item(top, size=4), Item(block, size="content"))
+    rtop, rblock = rects(layout.resolve(0, 0, 10, 5, SNAP))
+    assert rtop.h == 4   # fixed: untouched
+    assert rblock.h == 1  # intrinsic: shrunk to its minimum, rest clips
+
+
+def test_overflow_never_shrinks_backend_fixed_scrollbar():
+    # The scrollbar (min == preferred == max) has no slack; under overflow a
+    # co-resident intrinsic text yields instead.
+    bar = ScrollBar()
+    block = TextBlock("xxxxxxxx")  # width pref 8, min 0
+    layout = HSplit(Item(bar, size="content"), Item(block, size="content"))
+    rbar, rblock = rects(layout.resolve(0, 0, 5, 4, SNAP))
+    assert rbar.w == 1   # never yields
+    assert rblock.w == 4  # absorbs all the overflow
+
+
+def test_min_content_floors_a_flex_item():
+    # A flex item with min="content" never shrinks below its measured size;
+    # the competing flex item gives up the space instead.
+    block = TextBlock("a\nb\nc")  # content height 3
+    layout = VSplit(
+        Item(block, weight=1, hints={"min": "content"}), Item(Label("x"), weight=1)
+    )
+    rblock, rother = rects(layout.resolve(0, 0, 10, 4, SNAP))
+    assert rblock.h == 3  # floored at its content
+    assert rother.h == 1  # the other flex yielded
+
+
+# --- cross-axis alignment ----------------------------------------------------------
+
+
+def test_cross_axis_align_centers_shrink_to_content():
+    lbl = Label("hi")  # intrinsic height 1
+    layout = HSplit(Item(lbl, align="center"))
+    (r,) = rects(layout.resolve(0, 0, 10, 5, SNAP))
+    assert (r.h, r.y) == (1, 2)  # centered in the 5-cell slot
+    assert (r.x, r.w) == (0, 10)  # main axis still fills
+
+
+def test_cross_axis_align_end():
+    layout = HSplit(Item(Label("hi"), align="end"))
+    (r,) = rects(layout.resolve(0, 0, 10, 5, SNAP))
+    assert (r.h, r.y) == (1, 4)
+
+
+def test_no_align_fills_cross_axis():
+    layout = HSplit(Item(Label("hi")))
+    (r,) = rects(layout.resolve(0, 0, 10, 5, SNAP))
+    assert (r.h, r.y) == (5, 0)  # default: stretch to the slot
+
+
+# --- size_px companion (pixel-only fixed length) -----------------------------------
+
+
+def test_size_px_overrides_size_on_pixel_only():
+    a, b = Label("a"), Label("b")
+    layout = HSplit(Item(a, size=3, size_px=20), Item(b, weight=1))
+    ra, _ = rects(layout.resolve(0.0, 0.0, 10.0, 5.0, PIXEL))
+    assert ra.w == pytest.approx(2.0)  # 20px at 10px cells
+    ra2, _ = rects(layout.resolve(0, 0, 10, 5, SNAP))
+    assert ra2.w == 3  # cell-grid: px ignored, falls back to size
 
 
 class FakeGuiBackend(MemoryBackend):

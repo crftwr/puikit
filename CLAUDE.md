@@ -104,6 +104,22 @@ panel.set_layout(VSplit(
 
 The backend owns `cell_size`. GUI backends treat cell coordinates as **hints**, not hard constraints.
 
+The **cell is an abstract logical unit**, not a character: on TUI it grounds in
+one terminal character, on GUI in a backend-configured block of logical pixels
+— never derived from a font (GUI fonts are flexible/proportional, so there is
+no canonical line height to ground it in). The base monospaced font is *fitted
+to* the cell, not its source.
+
+A region's geometry comes from three kinds of intent: **unitless** (alignment,
+weight, split axis), **length-bearing** (fixed `size`, `min_*`, gaps,
+dividers), and **intrinsic** — `size="content"` / `min="content"`, where the
+widget *measures itself* (a button to its label, a message area to its line
+count, a scrollbar to a backend-fixed width) and the layout reserves the
+result. The layout receives a number through `Widget.measure`; it never reads
+a font directly. Resolution order is fixed → intrinsic → weighted → an overflow
+priority ladder (weight yields before intrinsic, intrinsic before fixed; a
+`min==max` widget never yields). See `docs/layout_system.md` §6.
+
 Layout resolution is capability-based: backends with `pixel_layout` get
 fractional cell boundaries (exact pixels); others have every boundary snapped
 to whole cells. Layouts re-resolve from the backend size on each render, so
@@ -384,4 +400,4 @@ PuiKit is primarily Python, but backends may include compiled components in othe
 Canonical examples live under `examples/`:
 
 1. **`hello_world/`** — minimal app; renders a single text label on both TUI and GUI backends
-2. **`demo_catalog/`** — widget showcase; one screen per widget type, switchable at runtime. Its **Layout** page is the layout-system showcase (`LayoutView`): the same split layout snapped to cells on TUI and resolved at pixel granularity on GUI, with surface roles and dividers
+2. **`demo_catalog/`** — widget showcase; one screen per widget type, switchable at runtime. Its **Layout** page is the layout-system showcase (`LayoutView`): the same split layout snapped to cells on TUI and resolved at pixel granularity on GUI, with surface roles and dividers. Its **Intrinsic** page shows content-driven sizing: a message area sized to its line count, buttons sized to their labels (cross-axis centered), and a backend-fixed scrollbar coexisting with a weighted split

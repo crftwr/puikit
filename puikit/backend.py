@@ -93,6 +93,21 @@ class Backend(ABC):
         """Size of one cell in pixels. (1, 1) for TUI backends."""
         return (1, 1)
 
+    @property
+    def scrollbar_cells(self) -> float:
+        """Backend's fixed scrollbar thickness, in cells. Font-independent:
+        a scrollbar that asks the layout to size it (size="content") gets this
+        width. One cell on cell-grid backends; GUI backends may override."""
+        return 1.0
+
+    def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
+        """Displayed width of ``text`` in cells (fractional on GUI). Cell-grid
+        backends count columns; GUI backends with a proportional or sized font
+        measure natively and divide by the cell width, so the result stays in
+        the shared cell unit. Used by widgets that size themselves to text
+        (a label, a button) — the layout never calls a font directly."""
+        return float(len(text))
+
     # --- core drawing primitives (all backends implement) -------------------
 
     @abstractmethod

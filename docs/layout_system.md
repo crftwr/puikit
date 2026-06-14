@@ -11,12 +11,13 @@ blocks, and the resolution rules.
 
 ---
 
-## 1. The core idea: positioning is neither a grid nor pixels
+## 1. The core idea: neither a grid nor pixels — for position *or* size
 
-A widget never says "put me at column 12" or "put me at pixel 240". It says
-"this region is a fixed 3 units tall; below it, a sidebar and a main area
-share the rest 1:2, and the sidebar is never thinner than 220px". That
-*description* is backend-neutral. Resolution is not:
+A widget never says "put me at column 12" or "put me at pixel 240". It also
+never sizes itself in a character grid or in pixels. It says "this region is a
+fixed 3 units tall; below it, a sidebar and a main area share the rest 1:2,
+and the sidebar is never thinner than 220px". That *description* is
+backend-neutral. Resolution is not:
 
 - On a **cell-grid backend** (TUI) every boundary snaps to a whole cell,
   because a terminal cannot place a boundary anywhere else.
@@ -24,11 +25,27 @@ share the rest 1:2, and the sidebar is never thinner than 220px". That
   fractional cells are fine, fractional pixels are not — so a 1:2 split fills
   the window to the last pixel and follows it as it resizes.
 
-The same `VSplit`/`HSplit`/`Item` tree produces both. The widget only ever
-receives a `DrawContext` sized to its resolved rectangle; it never learns
-which resolution happened. This is what "layout-system based, not grid based,
-not pixel based" means in practice: the description is the contract, the grid
-and the pixel raster are just two ways to satisfy it.
+A region's geometry is determined by three kinds of intent, and only one of
+them ever carries a length:
+
+- **Unitless intent** — *alignment* (left/center/right, top/center/bottom),
+  *weight* (a share of leftover space), and the *split axis*. These describe
+  structure and position-within-slack as pure proportion, so nothing has to
+  ground them in cells, pixels, or fonts. Most of a layout is this.
+- **Length-bearing intent** — *fixed size*, *minimums*, *gaps*, and
+  *dividers*. A length appears only where the design genuinely pins something
+  down. Each is stated in the abstract *cell* unit, with an optional `*_px`
+  companion that applies only on pixel-layout backends.
+- **Intrinsic intent** — `size="content"` / `min="content"`: the size is
+  *measured by the widget* (a button to its label, a message area to its line
+  count, a scrollbar to a backend-fixed thickness). The layout receives a
+  number through a defined protocol; it never reads a font or a backend
+  constant itself (see §6).
+
+The same `VSplit`/`HSplit`/`Item` tree produces both backends. The widget only
+ever receives a `DrawContext` sized to its resolved rectangle; it never learns
+which resolution happened. The grid and the pixel raster are just two ways to
+satisfy the description.
 
 ---
 
@@ -37,22 +54,33 @@ and the pixel raster are just two ways to satisfy it.
 ### `Item` — one slot, plus sizing intent
 
 ```python
-Item(content, size=None, weight=1.0, hints=None)
+Item(content, size=None, weight=1.0, hints=None, align=None, size_px=None)
 ```
 
 - `content` — a widget, or a nested `Split`.
-- `size` — a fixed length **in cells along the split axis**. When set, the
-  item does not flex (its weight is forced to 0).
-- `weight` — share of the *remaining* space after fixed items are placed.
+- `size` — main-axis length. A **number** is a fixed length in cells; the
+  string **`"content"`** makes the item *intrinsic*: the widget measures
+  itself and the layout reserves the measured length (§6). Either way the item
+  does not flex.
+- `size_px` — a fixed main-axis length in **pixels**, used in place of `size`
+  on pixel-layout backends; cell-grid backends keep `size`. Same capability
+  rule as `min_px`. (Pair it with a `size` fallback so cell-grid backends have
+  a length to use.)
+- `weight` — share of the *remaining* space after fixed and intrinsic items.
+- `align` — cross-axis alignment of a *shrink-to-content* child within its
+  slot: `"start"` / `"center"` / `"end"`. It only has an effect when the
+  widget reports an intrinsic cross size smaller than the slot; otherwise the
+  child fills the cross axis (§7).
 - `hints` — sizing and presentation hints:
   - `"min_cells"` — minimum length in cells, on every backend.
   - `"min_px"` — minimum length in pixels, converted through the backend's
     cell size; **applies only on pixel-layout backends**. Cell-grid backends
     ignore it and use `min_cells` (a pixel minimum would otherwise inflate
     into a huge cell count and starve the other items).
+  - `"min": "content"` — floors the item at its measured content size, so a
+    *flex* item never shrinks below what its content needs (§6).
   - presentation hints passed straight through to the placement, e.g.
-    `"surface"` (a theme role) or `"bg"` (an explicit background). These are
-    not the layout's concern; it forwards them to the Panel/DrawContext.
+    `"surface"` (a theme role) or `"bg"` (an explicit background).
 
 A bare widget passed where an `Item` is expected is wrapped in a default
 `Item` (weight 1).
@@ -69,6 +97,7 @@ VSplit(
     Item(HSplit(
         Item(sidebar, weight=1, hints={"min_px": 220, "min_cells": 18}),
         Item(main, weight=2),
+        Item(scrollbar, size="content"),     # backend-fixed width
     )),
     Item(status, size=1),
 )
@@ -79,24 +108,33 @@ A `Split` also carries an optional `gap` (blank cells between items) and a
 
 ---
 
-## 3. Sizing: fixed, then weighted, then minimums
+## 3. Sizing: fixed, then intrinsic, then weighted, then the ladder
 
 Resolution along the split axis (`Split._sizes`) is a deterministic pass:
 
 1. **Subtract spacing.** Gaps and divider thickness between items are removed
    from the available length first.
-2. **Place fixed items.** Each `size=` item takes its size (raised to its
-   minimum if a `min_*` hint is larger).
-3. **Distribute the rest by weight.** Remaining space is split among flex
+2. **Measure intrinsic items.** Each `size="content"` item (and each flex item
+   with a `min="content"` floor) is asked for its size via the measure
+   protocol (§6). The layout receives `(min, preferred, max)` in cells.
+3. **Reserve fixed and intrinsic items.** Each `size=` item takes its size and
+   each intrinsic item takes its measured `preferred` (both raised to their
+   minimum). Weight will divide only what is left.
+4. **Distribute the rest by weight.** Remaining space is split among flex
    items proportionally to `weight`, each raised to its minimum.
-4. **Resolve overflow.** Minimums can exceed the available space. A single
-   proportional pass shrinks the items that still have slack above their own
-   minimum, so the result fits without any item dropping below its minimum
-   (when that is feasible).
+5. **Resolve overflow with the priority ladder.** Reserved items plus flex
+   minimums can exceed the available space. Space is taken back
+   *lowest-priority first* (§6.1): flex surplus, then intrinsic items toward
+   their own minimum, never fixed. An item whose `min == preferred == max`
+   (a backend-fixed scrollbar) has zero slack and never yields; below an
+   item's minimum its content clips.
 
 This ordering makes the common cases obvious: fixed chrome (headers, status
-bars) is exact, the content area flexes, and minimums act as floors rather
-than reshaping the whole layout.
+bars) is exact, content-driven widgets get their natural size, the rest flexes,
+and minimums act as floors rather than reshaping the whole layout. Crucially,
+**weight is a claim on leftover by definition** — so a weighted split never
+fights a fixed or intrinsic size; it only divides the remainder, and a real
+conflict arises only at overflow, where the ladder decides.
 
 ---
 
@@ -104,10 +142,11 @@ than reshaping the whole layout.
 
 `Split.resolve(x, y, w, h, ctx)` returns `(widget, rect, hints)` placements
 and accumulates divider rects on the context. The `LayoutContext` carries the
-backend's resolution rules:
+backend's resolution rules and its self-measurement hooks:
 
 ```python
-LayoutContext(cell_w, cell_h, snap, hairline=False, dividers=[])
+LayoutContext(cell_w, cell_h, snap, hairline=False,
+              measure=None, scrollbar_cells=1.0, dividers=[])
 ```
 
 - `snap=True` (cell-grid / TUI): every boundary is rounded to a whole cell,
@@ -115,6 +154,9 @@ LayoutContext(cell_w, cell_h, snap, hairline=False, dividers=[])
 - `snap=False` (pixel-layout / GUI): boundaries are rounded to whole **device
   pixels** (`round(end * cell_px) / cell_px`), keeping fractional cells but
   never fractional pixels.
+- `measure` / `scrollbar_cells` — the backend's measurement hooks, so an
+  intrinsic widget can size itself (§6) without the layout ever touching the
+  backend.
 
 The subtle part is **boundary anchoring**. Each item's start is anchored to
 the *previous item's already-rounded end* plus the rounded spacing — not
@@ -156,7 +198,106 @@ where they go.
 
 ---
 
-## 6. Margins and edge bleed (Panel level)
+## 6. Intrinsic sizing: the widget measures itself
+
+Some widgets cannot be sized by the app, because their size *is* their
+content:
+
+- a **button** is as tall as its label's line and as wide as the label plus
+  padding;
+- a **message area** reserves as many lines as its text has;
+- a **scrollbar** is a backend-fixed thickness, independent of any font.
+
+These look different but are one mechanism: *an item whose length is computed
+by the content, not handed down*. The layout does not care whether the number
+comes from a font metric or a backend constant — it just receives a length.
+
+### The measure protocol
+
+```python
+class Widget:
+    def measure(self, ctx: LayoutContext, axis: str, available: float) -> SizeRequest:
+        return SizeRequest()        # default: no opinion, the item fills its slot
+
+@dataclass(frozen=True)
+class SizeRequest:
+    min: float = 0.0
+    preferred: float = 0.0
+    max: float | None = None
+```
+
+- `axis` is `"x"` (width) or `"y"` (height); `available` is the resolved
+  extent on the other axis (so a wrapped text can size its height to a known
+  width).
+- A widget that measures itself from text does so via `ctx.measure_text(...)`;
+  a widget with a backend-fixed extent reads it off `ctx` (e.g.
+  `ctx.scrollbar_cells`). The font system never feeds the layout directly —
+  it enters *only* through a widget's own `measure`, and only when the app
+  opted the item into `size="content"` / `min="content"` (see
+  `docs/font_system.md` §7).
+- A backend-fixed widget returns `min == preferred == max`, so it has zero
+  slack and the overflow ladder can never shrink it.
+
+Two ways intrinsic sizing enters an `Item`:
+
+- **intrinsic-as-size** (`size="content"`) — the item is sized *to* its
+  measurement, like a fixed item but measured (button, scrollbar). It still
+  shrinks toward its own `min` under overflow.
+- **intrinsic-as-floor** (`hints={"min": "content"}`) — the item flexes by
+  weight but never shrinks below its measured content (a message area in a
+  resizable dialog).
+
+### 6.1 The overflow priority ladder
+
+When reserved items plus flex minimums exceed the space, the ladder yields,
+lowest priority first:
+
+```
+yields first  1. weighted surplus (above its min)      ← 1:2 collapses
+              2. weighted down to its min
+              3. intrinsic-as-size, preferred → its min ← e.g. text drops lines
+never yields  4. fixed size= (incompressible)
+              -. min==preferred==max (scrollbar)        ← zero slack, untouched
+```
+
+Below an item's minimum, content clips — the same overflow rule a too-long
+string already follows. The classic worked case: in
+`HSplit(main weight=2, side weight=1, scrollbar size="content")`, the scrollbar
+claims its fixed width first and `2:1` divides the *remainder* — there is no
+conflict, because the weights never claimed the scrollbar's space.
+
+### 6.2 Two-axis dependency
+
+A wrapped message area's height depends on its resolved width. The common case
+— full-width rows stacked in a `VSplit` — resolves the cross axis before the
+height is measured, so one pass suffices. A widget that is intrinsic on *both*
+axes simultaneously needs the main-axis width fixed before the height measure,
+which is a bounded second pass; the current engine handles the one-pass common
+case and treats the two-axis case as a known refinement (same status as the
+single-pass overflow resolution).
+
+---
+
+## 7. Cross-axis alignment
+
+Alignment only has meaning against *slack*: a child that fills its slot has
+nothing to align. So alignment composes with intrinsic sizing. When an `Item`
+carries `align=` and its widget reports an intrinsic cross size *smaller* than
+the slot, the layout shrinks the child to that size and offsets it
+(`start`/`center`/`end`) within the leftover; otherwise the child stretches to
+fill the cross axis as before.
+
+```python
+HSplit(Item(button, align="center"))   # button is font-tall, centered vertically
+```
+
+This is `Split.resolve`'s cross-axis step: it measures the item on the cross
+axis (`"y"` for an `HSplit`, `"x"` for a `VSplit`), clamps the preferred size
+into the slot, and only shrinks-and-aligns when that size is strictly smaller.
+
+---
+
+## 8. Margins and edge bleed (Panel level)
 
 `Panel.set_layout(layout, margin_px=0, margin_cells=0)` insets the whole
 layout from the window frame. Margins follow the same capability rule as
@@ -177,16 +318,16 @@ coordinates inside the area they actually drew).
 
 ---
 
-## 7. Nesting inside a widget: `LayoutView`
+## 9. Nesting inside a widget: `LayoutView`
 
 The same engine runs *inside* a widget. `LayoutView` hosts a `Split` and
 resolves it against its own `DrawContext` via `ctx.layout_context()`, which
-builds a `LayoutContext` matching the backend's capabilities. Children get
-fractional rects on GUI and cell-snapped rects on TUI — exactly like a
-top-level layout, but scoped to a page. The capability decisions stay in the
-DrawContext, so the widget never branches on the backend. `LayoutView` also
-keeps the resolved `(widget, rect)` pairs to route mouse and keyboard events
-to its children.
+builds a `LayoutContext` matching the backend's capabilities (including the
+measurement hooks). Children get fractional rects on GUI and cell-snapped rects
+on TUI — exactly like a top-level layout, but scoped to a page. The capability
+decisions stay in the DrawContext, so the widget never branches on the backend.
+`LayoutView` also keeps the resolved `(widget, rect)` pairs to route mouse and
+keyboard events to its children.
 
 This is what makes the demo catalog's **Layout** page possible: one split
 definition, shown snapped to cells on TUI and resolved at pixel granularity on
@@ -194,7 +335,7 @@ GUI, dividers and surface roles included.
 
 ---
 
-## 8. Panel integration
+## 10. Panel integration
 
 - **Re-resolution on every render.** `Panel.render()` re-runs the layout from
   the backend's *exact* (fractional) size, so the layout tracks window resizes
@@ -207,59 +348,70 @@ GUI, dividers and surface roles included.
 
 ---
 
-## 9. Coordinate model
+## 11. Coordinate model
 
-The unit everywhere in the layout API is the **cell**. On TUI a cell is one
-character (`cell_size == (1, 1)`); on GUI the backend owns the cell size and a
-cell is a block of pixels. Cells are deliberately the *only* unit a widget or
-app expresses geometry in — including `min_px`, which is stated in pixels but
-immediately converted to cells through the backend's cell size. What changes
-per backend is not the unit but the **granularity**: whole cells on TUI,
-fractional (pixel-exact) cells on GUI. Pixels never appear in a widget's view
-of the world; they exist only as the rounding target inside `resolve`.
+The unit everywhere in the layout API is the **cell** — but the cell is an
+*abstract logical unit*, not a character. On TUI it grounds in one terminal
+character (`cell_size == (1, 1)`), because a terminal has no finer grid. On GUI
+the backend grounds it in a configured block of **logical pixels** — *not* read
+out of any font. (A monospaced base font may be *fitted to* the cell so
+grid-aligned widgets tile it cleanly, but the cell is primary and the font
+follows it, never the reverse — see `docs/font_system.md` §3.) This matters
+because GUI fonts are flexible and proportional: there is no canonical line
+height or column width to ground the unit in, so the unit must not depend on
+one.
+
+Cells are deliberately the *only* unit a widget or app expresses geometry in —
+including `min_px` / `size_px`, which are stated in pixels but immediately
+converted to cells through the backend's cell size. What changes per backend is
+not the unit but the **granularity**: whole cells on TUI, fractional
+(pixel-exact) cells on GUI. Pixels never appear in a widget's view of the
+world; they exist only as the rounding target inside `resolve`.
 
 ---
 
-## 10. Public API surface
+## 12. Public API surface
 
 ```
-puikit.layout:  Item, Split, HSplit, VSplit, LayoutContext, Divider
+puikit.layout:  Item, Split, HSplit, VSplit, LayoutContext, Divider, SizeRequest
 puikit:         HSplit, Item, VSplit            (re-exported)
 Panel:          set_layout(layout, margin_px=0, margin_cells=0)
 DrawContext:    layout_context(), draw_child(...), draw_divider(...)
-widgets:        LayoutView(layout)
+Backend:        measure_text(text, style) -> float,  scrollbar_cells -> float
+Widget:         measure(ctx, axis, available) -> SizeRequest
+widgets:        LayoutView(layout), Button, TextBlock
 ```
 
 ---
 
-## 11. Relationship to other systems
+## 13. Relationship to other systems
 
 - **Theme / surfaces** (`puikit/theme.py`) — the layout reserves space for
   separation; the theme supplies the *contrast* that does the separating on
   cell-grid backends, where dividers cost too much. `surface` hints on items
   are forwarded to the Panel, which resolves them to backgrounds.
-- **Fonts** (`docs/font_system.md`) — fonts render *inside* a resolved pane
-  and never feed back into sizing. A larger font does not earn a widget space;
-  it asks the layout system for room via `size` / `min_*`. The two systems
-  are intentionally decoupled at this boundary.
+- **Fonts** (`docs/font_system.md`) — fonts render *inside* a resolved pane.
+  A *decorative* font size never reshapes the layout (it clips). A widget that
+  is *structurally* content-sized reshapes only through its own `measure`
+  (§6), which the app opts into — so the layout stays font-agnostic while
+  buttons and message areas still size to their text.
 - **Animation** — the Panel can animate a widget's *rect* ("size" transition):
   the layout assigns the target rect, the Panel interpolates toward it, and
   the widget re-draws at each intermediate size.
 
 ---
 
-## 12. Open questions / possible extensions
+## 14. Open questions / possible extensions
 
 1. **Grid/Stack containers.** Only linear splits exist today. A 2-D grid
    (row/column spans) and a Z-stack (beyond the Panel's modal layers) are
    natural future `Split` siblings.
-2. **Multi-pass overflow.** Overflow resolution is a single proportional pass.
-   A pathological mix of minimums could leave a small residual; a second pass
-   (or iterating to a fixed point) would tighten it. Not observed in practice
-   yet.
-3. **Per-item alignment / max size.** `Item` has `size`, `weight`, and `min_*`
-   but no `max_*` or alignment within an oversized slot. Worth adding when a
+2. **Two-axis intrinsic sizing.** Height-depends-on-width is handled for the
+   one-pass common case (§6.2); a widget intrinsic on both axes at once would
+   want a second measure pass.
+3. **Per-item `max` size.** `Item` has `size`, `weight`, `min_*`, and
+   intrinsic sizing, but no extrinsic `max_*` ceiling. Worth adding when a
    real widget needs it.
-4. **Baseline / content-driven sizing.** Everything is outside-in (the parent
-   hands down space). A "size to content" item (intrinsic sizing) would invert
-   that for specific cases and is a larger design question.
+4. **Multi-pass overflow.** The overflow ladder is a single proportional pass
+   per tier. A pathological mix of minimums could leave a small residual;
+   iterating to a fixed point would tighten it. Not observed in practice yet.

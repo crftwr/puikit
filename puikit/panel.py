@@ -113,6 +113,8 @@ class DrawContext:
             cw, ch,
             snap=not self._caps.supports("pixel_layout"),
             hairline=self._caps.supports("hairline"),
+            measure=self._backend.measure_text,
+            scrollbar_cells=self._backend.scrollbar_cells,
         )
 
     def draw_text(self, x: int, y: int, text: str, style: Style = DEFAULT_STYLE) -> None:
@@ -415,7 +417,10 @@ class Panel:
         snap = not self.backend.capabilities.supports("pixel_layout")
         mx, my = self._resolve_margin(cw, ch, snap)
         ctx = LayoutContext(
-            cw, ch, snap, hairline=self.backend.capabilities.supports("hairline")
+            cw, ch, snap,
+            hairline=self.backend.capabilities.supports("hairline"),
+            measure=self.backend.measure_text,
+            scrollbar_cells=self.backend.scrollbar_cells,
         )
         placements = self._layout.resolve(
             mx, my, max(0.0, sw - 2 * mx), max(0.0, sh - 2 * my), ctx
