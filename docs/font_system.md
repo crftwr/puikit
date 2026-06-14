@@ -41,12 +41,12 @@ This is the load-bearing idea, and the reason the font system can stay small.
 
 PuiKit positioning is **neither a raw character grid nor raw pixels**. It is
 the *layout system* (`puikit.layout`: `VSplit` / `HSplit` / `Item` with
-`weight`, `size`, and `min_px` / `min_cells` hints). A widget tree describes
+`weight`, `size`, and `min_px` / `min` hints). A widget tree describes
 how regions divide space; each backend resolves that description with its own
 rules:
 
-- TUI snaps every boundary to a whole cell (a terminal cannot do otherwise).
-- GUI resolves to exact device pixels (fractional cells), following the
+- TUI snaps every boundary to a whole base unit (a terminal cannot do otherwise).
+- GUI resolves to exact device pixels (fractional base units), following the
   window pixel-for-pixel.
 
 So "grid" is a *TUI resolution* of the layout system, and "pixels" is a *GUI
@@ -57,28 +57,30 @@ A bigger *decorative* font does not earn a widget more space — it clips. A
 widget whose size genuinely *is* its content (a button, a message area) sizes
 itself **only** by opting into the layout's intrinsic sizing and reporting a
 measured length from its own `measure` (`docs/layout_system.md` §6). Even then
-the layout receives a number, never a font: the cell unit, and the cell
-metrics, stay font-independent.
+the layout receives a number, never a font: a *per-Style proportional* font
+never grounds the base unit — only the base grid font does (see below).
 
 Consequence for text drawing: a widget draws text *within its pane* using the
-pane's own coordinate space. That space is expressed in cells for
+pane's own coordinate space. That space is expressed in base units for
 TUI-compatibility, but on GUI it is continuous (fractional, pixel-exact) and
 nothing is snapped. A proportional run therefore flows by its natural advances
 from its origin; it is not quantized to columns. The pane's clip trims it at
 the pane edge. There is no GUI character grid.
 
-> The cell *unit* survives as the shared vocabulary that makes a widget
-> portable, and it is an **abstract logical length** — on GUI a
-> backend-configured block of pixels, never derived from a font. The cell
-> *grid* (whole-cell snapping, fixed advances) is a TUI-only resolution of
-> that vocabulary. Fonts live entirely on the GUI side of that line, plus a
-> narrow, honest degrade on TUI.
+> The base unit is the shared vocabulary that makes a widget portable. On GUI
+> it is the glyph box of the **base monospaced grid font** — a backend logical
+> length. The base unit *grid* (whole-base-unit snapping, fixed advances) is a
+> TUI-only resolution of that vocabulary. Proportional fonts live entirely on
+> the GUI side of that line, plus a narrow, honest degrade on TUI.
 
-Why font-independent? GUI fonts are flexible and proportional, so there is no
-canonical line height or column width to ground the unit in. The cell is the
-*primary* logical length; a monospaced base font is *fitted to it* so
-grid-aligned widgets (lists, tables) tile cleanly — the dependency runs
-cell → font, never font → cell.
+What grounds the base unit? The **base grid font** — and *only* it. The
+backend takes that font as a `Font` descriptor (the same type a widget uses,
+§4); the base unit's pixel size is its glyph box: `advance × line-height`
+(`base font → base unit`). This is well-defined precisely because the base
+font is **monospaced** — it has a canonical advance and line height. The thing
+that must never ground the unit is a *per-Style proportional* font: those flex
+and have no canonical metric, and they never do — a widget's font only ever
+affects the glyphs inside its already-resolved pane, never the base unit.
 
 ---
 
@@ -115,10 +117,17 @@ Field semantics per backend:
 | `monospace` | choose monospaced vs. proportional UI font | ignored (always monospaced)    |
 
 `Font()` with all defaults means "the backend's default UI font" — which is
-**proportional** on GUI. The framework's *base* font (the monospaced grid font,
-*fitted to* the cell metrics on GUI — not their source, see §3) is what text
-gets when a Style carries **no** font at all (`font=None`). That distinction
-keeps every existing widget rendering exactly as today until it opts in.
+**proportional** on GUI. The framework's *base* font is the monospaced grid
+font that **defines** the base unit on GUI (§3); it is named with the same
+`Font` descriptor and set on the backend constructor:
+
+```python
+MacOSBackend(base_font=Font(family="SF Mono", size=14, monospace=True))
+```
+
+It is what text gets when a Style carries **no** font at all (`font=None`).
+That distinction keeps every existing widget rendering exactly as today until
+it opts in.
 
 ---
 
@@ -200,7 +209,8 @@ content may reshape *explicitly*: it opts into intrinsic sizing
 measured length from its own `measure` (`docs/layout_system.md` §6). A button
 measures its label, a message area its line count. The measurement may consult
 a font, but it crosses into the layout as a plain number — the layout system
-never reads the font, and the cell unit stays font-independent.
+never reads the font, and a *per-Style* font never grounds the base unit (only
+the base grid font does, §3).
 
 This keeps the single source of truth for geometry (the layout system), lets
 font metrics influence size only through a deliberate, per-widget door, and
@@ -213,19 +223,19 @@ preserves the clipping/hit-testing math for everything that did not opt in.
 Proportional text cannot be laid out by counting characters, so a widget that
 centers, right-aligns, or wraps proportional text needs to ask how wide a run
 is. One method, resolved by the backend, returned in the **pane's own unit
-(cells; fractional on GUI)** so a widget mixes it freely with pane sizes:
+(base units; fractional on GUI)** so a widget mixes it freely with pane sizes:
 
 ```python
-DrawContext.measure_text(text, style=DEFAULT_STYLE) -> float   # width in cells
+DrawContext.measure_text(text, style=DEFAULT_STYLE) -> float   # width in base units
 Backend.measure_text(text, style=DEFAULT_STYLE) -> float
 ```
 
-- Default / cell-grid backends: `len(displayed columns)` — exact and cheap.
+- Default / whole-unit backends: `len(displayed columns)` — exact and cheap.
 - GUI with a proportional or sized font: native text measurement, divided by
-  the cell width, so the result stays in the shared cell unit. (The divisor is
-  the layout's cell width — a configured logical length, §3 — not a font
-  advance, so the unit a widget gets back never depends on which font measured
-  it.)
+  the base unit width, so the result stays in the shared base unit. (The
+  divisor is the base unit width — the base grid font's advance, §3 — so a
+  proportional run's width is expressed as a multiple of the base unit, the
+  same unit pane sizes use.)
 
 This is the same hook intrinsic sizing uses (`docs/layout_system.md` §6): a
 widget sized to its text calls `measure_text` from inside its `measure`.
@@ -246,7 +256,7 @@ font into `attr`, so the backend keeps drawing as it does today. `fonts` and
 
 - Resolve a `Font` to a native font object (family, size, weight, slant,
   monospaced vs. proportional), with caching keyed by the resolved request.
-- Render base-font text (`font is None`) on the cell grid as today — this
+- Render base-font text (`font is None`) on the base unit grid as today — this
   keeps monospaced widgets (lists, tables) column-aligned.
 - Render any real `Font` (a face, a size, or `monospace=False`) with the
   font's **natural advances** from the run origin; the pane clip trims it.
@@ -279,7 +289,7 @@ code and tests render identically.
 - Widget tests run against TUI and GUI capability profiles (existing
   `MemoryBackend` pattern): assert that a font folds to bold/italic attributes
   under the TUI profile and is preserved under the GUI profile.
-- `measure_text` returns the column count on cell-grid backends.
+- `measure_text` returns the column count on whole-unit backends.
 - macOS-only tests (skipped elsewhere) cover font resolution/caching and the
   grid-vs-flow render-path decision.
 - A `Fonts` page in `demo_catalog` showcases weights, slant, families, and
@@ -294,10 +304,15 @@ code and tests render identically.
 2. **Named family + weight on GUI** — for an installed family, how hard should
    we push synthetic weights/italics when the family lacks that face? Proposal:
    best-effort via the platform font manager, accept the native fallback.
-3. **`measure_text` unit** — cells (proposed, keeps one vocabulary) vs. pixels
+3. **`measure_text` unit** — base units (proposed, keeps one vocabulary) vs. pixels
    (more natural for proportional, but reintroduces a second unit for widgets).
-4. **Base GUI font configuration** — the cell metrics are a backend logical
-   length, *not* derived from the base font (§3). Open question: should the
-   cell size, and the base monospaced font *fitted to* it, be configurable on
-   the backend constructor, separate from per-Style fonts? (Leaning yes,
-   follow-up.)
+4. **Base GUI font configuration** — *resolved.* The base font is named with
+   the `Font` descriptor (§4) and passed to the backend constructor
+   (`MacOSBackend(base_font=Font(...))`); the `Font` type and
+   `Backend.resolve_font` are implemented. The base unit's pixel size is
+   **derived** from that base font's glyph box — `base font → base unit` — and
+   scales with its size. This is well-defined because the base font is
+   monospaced. *Per-Style proportional fonts never affect the base unit* (the
+   font-independence that matters); only the base grid font grounds it. Full
+   per-Style proportional rendering on widgets (`Style.font`) remains the open
+   draft.

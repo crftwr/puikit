@@ -28,7 +28,7 @@ class Event:
     key: str | None = None
     # KEY: printable character, if any
     char: str | None = None
-    # Mouse events: position in cell coordinates
+    # Mouse events: position in base-unit coordinates
     x: int | None = None
     y: int | None = None
     # MOUSE_CLICK / MOUSE_DRAG: "left", "middle", "right"
@@ -41,9 +41,9 @@ class Event:
     def translated(self, dx: float, dy: float) -> "Event":
         """A copy with mouse coordinates shifted by (dx, dy).
 
-        Results are floored to whole cells, so a widget placed at a
-        fractional cell origin (pixel layout) still receives integer
-        widget-local cell coordinates."""
+        Results are floored to whole base units, so a widget placed at a
+        fractional base unit origin (pixel layout) still receives integer
+        widget-local base-unit coordinates."""
         if self.x is None or self.y is None:
             return self
         return Event(

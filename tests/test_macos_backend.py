@@ -9,12 +9,26 @@ pytestmark = pytest.mark.skipif(
 )
 pytest.importorskip("AppKit", reason="pyobjc not installed")
 
-from puikit import Style, TextAttribute  # noqa: E402
+from puikit import Font, Style, TextAttribute  # noqa: E402
 from puikit.backends.macos_backend import (  # noqa: E402
     MacOSBackend,
     translate_key,
 )
 from puikit.event import EventType  # noqa: E402
+
+
+def test_base_font_drives_base_unit():
+    # The base unit is derived from the base font's glyph box (font -> base
+    # unit), and it scales with the font size. _init_fonts needs NSFont only,
+    # not a window.
+    small = MacOSBackend(base_font=Font(size=12, monospace=True))
+    small._init_fonts()
+    large = MacOSBackend(base_font=Font(size=24, monospace=True))
+    large._init_fonts()
+    assert small.base_size[0] >= 1 and small.base_size[1] >= 1
+    # A bigger base font means a bigger base unit, both axes.
+    assert large.base_size[0] > small.base_size[0]
+    assert large.base_size[1] > small.base_size[1]
 
 
 def test_translate_arrow_key():

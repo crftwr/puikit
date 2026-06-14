@@ -5,12 +5,12 @@ hardcoding colors, so each backend can apply its own region-separation
 strategy:
 
 - hairline-capable backends (GUI) may give adjacent roles the same
-  background and rely on 1-device-pixel divider lines (zero cell cost)
-- cell-grid backends (TUI) cannot afford a full row/column for a line, so
+  background and rely on 1-device-pixel divider lines (zero base unit cost)
+- whole-unit backends (TUI) cannot afford a full row/column for a line, so
   the theme guarantees adjacent roles contrasting backgrounds instead
 
 An explicit "bg" hint always overrides the theme; the app then owns the
-separation quality on cell-grid backends.
+separation quality on whole-unit backends.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from .capability import CapabilityProfile
 @dataclass(frozen=True)
 class Theme:
     """Maps surface roles to pane background colors, plus the divider color
-    used for layout dividers (hairlines on GUI, line cells on TUI)."""
+    used for layout dividers (hairlines on GUI, line base units on TUI)."""
 
     surfaces: dict[str, Color] = field(default_factory=dict)
     divider_color: Color = (110, 110, 124)
@@ -44,7 +44,7 @@ THEME_GUI = Theme(
     divider_color=(90, 90, 104),
 )
 
-# TUI: background contrast does the separating; no cells spent on lines.
+# TUI: background contrast does the separating; no base units spent on lines.
 THEME_TUI = Theme(
     surfaces={
         "content": (30, 30, 38),

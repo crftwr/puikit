@@ -41,7 +41,7 @@ Apps and widgets remain unaware of capabilities.
 ```
 App / Widget layer
 (FileList, ScrollBar, PreviewPane, ...)
-        ↓  cell coordinates + hints
+        ↓  base-unit coordinates + hints
    Panel / Layout layer
 (coordinate transform, capability resolution, layer management)
         ↓
@@ -75,7 +75,7 @@ backend.draw_shadow(x, y, w, h)      # TUI: ignored
 
 TUI examples:
 - `draw_box` → rendered with `┌─┐└─┘`
-- `draw_scrollbar` → thumb/track painted with cell background colors (a
+- `draw_scrollbar` → thumb/track painted with base unit background colors (a
   space glyph), so the bar fills the full row height with no inter-line gaps
 
 GUI examples:
@@ -84,7 +84,7 @@ GUI examples:
 
 ### 2. Layout
 
-Coordinates are cell-based (TUI-compatible). GUI backends convert to pixels.
+Coordinates are base-unit-based (TUI-compatible). GUI backends convert to pixels.
 
 ```python
 panel.add(widget, x=0, y=0, w=30, h=20, hints={"min_px": 200})
@@ -93,22 +93,24 @@ panel.add(widget, x=0, y=0, w=30, h=20, hints={"min_px": 200})
 panel.set_layout(VSplit(
     Item(header, size=3),
     Item(HSplit(
-        Item(sidebar, weight=1, hints={"min_px": 220, "min_cells": 18}),
+        Item(sidebar, weight=1, hints={"min_px": 220, "min": 18}),
         Item(main, weight=2),
     )),
 ))
 ```
 
-- TUI: cell coordinates passed directly to curses
-- GUI: cell coordinates × cell_size → pixel coordinates; hints used for flexible layout
+- TUI: base-unit coordinates passed directly to curses
+- GUI: base-unit coordinates × base_size → pixel coordinates; hints used for flexible layout
 
-The backend owns `cell_size`. GUI backends treat cell coordinates as **hints**, not hard constraints.
+The backend owns `base_size`. GUI backends treat base-unit coordinates as **hints**, not hard constraints.
 
-The **cell is an abstract logical unit**, not a character: on TUI it grounds in
-one terminal character, on GUI in a backend-configured block of logical pixels
-— never derived from a font (GUI fonts are flexible/proportional, so there is
-no canonical line height to ground it in). The base monospaced font is *fitted
-to* the cell, not its source.
+The **base unit is a logical length**, not a character: on TUI it grounds in
+one terminal character; on GUI it is the glyph box of the **base monospaced
+grid font** (`base_size == advance × line-height`), so the unit scales with the
+base font. The base font is named with a `Font` descriptor on the backend
+constructor (`MacOSBackend(base_font=Font(...))`) — the same type a text widget
+uses. This is well-defined because the base font is monospaced; *per-Style
+proportional* fonts never ground the base unit, only the base grid font does.
 
 A region's geometry comes from three kinds of intent: **unitless** (alignment,
 weight, split axis), **length-bearing** (fixed `size`, `min_*`, gaps,
@@ -121,20 +123,20 @@ priority ladder (weight yields before intrinsic, intrinsic before fixed; a
 `min==max` widget never yields). See `docs/layout_system.md` §6.
 
 Layout resolution is capability-based: backends with `pixel_layout` get
-fractional cell boundaries (exact pixels); others have every boundary snapped
-to whole cells. Layouts re-resolve from the backend size on each render, so
+fractional base unit boundaries (exact pixels); others have every boundary snapped
+to whole base units. Layouts re-resolve from the backend size on each render, so
 they follow window resizes.
 
 `set_layout(layout, margin_px=8)` insets the whole layout from the window
-frame. Margins follow the `min_px`/`min_cells` rules: `margin_px` applies
-only on pixel-layout backends (it would cost whole cells on a cell grid);
-`margin_cells` applies everywhere. The margin reads as pane padding, not as
+frame. Margins follow the `min_px`/`min` rules: `margin_px` applies
+only on pixel-layout backends (it would cost whole base units on a base unit grid);
+`margin_units` applies everywhere. The margin reads as pane padding, not as
 a bare frame: edge panes' surface backgrounds and the dividers bleed across
 the margin to the window edges, so the backend's default background never
 shows through.
 
 **Region separation** is intent, not geometry. A drawn separator costs one
-device pixel on GUI but a whole cell row/column on TUI, so the idiomatic
+device pixel on GUI but a whole base unit row/column on TUI, so the idiomatic
 solution differs per backend (GUI: hairline; TUI: background contrast) and
 the choice is made by the layout/Panel layer, never the app:
 
@@ -146,10 +148,10 @@ panel.set_layout(VSplit(
 ))
 ```
 
-- `divider="subtle"` — `hairline` backends reserve 1 device pixel (zero cell
-  cost) and draw a divider line; cell-grid backends reserve nothing — the
+- `divider="subtle"` — `hairline` backends reserve 1 device pixel (zero base unit
+  cost) and draw a divider line; whole-unit backends reserve nothing — the
   theme guarantees adjacent surface roles contrasting backgrounds instead
-- `divider="strong"` — cell-grid backends spend one whole cell on a
+- `divider="strong"` — whole-unit backends spend one whole base unit on a
   box-drawing line, because the app declared the separation worth the space
 - `hints={"surface": role}` — semantic surface roles (`content`, `sidebar`,
   `header`, `status`) resolved to colors by a per-backend `Theme`
@@ -207,7 +209,7 @@ Profiles are declared per backend type, using inheritance and overrides.
 ```python
 PROFILE_TUI = {
     "pixel_layout": False,
-    "hairline": False,        # sub-cell divider lines (zero cell cost)
+    "hairline": False,        # sub-unit divider lines (zero base unit cost)
     "layering": False,
     "transparency": False,
     "shadow": False,
@@ -400,4 +402,4 @@ PuiKit is primarily Python, but backends may include compiled components in othe
 Canonical examples live under `examples/`:
 
 1. **`hello_world/`** — minimal app; renders a single text label on both TUI and GUI backends
-2. **`demo_catalog/`** — widget showcase; one screen per widget type, switchable at runtime. Its **Layout** page is the layout-system showcase (`LayoutView`): the same split layout snapped to cells on TUI and resolved at pixel granularity on GUI, with surface roles and dividers. Its **Intrinsic** page shows content-driven sizing: a message area sized to its line count, buttons sized to their labels (cross-axis centered), and a backend-fixed scrollbar coexisting with a weighted split
+2. **`demo_catalog/`** — widget showcase; one screen per widget type, switchable at runtime. Its **Layout** page is the layout-system showcase (`LayoutView`): the same split layout snapped to base units on TUI and resolved at pixel granularity on GUI, with surface roles and dividers. Its **Intrinsic** page shows content-driven sizing: a message area sized to its line count, buttons sized to their labels (cross-axis centered), and a backend-fixed scrollbar coexisting with a weighted split

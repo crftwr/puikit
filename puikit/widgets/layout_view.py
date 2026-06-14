@@ -2,7 +2,7 @@
 
 The same engine the Panel uses for the top-level layout (puikit.layout)
 resolves the Split against this widget's DrawContext. Children therefore get
-fractional cell rects on pixel-layout backends and cell-snapped rects on
+fractional base unit rects on pixel-layout backends and base unit-snapped rects on
 TUI — exactly like a top-level layout, but nested within a page. Surface
 roles and dividers work the same way; the capability decisions stay in the
 DrawContext, so this widget never branches on the backend.
@@ -20,16 +20,46 @@ from .base import Widget
 class LayoutView(Widget):
     focusable = True
 
-    def __init__(self, layout: Any):
+    def __init__(
+        self, layout: Any, margin_px: float = 0.0, margin_units: float = 0.0
+    ):
         self.layout = layout
+        # Inset the hosted layout from this widget's own rect, the same way
+        # Panel.set_layout insets from the window frame: margin_px applies only
+        # on pixel-layout backends, margin_units everywhere. The area behind
+        # the margin is whatever filled this pane (its surface background), so
+        # the inset reads as symmetric page padding without any edge bleed.
+        self.margin_px = float(margin_px)
+        self.margin_units = float(margin_units)
         # Resolved (widget, rect) pairs from the last draw, for event routing.
         self._placements: list[tuple[Any, Rect]] = []
         self._focused: Any | None = None
 
+    def set_layout(self, layout: Any) -> None:
+        """Replace the hosted layout (e.g. switching pages) and re-pick focus
+        from the new tree on the next draw."""
+        self.layout = layout
+        self._placements = []
+        self._focused = None
+
+    def _margins(self, lctx: Any) -> tuple[float, float]:
+        if lctx.snap:
+            m = float(round(self.margin_units))
+            return (m, m)
+        mx = my = self.margin_units
+        if lctx.base_w > 0:
+            mx = round(max(mx, self.margin_px / lctx.base_w) * lctx.base_w) / lctx.base_w
+        if lctx.base_h > 0:
+            my = round(max(my, self.margin_px / lctx.base_h) * lctx.base_h) / lctx.base_h
+        return (mx, my)
+
     def draw(self, ctx: DrawContext) -> None:
-        w, h = ctx.size_cells
+        w, h = ctx.size_units
         lctx = ctx.layout_context()
-        placements = self.layout.resolve(0.0, 0.0, w, h, lctx)
+        mx, my = self._margins(lctx)
+        placements = self.layout.resolve(
+            mx, my, max(0.0, w - 2 * mx), max(0.0, h - 2 * my), lctx
+        )
         self._placements = [(widget, rect) for widget, rect, _ in placements]
         if self._focused is None:
             self._focused = next(

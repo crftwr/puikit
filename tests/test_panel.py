@@ -106,7 +106,7 @@ def test_dim_below_dims_underlying_content():
     from puikit import TextAttribute
 
     assert backend.style_at(0, 0).attr & TextAttribute.DIM  # under the layer
-    # The layer itself is drawn after dimming, so its cells are not dimmed.
+    # The layer itself is drawn after dimming, so its base units are not dimmed.
     cx, cy = (20 - 8) // 2, (10 - 4) // 2
     assert not backend.style_at(cx, cy).attr & TextAttribute.DIM
 
@@ -142,12 +142,12 @@ def test_pane_background_fills_and_text_inherits():
     panel = Panel(backend)
     panel.add(Label("hi"), x=2, y=1, w=10, h=3, hints={"bg": (10, 20, 30)})
     panel.render()
-    # Empty pane cells are filled with the background...
+    # Empty pane base units are filled with the background...
     assert backend.style_at(8, 2).bg == (10, 20, 30)
     # ...text without an explicit bg inherits it...
     assert backend.snapshot()[1][2:4] == "hi"
     assert backend.style_at(2, 1).bg == (10, 20, 30)
-    # ...and cells outside the pane are untouched.
+    # ...and base units outside the pane are untouched.
     assert backend.style_at(0, 0).bg is None
 
 
@@ -196,7 +196,7 @@ class SizeProbe(Widget):
         self.seen = None
 
     def draw(self, ctx):
-        self.seen = ctx.size_cells
+        self.seen = ctx.size_units
 
 
 def test_size_animation_redraws_at_intermediate_sizes():
@@ -248,7 +248,7 @@ def test_pop_layer_restores_event_flow():
 
 def test_text_renders_in_fractional_height_pane():
     # Regression: on pixel-layout backends, rounding can squeeze a fixed
-    # 1-cell pane (e.g. a status bar) to slightly under one cell. Its text
+    # 1-base unit pane (e.g. a status bar) to slightly under one base unit. Its text
     # must be drawn and clipped by the backend, not silently dropped.
     from puikit import DrawContext, Rect
 
@@ -259,7 +259,7 @@ def test_text_renders_in_fractional_height_pane():
 
 
 def test_text_extends_into_partial_last_column():
-    # A pane 5.5 cells wide shows 6 columns of text (the last one partial,
+    # A pane 5.5 base units wide shows 6 columns of text (the last one partial,
     # clipped at the pane edge by the backend).
     from puikit import DrawContext, Rect
 

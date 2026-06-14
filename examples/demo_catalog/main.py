@@ -2,11 +2,13 @@
 
 The pages are listed in the navigation on the left; moving the selection
 (up/down or mouse) switches the content pane on the right. The whole shell
-is built with the layout system, so it follows window resizes; pages are
-Containers, so their widgets are clipped and animate as a tree. The Layout
-page nests the same layout system inside a page (LayoutView): one split
-definition snapped to cells on TUI and resolved at pixel granularity on GUI,
-with surface roles and dividers.
+*and every page* are built with the layout system — no page hand-places a
+widget at a coordinate. Each `build_*_page` returns a `Split`, hosted in a
+single `LayoutView` whose layout is swapped per page; the host's margin gives
+every page symmetric padding (declared, not positioned). Widgets that need
+free-form internals (the animation card) stay `Container`s as *leaves*, placed
+by the layout. The layout re-resolves on resize, snapped to base units on TUI and
+to device pixels on GUI, with surface roles and dividers.
 
 Keys: up/down in the nav switch pages, tab moves focus between the nav and
 the page, 1..9 jump to a page, d opens a layered dialog, q quits.
@@ -68,29 +70,54 @@ class DemoDialog(Widget):
 # --- pages ---------------------------------------------------------------------
 
 
-def build_label_page(page: Container, panel: Panel) -> None:
-    page.add(Label("Plain label"), x=2, y=1, w=40, h=1)
-    page.add(Label("Bold label", BOLD), x=2, y=3, w=40, h=1)
-    page.add(Label("Reverse label", Style(attr=TextAttribute.REVERSE)), x=2, y=5, w=40, h=1)
-    page.add(Label("Colored label", Style(fg=(13, 188, 121))), x=2, y=7, w=40, h=1)
+def build_label_page(panel: Panel) -> VSplit:
+    # Each page returns a layout (not hand-placed coordinates): the rows stack
+    # with a 1-base unit gap, and the trailing weighted item soaks up the slack.
+    return VSplit(
+        Item(Label("Plain label"), size=1),
+        Item(Label("Bold label", BOLD), size=1),
+        Item(Label("Reverse label", Style(attr=TextAttribute.REVERSE)), size=1),
+        Item(Label("Colored label", Style(fg=(13, 188, 121))), size=1),
+        Item(Label(""), weight=1),
+        gap=1,
+    )
 
 
-def build_list_page(page: Container, panel: Panel) -> None:
+def build_list_page(panel: Panel) -> VSplit:
     items = [f"Item {i:03d}" for i in range(50)]
     status = Label("Use arrows / page keys; enter to select", DIM)
     listview = ListView(
         items, on_select=lambda i, text: setattr(status, "text", f"Selected: {text}")
     )
-    page.add(listview, x=2, y=1, w=30, h=12)
-    page.add(status, x=2, y=14, w=50, h=1)
-    page.focus(listview)
+    return VSplit(
+        # List capped to 30 base units wide; it flexes to fill the height.
+        Item(HSplit(Item(listview, size=30), Item(Label(""), weight=1)), weight=1),
+        Item(status, size=1),
+        gap=1,
+    )
 
 
-def build_scrollbar_page(page: Container, panel: Panel) -> None:
-    page.add(Label("Standalone scroll bars (pos / ratio):"), x=2, y=1, w=50, h=1)
-    for i, (pos, ratio) in enumerate([(0.0, 0.3), (0.5, 0.3), (1.0, 0.3), (0.0, 0.8)]):
-        page.add(Label(f"{pos:.1f} / {ratio:.1f}"), x=2 + i * 12, y=3, w=10, h=1)
-        page.add(ScrollBar(pos, ratio), x=6 + i * 12, y=5, w=1, h=10)
+def build_scrollbar_page(panel: Panel) -> VSplit:
+    columns = [
+        Item(
+            VSplit(
+                Item(Label(f"{pos:.1f} / {ratio:.1f}"), size=1),
+                # Scrollbar width is intrinsic (backend-fixed); height 10.
+                Item(
+                    HSplit(Item(ScrollBar(pos, ratio), size="content"), Item(Label(""), weight=1)),
+                    size=10,
+                ),
+                Item(Label(""), weight=1),
+            ),
+            size=12,
+        )
+        for pos, ratio in [(0.0, 0.3), (0.5, 0.3), (1.0, 0.3), (0.0, 0.8)]
+    ]
+    return VSplit(
+        Item(Label("Standalone scroll bars (pos / ratio):"), size=1),
+        Item(HSplit(*columns, Item(Label(""), weight=1), gap=2), weight=1),
+        gap=1,
+    )
 
 
 class AnimTarget(Container):
@@ -128,7 +155,7 @@ ANIMATIONS = [
 ]
 
 
-def build_animation_page(page: Container, panel: Panel) -> None:
+def build_animation_page(panel: Panel) -> VSplit:
     target = AnimTarget()
 
     def run(index: int, name: str) -> None:
@@ -136,16 +163,34 @@ def build_animation_page(page: Container, panel: Panel) -> None:
         panel.animate(target, hints=dict(ANIMATIONS[index][1]))
 
     listview = ListView([name for name, _ in ANIMATIONS], on_select=run)
-    page.add(Label("Pick a transition, press enter", DIM), x=2, y=1, w=50, h=1)
-    page.add(listview, x=2, y=3, w=24, h=8)
-    page.add(target, x=30, y=3, w=28, h=9, hints={"bg": CARD_BG})
-    page.focus(listview)
+    return VSplit(
+        Item(Label("Pick a transition, press enter", DIM), size=1),
+        Item(
+            HSplit(
+                Item(listview, size=24),
+                # AnimTarget stays a Container — a legitimate free-form *leaf*
+                # (bordered card with hand-placed children); the layout system
+                # only positions it. Capped to a 40x12 card via a nested split.
+                Item(
+                    VSplit(
+                        Item(target, size=12, hints={"bg": CARD_BG}),
+                        Item(Label(""), weight=1),
+                    ),
+                    size=40,
+                ),
+                Item(Label(""), weight=1),
+                gap=2,
+            ),
+            weight=1,
+        ),
+        gap=1,
+    )
 
 
 class Region(Widget):
     """A layout region that reports its own computed geometry. Regions draw
     no borders: the surface backgrounds and the layout dividers separate
-    them. The cell extent is fractional on pixel-layout backends and whole on
+    them. The base unit extent is fractional on pixel-layout backends and whole on
     TUI, so the same layout reads differently per backend."""
 
     def __init__(self, name: str, color: tuple[int, int, int], note: str = ""):
@@ -154,79 +199,79 @@ class Region(Widget):
         self.note = note
 
     def draw(self, ctx) -> None:
-        w_cells, h_cells = ctx.size_cells
-        cw, ch = ctx.cell_size
-        cells_line = f"{w_cells:.2f} x {h_cells:.2f} cells"
-        px_line = f"= {w_cells * cw:.0f} x {h_cells * ch:.0f} px"
+        w_units, h_units = ctx.size_units
+        cw, ch = ctx.base_size
+        units_line = f"{w_units:.2f} x {h_units:.2f} base units"
+        px_line = f"= {w_units * cw:.0f} x {h_units * ch:.0f} px"
         if ctx.height >= 5:
             ctx.draw_text(1, 0, self.name, Style(fg=self.color, attr=TextAttribute.BOLD))
-            ctx.draw_text(1, 2, cells_line)
+            ctx.draw_text(1, 2, units_line)
             ctx.draw_text(1, 3, px_line)
             if self.note:
                 ctx.draw_text(1, 4, self.note, Style(attr=TextAttribute.DIM))
         else:
-            line = f"{self.name}  {cells_line} {px_line}" + (
+            line = f"{self.name}  {units_line} {px_line}" + (
                 f"  ({self.note})" if self.note else ""
             )
             ctx.draw_text(1, 0, line, Style(fg=self.color))
 
 
-def build_layout_page(page: Container, panel: Panel) -> None:
+def build_layout_page(panel: Panel) -> VSplit:
     # One layout definition, resolved at the page's own granularity: every
-    # boundary snaps to whole cells on TUI, lands on device pixels on GUI.
+    # boundary snaps to whole base units on TUI, lands on device pixels on GUI.
     # Header/status use divider="subtle" (a GUI hairline, nothing on TUI —
     # the themed surface backgrounds carry the contrast); the body panes use
-    # divider="strong" (a hairline on GUI, one whole │ cell column on TUI).
-    page.add(Label("One layout, two granularities — resize the window", DIM), x=2, y=1, w=60, h=1)
-    board = LayoutView(
-        VSplit(
-            Item(
-                Region("Header", (229, 229, 16), "fixed: 1 cell"),
-                size=1,
-                hints={"surface": "header"},
+    # divider="strong" (a hairline on GUI, one whole │ base unit column on TUI).
+    return VSplit(
+        Item(Label("One layout, two granularities — resize the window", DIM), size=1),
+        Item(
+            VSplit(
+                Item(
+                    Region("Header", (229, 229, 16), "fixed: 1 base unit"),
+                    size=1,
+                    hints={"surface": "header"},
+                ),
+                Item(
+                    HSplit(
+                        Item(
+                            Region("Sidebar", (13, 188, 121), "weight 1, min 220px"),
+                            weight=1,
+                            hints={"min_px": 220, "min": 18, "surface": "sidebar"},
+                        ),
+                        Item(
+                            Region("Main", (36, 114, 200), "weight 2"),
+                            weight=2,
+                            hints={"surface": "content"},
+                        ),
+                        Item(
+                            Region("Inspector", (188, 63, 188), "weight 1"),
+                            weight=1,
+                            hints={"surface": "sidebar"},
+                        ),
+                        divider="strong",
+                    )
+                ),
+                Item(
+                    Region("Status", (220, 220, 220)),
+                    size=1,
+                    hints={"surface": "status"},
+                ),
+                divider="subtle",
             ),
-            Item(
-                HSplit(
-                    Item(
-                        Region("Sidebar", (13, 188, 121), "weight 1, min 220px"),
-                        weight=1,
-                        hints={"min_px": 220, "min_cells": 18, "surface": "sidebar"},
-                    ),
-                    Item(
-                        Region("Main", (36, 114, 200), "weight 2"),
-                        weight=2,
-                        hints={"surface": "content"},
-                    ),
-                    Item(
-                        Region("Inspector", (188, 63, 188), "weight 1"),
-                        weight=1,
-                        hints={"surface": "sidebar"},
-                    ),
-                    divider="strong",
-                )
-            ),
-            Item(
-                Region("Status", (220, 220, 220)),
-                size=1,
-                hints={"surface": "status"},
-            ),
-            divider="subtle",
-        )
+            weight=1,
+        ),
+        gap=1,
     )
-    # stretch: the board fills the page below the caption and tracks resizes.
-    page.add(board, x=2, y=3, w=0, h=0, hints={"stretch": True})
 
 
-def build_intrinsic_page(page: Container, panel: Panel) -> None:
+def build_intrinsic_page(panel: Panel) -> VSplit:
     # Three widgets that size *themselves*; the layout reserves what they
     # report and the rest flexes around them. None of these sizes is named by
     # the app — they come from the widget's own measure().
-    page.add(
-        Label("Widgets measure themselves; the layout reserves it", DIM),
-        x=2, y=1, w=60, h=1,
-    )
-    board = LayoutView(
-        VSplit(
+    return VSplit(
+        Item(Label("Widgets measure themselves; the layout reserves it", DIM), size=1),
+        Item(
+            VSplit(
             # 1. Content HEIGHT: the message reserves exactly its line count.
             Item(
                 TextBlock(
@@ -244,18 +289,22 @@ def build_intrinsic_page(page: Container, panel: Panel) -> None:
             #    the open space below the captions is that flex, on purpose.
             Item(
                 HSplit(
+                    # Explicit, distinct fills so the 2:1 proportion is a
+                    # *visible* block: resize the window and watch Main stay
+                    # twice Side while the scrollbar keeps its fixed width.
                     Item(
-                        Region("Main", (36, 114, 200), "weight 2 · flexes to fill"),
+                        Region("Main", (120, 170, 240), "weight 2 of 3"),
                         weight=2,
-                        hints={"surface": "content"},
+                        hints={"bg": (34, 48, 78)},
                     ),
                     Item(
-                        Region("Side", (13, 188, 121), "weight 1 · resize the window"),
+                        Region("Side", (130, 220, 170), "weight 1 of 3"),
                         weight=1,
-                        hints={"surface": "sidebar"},
+                        hints={"bg": (28, 58, 46)},
                     ),
                     # Fixed width, reserved before the 2:1 split divides the rest.
                     Item(ScrollBar(0.3, 0.4), size="content"),
+                    divider="subtle",
                 ),
                 weight=1,
             ),
@@ -280,9 +329,11 @@ def build_intrinsic_page(page: Container, panel: Panel) -> None:
                 hints={"bg": TITLE_BG},
             ),
             divider="subtle",
-        )
+            ),
+            weight=1,
+        ),
+        gap=1,
     )
-    page.add(board, x=2, y=3, w=0, h=0, hints={"stretch": True})
 
 
 PAGES = [
@@ -306,12 +357,15 @@ def main() -> None:
     backend = create_backend(args.backend)
     with backend:
         panel = Panel(backend)
-        content = Container()
+        # The page host is itself a layout (LayoutView), not a coordinate
+        # Container: each page is a Split swapped in via set_layout. Its margin
+        # gives every page symmetric padding inside the content pane — declared,
+        # not hand-placed (8px on GUI, 1 base unit on TUI).
+        content = LayoutView(VSplit(), margin_px=8, margin_units=1)
         status = Label("", DIM)
 
         def show_page(index: int, name: str) -> None:
-            content.clear()
-            PAGES[index][1](content, panel)
+            content.set_layout(PAGES[index][1](panel))
             status.text = f" {name} — tab: focus page/nav, d: dialog, q: quit"
 
         nav = ListView([name for name, _ in PAGES], on_change=show_page)
@@ -321,12 +375,16 @@ def main() -> None:
                 Item(Label(" PuiKit Demo Catalog", BOLD), size=1, hints={"bg": TITLE_BG}),
                 Item(
                     HSplit(
-                        Item(nav, size=18, hints={"min_cells": 12, "bg": NAV_BG}),
+                        Item(nav, size=18, hints={"min": 12, "bg": NAV_BG}),
                         Item(content, weight=1, hints={"min_px": 300, "bg": CONTENT_BG}),
                     )
                 ),
                 Item(status, size=1, hints={"bg": TITLE_BG}),
-            )
+            ),
+            # GUI: inset the whole layout 4px from the window frame. Edge panes
+            # bleed their backgrounds across the margin, so it reads as padding,
+            # not a bare frame. Ignored on TUI (a px margin would cost base units).
+            margin_px=4,
         )
 
         def close_dialog() -> None:

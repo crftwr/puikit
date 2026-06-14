@@ -28,7 +28,7 @@ class Widget:
         """Intrinsic size along ``axis`` ("x" = width, "y" = height), used
         when the layout places this widget with ``size="content"`` (or a
         ``min="content"`` floor, or cross-axis ``align``). ``available`` is
-        the resolved extent on the other axis, in cells.
+        the resolved extent on the other axis, in base units.
 
         Widgets that measure themselves from a font do so here via
         ``ctx.measure_text``; widgets with a backend-fixed extent read it off

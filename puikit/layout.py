@@ -6,9 +6,9 @@ description with its own rules:
 
 - **Unitless intent** — alignment (left/center/right, top/center/bottom),
   weight (a share of leftover space), and the split axis. These carry no
-  length at all, so nothing has to ground them in cells, pixels, or fonts.
+  length at all, so nothing has to ground them in base units, pixels, or fonts.
 - **Length-bearing intent** — fixed sizes, minimums, gaps, and dividers.
-  Each is stated in the abstract *cell* unit, with an optional ``*_px``
+  Each is stated in the abstract *base unit*, with an optional ``*_px``
   companion that only applies on pixel-layout backends (see below).
 - **Intrinsic (measured) intent** — ``size="content"`` / ``min="content"``:
   the widget measures *itself* (a button to its label, a scrollbar to a
@@ -17,11 +17,11 @@ description with its own rules:
 
 Resolution differs per backend:
 
-- pixel_layout backends keep fractional cell coordinates, snapped to the
+- pixel_layout backends keep fractional base-unit coordinates, snapped to the
   device-pixel grid (a 1:2 split lands on a real, whole-pixel boundary);
-- cell-grid backends (TUI) snap every boundary to whole cells.
+- whole-unit backends (TUI) snap every boundary to whole base units.
 
-The *cell* is the abstract layout unit, not a character: on TUI it grounds in
+The base unit is the abstract layout unit, not a character: on TUI it grounds in
 one terminal character; on GUI it grounds in a backend-configured block of
 logical pixels — never in a font metric. Widgets only ever see their resolved
 DrawContext; they never learn which resolution happened.
@@ -37,7 +37,7 @@ from .panel import Rect
 
 @dataclass(frozen=True)
 class SizeRequest:
-    """A widget's intrinsic size along one axis, in cells (fractional on GUI).
+    """A widget's intrinsic size along one axis, in base units (fractional on GUI).
 
     ``preferred`` is the natural size; ``min``/``max`` bound how far the
     layout may shrink or grow it. A backend-fixed widget (a scrollbar) sets
@@ -58,22 +58,22 @@ class SizeRequest:
 
 @dataclass(frozen=True)
 class LayoutContext:
-    cell_w: int
-    cell_h: int
-    snap: bool  # True: round all boundaries to whole cells (TUI)
-    hairline: bool = False  # backend can draw sub-cell divider lines
+    base_w: int
+    base_h: int
+    snap: bool  # True: round all boundaries to whole base units (TUI)
+    hairline: bool = False  # backend can draw sub-unit divider lines
     # How a widget measures itself, supplied by the backend. measure_text
-    # returns a width in cells; scrollbar_cells is the backend's fixed
+    # returns a width in base units; scrollbar_units is the backend's fixed
     # scrollbar thickness. Both let intrinsic widgets size themselves
     # without the layout ever touching the backend.
     measure: Callable[[str, Any], float] | None = None
-    scrollbar_cells: float = 1.0
+    scrollbar_units: float = 1.0
     # Divider rects emitted during resolve, for the Panel to draw.
     dividers: list[Divider] = field(default_factory=list)
 
     def measure_text(self, text: str, style: Any = None) -> float:
-        """Width of ``text`` in cells. Falls back to the column count when the
-        backend supplies no measurer (cell-grid backends: one column/char)."""
+        """Width of ``text`` in base units. Falls back to the column count when the
+        backend supplies no measurer (whole-unit backends: one column/char)."""
         if self.measure is not None:
             return self.measure(text, style)
         return float(len(text))
@@ -82,7 +82,7 @@ class LayoutContext:
 @dataclass(frozen=True)
 class Divider:
     """A region boundary the Panel must make visible: a hairline on
-    hairline-capable backends, box-drawing line cells otherwise."""
+    hairline-capable backends, box-drawing characters otherwise."""
 
     rect: Rect
     vertical: bool  # True: column between side-by-side items
@@ -109,21 +109,21 @@ def _align_offset(align: str, slack: float) -> float:
 class Item:
     """One slot in a split: a widget or a nested split, plus sizing intent.
 
-    size    main-axis length. A number is a fixed length in cells; the string
-            "content" makes the item *intrinsic* — the widget measures itself
-            and the layout reserves the measured length. Either way the item
-            does not flex.
+    size    main-axis length in base units. A number is a fixed length; the
+            string "content" makes the item *intrinsic* — the widget measures
+            itself and the layout reserves the measured length. Either way the
+            item does not flex.
     size_px main-axis fixed length in pixels, used in place of ``size`` on
-            pixel-layout backends (cell-grid backends keep ``size``); the same
+            pixel-layout backends (whole-unit backends keep ``size``); the same
             capability rule as ``min_px``.
     weight  share of the remaining space, after fixed and intrinsic items.
     align   cross-axis alignment of a shrink-to-content child within its slot:
             "start"/"center"/"end". Only has an effect when the widget reports
             an intrinsic cross size smaller than the slot (otherwise it fills).
-    hints   "min_cells": minimum length in cells, on every backend.
-            "min_px":    minimum in pixels; pixel-layout backends only.
-            "min":       "content" floors the item at its measured size, so a
-                         flex item never shrinks below what its content needs.
+    hints   "min":    minimum length on every backend — a number (base units),
+                      or "content" to floor a flex item at its measured size so
+                      it never shrinks below what its content needs.
+            "min_px": minimum in pixels; pixel-layout backends only.
             other hints (e.g. "surface", "bg") are forwarded to the placement.
     """
 
@@ -153,18 +153,26 @@ class Item:
             return "fixed"
         return "flex"
 
-    def fixed_cells(self, cell_px: int, px_aware: bool) -> float:
-        """Resolved fixed length in cells (``size`` or ``size_px``)."""
-        if px_aware and self.size_px is not None and cell_px > 0:
-            return self.size_px / cell_px
+    def fixed_units(self, base_px: int, px_aware: bool) -> float:
+        """Resolved fixed length in base units (``size`` or ``size_px``)."""
+        if px_aware and self.size_px is not None and base_px > 0:
+            return self.size_px / base_px
         return float(self.size) if isinstance(self.size, (int, float)) else 0.0
 
-    def min_cells(self, cell_px: int, px_aware: bool, req: SizeRequest | None) -> float:
-        minimum = float(self.hints.get("min_cells", 0.0))
-        if px_aware and "min_px" in self.hints and cell_px > 0:
-            minimum = max(minimum, self.hints["min_px"] / cell_px)
-        if self.hints.get("min") == "content" and req is not None:
-            minimum = max(minimum, req.clamped())
+    def min_units(self, base_px: int, px_aware: bool, req: SizeRequest | None) -> float:
+        """Minimum length in base units: a numeric ``min`` hint, a ``min_px``
+        floor (pixel backends), and the widget's own measured floor — an
+        intrinsic item never shrinks below ``req.min``; a flex item with
+        ``min="content"`` never shrinks below its measured size."""
+        m = self.hints.get("min")
+        minimum = float(m) if isinstance(m, (int, float)) else 0.0
+        if px_aware and "min_px" in self.hints and base_px > 0:
+            minimum = max(minimum, self.hints["min_px"] / base_px)
+        if req is not None:
+            if self.category == "content":
+                minimum = max(minimum, req.min)
+            elif m == "content":
+                minimum = max(minimum, req.clamped())
         return minimum
 
 
@@ -178,11 +186,11 @@ class Split:
 
     divider declares separation intent between adjacent items, never
     geometry — each backend maps it to its own idiom:
-      "subtle"  hairline backends: a 1-device-pixel line (zero cell cost);
-                cell-grid backends: nothing is drawn or reserved — adjacent
+      "subtle"  hairline backends: a 1-device-pixel line (zero base unit cost);
+                whole-unit backends: nothing is drawn or reserved — adjacent
                 panes are told apart by background contrast (surface roles)
-      "strong"  hairline backends: same hairline; cell-grid backends spend
-                one whole cell on a box-drawing line, because the app said
+      "strong"  hairline backends: same hairline; whole-unit backends spend
+                one whole base unit on a box-drawing line, because the app said
                 the separation is worth the space
     """
 
@@ -204,8 +212,8 @@ class Split:
         total = w if horizontal else h
         cross_full = h if horizontal else w
         cross_axis = "y" if horizontal else "x"
-        cell_px = ctx.cell_w if horizontal else ctx.cell_h
-        thickness = self._divider_thickness(cell_px, ctx)
+        base_px = ctx.base_w if horizontal else ctx.base_h
+        thickness = self._divider_thickness(base_px, ctx)
         spacing = self.gap + thickness
         sizes = self._sizes(total, ctx, spacing=spacing, cross=cross_full)
 
@@ -222,14 +230,14 @@ class Split:
             if ctx.snap:
                 end = round(end)
                 start = 0 if prev_end is None else prev_end + round(spacing)
-            elif cell_px > 0:
+            elif base_px > 0:
                 # Pixel granularity means whole device pixels: fractional
-                # cells are fine, fractional pixels are not.
-                end = round(end * cell_px) / cell_px
+                # base units are fine, fractional pixels are not.
+                end = round(end * base_px) / base_px
                 start = (
                     0.0
                     if prev_end is None
-                    else prev_end + round(spacing * cell_px) / cell_px
+                    else prev_end + round(spacing * base_px) / base_px
                 )
             else:
                 start = 0.0 if prev_end is None else prev_end + spacing
@@ -255,7 +263,7 @@ class Split:
             else:
                 rect = (x + coff, y + start, csize, main_size)
             if ctx.snap:
-                # Cell-grid backends must see true integers, not whole floats.
+                # Whole-unit backends must see true integers, not whole floats.
                 rect = tuple(round(v) for v in rect)
             if isinstance(item.content, Split):
                 placements.extend(item.content.resolve(*rect, ctx))
@@ -273,14 +281,14 @@ class Split:
                 ctx.dividers.append(Divider(rect, vertical=horizontal, level=self.divider))
         return placements
 
-    def _divider_thickness(self, cell_px: int, ctx: LayoutContext) -> float:
-        """Space reserved between items for the divider, in cells."""
+    def _divider_thickness(self, base_px: int, ctx: LayoutContext) -> float:
+        """Space reserved between items for the divider, in base units."""
         if self.divider is None:
             return 0.0
-        if ctx.hairline and not ctx.snap and cell_px > 0:
-            return 1.0 / cell_px  # one device pixel: zero cell cost
-        # Cell-grid: "subtle" costs nothing (background contrast separates);
-        # "strong" explicitly spends one cell on a drawn line.
+        if ctx.hairline and not ctx.snap and base_px > 0:
+            return 1.0 / base_px  # one device pixel: zero base unit cost
+        # Whole-unit: "subtle" costs nothing (background contrast separates);
+        # "strong" explicitly spends one base unit on a drawn line.
         return 1.0 if self.divider == "strong" else 0.0
 
     def _sizes(
@@ -289,7 +297,7 @@ class Split:
         """Main-axis lengths: fixed, then intrinsic (measured), then weighted,
         then an overflow priority ladder. See the module docstring."""
         horizontal = self._axis == "x"
-        cell_px = ctx.cell_w if horizontal else ctx.cell_h
+        base_px = ctx.base_w if horizontal else ctx.base_h
         px_aware = not ctx.snap
 
         gaps = spacing * (len(self.items) - 1)
@@ -305,7 +313,7 @@ class Split:
                 reqs.append(None)
 
         mins = [
-            item.min_cells(cell_px, px_aware, req)
+            item.min_units(base_px, px_aware, req)
             for item, req in zip(self.items, reqs)
         ]
         cats = [item.category for item in self.items]
@@ -316,7 +324,7 @@ class Split:
         bases: list[float | None] = []
         for item, cat, minimum, req in zip(self.items, cats, mins, reqs):
             if cat == "fixed":
-                base = max(item.fixed_cells(cell_px, px_aware), minimum)
+                base = max(item.fixed_units(base_px, px_aware), minimum)
                 reserved += base
                 bases.append(base)
             elif cat == "content":

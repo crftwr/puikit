@@ -4,7 +4,7 @@ Uses whatever macOS frameworks fit the job — AppKit/Cocoa for windows and
 events today; CoreGraphics, CoreText, and others as rendering grows.
 
 The backend keeps a display list of drawing intents (text runs, boxes,
-scrollbars, icons, images) in cell coordinates; a custom NSView renders the
+scrollbars, icons, images) in base-unit coordinates; a custom NSView renders the
 list in pixels on each draw pass, so the same widget code that runs on
 curses gets real rectangles, color text, and emoji icons here.
 
@@ -19,7 +19,7 @@ from __future__ import annotations
 import math
 import time
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from AppKit import (
@@ -39,11 +39,14 @@ from AppKit import (
     NSEventModifierFlagShift,
     NSEventTypeApplicationDefined,
     NSTimer,
+    NSBoldFontMask,
     NSFont,
     NSFontAttributeName,
+    NSFontManager,
     NSFontWeightBold,
     NSFontWeightRegular,
     NSForegroundColorAttributeName,
+    NSItalicFontMask,
     NSImage,
     NSCompositingOperationSourceOver,
     NSGraphicsContext,
@@ -65,6 +68,7 @@ from Foundation import NSMakeRect, NSMakeSize, NSObject, NSString, NSZeroPoint
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..event import Event, EventType
+from ..font import Font, FontWeight
 
 try:
     from Quartz import (
@@ -150,7 +154,7 @@ _ZWJ = "‍"  # zero-width joiner
 
 def _attaches_to_base(ch: str) -> bool:
     """True for a code point that renders on the previous base character
-    rather than in its own cell: combining marks, variation selectors
+    rather than in its own base unit: combining marks, variation selectors
     (U+FE00..U+FE0F, e.g. the one that turns "⚠" into the emoji "⚠️"), and
     the zero-width joiner."""
     return bool(
@@ -160,17 +164,17 @@ def _attaches_to_base(ch: str) -> bool:
     )
 
 
-def _cell_runs(text: str) -> list[str]:
-    """Split a string into one substring per display cell, keeping each glyph
+def _glyph_runs(text: str) -> list[str]:
+    """Split a string into one substring per base unit, keeping each glyph
     (base character plus any attaching marks / ZWJ sequence) whole so the
-    per-cell renderer never splits a single glyph across two cells."""
-    cells: list[str] = []
+    per-base-unit renderer never splits a single glyph across two base units."""
+    glyphs: list[str] = []
     for ch in text:
-        if cells and (_attaches_to_base(ch) or cells[-1].endswith(_ZWJ)):
-            cells[-1] += ch
+        if glyphs and (_attaches_to_base(ch) or glyphs[-1].endswith(_ZWJ)):
+            glyphs[-1] += ch
         else:
-            cells.append(ch)
-    return cells
+            glyphs.append(ch)
+    return glyphs
 
 
 def _ns_color(rgb: tuple[int, int, int], alpha: float = 1.0):
@@ -183,7 +187,7 @@ class Animation:
     """One running transition; progress is derived from wall-clock time.
 
     Kinds: "fade" (alpha), "slide" (position, hints from_dx/from_dy in
-    cells), "scale" (size, hints from_scale), "highlight" (color overlay,
+    base units), "scale" (size, hints from_scale), "highlight" (color overlay,
     hints color/strength)."""
 
     kind: str
@@ -210,7 +214,7 @@ class _PuiKitView(NSView):
     backend = None  # set right after alloc/init
 
     def isFlipped(self):
-        return True  # top-left origin, matching cell coordinates
+        return True  # top-left origin, matching base-unit coordinates
 
     def acceptsFirstResponder(self):
         return True
@@ -226,28 +230,28 @@ class _PuiKitView(NSView):
         if event is not None:
             self.backend._dispatch(event)
 
-    def _mouse_cell(self, ns_event) -> tuple[int, int]:
+    def _mouse_unit(self, ns_event) -> tuple[int, int]:
         point = self.convertPoint_fromView_(ns_event.locationInWindow(), None)
-        cw, ch = self.backend.cell_size
+        cw, ch = self.backend.base_size
         return (int(point.x // cw), int(point.y // ch))
 
     def mouseDown_(self, ns_event):
-        x, y = self._mouse_cell(ns_event)
+        x, y = self._mouse_unit(ns_event)
         self.backend._dispatch(Event(type=EventType.MOUSE_CLICK, x=x, y=y, button="left"))
 
     def rightMouseDown_(self, ns_event):
-        x, y = self._mouse_cell(ns_event)
+        x, y = self._mouse_unit(ns_event)
         self.backend._dispatch(Event(type=EventType.MOUSE_CLICK, x=x, y=y, button="right"))
 
     def mouseDragged_(self, ns_event):
-        x, y = self._mouse_cell(ns_event)
+        x, y = self._mouse_unit(ns_event)
         self.backend._dispatch(Event(type=EventType.MOUSE_DRAG, x=x, y=y, button="left"))
 
     def scrollWheel_(self, ns_event):
         delta = ns_event.scrollingDeltaY()
         if delta == 0:
             return
-        x, y = self._mouse_cell(ns_event)
+        x, y = self._mouse_unit(ns_event)
         scroll = 1 if delta > 0 else -1
         self.backend._dispatch(Event(type=EventType.MOUSE_SCROLL, x=x, y=y, scroll=scroll))
 
@@ -265,8 +269,8 @@ class _PuiKitWindowDelegate(NSObject):
 
 
 class MacOSBackend(Backend):
-    """macOS GUI backend (PyObjC). Coordinates stay cell-based; this backend
-    owns the cell size and converts to pixels at render time."""
+    """macOS GUI backend (PyObjC). Coordinates stay base unit-based; this backend
+    owns the base unit size and converts to pixels at render time."""
 
     PROFILE = CapabilityProfile(
         {
@@ -291,10 +295,16 @@ class MacOSBackend(Backend):
         return CapabilityProfile({**self.PROFILE, "animation": False})
 
     def __init__(self, width: int = 100, height: int = 30, title: str = "PuiKit",
-                 font_size: float = 14.0):
-        self._initial_cells = (width, height)
+                 base_font: Font | None = None):
+        self._initial_size = (width, height)
         self._title = title
-        self._font_size = font_size
+        # The base font is the monospaced grid font, named with the same Font
+        # descriptor a text widget uses. The base unit (the layout's length
+        # unit) is derived from this font's glyph box on open (base font ->
+        # base unit); per-Style proportional fonts never affect it.
+        self._base_font = base_font or Font(size=14.0, monospace=True)
+        self._base_w = 1.0
+        self._base_h = 1.0
         self._window = None
         self._view = None
         self._delegate = None
@@ -304,8 +314,6 @@ class MacOSBackend(Backend):
         self._back: list[tuple] = []
         self._front: list[tuple] = []
         self._fonts: dict[TextAttribute, Any] = {}
-        self._cell_w = 1.0
-        self._cell_h = 1.0
         self._animations: dict[int, Animation] = {}  # keyed by id(widget)
         self._anim_timer = None
         self._tick_callbacks: list[Any] = []
@@ -317,8 +325,8 @@ class MacOSBackend(Backend):
         app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
 
         self._init_fonts()
-        w_px = self._initial_cells[0] * self._cell_w
-        h_px = self._initial_cells[1] * self._cell_h
+        w_px = self._initial_size[0] * self._base_w
+        h_px = self._initial_size[1] * self._base_h
         style = (
             NSWindowStyleMaskTitled
             | NSWindowStyleMaskClosable
@@ -355,46 +363,69 @@ class MacOSBackend(Backend):
             self._view = None
             self._delegate = None
 
+    def resolve_font(self, font: Font, bold: bool = False, italic: bool = False) -> Any:
+        """Turn a Font descriptor into a native NSFont. Shared by the base font
+        and (later) per-Style widget fonts, so both name fonts the same way.
+
+        ``family`` is honored if installed; otherwise — and whenever
+        ``monospace`` is set or no family is given — the system monospaced font
+        is used (the base font must stay fixed-advance to tile the grid).
+        ``bold``/``italic`` force those traits on top of the descriptor."""
+        size = float(font.size) if font.size is not None else 14.0
+        want_bold = bold or font.bold
+        weight = NSFontWeightBold if want_bold else NSFontWeightRegular
+        ns = None
+        if font.family:
+            ns = NSFont.fontWithName_size_(font.family, size)
+        if ns is None:
+            ns = (
+                NSFont.monospacedSystemFontOfSize_weight_(size, weight)
+                or NSFont.fontWithName_size_("Menlo", size)
+            )
+        # Apply traits a named family does not already encode.
+        mask = 0
+        if want_bold:
+            mask |= NSBoldFontMask
+        if italic or font.italic:
+            mask |= NSItalicFontMask
+        if mask:
+            ns = NSFontManager.sharedFontManager().convertFont_toHaveTrait_(ns, mask) or ns
+        return ns
+
     def _init_fonts(self) -> None:
-        regular = NSFont.monospacedSystemFontOfSize_weight_(
-            self._font_size, NSFontWeightRegular
-        )
-        if regular is None:
-            regular = NSFont.fontWithName_size_("Menlo", self._font_size)
-        # The bold weight must stay monospaced and share the regular glyph
-        # advance; appending "-Bold" to the system monospaced font name fails
-        # and silently falls back to the proportional bold system font.
-        bold = NSFont.monospacedSystemFontOfSize_weight_(
-            self._font_size, NSFontWeightBold
-        ) or NSFont.fontWithName_size_("Menlo-Bold", self._font_size)
+        # Build the base font from its Font descriptor, then DERIVE the base
+        # unit from its glyph box (base font -> base unit). The base font is
+        # monospaced, so its advance and line height are canonical.
+        regular = self.resolve_font(self._base_font)
+        bold = self.resolve_font(self._base_font, bold=True)
         self._fonts = {TextAttribute.NORMAL: regular, TextAttribute.BOLD: bold}
-        size = NSString.stringWithString_("M").sizeWithAttributes_(
+        advance = NSString.stringWithString_("M").sizeWithAttributes_(
             {NSFontAttributeName: regular}
-        )
-        self._cell_w = math.ceil(size.width)
-        self._cell_h = math.ceil(regular.ascender() - regular.descender() + regular.leading())
+        ).width
+        self._base_w = math.ceil(advance)
+        self._base_h = math.ceil(regular.ascender() - regular.descender() + regular.leading())
 
     # --- geometry ----------------------------------------------------------
 
     @property
     def size(self) -> tuple[int, int]:
         if self._view is None:
-            return self._initial_cells
+            return self._initial_size
         bounds = self._view.bounds()
-        return (int(bounds.size.width // self._cell_w), int(bounds.size.height // self._cell_h))
+        return (int(bounds.size.width // self._base_w), int(bounds.size.height // self._base_h))
 
     @property
-    def size_cells(self) -> tuple[float, float]:
+    def size_units(self) -> tuple[float, float]:
         if self._view is None:
-            return (float(self._initial_cells[0]), float(self._initial_cells[1]))
+            return (float(self._initial_size[0]), float(self._initial_size[1]))
         bounds = self._view.bounds()
-        return (bounds.size.width / self._cell_w, bounds.size.height / self._cell_h)
+        return (bounds.size.width / self._base_w, bounds.size.height / self._base_h)
 
     @property
-    def cell_size(self) -> tuple[int, int]:
-        return (int(self._cell_w), int(self._cell_h))
+    def base_size(self) -> tuple[int, int]:
+        return (int(self._base_w), int(self._base_h))
 
-    # --- drawing (display list, cell coordinates) ----------------------------
+    # --- drawing (display list, base-unit coordinates) ----------------------------
 
     def clear(self) -> None:
         self._back = []
@@ -524,7 +555,7 @@ class MacOSBackend(Backend):
                 # NSRectClip works in the current transform, so a clip set
                 # inside an animated group travels with the transition.
                 NSGraphicsContext.saveGraphicsState()
-                NSRectClip(self._cell_rect(*command[1:]))
+                NSRectClip(self._unit_rect(*command[1:]))
             elif kind == "clip_pop":
                 NSGraphicsContext.restoreGraphicsState()
 
@@ -542,9 +573,9 @@ class MacOSBackend(Backend):
             CGContextBeginTransparencyLayer(cg, None)
             return (animation, rect, True, True)
         if animation.kind == "slide":
-            # Position: start offset (in cells) decaying to the final place.
-            dx = animation.hints.get("from_dx", 0.0) * self._cell_w * (1.0 - eased)
-            dy = animation.hints.get("from_dy", 2.0) * self._cell_h * (1.0 - eased)
+            # Position: start offset (in base units) decaying to the final place.
+            dx = animation.hints.get("from_dx", 0.0) * self._base_w * (1.0 - eased)
+            dy = animation.hints.get("from_dy", 2.0) * self._base_h * (1.0 - eased)
             CGContextSaveGState(cg)
             CGContextTranslateCTM(cg, dx, dy)
             return (animation, rect, True, False)
@@ -552,8 +583,8 @@ class MacOSBackend(Backend):
             # Size: grow from from_scale to full size around the rect center.
             from_scale = animation.hints.get("from_scale", 0.7)
             scale = from_scale + (1.0 - from_scale) * eased
-            cx = (rect.x + rect.w / 2.0) * self._cell_w
-            cy = (rect.y + rect.h / 2.0) * self._cell_h
+            cx = (rect.x + rect.w / 2.0) * self._base_w
+            cy = (rect.y + rect.h / 2.0) * self._base_h
             CGContextSaveGState(cg)
             CGContextTranslateCTM(cg, cx, cy)
             CGContextScaleCTM(cg, scale, scale)
@@ -580,13 +611,13 @@ class MacOSBackend(Backend):
             if alpha > 0:
                 _ns_color(color, alpha).setFill()
                 NSRectFillUsingOperation(
-                    self._cell_rect(rect.x, rect.y, rect.w, rect.h),
+                    self._unit_rect(rect.x, rect.y, rect.w, rect.h),
                     NSCompositingOperationSourceOver,
                 )
 
-    def _cell_rect(self, x: int, y: int, w_cells: int, h_cells: int):
+    def _unit_rect(self, x: int, y: int, w_units: int, h_units: int):
         return NSMakeRect(
-            x * self._cell_w, y * self._cell_h, w_cells * self._cell_w, h_cells * self._cell_h
+            x * self._base_w, y * self._base_h, w_units * self._base_w, h_units * self._base_h
         )
 
     def _render_text(self, x: int, y: int, text: str, style: Style) -> None:
@@ -604,29 +635,29 @@ class MacOSBackend(Backend):
         if style.attr & TextAttribute.UNDERLINE:
             attrs[NSUnderlineStyleAttributeName] = NSUnderlineStyleSingle
 
-        # The cell width is the glyph advance rounded *up* (see _init_fonts),
-        # so a run drawn as one NSString flows narrower than the cell grid and
+        # The base unit width is the glyph advance rounded *up* (see _init_fonts),
+        # so a run drawn as one NSString flows narrower than the base unit grid and
         # drifts left a fraction of a pixel per glyph — over a wide pane the
-        # drift accumulates to whole cells, so cell-based clipping/truncation
+        # drift accumulates to whole base units, so base unit-based clipping/truncation
         # cuts text that visually still fits. Place every glyph on its own
-        # cell instead: columns stay aligned and the clip rect trims the
-        # boundary glyph at the exact pane edge, matching the cell coordinates
+        # base unit instead: columns stay aligned and the clip rect trims the
+        # boundary glyph at the exact pane edge, matching the base-unit coordinates
         # the rest of the framework works in. The run's background fills whole
-        # cells (not just glyph advances) so reversed/selected runs have no
+        # base units (not just glyph advances) so reversed/selected runs have no
         # sub-pixel seams.
-        runs = _cell_runs(text)
+        runs = _glyph_runs(text)
         if bg is not None:
             _ns_color(bg).setFill()
-            NSRectFill(self._cell_rect(x, y, len(runs), 1))
-        for i, cell in enumerate(runs):
-            NSString.stringWithString_(cell).drawAtPoint_withAttributes_(
-                self._cell_rect(x + i, y, 1, 1).origin, attrs
+            NSRectFill(self._unit_rect(x, y, len(runs), 1))
+        for i, glyph in enumerate(runs):
+            NSString.stringWithString_(glyph).drawAtPoint_withAttributes_(
+                self._unit_rect(x + i, y, 1, 1).origin, attrs
             )
 
     def _render_box(
         self, x: int, y: int, w: int, h: int, style: Style, hints: dict[str, Any]
     ) -> None:
-        rect = self._cell_rect(x, y, w, h)
+        rect = self._unit_rect(x, y, w, h)
         if hints.get("fill"):
             _ns_color(style.bg or _DEFAULT_BG).setFill()
             NSRectFill(rect)
@@ -641,13 +672,13 @@ class MacOSBackend(Backend):
 
     def _render_fill(self, x: float, y: float, w: float, h: float, style: Style) -> None:
         _ns_color(style.bg or _DEFAULT_BG).setFill()
-        NSRectFill(self._cell_rect(x, y, w, h))
+        NSRectFill(self._unit_rect(x, y, w, h))
 
     def _render_dim(self, x: int, y: int, w: int, h: int) -> None:
         # Real transparency: a translucent dark overlay on whatever was
         # already drawn below.
         _ns_color((0, 0, 0), 0.45).setFill()
-        NSRectFillUsingOperation(self._cell_rect(x, y, w, h), NSCompositingOperationSourceOver)
+        NSRectFillUsingOperation(self._unit_rect(x, y, w, h), NSCompositingOperationSourceOver)
 
     def _render_shadow(self, x: int, y: int, w: int, h: int) -> None:
         # Fill the layer's rect with the window background while an NSShadow
@@ -660,17 +691,17 @@ class MacOSBackend(Backend):
         shadow.setShadowColor_(_ns_color((0, 0, 0), 0.7))
         shadow.set()
         _ns_color(_DEFAULT_BG).setFill()
-        NSRectFill(self._cell_rect(x, y, w, h))
+        NSRectFill(self._unit_rect(x, y, w, h))
         NSGraphicsContext.restoreGraphicsState()
 
     def _render_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float, style: Style
     ) -> None:
-        track = self._cell_rect(x, y, 1, h)
+        track = self._unit_rect(x, y, 1, h)
         _ns_color((60, 60, 60)).setFill()
         NSRectFill(track)
         # Pixel-level thumb: size and position are computed in device pixels
-        # (not snapped to whole cells), so the scroll position is exact.
+        # (not snapped to whole base units), so the scroll position is exact.
         track_h = track.size.height
         thumb_h = max(2.0, track_h * ratio)
         thumb_y = track.origin.y + (track_h - thumb_h) * pos
@@ -681,10 +712,10 @@ class MacOSBackend(Backend):
         image = NSImage.alloc().initWithContentsOfFile_(path)
         if image is None:
             return
-        w_cells = hints.get("w", max(1, round(image.size().width / self._cell_w)))
-        h_cells = hints.get("h", max(1, round(image.size().height / self._cell_h)))
+        w_units = hints.get("w", max(1, round(image.size().width / self._base_w)))
+        h_units = hints.get("h", max(1, round(image.size().height / self._base_h)))
         image.drawInRect_fromRect_operation_fraction_respectFlipped_hints_(
-            self._cell_rect(x, y, w_cells, h_cells),
+            self._unit_rect(x, y, w_units, h_units),
             NSMakeRect(0, 0, 0, 0),
             2,  # NSCompositingOperationSourceOver
             1.0,

@@ -30,7 +30,7 @@ def test_listview_renders_visible_slice_and_selection(backend):
     # Selected row is drawn reversed.
     assert backend.style_at(0, 0).attr & TextAttribute.REVERSE
     assert not backend.style_at(0, 1).attr & TextAttribute.REVERSE
-    # Long list shows a scrollbar in the last column, painted via cell
+    # Long list shows a scrollbar in the last column, painted via base unit
     # background color (thumb or track) rather than a glyph.
     assert backend.style_at(9, 0).bg in {(150, 150, 150), (60, 60, 60)}
 
@@ -126,7 +126,7 @@ def test_scrollbar_thumb_position(backend):
     panel = Panel(backend)
     panel.add(ScrollBar(pos=1.0, ratio=0.3), x=0, y=0, w=1, h=10)
     panel.render()
-    # The bar is painted with cell background colors; the thumb is the lighter
+    # The bar is painted with base unit background colors; the thumb is the lighter
     # background, the track the darker one.
     thumb, track = (150, 150, 150), (60, 60, 60)
     column = [backend.style_at(0, row).bg for row in range(10)]

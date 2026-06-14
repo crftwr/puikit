@@ -1,7 +1,7 @@
 """Region separation: surface roles and dividers resolved per backend.
 
 The same layout must separate regions with background contrast on TUI
-(no cells to spare for lines) and with hairlines on GUI (1 device pixel,
+(no base units to spare for lines) and with hairlines on GUI (1 device pixel,
 same backgrounds allowed) — without the app branching.
 """
 
@@ -56,7 +56,7 @@ def test_explicit_bg_hint_overrides_theme():
     assert backend.style_at(5, 2).bg == (1, 2, 3)
 
 
-def test_strong_divider_draws_line_cells_on_tui():
+def test_strong_divider_draws_line_glyphs_on_tui():
     backend = MemoryBackend(width=21, height=6)
     panel = Panel(backend)
     panel.set_layout(HSplit(Label("L"), Label("R"), divider="strong"))
@@ -75,7 +75,7 @@ class RecordingGuiBackend(MemoryBackend):
         self.fill_calls = []
 
     @property
-    def cell_size(self):
+    def base_size(self):
         return (10, 20)
 
     def fill_rect(self, x, y, w, h, style=DEFAULT_STYLE):

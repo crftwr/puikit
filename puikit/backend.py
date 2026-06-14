@@ -78,33 +78,33 @@ class Backend(ABC):
     @property
     @abstractmethod
     def size(self) -> tuple[int, int]:
-        """Drawable area in whole cells (width, height)."""
+        """Drawable area in whole base units (width, height)."""
 
     @property
-    def size_cells(self) -> tuple[float, float]:
-        """Exact drawable area in cells. Pixel-layout backends return
-        fractional values when the window is not a whole number of cells,
+    def size_units(self) -> tuple[float, float]:
+        """Exact drawable area in base units. Pixel-layout backends return
+        fractional values when the window is not a whole number of base units,
         so layouts can fill it to the last pixel."""
         w, h = self.size
         return (float(w), float(h))
 
     @property
-    def cell_size(self) -> tuple[int, int]:
-        """Size of one cell in pixels. (1, 1) for TUI backends."""
+    def base_size(self) -> tuple[int, int]:
+        """Size of one base unit in pixels. (1, 1) for TUI backends."""
         return (1, 1)
 
     @property
-    def scrollbar_cells(self) -> float:
-        """Backend's fixed scrollbar thickness, in cells. Font-independent:
+    def scrollbar_units(self) -> float:
+        """Backend's fixed scrollbar thickness, in base units. Font-independent:
         a scrollbar that asks the layout to size it (size="content") gets this
-        width. One cell on cell-grid backends; GUI backends may override."""
+        width. One base unit on whole-unit backends; GUI backends may override."""
         return 1.0
 
     def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
-        """Displayed width of ``text`` in cells (fractional on GUI). Cell-grid
+        """Displayed width of ``text`` in base units (fractional on GUI). Whole-unit
         backends count columns; GUI backends with a proportional or sized font
-        measure natively and divide by the cell width, so the result stays in
-        the shared cell unit. Used by widgets that size themselves to text
+        measure natively and divide by the base unit width, so the result stays in
+        the shared base unit unit. Used by widgets that size themselves to text
         (a label, a button) — the layout never calls a font directly."""
         return float(len(text))
 
@@ -186,7 +186,7 @@ class Backend(ABC):
 
     def begin_group(self, key: Any, rect: Any = None) -> None:
         """Called by the Panel before a widget draws, with the widget's rect
-        in cells. Backends that render per-widget effects (animation alpha,
+        in base units. Backends that render per-widget effects (animation alpha,
         transforms, ...) use the markers; the default is a no-op."""
 
     def end_group(self, key: Any) -> None:

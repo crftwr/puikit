@@ -81,21 +81,21 @@ class MemoryBackend(Backend):
         if self._clip_stack:
             self._clip_stack.pop()
 
-    def _cell_visible(self, x: int, y: int) -> bool:
+    def _unit_visible(self, x: int, y: int) -> bool:
         if not self._clip_stack:
             return True
         x0, y0, x1, y1 = self._clip_stack[-1]
         return x0 <= x < x1 and y0 <= y < y1
 
     def draw_text(self, x: int, y: int, text: str, style: Style = DEFAULT_STYLE) -> None:
-        # Pixel-layout rects may carry fractional cell coordinates; this
-        # backend renders on a character grid, so round to the nearest cell.
+        # Pixel-layout rects may carry fractional base-unit coordinates; this
+        # backend renders on a character grid, so round to the nearest base unit.
         x, y = round(x), round(y)
         if not 0 <= y < self._height:
             return
         for i, ch in enumerate(text):
             cx = x + i
-            if 0 <= cx < self._width and self._cell_visible(cx, y):
+            if 0 <= cx < self._width and self._unit_visible(cx, y):
                 self._grid[y][cx] = ch
                 self._styles[y][cx] = style
 
@@ -151,7 +151,7 @@ class MemoryBackend(Backend):
         x, y, h = round(x), round(y), round(h)
         thumb_h = max(1, round(h * ratio))
         thumb_y = round((h - thumb_h) * pos)
-        # Mirror the curses backend: the bar is painted with cell background
+        # Mirror the curses backend: the bar is painted with base unit background
         # colors (a space glyph), not block characters, so the thumb fills the
         # full row height with no inter-line gaps. Tests inspect style_at().
         thumb_style = Style(bg=style.fg or _SCROLLBAR_THUMB)

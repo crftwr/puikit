@@ -140,7 +140,7 @@ def test_size_animation_on_container_child():
             self.seen = None
 
         def draw(self, ctx):
-            self.seen = ctx.size_cells
+            self.seen = ctx.size_units
 
     backend = MemoryBackend(width=40, height=20, capabilities=PROFILE_GUI_DESKTOP)
     panel = Panel(backend)

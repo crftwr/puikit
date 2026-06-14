@@ -1,6 +1,6 @@
 """Panel / Layout / Layer management.
 
-The Panel is the only API widgets talk to. It places widgets in cell
+The Panel is the only API widgets talk to. It places widgets in base unit
 coordinates, resolves backend capabilities, and contains all fallback
 chains so widget code never branches on TUI/GUI.
 """
@@ -30,8 +30,8 @@ ICON_TEXT_FALLBACKS = {
 
 @dataclass(frozen=True)
 class Rect:
-    # Cell coordinates. Fractional values are produced by the layout system
-    # on pixel_layout-capable backends; cell-grid backends only see integers.
+    # Base-unit coordinates. Fractional values are produced by the layout system
+    # on pixel_layout-capable backends; whole-unit backends only see integers.
     x: float
     y: float
     w: float
@@ -88,14 +88,14 @@ class DrawContext:
         return int(self._rect.h)
 
     @property
-    def size_cells(self) -> tuple[float, float]:
-        """Exact extent in cells; fractional on pixel-aware backends."""
+    def size_units(self) -> tuple[float, float]:
+        """Exact extent in base units; fractional on pixel-aware backends."""
         return (self._rect.w, self._rect.h)
 
     @property
-    def cell_size(self) -> tuple[int, int]:
-        """Pixel size of one cell, as declared by the backend."""
-        return self._backend.cell_size
+    def base_size(self) -> tuple[int, int]:
+        """Pixel size of one base unit, as declared by the backend."""
+        return self._backend.base_size
 
     @property
     def theme(self) -> "Theme | None":
@@ -104,23 +104,23 @@ class DrawContext:
     def layout_context(self) -> "Any":
         """Build a LayoutContext matching this backend's capabilities, so a
         widget can resolve a nested puikit.layout Split against its own rect
-        with the same cell-vs-pixel rules the Panel uses for the top level.
+        with the same base unit-vs-pixel rules the Panel uses for the top level.
         Capability resolution stays here, not in the widget."""
         from .layout import LayoutContext
 
-        cw, ch = self._backend.cell_size
+        cw, ch = self._backend.base_size
         return LayoutContext(
             cw, ch,
             snap=not self._caps.supports("pixel_layout"),
             hairline=self._caps.supports("hairline"),
             measure=self._backend.measure_text,
-            scrollbar_cells=self._backend.scrollbar_cells,
+            scrollbar_units=self._backend.scrollbar_units,
         )
 
     def draw_text(self, x: int, y: int, text: str, style: Style = DEFAULT_STYLE) -> None:
         # Gate on the exact (possibly fractional) extent and let the
         # backend's clip rect cut the overflow: a pane squeezed to 0.97
-        # cells by pixel rounding must still render its row 0, clipped at
+        # base units by pixel rounding must still render its row 0, clipped at
         # the pane edge, not drop it.
         if not 0 <= y < self._rect.h:
             return
@@ -149,12 +149,12 @@ class DrawContext:
         self, style: Style = DEFAULT_STYLE, hints: dict[str, Any] | None = None
     ) -> None:
         """Box around the widget's exact extent, framing it. Unlike draw_box
-        with width/height (whole cells), this covers fractional edges on
+        with width/height (whole base units), this covers fractional edges on
         pixel-layout backends, so adjacent widgets meet without gaps.
 
         The frame owns its outline, so everything drawn afterwards on this
         context (text, children) is clipped to the interior: the box's stroke
-        is one device pixel on pixel-layout backends and one cell on cell-grid
+        is one device pixel on pixel-layout backends and one base unit on whole-unit
         backends, and the content clip is inset by exactly that, at pixel
         granularity. Content can fill right up to the inner edge of the frame
         but never paints over the frame line itself."""
@@ -162,9 +162,9 @@ class DrawContext:
             self._rect.x, self._rect.y, self._rect.w, self._rect.h, self._resolve(style), hints
         )
         # Inset the content region by the stroke width: one device pixel on
-        # pixel-layout backends, one whole cell on cell-grid backends.
+        # pixel-layout backends, one whole base unit on whole-unit backends.
         if self._caps.supports("pixel_layout"):
-            cw, ch = self._backend.cell_size
+            cw, ch = self._backend.base_size
             ix = 1.0 / cw if cw else 0.0
             iy = 1.0 / ch if ch else 0.0
         else:
@@ -228,7 +228,7 @@ class DrawContext:
     def draw_divider(self, divider: "Any") -> None:
         """Render a layout Divider in this context's coordinates, mirroring
         the Panel's top-level divider drawing: a hairline on hairline-capable
-        backends, box-drawing line cells otherwise. The hairline/cell choice
+        backends, box-drawing characters otherwise. The hairline/base unit choice
         is made here, so the hosting widget never branches on capability."""
         theme = self.theme
         color = theme.divider_color if theme is not None else (110, 110, 124)
@@ -309,7 +309,7 @@ def _bleed_to_window(
     x1 = sw if rect.x + rect.w >= sw - mx - eps else rect.x + rect.w
     y1 = sh if rect.y + rect.h >= sh - my - eps else rect.y + rect.h
     if snap:
-        # Cell-grid backends must keep true integer coordinates.
+        # Whole-unit backends must keep true integer coordinates.
         x0, y0, x1, y1 = (round(v) for v in (x0, y0, x1, y1))
     return Rect(x0, y0, x1 - x0, y1 - y0)
 
@@ -343,7 +343,7 @@ class Panel:
         self.backend = backend
         # The theme encodes the backend's region-separation strategy: GUI
         # themes separate surfaces with hairlines, TUI themes with
-        # background contrast (a line would cost a whole cell row/column).
+        # background contrast (a line would cost a whole base unit row/column).
         self.theme = theme if theme is not None else theme_for(backend.capabilities)
         self._children: list[_Slot] = []
         self._layers: list[_Slot] = []
@@ -351,7 +351,7 @@ class Panel:
         self._focused: Any | None = None
         self._layout: Any | None = None
         self._margin_px = 0.0
-        self._margin_cells = 0.0
+        self._margin_units = 0.0
         self._size_anims: dict[Any, _SizeAnimation] = {}
 
     # --- layout management ---------------------------------------------------
@@ -377,50 +377,50 @@ class Panel:
         self._layout = None
 
     def set_layout(
-        self, layout: Any, margin_px: float = 0.0, margin_cells: float = 0.0
+        self, layout: Any, margin_px: float = 0.0, margin_units: float = 0.0
     ) -> None:
         """Use a declarative layout (see puikit.layout) instead of manual
         add() calls. Rects are recomputed from the backend size on every
         render, so the layout follows window resizes.
 
-        margin_px / margin_cells inset the layout from the window frame.
-        They follow the min_px/min_cells hint rules: the pixel margin
-        applies only on pixel-layout backends (it would cost whole cells on
-        a cell grid), margin_cells applies everywhere."""
+        margin_px / margin_units inset the layout from the window frame.
+        They follow the min_px/min hint rules: the pixel margin
+        applies only on pixel-layout backends (it would cost whole base units on
+        a base unit grid), margin_units applies everywhere."""
         self._layout = layout
         self._margin_px = float(margin_px)
-        self._margin_cells = float(margin_cells)
+        self._margin_units = float(margin_units)
         self._apply_layout()
 
     def _resolve_margin(
-        self, cell_w: int, cell_h: int, snap: bool
+        self, base_w: int, base_h: int, snap: bool
     ) -> tuple[float, float]:
-        """Window margin in cells per axis, snapped to whole device pixels
+        """Window margin in base units per axis, snapped to whole device pixels
         on pixel-layout backends."""
         if snap:
-            margin = round(self._margin_cells)
+            margin = round(self._margin_units)
             return (margin, margin)
-        mx, my = self._margin_cells, self._margin_cells
-        if cell_w > 0:
-            mx = round(max(mx, self._margin_px / cell_w) * cell_w) / cell_w
-        if cell_h > 0:
-            my = round(max(my, self._margin_px / cell_h) * cell_h) / cell_h
+        mx, my = self._margin_units, self._margin_units
+        if base_w > 0:
+            mx = round(max(mx, self._margin_px / base_w) * base_w) / base_w
+        if base_h > 0:
+            my = round(max(my, self._margin_px / base_h) * base_h) / base_h
         return (mx, my)
 
     def _apply_layout(self) -> None:
         from .layout import LayoutContext
 
-        # size_cells is exact (fractional on pixel-layout backends), so the
-        # layout tracks window resizes pixel by pixel, not cell by cell.
-        sw, sh = self.backend.size_cells
-        cw, ch = self.backend.cell_size
+        # size_units is exact (fractional on pixel-layout backends), so the
+        # layout tracks window resizes pixel by pixel, not base unit by base unit.
+        sw, sh = self.backend.size_units
+        cw, ch = self.backend.base_size
         snap = not self.backend.capabilities.supports("pixel_layout")
         mx, my = self._resolve_margin(cw, ch, snap)
         ctx = LayoutContext(
             cw, ch, snap,
             hairline=self.backend.capabilities.supports("hairline"),
             measure=self.backend.measure_text,
-            scrollbar_cells=self.backend.scrollbar_cells,
+            scrollbar_units=self.backend.scrollbar_units,
         )
         placements = self._layout.resolve(
             mx, my, max(0.0, sw - 2 * mx), max(0.0, sh - 2 * my), ctx
@@ -461,11 +461,15 @@ class Panel:
         return self._layers.pop().widget
 
     def _layer_rect(self, hints: dict[str, Any]) -> Rect:
-        sw, sh = self.backend.size
+        # Center within the backend's exact (fractional) base unit extent, dividing
+        # by 2 — not integer // on whole base units: a layer must center at device-
+        # pixel precision on GUI, not snap to a whole base unit. Whole-unit backends
+        # round at draw time. (Layout-unit base units everywhere; never a pixel.)
+        sw, sh = self.backend.size_units
         w = hints.get("w", sw)
         h = hints.get("h", sh)
-        x = hints.get("x", (sw - w) // 2)
-        y = hints.get("y", (sh - h) // 2)
+        x = hints.get("x", (sw - w) / 2)
+        y = hints.get("y", (sh - h) / 2)
         return Rect(x, y, w, h)
 
     # --- focus ----------------------------------------------------------------
@@ -508,8 +512,8 @@ class Panel:
                 rect.x, rect.y, rect.w, rect.h, Style(bg=self.theme.divider_color)
             )
             return
-        # Cell-grid backends only ever get "strong" dividers (one whole
-        # cell); render them with box-drawing characters.
+        # Whole-unit backends only ever get "strong" dividers (one whole
+        # base unit); render them with box-drawing characters.
         style = Style(fg=self.theme.divider_color)
         if divider.vertical:
             for row in range(int(rect.h)):
@@ -542,8 +546,9 @@ class Panel:
     def _render_layer(self, slot: _Slot) -> None:
         if slot.hints.get("dim_below"):
             # Every backend implements dim_rect; TUI approximates with dim
-            # attributes, GUI draws a translucent overlay.
-            sw, sh = self.backend.size
+            # attributes, GUI draws a translucent overlay. Dim the exact
+            # (fractional) extent so the last partial base unit is covered too.
+            sw, sh = self.backend.size_units
             self.backend.dim_rect(0, 0, sw, sh)
         rect = self._interpolate_rect(slot.widget, slot.rect)
         self.backend.begin_group(slot.widget, rect)
@@ -655,7 +660,7 @@ class Panel:
         local = event.translated(-slot.rect.x, -slot.rect.y)
         if clamp and local.x is not None:
             # Margin clicks land outside the content rect; act on the
-            # nearest content cell instead of handing widgets coordinates
+            # nearest content base unit instead of handing widgets coordinates
             # they never drew.
             x = min(max(local.x, 0), max(0, math.ceil(slot.rect.w) - 1))
             y = min(max(local.y, 0), max(0, math.ceil(slot.rect.h) - 1))

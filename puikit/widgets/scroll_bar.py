@@ -22,6 +22,6 @@ class ScrollBar(Widget):
         # so a scrollbar placed with size="content" claims exactly that width
         # and never yields it to a competing weighted split. Height fills.
         if axis == "x":
-            t = ctx.scrollbar_cells
+            t = ctx.scrollbar_units
             return SizeRequest(min=t, preferred=t, max=t)
         return SizeRequest()

@@ -143,8 +143,8 @@ class CursesBackend(Backend):
         try:
             self._stdscr.addstr(y, x, text, self._to_curses_attr(style))
         except curses.error:
-            # Writing the bottom-right cell raises after the cursor advances
-            # off-screen; the cell itself is drawn, so this is safe to ignore.
+            # Writing the bottom-right base unit raises after the cursor advances
+            # off-screen; the base unit itself is drawn, so this is safe to ignore.
             pass
 
     def draw_box(
@@ -173,7 +173,7 @@ class CursesBackend(Backend):
             self.draw_text(x, y + row, " " * w, style)
 
     def dim_rect(self, x: int, y: int, w: int, h: int) -> None:
-        # TUI approximation of "dim below": restyle already-drawn cells with
+        # TUI approximation of "dim below": restyle already-drawn base units with
         # A_DIM. Colors are reset to the default pair, which is acceptable
         # for content sitting under a modal layer.
         assert self._stdscr is not None
@@ -195,8 +195,8 @@ class CursesBackend(Backend):
         x, y, h = round(x), round(y), round(h)
         thumb_h = max(1, round(h * ratio))
         thumb_y = round((h - thumb_h) * pos)
-        # Paint the bar with cell *background* colors rather than block glyphs:
-        # the cell background fills the full row height (including the
+        # Paint the bar with base unit *background* colors rather than block glyphs:
+        # the base unit background fills the full row height (including the
         # terminal's line spacing), so the thumb reads as one continuous bar
         # with no gaps, whereas a stacked `█` glyph leaves inter-line gaps.
         thumb_style = Style(bg=style.fg or _SCROLLBAR_THUMB)

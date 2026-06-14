@@ -20,7 +20,7 @@ from .base import Widget
 @dataclass
 class _ChildSlot:
     widget: Any
-    rect: Rect  # container-local cells
+    rect: Rect  # container-local base units
     hints: dict[str, Any] = field(default_factory=dict)
 
 
@@ -30,7 +30,7 @@ class Container(Widget):
     def __init__(self):
         self._children: list[_ChildSlot] = []
         self._focused: Any | None = None
-        # Container extent (cells) from the last draw; lets stretched slots
+        # Container extent (base units) from the last draw; lets stretched slots
         # be hit-tested at the size they were actually drawn.
         self._size: tuple[float, float] = (0.0, 0.0)
 
@@ -40,7 +40,7 @@ class Container(Widget):
         self, widget: Any, x: float, y: float, w: float, h: float,
         hints: dict[str, Any] | None = None,
     ) -> None:
-        """Place a child at fixed cell coordinates. With hints={"stretch":
+        """Place a child at fixed base-unit coordinates. With hints={"stretch":
         True} the child instead fills the container from (x, y) to the far
         edge at draw time, so it tracks the container's own resizing (w/h are
         then ignored)."""
@@ -69,7 +69,7 @@ class Container(Widget):
         return slot.rect
 
     def draw(self, ctx: DrawContext) -> None:
-        self._size = ctx.size_cells
+        self._size = ctx.size_units
         for slot in self._children:
             r = self._slot_rect(slot)
             ctx.draw_child(slot.widget, r.x, r.y, r.w, r.h, hints=slot.hints)

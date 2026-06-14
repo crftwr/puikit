@@ -20,7 +20,7 @@ class CapabilityProfile(dict):
 
 PROFILE_TUI = CapabilityProfile(
     pixel_layout=False,
-    hairline=False,  # sub-cell divider lines (zero cell cost)
+    hairline=False,  # sub-unit divider lines (zero base unit cost)
     layering=False,
     transparency=False,
     shadow=False,

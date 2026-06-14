@@ -16,8 +16,8 @@ See [CLAUDE.md](CLAUDE.md) for the full design document.
 Early development. Currently implemented:
 
 - Core framework: `Panel`, `Backend` interface, capability profiles, event model
-- Layout system: `HSplit` / `VSplit` / `Item` with weights and `min_px` / `min_cells`
-  hints — snapped to whole cells on TUI, resolved at pixel granularity on GUI
+- Layout system: `HSplit` / `VSplit` / `Item` with weights and `min_px` / `min`
+  hints — snapped to whole base units on TUI, resolved at pixel granularity on GUI
 - Animation: `panel.animate(widget, hints={"transition": "fade", "duration_ms": 200})`
   — transitions `fade` (opacity), `slide` (position), `scale` (visual zoom),
   `size` (layout reflow), and `highlight` (color) rendered on the macOS

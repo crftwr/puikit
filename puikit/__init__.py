@@ -16,6 +16,7 @@ from .capability import (
     PROFILE_TUI,
 )
 from .event import Event, EventType
+from .font import Font, FontSlant, FontWeight
 from .layout import HSplit, Item, VSplit
 from .panel import DrawContext, Panel, Rect
 from .theme import THEME_GUI, THEME_TUI, Theme, theme_for
@@ -30,6 +31,9 @@ __all__ = [
     "DrawContext",
     "Event",
     "EventType",
+    "Font",
+    "FontSlant",
+    "FontWeight",
     "HSplit",
     "Item",
     "Panel",
