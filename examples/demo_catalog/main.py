@@ -682,17 +682,21 @@ def build_layer_page(panel: Panel) -> VSplit:
     )
 
 
+# Each nav entry carries an emoji prefix: the same intent renders as a
+# full-color glyph on GUI and as a (wide) text glyph on TUI — the shared
+# wide-character accounting (puikit.text) keeps the labels column-aligned on
+# both backends, so no page branches on the backend for its own name.
 PAGES = [
-    ("Label", build_label_page),
-    ("Widgets", build_widgets_page),
-    ("ListView", build_list_page),
-    ("ScrollBar", build_scrollbar_page),
-    ("Animation", build_animation_page),
-    ("Layering", build_layer_page),
-    ("Layout", build_layout_page),
-    ("Intrinsic", build_intrinsic_page),
-    ("Fonts", build_fonts_page),
-    ("Color", build_color_page),
+    ("🏷️ Label", build_label_page),
+    ("🎛️ Widgets", build_widgets_page),
+    ("📋 ListView", build_list_page),
+    ("🎚️ ScrollBar", build_scrollbar_page),
+    ("🎬 Animation", build_animation_page),
+    ("🗂️ Layering", build_layer_page),
+    ("📐 Layout", build_layout_page),
+    ("📏 Intrinsic", build_intrinsic_page),
+    ("🔤 Fonts", build_fonts_page),
+    ("🎨 Color", build_color_page),
 ]
 
 
