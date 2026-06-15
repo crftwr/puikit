@@ -285,6 +285,10 @@ class DrawContext:
         from .text import display_width
 
         hints = hints or {}
+        # The placeholder draws box-drawing characters and text, which live on
+        # the whole-unit grid, so snap the (possibly fractional) origin and
+        # extent to cells. A caller may pass a float x/y (e.g. a centered icon).
+        x, y = int(x), int(y)
         w = int(hints.get("w", self.width - x))
         h = int(hints.get("h", self.height - y))
         if w <= 0 or h <= 0:

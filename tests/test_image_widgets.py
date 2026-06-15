@@ -19,7 +19,7 @@ from puikit import (
 )
 from puikit.backends.memory_backend import MemoryBackend
 from puikit.image import aspect_extent, contain_box, cover_source, image_size
-from puikit.widgets import ImageButton, ImageView, Label
+from puikit.widgets import Button, ImageView, Label
 
 
 def _png(path, w, h):
@@ -158,33 +158,34 @@ def test_imageview_fit_height_derives_width(backend, tmp_path):
     assert rect.w == pytest.approx(6)  # 12 * 50/100
 
 
-# --- ImageButton ------------------------------------------------------------
+# --- Button image face (image-only and image+text) --------------------------
 
 
-def test_imagebutton_fires_on_click(backend):
+def test_image_button_fires_on_click(backend):
     panel = Panel(backend)
     clicks = []
-    btn = ImageButton("ok.png", on_click=lambda: clicks.append(1), alt="OK")
+    btn = Button(image="ok.png", on_click=lambda: clicks.append(1), alt="OK")
     panel.add(btn, x=0, y=0, w=8, h=4)
     panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=2, y=2, button="left"))
     assert clicks == [1]
 
 
-def test_imagebutton_fires_on_activate_key(backend):
+def test_image_button_fires_on_activate_key(backend):
     panel = Panel(backend)
     clicks = []
-    btn = ImageButton("ok.png", on_click=lambda: clicks.append(1))
+    btn = Button(image="ok.png", on_click=lambda: clicks.append(1))
     panel.add(btn, x=0, y=0, w=8, h=4)
     panel.dispatch_event(Event(type=EventType.KEY, key="enter"))
     assert clicks == [1]
 
 
-def test_imagebutton_focus_ring_and_hover(backend):
+def test_image_button_focus_ring_and_hover(backend):
     panel = Panel(backend)
-    btn = ImageButton("ok.png", alt="OK")
+    btn = Button(image="ok.png", alt="OK")
     panel.add(btn, x=0, y=0, w=8, h=4)
     panel.render()
     assert "┌" in "\n".join(backend.snapshot())
+    # An image-only button reads as a neutral tile, not a primary action.
     base_bg = backend.style_at(0, 0).bg
     assert base_bg == panel.theme.control_bg
     panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=3, y=2))
@@ -192,9 +193,9 @@ def test_imagebutton_focus_ring_and_hover(backend):
     assert backend.style_at(7, 3).bg != base_bg
 
 
-def test_imagebutton_inset_image_uses_contain_by_default(backend):
+def test_image_button_inset_image_uses_contain_by_default(backend):
     panel = Panel(backend)
-    panel.add(ImageButton("ok.png", pad=1), x=0, y=0, w=8, h=4)
+    panel.add(Button(image="ok.png", pad=1), x=0, y=0, w=8, h=4)
     panel.render()
     if _has_images(backend):
         x, y, path, hints = backend.image_calls[0]
@@ -203,6 +204,41 @@ def test_imagebutton_inset_image_uses_contain_by_default(backend):
         assert hints["fit"] == "contain"
 
 
-def test_imagebutton_invalid_fit_rejected():
+def test_image_button_invalid_fit_rejected():
     with pytest.raises(ValueError):
-        ImageButton("ok.png", fit="width")  # aspect modes are not face fits
+        Button(image="ok.png", fit="width")  # aspect modes are not face fits
+
+
+def test_button_needs_label_or_image():
+    with pytest.raises(ValueError):
+        Button()
+
+
+def test_image_text_button_draws_icon_and_label(backend):
+    panel = Panel(backend)
+    btn = Button("Play", image="ok.png", alt="P", pad=1, gap=1)
+    panel.add(btn, x=0, y=0, w=14, h=4)
+    panel.render()
+    # The label is drawn alongside the icon...
+    assert "Play" in "\n".join(backend.snapshot())
+    # ...over the accent action fill (a label makes it a primary action).
+    assert backend.style_at(0, 0).bg == panel.theme.button_bg
+    if _has_images(backend):
+        # The icon is a square sized to the inner height (h - 2*pad = 2).
+        x, y, path, hints = backend.image_calls[0]
+        assert (hints["w"], hints["h"]) == (2, 2)
+
+
+def test_image_text_button_width_is_intrinsic(backend):
+    # In a horizontal split, size="content" reserves icon + gap + label + pads.
+    panel = Panel(backend)
+    btn = Button("Go", image="ok.png")  # icon square = height-2*pad
+    panel.set_layout(
+        HSplit(Item(btn, size="content"), Item(Label(""), weight=1))
+    )
+    panel.render()
+    rect = _rect_of(panel, btn)
+    height = backend.size[1]
+    inner_h = max(1.0, height - 2 * 1)  # default pad=1
+    expected = 2 * 1 + inner_h + 1 + len("Go")  # 2*pad + icon + gap + text
+    assert rect.w == pytest.approx(expected)

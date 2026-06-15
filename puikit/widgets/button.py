@@ -1,11 +1,20 @@
-"""A flat, VS Code-style push button.
+"""A flat, VS Code-style push button — text, image, or both.
 
-The button is compact — one base-unit row tall — with a flat accent fill, a
-bold centered label, and live feedback: it lightens on hover and shows an
-accent focus ring (a frame when it has the height for one, an underline when
-it is a single row) when focused. It still sizes its width to its label via
-``measure``, so ``Item(button, size="content")`` reserves exactly the label
-plus padding.
+One button class covers three faces:
+
+- **text** (``Button("OK")``) — a bold centered label on a flat accent fill;
+  it sizes its width to the label via ``measure``.
+- **image** (``Button(image="play.png")``) — a picture inset over a neutral
+  control surface, scaled by ``fit`` (contain/cover/fill); it fills its slot.
+- **image + text** (``Button("Play", image="play.png")``) — an icon and a
+  label side by side, centered as a group on the accent fill.
+
+All three share one interaction: a click or activate (space/enter) fires
+``on_click``, the face lightens on hover, and an accent focus cue marks focus
+(a framed ring when there is an image or room for a box, an underline for a
+single-row text button). The image face is an intent — GUI renders the real
+picture, TUI falls back in the Panel layer to a framed alt text — so the
+button reads as interactive on every backend, and no draw branches on it.
 """
 
 from __future__ import annotations
@@ -14,15 +23,21 @@ from collections.abc import Callable
 
 from ..backend import Style, TextAttribute
 from ..event import Event, EventType
+from ..image import CONTAIN, COVER, FILL
 from ..layout import LayoutContext, SizeRequest
 from ..panel import DrawContext
 from ..theme import DEFAULT_THEME
 from ._input import is_activate
 from .base import Widget
 
+# Fits valid for a button face. The aspect modes ("width"/"height") size a
+# widget to an image's ratio; a button is sized by the layout or its label,
+# so only the within-a-given-box fits apply.
+_FACE_FITS = frozenset({FILL, CONTAIN, COVER})
+
 
 def _lighten(color: tuple[int, int, int], amount: float = 0.12) -> tuple[int, int, int]:
-    """Nudge a color toward white, for the hover state of a custom fill."""
+    """Nudge a color toward white, for the hover state of a fill."""
     return tuple(round(c + (255 - c) * amount) for c in color)  # type: ignore[return-value]
 
 
@@ -31,16 +46,35 @@ class Button(Widget):
 
     def __init__(
         self,
-        label: str,
+        label: str | None = None,
         on_click: Callable[[], None] | None = None,
+        image: str | None = None,
         style: Style | None = None,
+        fit: str = CONTAIN,
+        alt: str | None = None,
         pad_x: int = 2,
+        pad: int = 1,
+        gap: int = 1,
     ):
-        self.label = label
+        if not label and image is None:
+            raise ValueError("a Button needs a label, an image, or both")
+        if image is not None and fit not in _FACE_FITS:
+            raise ValueError(
+                f"unknown image fit {fit!r}; a button face expects one of {sorted(_FACE_FITS)}"
+            )
+        self.label = label or ""
         self.on_click = on_click
-        # None -> the theme's accent button colors; a Style overrides the fill.
+        self.image = image
+        # None -> the theme's button colors; a Style overrides the fill.
         self.style = style
-        self.pad_x = pad_x
+        self.fit = fit
+        # Text shown in place of the picture on backends without images (TUI).
+        self.alt = alt
+        self.pad_x = pad_x  # horizontal padding measured around a text label
+        self.pad = pad      # inset of the image from the button edge
+        self.gap = gap      # space between image and label when both are shown
+
+    # --- colors --------------------------------------------------------------
 
     def _colors(self, ctx: DrawContext):
         theme = ctx.theme or DEFAULT_THEME
@@ -48,38 +82,94 @@ class Button(Widget):
             bg = self.style.bg
             fg = self.style.fg or theme.button_text
             hover = _lighten(bg)
+        elif self.label:
+            # A label denotes a primary action: the accent button fill.
+            bg, fg, hover = theme.button_bg, theme.button_text, theme.button_hover_bg
         else:
-            bg = theme.button_bg
-            fg = theme.button_text
-            hover = theme.button_hover_bg
+            # A bare icon is a neutral tile, not a primary action.
+            bg, fg, hover = theme.control_bg, theme.button_text, _lighten(theme.control_bg)
         return (hover if ctx.hovered else bg), fg, theme
+
+    # --- draw ----------------------------------------------------------------
 
     def draw(self, ctx: DrawContext) -> None:
         bg, fg, theme = self._colors(ctx)
         wu, hu = ctx.size_units
         ctx.fill_rect(0, 0, wu, hu, Style(bg=bg))
 
-        attr = TextAttribute.BOLD
-        # Focus cue: a framed accent ring when the button is tall enough for a
-        # box, an accent underline when it is a single row.
-        if ctx.focused:
-            if ctx.height >= 2:
-                ctx.draw_box(0, 0, ctx.width, ctx.height, Style(fg=theme.accent, bg=bg))
-            else:
-                attr |= TextAttribute.UNDERLINE
+        if self.image is not None and self.label:
+            self._draw_icon_label(ctx, bg, fg)
+        elif self.image is not None:
+            self._draw_image(ctx)
+        else:
+            self._draw_label(ctx, bg, fg)
 
+        # Focus cue: a framed accent ring when there is an image or the height
+        # for a box; the single-row text underline is applied in _draw_label.
+        if ctx.focused and (self.image is not None or ctx.height >= 2):
+            if ctx.width >= 1 and ctx.height >= 1:
+                ctx.draw_box(0, 0, ctx.width, ctx.height, Style(fg=theme.accent, bg=bg))
+
+    def _draw_label(self, ctx: DrawContext, bg, fg) -> None:
+        attr = TextAttribute.BOLD
+        if ctx.focused and ctx.height < 2:  # no room for a box: underline instead
+            attr |= TextAttribute.UNDERLINE
         tx = max(0, (ctx.width - len(self.label)) // 2)
         ty = max(0, ctx.height // 2)
         ctx.draw_text(tx, ty, self.label, Style(fg=fg, bg=bg, attr=attr))
 
+    def _draw_image(self, ctx: DrawContext) -> None:
+        wu, hu = ctx.size_units
+        pad = self.pad
+        iw = max(0.0, wu - 2 * pad)
+        ih = max(0.0, hu - 2 * pad)
+        if iw > 0 and ih > 0:
+            ctx.draw_image(
+                pad, pad, self.image,
+                hints={"w": iw, "h": ih, "fit": self.fit, "alt": self.alt},
+            )
+
+    def _draw_icon_label(self, ctx: DrawContext, bg, fg) -> None:
+        # An icon (a square sized to the inner height, the image fit inside it)
+        # and the label side by side, centered as a group on the button face.
+        wu, hu = ctx.size_units
+        pad = self.pad
+        inner_h = max(1.0, hu - 2 * pad)
+        icon_w = inner_h
+        text_w = len(self.label)
+        group_w = icon_w + self.gap + text_w
+        gx = max(float(pad), (wu - group_w) / 2.0)
+        ctx.draw_image(
+            gx, pad, self.image,
+            hints={"w": icon_w, "h": inner_h, "fit": self.fit, "alt": self.alt},
+        )
+        tx = int(round(gx + icon_w + self.gap))
+        ty = max(0, ctx.height // 2)
+        ctx.draw_text(tx, ty, self.label, Style(fg=fg, bg=bg, attr=TextAttribute.BOLD))
+
+    # --- measure -------------------------------------------------------------
+
     def measure(self, ctx: LayoutContext, axis: str, available: float) -> SizeRequest:
-        # Compact: one row tall, label width plus horizontal padding. Fixed
-        # (min == pref == max), so it keeps its natural size unless overflow
-        # forces it.
         if axis == "y":
-            return SizeRequest(min=1.0, preferred=1.0, max=1.0)
-        w = ctx.measure_text(self.label, self.style or Style()) + 2 * self.pad_x
+            # Text-only is a fixed single row (min == pref == max, never flexes);
+            # any image fills its slot vertically (size it through the layout).
+            if self.image is None:
+                return SizeRequest(min=1.0, preferred=1.0, max=1.0)
+            return SizeRequest()
+        # axis == "x": natural width.
+        if self.image is None:
+            w = ctx.measure_text(self.label, self.style or Style()) + 2 * self.pad_x
+            return SizeRequest(min=w, preferred=w, max=w)
+        if not self.label:
+            return SizeRequest()  # image-only fills its slot
+        # image + text: the icon square (from the resolved height) plus the gap,
+        # the label, and the edge pads — a fixed width the layout reserves.
+        inner_h = max(1.0, available - 2 * self.pad)
+        text_w = ctx.measure_text(self.label, self.style or Style())
+        w = 2 * self.pad + inner_h + self.gap + text_w
         return SizeRequest(min=w, preferred=w, max=w)
+
+    # --- events --------------------------------------------------------------
 
     def handle_event(self, event: Event) -> bool:
         if event.type is EventType.MOUSE_CLICK or is_activate(event):

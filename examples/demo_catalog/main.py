@@ -39,7 +39,6 @@ from puikit.widgets import (
     Checkbox,
     Container,
     DropDown,
-    ImageButton,
     ImageView,
     Label,
     LayoutView,
@@ -693,14 +692,14 @@ def build_images_page(panel: Panel) -> VSplit:
     # the layout, never by the page. GUI renders the real picture (scaled,
     # letterboxed, or cropped per fit); TUI has no `images` capability, so the
     # Panel layer frames each (fit-shaped) footprint with its alt text. The
-    # page never branches on the backend. The ImageButton clicks like any
-    # button. The asset is a 16:9 scene, so the fits read distinctly.
+    # page never branches on the backend. The image-faced Button clicks like
+    # any button. The asset is a 16:9 scene, so the fits read distinctly.
     status = Label("Resize the window to watch each fit re-resolve", DIM)
     plays = {"n": 0}
 
     def on_play() -> None:
         plays["n"] += 1
-        status.text = f"ImageButton clicked ×{plays['n']}"
+        status.text = f"Button clicked ×{plays['n']}"
 
     scene = os.path.join(ASSETS, "scene.png")
     play = os.path.join(ASSETS, "play.png")
@@ -752,16 +751,24 @@ def build_images_page(panel: Panel) -> VSplit:
             ),
             weight=1,
         ),
-        # An image-faced button, sized to a fixed square card.
+        # The one Button class, three faces: an image-only tile, and an
+        # icon+label action button sized to its content.
         Item(
             VSplit(
-                Item(Label("ImageButton", BOLD), size=1),
+                Item(Label("Button: image / image+text", BOLD), size=1),
                 Item(
-                    HSplit(Item(ImageButton(play, on_click=on_play, alt="▶"), size=8), Item(Label(""), weight=1)),
+                    HSplit(Item(Button(image=play, on_click=on_play, alt="▶"), size=8), Item(Label(""), weight=1)),
                     size=4,
                 ),
+                Item(
+                    HSplit(
+                        Item(Button("Play", image=play, on_click=on_play, alt="▶"), size="content"),
+                        Item(Label(""), weight=1),
+                    ),
+                    size=3,
+                ),
                 Item(Label(""), weight=1),
-                gap=0,
+                gap=1,
             ),
             weight=1,
         ),
