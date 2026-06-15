@@ -1,0 +1,90 @@
+"""RGBA color and image-alpha tests.
+
+The same RGBA intent renders two ways: a transparency-capable backend (GUI)
+receives the 4-tuple and composites it per pixel; a backend without the
+capability (TUI) has the Panel layer flatten it over the pane background to an
+opaque RGB before it ever reaches the backend."""
+
+import pytest
+
+from puikit import Panel, PROFILE_GUI_DESKTOP, PROFILE_TUI, Style
+from puikit.backends.memory_backend import MemoryBackend
+from puikit.panel import _composite
+from puikit.widgets import ImageView, Widget
+
+
+# --- the composite helper ---------------------------------------------------
+
+
+def test_composite_passes_opaque_and_none_through():
+    assert _composite(None, (0, 0, 0)) is None
+    assert _composite((10, 20, 30), (0, 0, 0)) == (10, 20, 30)
+
+
+def test_composite_blends_rgba_over_base():
+    # 50%-ish alpha (128/255) of white over black -> mid gray.
+    assert _composite((255, 255, 255, 128), (0, 0, 0)) == (128, 128, 128)
+    # Fully transparent -> the base shows; fully opaque -> the color shows.
+    assert _composite((255, 0, 0, 0), (10, 20, 30)) == (10, 20, 30)
+    assert _composite((255, 0, 0, 255), (10, 20, 30)) == (255, 0, 0)
+
+
+def test_composite_without_base_drops_alpha():
+    assert _composite((255, 0, 0, 128), None) == (255, 0, 0)
+
+
+# --- RGBA fills resolved per backend ----------------------------------------
+
+
+class _Fill(Widget):
+    def __init__(self, color):
+        self.color = color
+
+    def draw(self, ctx):
+        wu, hu = ctx.size_units
+        ctx.fill_rect(0, 0, wu, hu, Style(bg=self.color))
+
+
+@pytest.mark.parametrize(
+    "profile,expected",
+    [
+        (PROFILE_TUI, (128, 128, 128)),          # flattened over the pane bg
+        (PROFILE_GUI_DESKTOP, (255, 255, 255, 128)),  # passed through unchanged
+    ],
+    ids=["tui-flattens", "gui-passes-through"],
+)
+def test_rgba_fill_resolves_per_capability(profile, expected):
+    backend = MemoryBackend(width=6, height=3, capabilities=profile)
+    panel = Panel(backend)
+    panel.add(_Fill((255, 255, 255, 128)), x=0, y=0, w=6, h=3, hints={"bg": (0, 0, 0)})
+    panel.render()
+    assert backend.style_at(0, 0).bg == expected
+
+
+def test_rgba_fill_flattens_over_pane_background_color():
+    # A translucent red over a blue pane flattens toward purple on TUI.
+    backend = MemoryBackend(width=4, height=2, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+    panel.add(_Fill((255, 0, 0, 128)), x=0, y=0, w=4, h=2, hints={"bg": (0, 0, 200)})
+    panel.render()
+    r, g, b = backend.style_at(0, 0).bg
+    assert r > 120 and b > 90 and g == 0  # blended, not pure red or pure blue
+
+
+# --- image global opacity ---------------------------------------------------
+
+
+def test_imageview_alpha_hint_flows_to_backend():
+    backend = MemoryBackend(width=8, height=4, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    panel.add(ImageView("p.png", alpha=0.4), x=0, y=0, w=8, h=4)
+    panel.render()
+    assert backend.image_calls[0][3]["alpha"] == pytest.approx(0.4)
+
+
+def test_imageview_alpha_defaults_to_opaque():
+    backend = MemoryBackend(width=8, height=4, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    panel.add(ImageView("p.png"), x=0, y=0, w=8, h=4)
+    panel.render()
+    assert backend.image_calls[0][3]["alpha"] == 1.0

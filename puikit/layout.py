@@ -137,6 +137,14 @@ class Item:
                       it never shrinks below what its content needs.
             "min_px": minimum in pixels; pixel-layout backends only.
             other hints (e.g. "surface", "bg") are forwarded to the placement.
+
+            NOTE: hints are only carried to the placement when ``content`` is a
+            *widget* (a leaf). When ``content`` is a nested ``Split``, resolve()
+            recurses into it and these hints are dropped — they are not pushed
+            down to the descendants. So a "surface"/"bg" pane hint must sit on
+            the leaf items inside the split, not on the item wrapping it. See
+            docs/layout_system.md §14(5); revisit to propagate or let a Split
+            own a background.
     """
 
     def __init__(
@@ -278,6 +286,10 @@ class Split:
                 # Whole-unit backends must see true integers, not whole floats.
                 rect = tuple(round(v) for v in rect)
             if isinstance(item.content, Split):
+                # NOTE: item.hints is dropped here — a wrapping item's pane
+                # hints (surface/bg) do not propagate into the nested split, so
+                # they must be set on the leaf items instead. See the Item
+                # docstring and docs/layout_system.md §14(5).
                 placements.extend(item.content.resolve(*rect, ctx))
             else:
                 placements.append((item.content, Rect(*rect), item.hints))

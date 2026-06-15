@@ -34,7 +34,9 @@ from .base import Widget
 
 
 class ImageView(Widget):
-    def __init__(self, path: str, fit: str = FILL, alt: str | None = None):
+    def __init__(
+        self, path: str, fit: str = FILL, alt: str | None = None, alpha: float = 1.0
+    ):
         if fit not in FITS:
             raise ValueError(f"unknown image fit {fit!r}; expected one of {sorted(FITS)}")
         self.path = path
@@ -42,6 +44,10 @@ class ImageView(Widget):
         # Emoji/glyph shown in place of the picture on backends without images
         # (TUI). None -> a neutral "●".
         self.alt = alt
+        # Global opacity (0..1) the image is drawn at, on top of its own
+        # per-pixel alpha. 1.0 = fully opaque. Composited by transparency-
+        # capable backends; ignored on TUI (the alt glyph stands in).
+        self.alpha = alpha
 
     def draw(self, ctx: DrawContext) -> None:
         # The aspect modes have already shaped the rect (via measure), so they
@@ -49,7 +55,8 @@ class ImageView(Widget):
         draw_fit = FILL if self.fit in ASPECT_FITS else self.fit
         wu, hu = ctx.size_units
         ctx.draw_image(
-            0, 0, self.path, hints={"w": wu, "h": hu, "fit": draw_fit, "alt": self.alt}
+            0, 0, self.path,
+            hints={"w": wu, "h": hu, "fit": draw_fit, "alt": self.alt, "alpha": self.alpha},
         )
 
     def measure(self, ctx: LayoutContext, axis: str, available: float) -> SizeRequest:

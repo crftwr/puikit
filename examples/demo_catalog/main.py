@@ -19,6 +19,7 @@ the page, 1..9 jump to a page, d opens a layered dialog, q quits.
 
 import argparse
 import colorsys
+import math
 import os
 
 from puikit import (
@@ -784,6 +785,157 @@ def build_images_page(panel: Panel) -> VSplit:
     )
 
 
+class CheckerImage(Widget):
+    """Per-pixel alpha. A checkerboard is painted first; an RGBA image is drawn
+    over it, so the image's *own* alpha channel decides which checks show
+    through — opaque pixels hide them, transparent pixels reveal them, and the
+    feathered rim blends. GUI composites this pixel by pixel; TUI has no images,
+    so the Panel layer stamps the alt emoji over the checkerboard instead. The
+    widget never branches on the backend."""
+
+    def __init__(self, image: str, alt: str = "🎫", cell: int = 2):
+        self.image = image
+        self.alt = alt
+        self.cell = cell
+
+    def draw(self, ctx) -> None:
+        wu, hu = ctx.size_units
+        c = self.cell
+        for ry in range(math.ceil(hu / c)):
+            for rx in range(math.ceil(wu / c)):
+                shade = (74, 74, 86) if (rx + ry) % 2 == 0 else (150, 150, 166)
+                ctx.fill_rect(rx * c, ry * c, c, c, Style(bg=shade))
+        # contain keeps the round badge's aspect, so the transparent corners
+        # sit over the checkerboard and read as genuinely see-through.
+        ctx.draw_image(
+            0, 0, self.image, hints={"w": wu, "h": hu, "fit": "contain", "alt": self.alt}
+        )
+
+
+def build_alpha_page(panel: Panel) -> VSplit:
+    # Pixel-level alpha channel: an RGBA badge (a feathered, hue-swept disk on a
+    # transparent field) composited over a checkerboard. The checks showing
+    # through the corners and the soft rim are the alpha channel at work.
+    badge = os.path.join(ASSETS, "badge.png")
+    explainer = TextBlock(
+        "badge.png is an RGBA image (color type 6).\n"
+        "Its alpha channel is per pixel:\n"
+        "  · opaque disk center — hides the checks,\n"
+        "  · feathered rim — blends with the checks,\n"
+        "  · transparent corners — checks show through.\n"
+        "GUI composites it pixel by pixel; TUI shows\n"
+        "the alt emoji over the same checkerboard.",
+    )
+    return VSplit(
+        Item(Label("Per-pixel alpha — an RGBA image over a checkerboard", DIM), size=1),
+        Item(
+            HSplit(
+                Item(CheckerImage(badge, alt="🎫"), weight=3),
+                Item(explainer, weight=2, hints={"surface": "content"}),
+                gap=2,
+            ),
+            weight=1,
+        ),
+        gap=1,
+    )
+
+
+class RGBAOverlays(Widget):
+    """Three translucent RGBA fills over the pane's base color. Where they
+    overlap, the channels composite (SourceOver) on GUI — red+green+blue build
+    up toward white; on TUI there is no per-pixel compositing, so the Panel
+    flattens each fill over the pane background instead (no overlap build-up).
+    Same RGBA intent, two fidelities."""
+
+    def draw(self, ctx) -> None:
+        wu, hu = ctx.size_units
+        a = 130  # ~51% opacity in the 0-255 alpha channel
+        bw, bh = wu * 0.52, hu * 0.6
+        ctx.fill_rect(wu * 0.04, hu * 0.08, bw, bh, Style(bg=(222, 64, 64, a)))    # red
+        ctx.fill_rect(wu * 0.24, hu * 0.30, bw, bh, Style(bg=(70, 200, 96, a)))    # green
+        ctx.fill_rect(wu * 0.44, hu * 0.08, bw, bh, Style(bg=(74, 124, 232, a)))   # blue
+
+
+class TintedImage(Widget):
+    """Image + RGBA blending: an opaque photo with a translucent color wash
+    drawn on top. GUI composites the wash over the picture (a colored tint);
+    TUI cannot, so the wash flattens to a flat color block (the picture's alt
+    emoji is painted under it). The wash is one RGBA fill, resolved per
+    backend."""
+
+    def __init__(self, image: str, tint, alt: str = "🏞️"):
+        self.image = image
+        self.tint = tint
+        self.alt = alt
+
+    def draw(self, ctx) -> None:
+        wu, hu = ctx.size_units
+        ctx.draw_image(0, 0, self.image, hints={"w": wu, "h": hu, "fit": "cover", "alt": self.alt})
+        ctx.fill_rect(0, 0, wu, hu, Style(bg=self.tint))
+
+
+def build_blending_page(panel: Panel) -> VSplit:
+    # Image + RGBA blending, two ways: (1) the same photo drawn at falling
+    # global opacities over a light backdrop, so it blends toward the
+    # background; (2) translucent RGBA color fills compositing over a base and
+    # over each other, plus a color wash over a photo.
+    scene = os.path.join(ASSETS, "scene.png")
+    light = (228, 228, 234)  # a light backdrop a faded image blends toward
+    base = (20, 20, 28)      # the dark base the RGBA overlays composite onto
+
+    # The pane-background hint must sit on the *leaf* item the layout places —
+    # a hint on an item wrapping a nested split is not carried to its children,
+    # and the TUI flatten needs that background to composite an RGBA color over.
+    def opacity_cell(caption: str, alpha: float) -> Item:
+        return Item(
+            VSplit(
+                Item(Label(caption, BOLD), size=1, hints={"bg": light}),
+                Item(
+                    ImageView(scene, fit="cover", alt="🏞️", alpha=alpha),
+                    weight=1, hints={"bg": light},
+                ),
+                gap=0,
+            ),
+            weight=1,
+        )
+
+    return VSplit(
+        Item(Label("Image + RGBA blending — GUI composites, TUI approximates", DIM), size=1),
+        Item(
+            HSplit(
+                opacity_cell("image @ 100%", 1.0),
+                opacity_cell("image @ 60%", 0.6),
+                opacity_cell("image @ 30%", 0.3),
+                gap=2,
+            ),
+            weight=1,
+        ),
+        Item(
+            HSplit(
+                Item(
+                    VSplit(
+                        Item(Label("RGBA fills — overlaps blend on GUI", BOLD), size=1, hints={"bg": base}),
+                        Item(RGBAOverlays(), weight=1, hints={"bg": base}),
+                        gap=0,
+                    ),
+                    weight=1,
+                ),
+                Item(
+                    VSplit(
+                        Item(Label("Photo + translucent color wash", BOLD), size=1, hints={"surface": "sidebar"}),
+                        Item(TintedImage(scene, (0, 96, 208, 120)), weight=1, hints={"surface": "sidebar"}),
+                        gap=0,
+                    ),
+                    weight=1,
+                ),
+                gap=2,
+            ),
+            weight=1,
+        ),
+        gap=1,
+    )
+
+
 # Each nav entry carries an emoji prefix: the same intent renders as a
 # full-color glyph on GUI and as a (wide) text glyph on TUI — the shared
 # wide-character accounting (puikit.text) keeps the labels column-aligned on
@@ -800,6 +952,8 @@ PAGES = [
     ("🔤 Fonts", build_fonts_page),
     ("🎨 Color", build_color_page),
     ("🖼️ Images", build_images_page),
+    ("🫧 Alpha", build_alpha_page),
+    ("🌫️ Blending", build_blending_page),
 ]
 
 

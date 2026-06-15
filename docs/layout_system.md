@@ -429,3 +429,18 @@ widgets:        LayoutView(layout, margin_px=0, margin_units=0).set_layout(...)
 4. **Multi-pass overflow.** The overflow ladder is a single proportional pass
    per tier. A pathological mix of minimums could leave a small residual;
    iterating to a fixed point would tighten it. Not observed in practice yet.
+5. **Pane hints on split-wrapping items are dropped.** A `hints` dict on an
+   `Item` is only carried to the placement when the item's content is a
+   *widget* (a leaf). When the content is a nested `Split`, `resolve` recurses
+   into it and the wrapping item's `hints` are discarded — they are not pushed
+   down to the descendants. So `Item(VSplit(...), hints={"surface": "content"})`
+   draws no pane background; the `surface`/`bg` hint must sit on the leaf items
+   inside the split instead (`Item(widget, hints={"surface": "content"})`).
+   This is a real footgun: a region-wide background or surface role cannot be
+   declared once on the enclosing split. Options when we revisit: (a) propagate
+   a wrapping item's pane hints to its leaf descendants during `resolve`, or
+   (b) let a `Split` itself carry a `surface`/`bg` and emit a backing-fill
+   placement for its whole rect. Either makes a region background a single
+   declaration; (a) is the smaller change. The Panel already fills only the
+   leaf rects (§10), so today a split-level background simply never gets
+   painted — no crash, just a silently missing fill.

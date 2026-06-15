@@ -29,7 +29,11 @@ class TextAttribute(IntFlag):
     ITALIC = 32
 
 
-Color = tuple[int, int, int]  # RGB, 0-255 per channel
+# RGB, or RGBA with a 4th alpha channel (0-255 per channel; alpha 255 = opaque,
+# a 3-tuple is implicitly opaque). Transparency-capable backends composite an
+# RGBA color per pixel; others have the Panel layer flatten it over the pane
+# background to an opaque RGB before it reaches the backend.
+Color = tuple[int, int, int] | tuple[int, int, int, int]
 
 
 @dataclass(frozen=True)

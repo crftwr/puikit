@@ -200,9 +200,25 @@ def _glyph_runs(text: str) -> list[str]:
     return glyphs
 
 
-def _ns_color(rgb: tuple[int, int, int], alpha: float = 1.0):
-    r, g, b = rgb
+def _ns_color(color: tuple[int, ...], alpha: float = 1.0):
+    # An RGBA 4-tuple folds its alpha channel into the opacity; a 3-tuple is
+    # opaque. ``alpha`` multiplies on top (e.g. a dim or shadow tint).
+    if len(color) == 4:
+        r, g, b, a = color
+        alpha = alpha * (a / 255.0)
+    else:
+        r, g, b = color
     return NSColor.colorWithSRGBRed_green_blue_alpha_(r / 255, g / 255, b / 255, alpha)
+
+
+def _fill_rect(rect, color) -> None:
+    """Fill ``rect`` with ``color``, compositing over what is already drawn
+    when the color is translucent (an RGBA channel below 255)."""
+    _ns_color(color).setFill()
+    if len(color) == 4 and color[3] < 255:
+        NSRectFillUsingOperation(rect, NSCompositingOperationSourceOver)
+    else:
+        NSRectFill(rect)
 
 
 @dataclass
@@ -940,8 +956,7 @@ class MacOSBackend(Backend):
     ) -> None:
         rect = self._unit_rect(x, y, w, h)
         if hints.get("fill"):
-            _ns_color(style.bg or _DEFAULT_BG).setFill()
-            NSRectFill(rect)
+            _fill_rect(rect, style.bg or _DEFAULT_BG)
         # Inset by half the line width so the 1px stroke lands on the pixel grid.
         rect = NSMakeRect(
             rect.origin.x + 0.5, rect.origin.y + 0.5, rect.size.width - 1, rect.size.height - 1
@@ -952,8 +967,7 @@ class MacOSBackend(Backend):
         path.stroke()
 
     def _render_fill(self, x: float, y: float, w: float, h: float, style: Style) -> None:
-        _ns_color(style.bg or _DEFAULT_BG).setFill()
-        NSRectFill(self._unit_rect(x, y, w, h))
+        _fill_rect(self._unit_rect(x, y, w, h), style.bg or _DEFAULT_BG)
 
     def _render_dim(self, x: int, y: int, w: int, h: int) -> None:
         # Real transparency: a translucent dark overlay on whatever was
@@ -998,11 +1012,14 @@ class MacOSBackend(Backend):
         h_units = hints.get("h", max(1, round(ih / self._base_h)))
         target = self._unit_rect(x, y, w_units, h_units)
         dest, source = self._fit_rects(hints.get("fit", "fill"), target, iw, ih)
+        # SourceOver already honors the image's own per-pixel alpha (an RGBA
+        # PNG); the "alpha" hint is an extra global opacity (the fraction).
+        opacity = float(hints.get("alpha", 1.0))
         image.drawInRect_fromRect_operation_fraction_respectFlipped_hints_(
             dest,
             source,
             2,  # NSCompositingOperationSourceOver
-            1.0,
+            opacity,
             True,
             None,
         )

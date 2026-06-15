@@ -42,6 +42,23 @@ class Rect:
         return self.x <= x < self.x + self.w and self.y <= y < self.y + self.h
 
 
+def _composite(color, base):
+    """Flatten an RGBA color over an opaque base to an opaque RGB, for backends
+    that cannot composite per pixel (TUI). A 3-tuple (already opaque) or None
+    passes through; with no known base the alpha is simply dropped."""
+    if color is None or len(color) < 4:
+        return color
+    r, g, b, a = color
+    if base is None:
+        return (r, g, b)
+    f = a / 255.0
+    return (
+        round(r * f + base[0] * (1 - f)),
+        round(g * f + base[1] * (1 - f)),
+        round(b * f + base[2] * (1 - f)),
+    )
+
+
 def _intersect(a: Rect, b: Rect) -> Rect | None:
     x0, y0 = max(a.x, b.x), max(a.y, b.y)
     x1 = min(a.x + a.w, b.x + b.w)
@@ -86,6 +103,7 @@ class DrawContext:
         is folded down for backends that cannot render it (docs/font_system.md
         §6) — weight/slant become bold/italic attributes, the rest is dropped."""
         bg = self._background if (self._background is not None and style.bg is None) else style.bg
+        fg = style.fg
         attr = style.attr
         font = style.font
         if font is not None and not self._caps.supports("fonts"):
@@ -94,9 +112,16 @@ class DrawContext:
             if font.slant is FontSlant.ITALIC:
                 attr |= TextAttribute.ITALIC
             font = None
-        if (bg, attr, font) == (style.bg, style.attr, style.font):
+        if not self._caps.supports("transparency"):
+            # No per-pixel compositing: flatten any RGBA color over the pane
+            # background (bg over the pane, fg over the resolved bg) to the
+            # opaque approximation the terminal can actually render.
+            base = self._background
+            bg = _composite(bg, base)
+            fg = _composite(fg, bg or base)
+        if (fg, bg, attr, font) == (style.fg, style.bg, style.attr, style.font):
             return style
-        return Style(style.fg, bg, attr, font)
+        return Style(fg, bg, attr, font)
 
     @property
     def width(self) -> int:
