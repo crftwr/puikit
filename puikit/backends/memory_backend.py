@@ -36,7 +36,7 @@ class MemoryBackend(Backend):
         self._events: deque[Event] = deque()
         self._quit_requested = False
         self.icon_calls: list[tuple[int, int, str]] = []
-        self.image_calls: list[tuple[int, int, str]] = []
+        self.image_calls: list[tuple[float, float, str, dict[str, Any]]] = []
         self.shadow_calls: list[tuple[int, int, int, int]] = []
         self.animate_calls: list[tuple[Any, dict[str, Any]]] = []
         self.tick_callbacks: list[Any] = []
@@ -164,7 +164,7 @@ class MemoryBackend(Backend):
         self.icon_calls.append((x, y, icon_name))
 
     def draw_image(self, x: int, y: int, path: str, hints: dict[str, Any] | None = None) -> None:
-        self.image_calls.append((x, y, path))
+        self.image_calls.append((x, y, path, hints or {}))
 
     def present(self) -> None:
         self.present_count += 1

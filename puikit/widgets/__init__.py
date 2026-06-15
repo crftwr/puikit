@@ -5,6 +5,8 @@ from .button import Button
 from .checkbox import Checkbox
 from .container import Container
 from .dropdown import DropDown
+from .image import ImageView
+from .image_button import ImageButton
 from .label import Label
 from .layout_view import LayoutView
 from .list import ListView
@@ -19,6 +21,8 @@ __all__ = [
     "Checkbox",
     "Container",
     "DropDown",
+    "ImageButton",
+    "ImageView",
     "Label",
     "LayoutView",
     "ListView",

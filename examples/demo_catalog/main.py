@@ -19,6 +19,7 @@ the page, 1..9 jump to a page, d opens a layered dialog, q quits.
 
 import argparse
 import colorsys
+import os
 
 from puikit import (
     EventType,
@@ -38,6 +39,8 @@ from puikit.widgets import (
     Checkbox,
     Container,
     DropDown,
+    ImageButton,
+    ImageView,
     Label,
     LayoutView,
     ListView,
@@ -682,6 +685,66 @@ def build_layer_page(panel: Panel) -> VSplit:
     )
 
 
+ASSETS = os.path.join(os.path.dirname(__file__), "assets")
+
+
+def build_images_page(panel: Panel) -> VSplit:
+    # One image intent, two fidelities. GUI renders the real pictures, scaled
+    # into the panes the layout assigns; TUI has no `images` capability, so the
+    # Panel layer frames each footprint and shows the alt text — the page never
+    # branches on the backend. The ImageButton clicks like any button.
+    status = Label("Click the play button; resize to rescale the image", DIM)
+    plays = {"n": 0}
+
+    def on_play() -> None:
+        plays["n"] += 1
+        status.text = f"ImageButton clicked ×{plays['n']}"
+
+    gradient = os.path.join(ASSETS, "gradient.png")
+    play = os.path.join(ASSETS, "play.png")
+    return VSplit(
+        Item(Label("GUI draws the real image; TUI frames it with alt text", DIM), size=1),
+        Item(
+            HSplit(
+                # An image view, scaled to fill its weighted pane on resize.
+                Item(
+                    VSplit(
+                        Item(Label("ImageView (scales to its pane)", BOLD), size=1),
+                        Item(ImageView(gradient, alt="gradient.png"), weight=1),
+                        gap=1,
+                    ),
+                    weight=2,
+                    hints={"surface": "content"},
+                ),
+                # An image-faced button, sized to a fixed square card.
+                Item(
+                    VSplit(
+                        Item(Label("ImageButton", BOLD), size=1),
+                        Item(
+                            HSplit(
+                                Item(
+                                    ImageButton(play, on_click=on_play, alt="▶"),
+                                    size=8,
+                                ),
+                                Item(Label(""), weight=1),
+                            ),
+                            size=4,
+                        ),
+                        Item(Label(""), weight=1),
+                        gap=1,
+                    ),
+                    weight=1,
+                    hints={"surface": "sidebar"},
+                ),
+                gap=2,
+            ),
+            weight=1,
+        ),
+        Item(status, size=1),
+        gap=1,
+    )
+
+
 # Each nav entry carries an emoji prefix: the same intent renders as a
 # full-color glyph on GUI and as a (wide) text glyph on TUI — the shared
 # wide-character accounting (puikit.text) keeps the labels column-aligned on
@@ -697,6 +760,7 @@ PAGES = [
     ("📏 Intrinsic", build_intrinsic_page),
     ("🔤 Fonts", build_fonts_page),
     ("🎨 Color", build_color_page),
+    ("🖼️ Images", build_images_page),
 ]
 
 

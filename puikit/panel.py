@@ -275,7 +275,25 @@ class DrawContext:
     ) -> None:
         if self._caps.supports("images"):
             self._backend.draw_image(self._rect.x + x, self._rect.y + y, path, hints)
-        # TUI fallback: no-op
+            return
+        # Fallback for backends without images (TUI): frame the image's
+        # footprint and show its alt text centered, so the region the image
+        # would occupy stays legible. The widget never branches on capability;
+        # the size ("w"/"h") and "alt" hints carry the intent here.
+        from .text import display_width
+
+        hints = hints or {}
+        w = int(hints.get("w", self.width - x))
+        h = int(hints.get("h", self.height - y))
+        if w <= 0 or h <= 0:
+            return
+        style = Style(attr=TextAttribute.DIM)
+        self.draw_box(x, y, w, h, style)
+        alt = hints.get("alt")
+        if alt and h >= 1:
+            ax = x + max(0, (w - display_width(alt)) // 2)
+            ay = y + h // 2
+            self.draw_text(ax, ay, alt[: max(0, w - 2)], style)
 
     def fill_rect(
         self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE
