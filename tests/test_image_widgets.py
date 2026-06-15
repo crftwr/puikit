@@ -87,9 +87,9 @@ def test_contain_box_letterboxes_and_cover_crops():
 # --- ImageView draw / fallback ----------------------------------------------
 
 
-def test_imageview_draws_image_on_gui_else_alt_fallback(backend):
+def test_imageview_draws_image_on_gui_else_alt_emoji(backend):
     panel = Panel(backend)
-    panel.add(ImageView("logo.png", alt="LOGO"), x=0, y=0, w=10, h=4)
+    panel.add(ImageView("logo.png", alt="🌅"), x=0, y=0, w=10, h=4)
     panel.render()
     if _has_images(backend):
         assert len(backend.image_calls) == 1
@@ -97,10 +97,18 @@ def test_imageview_draws_image_on_gui_else_alt_fallback(backend):
         assert (x, y, path) == (0, 0, "logo.png")
         assert (hints["w"], hints["h"], hints["fit"]) == (10, 4, "fill")
     else:
+        # The image is replaced by its alt emoji, centered in the footprint.
         assert backend.image_calls == []
-        joined = "\n".join(backend.snapshot())
-        assert "LOGO" in joined
-        assert "┌" in joined  # the placeholder frame
+        assert "🌅" in "\n".join(backend.snapshot())
+
+
+def test_imageview_alt_defaults_to_bullet(backend):
+    panel = Panel(backend)
+    panel.add(ImageView("logo.png"), x=0, y=0, w=10, h=4)
+    panel.render()
+    if not _has_images(backend):
+        # No alt given -> a neutral "●" stands in for the picture.
+        assert "●" in "\n".join(backend.snapshot())
 
 
 def test_imageview_invalid_fit_rejected():
@@ -108,19 +116,17 @@ def test_imageview_invalid_fit_rejected():
         ImageView("logo.png", fit="stretchy")
 
 
-def test_imageview_contain_fit_flows_to_draw_or_letterboxes_fallback(backend, tmp_path):
+def test_imageview_contain_fit_flows_to_draw(backend, tmp_path):
     path = _png(tmp_path / "wide.png", 100, 50)  # 2:1
     panel = Panel(backend)
-    panel.add(ImageView(path, fit="contain"), x=0, y=0, w=20, h=8)
+    panel.add(ImageView(path, fit="contain", alt="🖼"), x=0, y=0, w=20, h=8)
     panel.render()
     if _has_images(backend):
         _, _, _, hints = backend.image_calls[0]
         assert hints["fit"] == "contain"
     else:
-        # The placeholder frames only the aspect-correct sub-rect: a 2:1 image
-        # in a 20x8 box letterboxes to a 16-wide box, centered (left edge at 2).
-        row = backend.snapshot()[0]
-        assert row[0] == " " and row[2] == "┌"
+        # On TUI the fit does not change the fallback: the alt emoji stands in.
+        assert "🖼" in "\n".join(backend.snapshot())
 
 
 def test_imageview_cover_fit_flows_to_draw(backend):

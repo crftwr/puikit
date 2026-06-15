@@ -3,8 +3,8 @@
 The widget declares the intent — "draw this image into my rect with this
 fit" — and the backend decides how. A backend with the ``images`` capability
 (GUI) renders the real picture; backends without it (TUI) fall back in the
-Panel layer, framing the (fit-shaped) footprint and showing the alt text. The
-widget never branches on the backend.
+Panel layer to the ``alt`` emoji (a neutral ``●`` when none is given),
+centered in the footprint. The widget never branches on the backend.
 
 ``fit`` controls how the image relates to the rect the layout assigns:
 
@@ -39,7 +39,8 @@ class ImageView(Widget):
             raise ValueError(f"unknown image fit {fit!r}; expected one of {sorted(FITS)}")
         self.path = path
         self.fit = fit
-        # Text shown in place of the picture on backends without images (TUI).
+        # Emoji/glyph shown in place of the picture on backends without images
+        # (TUI). None -> a neutral "●".
         self.alt = alt
 
     def draw(self, ctx: DrawContext) -> None:

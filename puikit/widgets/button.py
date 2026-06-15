@@ -13,8 +13,8 @@ All three share one interaction: a click or activate (space/enter) fires
 ``on_click``, the face lightens on hover, and an accent focus cue marks focus
 (a framed ring when there is an image or room for a box, an underline for a
 single-row text button). The image face is an intent — GUI renders the real
-picture, TUI falls back in the Panel layer to a framed alt text — so the
-button reads as interactive on every backend, and no draw branches on it.
+picture, TUI falls back in the Panel layer to the alt emoji — so the button
+reads as interactive on every backend, and no draw branches on it.
 """
 
 from __future__ import annotations
@@ -68,7 +68,8 @@ class Button(Widget):
         # None -> the theme's button colors; a Style overrides the fill.
         self.style = style
         self.fit = fit
-        # Text shown in place of the picture on backends without images (TUI).
+        # Emoji/glyph shown in place of the picture on backends without images
+        # (TUI). None -> a neutral "●".
         self.alt = alt
         self.pad_x = pad_x  # horizontal padding measured around a text label
         self.pad = pad      # inset of the image from the button edge

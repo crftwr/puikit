@@ -691,9 +691,9 @@ def build_images_page(panel: Panel) -> VSplit:
     # One image intent, two fidelities — and five object-fits, all resolved by
     # the layout, never by the page. GUI renders the real picture (scaled,
     # letterboxed, or cropped per fit); TUI has no `images` capability, so the
-    # Panel layer frames each (fit-shaped) footprint with its alt text. The
-    # page never branches on the backend. The image-faced Button clicks like
-    # any button. The asset is a 16:9 scene, so the fits read distinctly.
+    # Panel layer stamps each image's alt emoji in its place. The page never
+    # branches on the backend. The image-faced Button clicks like any button.
+    # The asset is a 16:9 scene, so the fits read distinctly on GUI.
     status = Label("Resize the window to watch each fit re-resolve", DIM)
     plays = {"n": 0}
 
@@ -710,7 +710,7 @@ def build_images_page(panel: Panel) -> VSplit:
         return Item(
             VSplit(
                 Item(Label(title, BOLD), size=1),
-                Item(ImageView(scene, fit=fit, alt=f"scene ({fit})"), weight=1),
+                Item(ImageView(scene, fit=fit, alt="🏞️"), weight=1),
                 gap=0,
             ),
             weight=1,
@@ -731,7 +731,7 @@ def build_images_page(panel: Panel) -> VSplit:
         Item(
             VSplit(
                 Item(Label("fit=width (height follows)", BOLD), size=1),
-                Item(ImageView(scene, fit="width", alt="scene (width)"), size="content"),
+                Item(ImageView(scene, fit="width", alt="🏞️"), size="content"),
                 Item(Label(""), weight=1),
                 gap=0,
             ),
@@ -742,7 +742,7 @@ def build_images_page(panel: Panel) -> VSplit:
                 Item(Label("fit=height (width follows)", BOLD), size=1),
                 Item(
                     HSplit(
-                        Item(ImageView(scene, fit="height", alt="scene (height)"), size="content"),
+                        Item(ImageView(scene, fit="height", alt="🏞️"), size="content"),
                         Item(Label(""), weight=1),
                     ),
                     weight=1,
@@ -776,7 +776,7 @@ def build_images_page(panel: Panel) -> VSplit:
     )
 
     return VSplit(
-        Item(Label("ImageView object-fits — GUI draws them, TUI frames them", DIM), size=1),
+        Item(Label("ImageView object-fits — GUI draws them, TUI shows alt emoji", DIM), size=1),
         Item(box_fits, weight=1, hints={"surface": "content"}),
         Item(aspect_fits, weight=1, hints={"surface": "sidebar"}),
         Item(status, size=1),

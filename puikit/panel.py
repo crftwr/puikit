@@ -277,37 +277,25 @@ class DrawContext:
         if self._caps.supports("images"):
             self._backend.draw_image(self._rect.x + x, self._rect.y + y, path, hints)
             return
-        # Fallback for backends without images (TUI): frame the image's
-        # footprint and show its alt text centered, so the region the image
-        # would occupy stays legible. The widget never branches on capability;
-        # the size ("w"/"h"), "fit", and "alt" hints carry the intent here.
-        from .image import CONTAIN, contain_box
+        # Fallback for backends without images (TUI): the picture is replaced
+        # by a single glyph — the "alt" emoji — centered in the footprint, so
+        # the image still reads as a mark on the grid. Without an explicit alt,
+        # a neutral "●" stands in. The widget never branches on capability.
         from .text import display_width
 
         hints = hints or {}
-        # The placeholder draws box-drawing characters and text, which live on
-        # the whole-unit grid, so snap the (possibly fractional) origin and
-        # extent to cells. A caller may pass a float x/y (e.g. a centered icon).
+        # The glyph lives on the whole-unit grid, so snap the (possibly
+        # fractional) origin and extent to cells. A caller may pass a float
+        # x/y (e.g. a centered icon).
         x, y = int(x), int(y)
         w = int(hints.get("w", self.width - x))
         h = int(hints.get("h", self.height - y))
         if w <= 0 or h <= 0:
             return
-        # A "contain" fit letterboxes the picture, so the placeholder frames
-        # only the aspect-correct sub-rect — the same shape the GUI would draw.
-        if hints.get("fit") == CONTAIN:
-            size = self._backend.image_size(path)
-            if size is not None:
-                ox, oy, bw, bh = contain_box(w, h, size[0], size[1])
-                x, y = x + int(ox), y + int(oy)
-                w, h = max(1, int(round(bw))), max(1, int(round(bh)))
-        style = Style(attr=TextAttribute.DIM)
-        self.draw_box(x, y, w, h, style)
-        alt = hints.get("alt")
-        if alt and h >= 1:
-            ax = x + max(0, (w - display_width(alt)) // 2)
-            ay = y + h // 2
-            self.draw_text(ax, ay, alt[: max(0, w - 2)], style)
+        glyph = hints.get("alt") or "●"
+        gx = x + max(0, (w - display_width(glyph)) // 2)
+        gy = y + h // 2
+        self.draw_text(gx, gy, glyph)
 
     def fill_rect(
         self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE
