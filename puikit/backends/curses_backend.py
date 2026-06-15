@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import curses
+import locale
 from typing import Any
 
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute
@@ -42,6 +43,16 @@ _KEY_NAMES = {
     127: "backspace",
 }
 
+# Control characters that get_wch() returns as one-character strings.
+_CONTROL_CHARS = {
+    "\t": "tab",
+    "\n": "enter",
+    "\r": "enter",
+    "\x1b": "escape",
+    "\x7f": "backspace",
+    "\x08": "backspace",
+}
+
 _ATTR_MAP = [
     (TextAttribute.BOLD, curses.A_BOLD),
     (TextAttribute.UNDERLINE, curses.A_UNDERLINE),
@@ -67,10 +78,22 @@ class CursesBackend(Backend):
         self._color_pairs: dict[tuple[int, int], int] = {}
         self._next_pair_id = 1
         self._clip_stack: list[tuple[int, int, int, int]] = []  # x0, y0, x1, y1
+        # Where the focused text widget wants the terminal cursor (and thus the
+        # terminal's own IME composition). Reset each frame; set via
+        # request_text_input during draw; applied in present().
+        self._input_pos: tuple[int, int] | None = None
 
     # --- lifecycle ---------------------------------------------------------
 
     def open(self) -> None:
+        # Adopt the user's locale BEFORE initscr() so ncurses emits the
+        # terminal's encoding (UTF-8) and advances wide glyphs by two cells.
+        # Without this, curses runs in the C locale and multibyte characters
+        # are written byte-by-byte as Latin-1 mojibake (e.g. "あ" -> "ã\x81\x82").
+        try:
+            locale.setlocale(locale.LC_ALL, "")
+        except locale.Error:
+            pass
         self._stdscr = curses.initscr()
         curses.noecho()
         curses.cbreak()
@@ -106,6 +129,15 @@ class CursesBackend(Backend):
     def clear(self) -> None:
         assert self._stdscr is not None
         self._stdscr.erase()
+        # No text field has claimed the cursor yet this frame.
+        self._input_pos = None
+
+    def request_text_input(self, x: int, y: int, hints: dict[str, Any] | None = None) -> None:
+        """The focused text widget's caret position (screen base units). In a
+        terminal the IME composes inline at the *hardware cursor*, so we move it
+        here in present(); otherwise composition appears wherever the last write
+        left the cursor (e.g. the status bar)."""
+        self._input_pos = (int(x), int(y))
 
     def push_clip(self, x: float, y: float, w: float, h: float) -> None:
         x0, y0 = round(x), round(y)
@@ -210,6 +242,19 @@ class CursesBackend(Backend):
 
     def present(self) -> None:
         assert self._stdscr is not None
+        # Place (and show) the hardware cursor at the focused field's caret so
+        # terminal IME composition lands there; hide it otherwise.
+        show = False
+        if self._input_pos is not None:
+            x, y = self._input_pos
+            w, h = self.size
+            if 0 <= x < w and 0 <= y < h:
+                self._stdscr.move(y, x)
+                show = True
+        try:
+            curses.curs_set(1 if show else 0)
+        except curses.error:
+            pass
         self._stdscr.refresh()
 
     # --- colors / attributes ----------------------------------------------------
@@ -276,17 +321,25 @@ class CursesBackend(Backend):
         if self._quit_requested:
             return False
         self._stdscr.timeout(timeout_ms)
-        ch = self._stdscr.getch()
-        if ch != -1:
-            event = self._translate(ch)
-            if event is not None:
-                handler(event)
+        # get_wch() (not getch()) assembles multibyte UTF-8 input into one
+        # character, so committed IME / CJK text arrives whole instead of as
+        # individual bytes. It returns a str for characters, an int for special
+        # keys, and raises on timeout with no input.
+        try:
+            ch = self._stdscr.get_wch()
+        except curses.error:
+            return not self._quit_requested
+        event = self._translate(ch)
+        if event is not None:
+            handler(event)
         return not self._quit_requested
 
     def quit(self) -> None:
         self._quit_requested = True
 
-    def _translate(self, ch: int) -> Event | None:
+    def _translate(self, ch: "int | str") -> Event | None:
+        if isinstance(ch, str):
+            return self._translate_char(ch)
         if ch == curses.KEY_RESIZE:
             w, h = self.size
             return Event(type=EventType.RESIZE, hints={"w": w, "h": h})
@@ -298,6 +351,16 @@ class CursesBackend(Backend):
             char = chr(ch)
             if char.isprintable():
                 return Event(type=EventType.KEY, key=char, char=char)
+        return None
+
+    def _translate_char(self, ch: str) -> Event | None:
+        # Control characters that get_wch delivers as strings map to key names;
+        # everything printable (ASCII or multibyte) is a character event.
+        name = _CONTROL_CHARS.get(ch)
+        if name is not None:
+            return Event(type=EventType.KEY, key=name)
+        if ch.isprintable():
+            return Event(type=EventType.KEY, key=ch, char=ch)
         return None
 
     def _translate_mouse(self) -> Event | None:
