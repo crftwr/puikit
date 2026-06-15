@@ -952,8 +952,8 @@ PAGES = [
     ("🔤 Fonts", build_fonts_page),
     ("🎨 Color", build_color_page),
     ("🖼️ Images", build_images_page),
-    ("🫧 Alpha", build_alpha_page),
-    ("🌫️ Blending", build_blending_page),
+    ("💧 Alpha", build_alpha_page),
+    ("🌈 Blending", build_blending_page),
 ]
 
 

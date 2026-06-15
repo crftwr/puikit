@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import math
 import time
-import unicodedata
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -84,7 +83,7 @@ from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..event import Event, EventType
 from ..font import Font, FontWeight
-from ..text import display_width
+from ..text import display_width, glyph_runs as _glyph_runs
 
 try:
     from Quartz import (
@@ -172,32 +171,6 @@ def translate_key(characters: str, modifier_flags: int = 0) -> Event | None:
     return None
 
 
-_ZWJ = "‍"  # zero-width joiner
-
-
-def _attaches_to_base(ch: str) -> bool:
-    """True for a code point that renders on the previous base character
-    rather than in its own base unit: combining marks, variation selectors
-    (U+FE00..U+FE0F, e.g. the one that turns "⚠" into the emoji "⚠️"), and
-    the zero-width joiner."""
-    return bool(
-        unicodedata.combining(ch)
-        or "︀" <= ch <= "️"
-        or ch == _ZWJ
-    )
-
-
-def _glyph_runs(text: str) -> list[str]:
-    """Split a string into one substring per base unit, keeping each glyph
-    (base character plus any attaching marks / ZWJ sequence) whole so the
-    per-base-unit renderer never splits a single glyph across two base units."""
-    glyphs: list[str] = []
-    for ch in text:
-        if glyphs and (_attaches_to_base(ch) or glyphs[-1].endswith(_ZWJ)):
-            glyphs[-1] += ch
-        else:
-            glyphs.append(ch)
-    return glyphs
 
 
 def _ns_color(color: tuple[int, ...], alpha: float = 1.0):

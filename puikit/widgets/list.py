@@ -7,6 +7,7 @@ from collections.abc import Callable, Sequence
 from ..backend import DEFAULT_STYLE, Style, TextAttribute
 from ..event import Event, EventType
 from ..panel import DrawContext
+from ..text import display_width, truncate_to_width
 from .base import Widget
 
 
@@ -63,7 +64,12 @@ class ListView(Widget):
             if y >= view_h or index >= content_h:
                 break
             if index >= 0:
-                text = self.items[index][:text_w].ljust(text_w)
+                # Truncate and pad by display width, not character count: an
+                # item with a wide glyph (CJK, emoji) is fewer characters than
+                # columns, so ljust by length would make the row — and its
+                # selection background — overflow the pane by a column.
+                clipped = truncate_to_width(self.items[index], text_w)
+                text = clipped + " " * (text_w - display_width(clipped))
                 style = self.style
                 if index == self.selected:
                     style = Style(style.fg, style.bg, style.attr | TextAttribute.REVERSE)

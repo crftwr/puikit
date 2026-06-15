@@ -35,6 +35,29 @@ def test_listview_renders_visible_slice_and_selection(backend):
     assert backend.style_at(9, 0).bg in {(150, 150, 150), (60, 60, 60)}
 
 
+def test_listview_pads_rows_by_display_width(backend):
+    # An item with a wide glyph (emoji) is fewer characters than display
+    # columns; the row must be padded to the pane's column width, not its
+    # character count, or the selection background overflows the pane edge.
+    from puikit.text import display_width
+
+    captured: list[str] = []
+    orig = backend.draw_text
+
+    def spy(x, y, text, style=None):
+        captured.append(text)
+        return orig(x, y, text, style) if style is not None else orig(x, y, text)
+
+    backend.draw_text = spy
+    panel = Panel(backend)
+    panel.add(ListView(["🏷️ Label", "🫧 Alpha", "plain"]), x=0, y=0, w=8, h=3)
+    panel.render()
+    rows = [t for t in captured if t.strip()]
+    assert rows, "expected the list rows to be drawn"
+    for row in rows:
+        assert display_width(row) == 8
+
+
 def test_listview_keyboard_navigation_scrolls(backend):
     panel = Panel(backend)
     listview = ListView([f"item{i}" for i in range(20)])

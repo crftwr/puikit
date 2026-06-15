@@ -9,6 +9,8 @@ from typing import Any
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute
 from ..capability import PROFILE_TUI
 from ..event import Event, EventType
+from ..text import display_width as _display_width
+from ..text import glyph_runs as _glyph_runs
 from ..text import truncate_to_width as _truncate_to_width
 
 # RGB values of the 8 basic curses colors, used for nearest-color mapping.
@@ -175,12 +177,36 @@ class CursesBackend(Backend):
         # Clip to the screen edge by display columns: wide (CJK) glyphs occupy
         # two cells, so a character count would let text run past the edge.
         text = _truncate_to_width(text, w - x)
+        attr = self._to_curses_attr(style)
+        runs = _glyph_runs(text)
+        widths = [_display_width(g) for g in runs]
+        total = sum(widths)
+        # Pre-paint the run's full display width with the style's background
+        # first. An emoji + variation selector (e.g. "🏷️" = base + U+FE0F) is one
+        # display column wide to wcwidth but two to us, so curses writes it into
+        # only the left cell and leaves the reserved right cell untouched — on a
+        # reversed/selected row that cell would show an unpainted gap (the right
+        # half of the emoji's highlight). The space fill guarantees every
+        # reserved column carries the row background; glyphs are drawn on top.
         try:
-            self._stdscr.addstr(y, x, text, self._to_curses_attr(style))
+            self._stdscr.addstr(y, x, " " * total, attr)
         except curses.error:
-            # Writing the bottom-right base unit raises after the cursor advances
-            # off-screen; the base unit itself is drawn, so this is safe to ignore.
             pass
+        # Then place each glyph at the column puikit assigns it rather than
+        # streaming the whole run: the terminal advances emoji/selector
+        # sequences by its own width rules, which disagree with display_width
+        # and would drift every following glyph out of column. Explicit
+        # per-glyph placement keeps columns authoritative.
+        col = 0
+        for glyph, gw in zip(runs, widths):
+            try:
+                self._stdscr.addstr(y, x + col, glyph, attr)
+            except curses.error:
+                # Writing the bottom-right base unit raises after the cursor
+                # advances off-screen; the base unit itself is drawn, so this
+                # is safe to ignore.
+                pass
+            col += gw
 
     def draw_box(
         self,
