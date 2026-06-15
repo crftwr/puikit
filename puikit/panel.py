@@ -165,6 +165,7 @@ class DrawContext:
             hairline=self._caps.supports("hairline"),
             measure=self._backend.measure_text,
             scrollbar_units=self._backend.scrollbar_units,
+            image_size=self._backend.image_size,
         )
 
     def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
@@ -279,7 +280,8 @@ class DrawContext:
         # Fallback for backends without images (TUI): frame the image's
         # footprint and show its alt text centered, so the region the image
         # would occupy stays legible. The widget never branches on capability;
-        # the size ("w"/"h") and "alt" hints carry the intent here.
+        # the size ("w"/"h"), "fit", and "alt" hints carry the intent here.
+        from .image import CONTAIN, contain_box
         from .text import display_width
 
         hints = hints or {}
@@ -287,6 +289,14 @@ class DrawContext:
         h = int(hints.get("h", self.height - y))
         if w <= 0 or h <= 0:
             return
+        # A "contain" fit letterboxes the picture, so the placeholder frames
+        # only the aspect-correct sub-rect — the same shape the GUI would draw.
+        if hints.get("fit") == CONTAIN:
+            size = self._backend.image_size(path)
+            if size is not None:
+                ox, oy, bw, bh = contain_box(w, h, size[0], size[1])
+                x, y = x + int(ox), y + int(oy)
+                w, h = max(1, int(round(bw))), max(1, int(round(bh)))
         style = Style(attr=TextAttribute.DIM)
         self.draw_box(x, y, w, h, style)
         alt = hints.get("alt")
@@ -505,6 +515,7 @@ class Panel:
             hairline=self.backend.capabilities.supports("hairline"),
             measure=self.backend.measure_text,
             scrollbar_units=self.backend.scrollbar_units,
+            image_size=self.backend.image_size,
         )
         placements = self._layout.resolve(
             mx, my, max(0.0, sw - 2 * mx), max(0.0, sh - 2 * my), ctx

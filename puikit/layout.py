@@ -68,6 +68,11 @@ class LayoutContext:
     # without the layout ever touching the backend.
     measure: Callable[[str, Any], float] | None = None
     scrollbar_units: float = 1.0
+    # How a widget measures an image: its natural pixel size, supplied by the
+    # backend so an ImageView can size itself to the aspect ratio without ever
+    # loading the file. Backend-independent (a file's dimensions are a fact),
+    # but routed through the backend like measure, so a backend can override.
+    image_size: Callable[[str], tuple[int, int] | None] | None = None
     # Divider rects emitted during resolve, for the Panel to draw.
     dividers: list[Divider] = field(default_factory=list)
 
@@ -77,6 +82,13 @@ class LayoutContext:
         if self.measure is not None:
             return self.measure(text, style)
         return float(len(text))
+
+    def measure_image(self, path: str) -> tuple[int, int] | None:
+        """Natural ``(width, height)`` of the image in pixels, or None when no
+        measurer is supplied or the format is unknown."""
+        if self.image_size is not None:
+            return self.image_size(path)
+        return None
 
 
 @dataclass(frozen=True)

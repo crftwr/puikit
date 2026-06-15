@@ -689,57 +689,89 @@ ASSETS = os.path.join(os.path.dirname(__file__), "assets")
 
 
 def build_images_page(panel: Panel) -> VSplit:
-    # One image intent, two fidelities. GUI renders the real pictures, scaled
-    # into the panes the layout assigns; TUI has no `images` capability, so the
-    # Panel layer frames each footprint and shows the alt text — the page never
-    # branches on the backend. The ImageButton clicks like any button.
-    status = Label("Click the play button; resize to rescale the image", DIM)
+    # One image intent, two fidelities — and five object-fits, all resolved by
+    # the layout, never by the page. GUI renders the real picture (scaled,
+    # letterboxed, or cropped per fit); TUI has no `images` capability, so the
+    # Panel layer frames each (fit-shaped) footprint with its alt text. The
+    # page never branches on the backend. The ImageButton clicks like any
+    # button. The asset is a 16:9 scene, so the fits read distinctly.
+    status = Label("Resize the window to watch each fit re-resolve", DIM)
     plays = {"n": 0}
 
     def on_play() -> None:
         plays["n"] += 1
         status.text = f"ImageButton clicked ×{plays['n']}"
 
-    gradient = os.path.join(ASSETS, "gradient.png")
+    scene = os.path.join(ASSETS, "scene.png")
     play = os.path.join(ASSETS, "play.png")
-    return VSplit(
-        Item(Label("GUI draws the real image; TUI frames it with alt text", DIM), size=1),
+
+    def fit_cell(title: str, fit: str) -> Item:
+        # Each cell hands the image the same square-ish pane; the fit decides
+        # how the 16:9 scene relates to it (stretch / letterbox / crop).
+        return Item(
+            VSplit(
+                Item(Label(title, BOLD), size=1),
+                Item(ImageView(scene, fit=fit, alt=f"scene ({fit})"), weight=1),
+                gap=0,
+            ),
+            weight=1,
+        )
+
+    # Top row: the three fits that share a given width and height.
+    box_fits = HSplit(
+        fit_cell("fill", "fill"),
+        fit_cell("contain", "contain"),
+        fit_cell("cover", "cover"),
+        gap=2,
+    )
+
+    # Bottom row: the two aspect-driven fits size the widget themselves. "width"
+    # is intrinsic in a vertical stack (height follows the width it is given);
+    # "height" is intrinsic in a horizontal split (width follows the height).
+    aspect_fits = HSplit(
         Item(
-            HSplit(
-                # An image view, scaled to fill its weighted pane on resize.
-                Item(
-                    VSplit(
-                        Item(Label("ImageView (scales to its pane)", BOLD), size=1),
-                        Item(ImageView(gradient, alt="gradient.png"), weight=1),
-                        gap=1,
-                    ),
-                    weight=2,
-                    hints={"surface": "content"},
-                ),
-                # An image-faced button, sized to a fixed square card.
-                Item(
-                    VSplit(
-                        Item(Label("ImageButton", BOLD), size=1),
-                        Item(
-                            HSplit(
-                                Item(
-                                    ImageButton(play, on_click=on_play, alt="▶"),
-                                    size=8,
-                                ),
-                                Item(Label(""), weight=1),
-                            ),
-                            size=4,
-                        ),
-                        Item(Label(""), weight=1),
-                        gap=1,
-                    ),
-                    weight=1,
-                    hints={"surface": "sidebar"},
-                ),
-                gap=2,
+            VSplit(
+                Item(Label("fit=width (height follows)", BOLD), size=1),
+                Item(ImageView(scene, fit="width", alt="scene (width)"), size="content"),
+                Item(Label(""), weight=1),
+                gap=0,
             ),
             weight=1,
         ),
+        Item(
+            VSplit(
+                Item(Label("fit=height (width follows)", BOLD), size=1),
+                Item(
+                    HSplit(
+                        Item(ImageView(scene, fit="height", alt="scene (height)"), size="content"),
+                        Item(Label(""), weight=1),
+                    ),
+                    weight=1,
+                ),
+                gap=0,
+            ),
+            weight=1,
+        ),
+        # An image-faced button, sized to a fixed square card.
+        Item(
+            VSplit(
+                Item(Label("ImageButton", BOLD), size=1),
+                Item(
+                    HSplit(Item(ImageButton(play, on_click=on_play, alt="▶"), size=8), Item(Label(""), weight=1)),
+                    size=4,
+                ),
+                Item(Label(""), weight=1),
+                gap=0,
+            ),
+            weight=1,
+        ),
+        gap=2,
+    )
+
+    return VSplit(
+        Item(Label("ImageView object-fits — GUI draws them, TUI frames them", DIM), size=1),
+        Item(box_fits, weight=1, hints={"surface": "content"}),
+        Item(aspect_fits, weight=1, hints={"surface": "sidebar"}),
         Item(status, size=1),
         gap=1,
     )

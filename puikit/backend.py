@@ -205,6 +205,16 @@ class Backend(ABC):
     def draw_image(self, x: int, y: int, path: str, hints: dict[str, Any] | None = None) -> None:
         raise CapabilityNotSupported("images")
 
+    def image_size(self, path: str) -> tuple[int, int] | None:
+        """Natural ``(width, height)`` of the image in pixels, or None if
+        unknown. Lets the layout size an ImageView to its aspect ratio
+        (fit="width"/"height") on every backend, even where the image cannot
+        be drawn. The default parses the file header (puikit.image); a backend
+        may override with a native loader."""
+        from .image import image_size
+
+        return image_size(path)
+
     # --- event loop ---------------------------------------------------------
 
     @abstractmethod

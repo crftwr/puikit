@@ -17,10 +17,13 @@ from collections.abc import Callable
 
 from ..backend import Color, Style
 from ..event import Event, EventType
+from ..image import CONTAIN, COVER, FILL
 from ..panel import DrawContext
 from ..theme import DEFAULT_THEME
 from ._input import is_activate
 from .base import Widget
+
+_FACE_FITS = frozenset({FILL, CONTAIN, COVER})
 
 
 def _lighten(color: Color, amount: float = 0.12) -> Color:
@@ -37,7 +40,12 @@ class ImageButton(Widget):
         on_click: Callable[[], None] | None = None,
         alt: str | None = None,
         pad: int = 1,
+        fit: str = CONTAIN,
     ):
+        if fit not in _FACE_FITS:
+            raise ValueError(
+                f"unknown image fit {fit!r}; a button face expects one of {sorted(_FACE_FITS)}"
+            )
         self.path = path
         self.on_click = on_click
         # Text shown in place of the picture on backends without images (TUI).
@@ -45,6 +53,9 @@ class ImageButton(Widget):
         # Gap between the button edge and the image, in base units; it leaves
         # room for the focus ring and reads the image as a raised face.
         self.pad = pad
+        # How the face image fills the padded area. "contain" (default) keeps
+        # the whole glyph visible; "cover"/"fill" suit edge-to-edge artwork.
+        self.fit = fit
 
     def draw(self, ctx: DrawContext) -> None:
         theme = ctx.theme or DEFAULT_THEME
@@ -58,7 +69,10 @@ class ImageButton(Widget):
         iw = max(0.0, wu - 2 * pad)
         ih = max(0.0, hu - 2 * pad)
         if iw > 0 and ih > 0:
-            ctx.draw_image(pad, pad, self.path, hints={"w": iw, "h": ih, "alt": self.alt})
+            ctx.draw_image(
+                pad, pad, self.path,
+                hints={"w": iw, "h": ih, "fit": self.fit, "alt": self.alt},
+            )
 
         # Accent focus ring around the whole face, matching Button's focus cue.
         if ctx.focused and ctx.width >= 1 and ctx.height >= 1:

@@ -993,16 +993,37 @@ class MacOSBackend(Backend):
         image = NSImage.alloc().initWithContentsOfFile_(path)
         if image is None:
             return
-        w_units = hints.get("w", max(1, round(image.size().width / self._base_w)))
-        h_units = hints.get("h", max(1, round(image.size().height / self._base_h)))
+        iw, ih = image.size().width, image.size().height
+        w_units = hints.get("w", max(1, round(iw / self._base_w)))
+        h_units = hints.get("h", max(1, round(ih / self._base_h)))
+        target = self._unit_rect(x, y, w_units, h_units)
+        dest, source = self._fit_rects(hints.get("fit", "fill"), target, iw, ih)
         image.drawInRect_fromRect_operation_fraction_respectFlipped_hints_(
-            self._unit_rect(x, y, w_units, h_units),
-            NSMakeRect(0, 0, 0, 0),
+            dest,
+            source,
             2,  # NSCompositingOperationSourceOver
             1.0,
             True,
             None,
         )
+
+    def _fit_rects(self, fit: str, target, iw: float, ih: float):
+        """Destination and source rects for an object-fit. The geometry lives
+        in puikit.image (shared with the TUI placeholder); here it is mapped
+        onto the pixel target rect. A zero source rect means the whole image."""
+        from ..image import CONTAIN, COVER, contain_box, cover_source
+
+        whole = NSMakeRect(0, 0, 0, 0)
+        tw, th = target.size.width, target.size.height
+        if fit == CONTAIN:
+            ox, oy, bw, bh = contain_box(tw, th, iw, ih)
+            return NSMakeRect(target.origin.x + ox, target.origin.y + oy, bw, bh), whole
+        if fit == COVER:
+            sx, sy, sw, sh = cover_source(iw, ih, tw, th)
+            return target, NSMakeRect(sx, sy, sw, sh)
+        # FILL (and the aspect modes, whose rect is already aspect-correct):
+        # stretch the whole image across the whole target.
+        return target, whole
 
     # --- event loop ----------------------------------------------------------
 
