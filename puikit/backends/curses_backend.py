@@ -255,6 +255,13 @@ class CursesBackend(Backend):
             curses.curs_set(1 if show else 0)
         except curses.error:
             pass
+        # Some terminals (Terminal.app) realize IME composition by *inserting*
+        # the preedit at the cursor, shifting the rest of the row right and
+        # pushing trailing cells (e.g. the scroll bar) off the grid — and never
+        # restore them. curses' diff-based refresh can't see that damage, so
+        # while a text field is focused we force a full repaint to repair it.
+        if self._input_pos is not None:
+            self._stdscr.redrawwin()
         self._stdscr.refresh()
 
     # --- colors / attributes ----------------------------------------------------
