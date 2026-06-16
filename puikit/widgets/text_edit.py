@@ -26,6 +26,9 @@ from ..theme import DEFAULT_THEME
 from ._input import typed_char
 from .base import Widget
 
+# Corner radius of the field, in device pixels (dropped on a character grid).
+_FIELD_RADIUS = 4.0
+
 
 class TextEdit(Widget):
     focusable = True
@@ -75,7 +78,13 @@ class TextEdit(Widget):
         self._scroll_into_view(caret, field_w, len(disp))
 
         bg = theme.hover_bg if (ctx.hovered and not ctx.focused) else theme.control_bg
-        ctx.fill_rect(0, 0, min(float(self.width), ctx.size_units[0]), 1, Style(bg=bg))
+        # A flat, rounded field with a subtle border (accent while focused) on
+        # vector backends; a plain fill on a character grid.
+        border = theme.accent if ctx.focused else theme.control_border
+        ctx.round_rect(
+            0, 0, min(float(self.width), ctx.size_units[0]), 1,
+            Style(bg=bg, fg=border), radius=_FIELD_RADIUS, hints={"fill": True},
+        )
 
         # Lay out characters left to right in display columns (wide CJK glyphs
         # take two), stopping at the field edge. The caret column is tracked the

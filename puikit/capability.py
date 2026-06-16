@@ -21,6 +21,9 @@ class CapabilityProfile(dict):
 PROFILE_TUI = CapabilityProfile(
     pixel_layout=False,
     hairline=False,  # sub-unit divider lines (zero base unit cost)
+    vector_shapes=False,     # rounded rects / ellipses / vector marks (a modern,
+                             # non-character look for controls); grid backends fall
+                             # back to box-drawing + ASCII marks in the Panel layer
     fonts=False,             # real faces, sizes, weights, slants
     proportional_text=False,  # variable-advance text (no character grid)
     layering=False,
@@ -41,6 +44,7 @@ PROFILE_TUI = CapabilityProfile(
 PROFILE_GUI_WEB = CapabilityProfile(
     pixel_layout=True,
     hairline=True,
+    vector_shapes=True,
     fonts=True,
     proportional_text=True,
     layering=True,
@@ -84,6 +88,7 @@ PROFILE_MOBILE = CapabilityProfile(
 PROFILE_GAME = CapabilityProfile(
     pixel_layout=True,
     hairline=True,
+    vector_shapes=True,
     fonts=True,
     proportional_text=True,
     layering=True,

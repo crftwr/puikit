@@ -329,6 +329,115 @@ class DrawContext:
             self._rect.x + x, self._rect.y + y, w, h, self._resolve(style)
         )
 
+    # --- modern control faces (vector on capable backends, grid otherwise) ----
+
+    def round_rect(
+        self,
+        x: float,
+        y: float,
+        w: float,
+        h: float,
+        style: Style = DEFAULT_STYLE,
+        radius: float | None = 4.0,
+        hints: dict[str, Any] | None = None,
+    ) -> None:
+        """A rounded rectangle control face (button, field, mark box). On
+        ``vector_shapes`` backends it draws real rounded corners; otherwise the
+        rounding is dropped and the rect renders as a plain fill (hints
+        ``fill``) and/or a box-drawing outline (``style.fg``), so a control
+        reads correctly on a character grid too. ``radius`` is in device
+        pixels; ``None`` means fully rounded (a circle/pill)."""
+        style = self._resolve(style)
+        hints = hints or {}
+        if self._caps.supports("vector_shapes"):
+            self._backend.draw_round_rect(
+                self._rect.x + x, self._rect.y + y, w, h, radius, style, hints
+            )
+            return
+        # Grid fallback: rounding is meaningless on whole cells.
+        if hints.get("fill") and style.bg is not None:
+            self._backend.fill_rect(self._rect.x + x, self._rect.y + y, w, h, Style(bg=style.bg))
+        if style.fg is not None:
+            iw, ih = round(w), round(h)
+            if iw >= 2 and ih >= 2:
+                self._backend.draw_box(
+                    self._rect.x + x, self._rect.y + y, iw, ih, style, hints
+                )
+
+    def draw_check_mark(
+        self, x: float, y: float, *, checked: bool, focused: bool, theme: "Theme",
+        row_bg: tuple[int, int, int] | None = None,
+    ) -> None:
+        """Draw a checkbox mark whose first cell sits at (x, y). Vector backends
+        get a rounded box — accent-filled with a check when on, bordered when
+        off, an accent ring on focus; grid backends fall back to the ``[x]`` /
+        ``[ ]`` text mark. The caller reserves the same column slot either way,
+        so the label aligns identically on every backend."""
+        if not self._caps.supports("vector_shapes"):
+            mark = "[x]" if checked else "[ ]"
+            if focused:
+                style = Style(fg=theme.button_text, bg=theme.accent)
+            else:
+                style = Style(fg=theme.accent if checked else theme.text, bg=row_bg)
+            self.draw_text(int(x), y, mark, style)
+            return
+        bx, by, w_u, h_u, side = self._mark_box(x, y)
+        fill = theme.accent if checked else theme.control_bg
+        border = theme.accent if (focused or checked) else theme.control_border
+        self.round_rect(
+            bx, by, w_u, h_u, Style(bg=fill, fg=border),
+            radius=max(2.0, side * 0.28), hints={"fill": True},
+        )
+        if checked:
+            self._draw_check(bx, by, w_u, h_u, Style(fg=theme.button_text))
+
+    def draw_radio_mark(
+        self, x: float, y: float, *, selected: bool, focused: bool, theme: "Theme",
+        row_bg: tuple[int, int, int] | None = None,
+    ) -> None:
+        """Draw a radio mark whose first cell sits at (x, y). Vector backends get
+        a circle — accent-ringed with a filled accent dot when selected; grid
+        backends fall back to the ``(•)`` / ``( )`` text mark."""
+        if not self._caps.supports("vector_shapes"):
+            mark = "(•)" if selected else "( )"
+            if focused and selected:
+                style = Style(fg=theme.button_text, bg=theme.accent)
+            else:
+                style = Style(fg=theme.accent if selected else theme.text, bg=row_bg)
+            self.draw_text(int(x), y, mark, style)
+            return
+        bx, by, w_u, h_u, side = self._mark_box(x, y)
+        border = theme.accent if (focused or selected) else theme.control_border
+        self.round_rect(
+            bx, by, w_u, h_u, Style(bg=theme.control_bg, fg=border),
+            radius=None, hints={"fill": True},
+        )
+        if selected:
+            dw, dh = w_u * 0.46, h_u * 0.46
+            self.round_rect(
+                bx + (w_u - dw) / 2.0, by + (h_u - dh) / 2.0, dw, dh,
+                Style(bg=theme.accent), radius=None, hints={"fill": True},
+            )
+
+    def _mark_box(self, x: float, y: float) -> tuple[float, float, float, float, float]:
+        """Geometry for a checkbox/radio mark box: a pixel-square, vertically
+        centered in the row, returned as (x, y, w, h) in base units plus the
+        side length in device pixels. Square in pixels even though a base unit
+        cell is taller than it is wide."""
+        bw, bh = self.base_size
+        side = min(bh, bw * 2) * 0.80  # device pixels
+        w_u = side / bw if bw else 1.0
+        h_u = side / bh if bh else 1.0
+        return (x + 0.2, y + (1.0 - h_u) / 2.0, w_u, h_u, side)
+
+    def _draw_check(
+        self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE
+    ) -> None:
+        if self._caps.supports("vector_shapes"):
+            self._backend.draw_check(
+                self._rect.x + x, self._rect.y + y, w, h, self._resolve(style)
+            )
+
     def draw_divider(self, divider: "Any") -> None:
         """Render a layout Divider in this context's coordinates, mirroring
         the Panel's top-level divider drawing: a hairline on hairline-capable

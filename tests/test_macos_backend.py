@@ -127,8 +127,20 @@ def test_profile_declares_gui_capabilities():
     assert profile.supports("icons")
     assert profile.supports("images")
     assert profile.supports("animation")
+    assert profile.supports("vector_shapes")
     # Not implemented yet in the MVP:
     assert not profile.supports("system_tray")
+
+
+def test_vector_primitives_record_display_list_commands():
+    backend = MacOSBackend()  # not opened: no window is created
+    backend.draw_round_rect(0, 0, 4, 1, 4.0, Style(bg=(1, 2, 3)), {"fill": True})
+    backend.draw_check(0, 0, 1, 1, Style(fg=(255, 255, 255)))
+    backend.present()
+    assert [cmd[0] for cmd in backend._front] == ["round_rect", "check"]
+    rr = backend._front[0]
+    assert rr[5] == 4.0  # radius carried through
+    assert rr[7] == {"fill": True}
 
 
 def test_animation_progress_and_easing():

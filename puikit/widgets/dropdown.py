@@ -23,6 +23,9 @@ from .base import Widget
 
 _POPUP_Z = 50
 
+# Corner radius of the closed field, in device pixels (dropped on a grid).
+_FIELD_RADIUS = 4.0
+
 
 class DropDown(Widget):
     focusable = True
@@ -70,7 +73,13 @@ class DropDown(Widget):
         if w < 5:
             return
         bg = theme.hover_bg if ctx.hovered else theme.control_bg
-        ctx.fill_rect(0, 0, min(float(self.width), ctx.size_units[0]), 1, Style(bg=bg))
+        # A flat, rounded field with a subtle border (accent while focused) on
+        # vector backends; a plain fill on a character grid.
+        border = theme.accent if ctx.focused else theme.control_border
+        ctx.round_rect(
+            0, 0, min(float(self.width), ctx.size_units[0]), 1,
+            Style(bg=bg, fg=border), radius=_FIELD_RADIUS, hints={"fill": True},
+        )
 
         attr = TextAttribute.UNDERLINE if ctx.focused else TextAttribute.NORMAL
         label = self.options[self.selected] if self.options else ""

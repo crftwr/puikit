@@ -35,6 +35,10 @@ from .base import Widget
 # so only the within-a-given-box fits apply.
 _FACE_FITS = frozenset({FILL, CONTAIN, COVER})
 
+# Corner radius of the button face, in device pixels. Dropped on character-grid
+# backends (the face renders as a plain fill there).
+_RADIUS = 5.0
+
 
 def _lighten(color: tuple[int, int, int], amount: float = 0.12) -> tuple[int, int, int]:
     """Nudge a color toward white, for the hover state of a fill."""
@@ -96,7 +100,8 @@ class Button(Widget):
     def draw(self, ctx: DrawContext) -> None:
         bg, fg, theme = self._colors(ctx)
         wu, hu = ctx.size_units
-        ctx.fill_rect(0, 0, wu, hu, Style(bg=bg))
+        # A rounded fill on vector backends, a plain fill on a character grid.
+        ctx.round_rect(0, 0, wu, hu, Style(bg=bg), radius=_RADIUS, hints={"fill": True})
 
         if self.image is not None and self.label:
             self._draw_icon_label(ctx, bg, fg)
@@ -105,11 +110,11 @@ class Button(Widget):
         else:
             self._draw_label(ctx, bg, fg)
 
-        # Focus cue: a framed accent ring when there is an image or the height
+        # Focus cue: a rounded accent ring when there is an image or the height
         # for a box; the single-row text underline is applied in _draw_label.
         if ctx.focused and (self.image is not None or ctx.height >= 2):
             if ctx.width >= 1 and ctx.height >= 1:
-                ctx.draw_box(0, 0, ctx.width, ctx.height, Style(fg=theme.accent, bg=bg))
+                ctx.round_rect(0, 0, wu, hu, Style(fg=theme.accent, bg=bg), radius=_RADIUS)
 
     def _draw_label(self, ctx: DrawContext, bg, fg) -> None:
         attr = TextAttribute.BOLD

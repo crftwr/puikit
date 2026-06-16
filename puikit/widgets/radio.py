@@ -50,17 +50,16 @@ class RadioGroup(Widget):
             row_bg = theme.hover_bg if i == hover_row else None
             if row_bg is not None:
                 ctx.fill_rect(0, i, ctx.size_units[0], 1, Style(bg=row_bg))
-            mark = _SELECTED if i == self.selected else _UNSELECTED
-            # The selected dot reads in the accent color; focus draws an accent
-            # ring around the selected row's mark.
-            if ctx.focused and i == self.selected:
-                mark_style = Style(fg=theme.button_text, bg=theme.accent)
-            else:
-                mark_style = Style(
-                    fg=theme.accent if i == self.selected else theme.text, bg=row_bg
-                )
-            ctx.draw_text(0, i, mark, mark_style)
-            ctx.draw_text(len(mark) + len(_GAP), i, option, Style(fg=theme.text, bg=row_bg))
+            # The mark is an intent: a circle with an accent dot on vector
+            # backends, the "(•)"/"( )" text mark on a character grid. Focus
+            # cues only the selected row's mark.
+            selected = i == self.selected
+            ctx.draw_radio_mark(
+                0, i, selected=selected, focused=ctx.focused and selected,
+                theme=theme, row_bg=row_bg,
+            )
+            label_x = len(_UNSELECTED) + len(_GAP)
+            ctx.draw_text(label_x, i, option, Style(fg=theme.text, bg=row_bg))
 
     def _hover_row(self, ctx: DrawContext) -> int | None:
         panel = ctx.panel

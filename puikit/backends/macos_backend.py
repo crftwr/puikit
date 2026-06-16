@@ -682,6 +682,29 @@ class MacOSBackend(Backend):
     def fill_rect(self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE) -> None:
         self._back.append(("fill", x, y, w, h, style))
 
+    def draw_round_rect(
+        self,
+        x: float,
+        y: float,
+        w: float,
+        h: float,
+        radius: float | None,
+        style: Style = DEFAULT_STYLE,
+        hints: dict[str, Any] | None = None,
+    ) -> None:
+        self._back.append(("round_rect", x, y, w, h, radius, style, hints or {}))
+
+    def draw_check(
+        self,
+        x: float,
+        y: float,
+        w: float,
+        h: float,
+        style: Style = DEFAULT_STYLE,
+        hints: dict[str, Any] | None = None,
+    ) -> None:
+        self._back.append(("check", x, y, w, h, style))
+
     def dim_rect(self, x: int, y: int, w: int, h: int) -> None:
         self._back.append(("dim", x, y, w, h))
 
@@ -777,6 +800,10 @@ class MacOSBackend(Backend):
                 self._render_image(*command[1:])
             elif kind == "fill":
                 self._render_fill(*command[1:])
+            elif kind == "round_rect":
+                self._render_round_rect(*command[1:])
+            elif kind == "check":
+                self._render_check(*command[1:])
             elif kind == "dim":
                 self._render_dim(*command[1:])
             elif kind == "shadow":
@@ -941,6 +968,45 @@ class MacOSBackend(Backend):
 
     def _render_fill(self, x: float, y: float, w: float, h: float, style: Style) -> None:
         _fill_rect(self._unit_rect(x, y, w, h), style.bg or _DEFAULT_BG)
+
+    def _render_round_rect(
+        self, x: float, y: float, w: float, h: float, radius, style: Style, hints: dict[str, Any]
+    ) -> None:
+        rect = self._unit_rect(x, y, w, h)
+        r = radius if radius is not None else min(rect.size.width, rect.size.height) / 2.0
+        r = max(0.0, min(r, rect.size.width / 2.0, rect.size.height / 2.0))
+        if hints.get("fill") and style.bg is not None:
+            # NSBezierPath.fill composites source-over by default, so an RGBA
+            # fill (translucent control face) blends over what is already drawn.
+            _ns_color(style.bg).setFill()
+            NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(rect, r, r).fill()
+        if style.fg is not None:
+            line = float(hints.get("line_width", 1.0))
+            # Inset by half the line width so the stroke lands on the pixel grid.
+            inset = NSMakeRect(
+                rect.origin.x + line / 2.0, rect.origin.y + line / 2.0,
+                rect.size.width - line, rect.size.height - line,
+            )
+            ir = max(0.0, min(r, inset.size.width / 2.0, inset.size.height / 2.0))
+            _ns_color(style.fg).setStroke()
+            path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(inset, ir, ir)
+            path.setLineWidth_(line)
+            path.stroke()
+
+    def _render_check(self, x: float, y: float, w: float, h: float, style: Style) -> None:
+        rect = self._unit_rect(x, y, w, h)
+        ox, oy = rect.origin.x, rect.origin.y
+        pw, ph = rect.size.width, rect.size.height
+        # A check stroked across the box (view is flipped: larger y is lower).
+        path = NSBezierPath.bezierPath()
+        path.moveToPoint_((ox + pw * 0.24, oy + ph * 0.52))
+        path.lineToPoint_((ox + pw * 0.42, oy + ph * 0.70))
+        path.lineToPoint_((ox + pw * 0.78, oy + ph * 0.30))
+        path.setLineWidth_(max(1.4, ph * 0.13))
+        path.setLineCapStyle_(1)   # NSLineCapStyleRound
+        path.setLineJoinStyle_(1)  # NSLineJoinStyleRound
+        _ns_color(style.fg or _DEFAULT_FG).setStroke()
+        path.stroke()
 
     def _render_dim(self, x: int, y: int, w: int, h: int) -> None:
         # Real transparency: a translucent dark overlay on whatever was

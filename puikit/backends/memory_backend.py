@@ -37,6 +37,8 @@ class MemoryBackend(Backend):
         self._quit_requested = False
         self.icon_calls: list[tuple[int, int, str]] = []
         self.image_calls: list[tuple[float, float, str, dict[str, Any]]] = []
+        self.round_rect_calls: list[tuple] = []
+        self.check_calls: list[tuple] = []
         self.shadow_calls: list[tuple[int, int, int, int]] = []
         self.animate_calls: list[tuple[Any, dict[str, Any]]] = []
         self.tick_callbacks: list[Any] = []
@@ -46,6 +48,13 @@ class MemoryBackend(Backend):
 
     @property
     def capabilities(self) -> CapabilityProfile:
+        # This backend renders to a character grid, so it cannot draw vector
+        # shapes (rounded rects, ellipses, check marks) even when handed a GUI
+        # profile for a layout/input test. Force the capability off so the
+        # Panel layer falls back to the box-drawing + ASCII mark path, keeping
+        # the grid snapshot identical to a real terminal.
+        if self._capabilities.supports("vector_shapes"):
+            return CapabilityProfile({**self._capabilities, "vector_shapes": False})
         return self._capabilities
 
     # --- lifecycle ---------------------------------------------------------
@@ -123,6 +132,32 @@ class MemoryBackend(Backend):
         x, y, w, h = round(x), round(y), round(w), round(h)
         for row in range(h):
             self.draw_text(x, y + row, " " * w, style)
+
+    def draw_round_rect(
+        self,
+        x: float,
+        y: float,
+        w: float,
+        h: float,
+        radius: float | None,
+        style: Style = DEFAULT_STYLE,
+        hints: dict[str, Any] | None = None,
+    ) -> None:
+        # A grid cannot render rounding; the call is recorded for tests that
+        # opt into vector_shapes (the default capability masks it off, so the
+        # Panel layer falls back to fill_rect/draw_box and this is never hit).
+        self.round_rect_calls.append((x, y, w, h, radius, style, hints or {}))
+
+    def draw_check(
+        self,
+        x: float,
+        y: float,
+        w: float,
+        h: float,
+        style: Style = DEFAULT_STYLE,
+        hints: dict[str, Any] | None = None,
+    ) -> None:
+        self.check_calls.append((x, y, w, h, style))
 
     def dim_rect(self, x: int, y: int, w: int, h: int) -> None:
         x, y, w, h = round(x), round(y), round(w), round(h)

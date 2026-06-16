@@ -18,8 +18,9 @@ from ..theme import DEFAULT_THEME
 from ._input import is_activate
 from .base import Widget
 
-# Box marks. ASCII brackets render identically on every backend; a font-rich
-# backend could swap in ☑/☐ via a future icon hint without touching this code.
+# The mark occupies this many columns on every backend (matching the "[x]" text
+# fallback), so the label aligns the same whether the backend draws a vector box
+# or the ASCII mark. _CHECKED/_UNCHECKED size the slot in `measure`.
 _CHECKED = "[x]"
 _UNCHECKED = "[ ]"
 _GAP = " "
@@ -48,15 +49,13 @@ class Checkbox(Widget):
         if row_bg is not None:
             ctx.fill_rect(0, 0, ctx.size_units[0], 1, Style(bg=row_bg))
 
-        mark = _CHECKED if self.checked else _UNCHECKED
-        # A checked box reads in the accent color; focus draws a filled accent
-        # ring around the mark (row-friendly, no box needed).
-        if ctx.focused:
-            mark_style = Style(fg=theme.button_text, bg=theme.accent)
-        else:
-            mark_style = Style(fg=theme.accent if self.checked else theme.text, bg=row_bg)
-        ctx.draw_text(0, 0, mark, mark_style)
-        ctx.draw_text(len(mark) + len(_GAP), 0, self.label, Style(fg=theme.text, bg=row_bg))
+        # The mark is an intent: a rounded check box on vector backends, the
+        # "[x]"/"[ ]" text mark on a character grid — the Panel layer chooses.
+        ctx.draw_check_mark(
+            0, 0, checked=self.checked, focused=ctx.focused, theme=theme, row_bg=row_bg
+        )
+        label_x = len(_UNCHECKED) + len(_GAP)
+        ctx.draw_text(label_x, 0, self.label, Style(fg=theme.text, bg=row_bg))
 
     def measure(self, ctx: LayoutContext, axis: str, available: float) -> SizeRequest:
         if axis == "x":
