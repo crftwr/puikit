@@ -142,6 +142,16 @@ class DrawContext:
         return self._backend.base_size
 
     @property
+    def vector_shapes(self) -> bool:
+        """True when the backend renders true device pixels (rounded rects,
+        hairlines, sub-unit insets). False on a character grid — including a grid
+        handed a GUI profile for a test — where sub-unit padding and frame lines
+        must collapse so content stays aligned to whole cells. Widgets read this
+        only to drop pixel-only ornamentation; the visible-vs-grid drawing choice
+        itself still lives in the Panel layer (round_rect, draw_*_mark)."""
+        return self._caps.supports("vector_shapes")
+
+    @property
     def focused(self) -> bool:
         """True when this widget holds the keyboard focus. Interactive widgets
         use it to draw a focus cue (a reversed marker, a cursor); the value is
@@ -200,19 +210,21 @@ class DrawContext:
         columns; the font is folded first, matching what draw_text will draw."""
         return self._backend.measure_text(text, self._resolve(style))
 
-    def draw_text(self, x: int, y: float, text: str, style: Style = DEFAULT_STYLE) -> None:
+    def draw_text(self, x: float, y: float, text: str, style: Style = DEFAULT_STYLE) -> None:
         # Gate on the exact (possibly fractional) extent and let the
         # backend's clip rect cut the overflow: a pane squeezed to 0.97
         # base units by pixel rounding must still render its row 0, clipped at
         # the pane edge, not drop it. y may be fractional and is allowed to
         # start within one unit above the pane (a row mid-scroll off the top,
-        # e.g. ListView's smooth scroll): its visible part is clipped in.
+        # e.g. ListView's smooth scroll): its visible part is clipped in. x may
+        # be fractional too (a few pixels of sub-unit padding on a pixel backend);
+        # the slice math is taken in whole cells so truncation stays grid-safe.
         if not -1 < y < self._rect.h:
             return
         if x < 0:
-            text = text[-x:]
+            text = text[int(math.ceil(-x)):]
             x = 0
-        text = text[: max(0, math.ceil(self._rect.w) - x)]
+        text = text[: max(0, math.ceil(self._rect.w - x))]
         if not text:
             return
         self._backend.draw_text(self._rect.x + x, self._rect.y + y, text, self._resolve(style))

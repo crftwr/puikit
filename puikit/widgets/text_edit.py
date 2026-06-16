@@ -24,7 +24,7 @@ from ..panel import DrawContext
 from ..text import char_width, display_width
 from ..theme import DEFAULT_THEME
 from ._input import typed_char
-from .base import Widget
+from .base import CONTROL_HEIGHT, Widget
 
 # Corner radius of the field, in device pixels (dropped on a character grid).
 _FIELD_RADIUS = 4.0
@@ -58,7 +58,10 @@ class TextEdit(Widget):
         if axis == "x":
             w = float(self.width)
             return SizeRequest(min=w, preferred=w, max=w)
-        return SizeRequest(min=1.0, preferred=1.0, max=1.0)
+        # A single line: one cell on a grid, a little taller (centered text +
+        # padding) on pixel backends.
+        h = 1.0 if ctx.snap else CONTROL_HEIGHT
+        return SizeRequest(min=1.0, preferred=h, max=h)
 
     # --- drawing -------------------------------------------------------------
 
@@ -78,13 +81,13 @@ class TextEdit(Widget):
         self._scroll_into_view(caret, field_w, len(disp))
 
         bg = theme.hover_bg if (ctx.hovered and not ctx.focused) else theme.control_bg
-        # A flat, rounded field with a subtle border (accent while focused) on
-        # vector backends; a plain fill on a character grid.
-        border = theme.accent if ctx.focused else theme.control_border
-        ctx.round_rect(
-            0, 0, min(float(self.width), ctx.size_units[0]), 1,
-            Style(bg=bg, fg=border), radius=_FIELD_RADIUS, hints={"fill": True},
-        )
+        field_full_w = min(float(self.width), ctx.size_units[0])
+        field_h = ctx.size_units[1]
+        ty = (field_h - 1.0) / 2.0  # center the text line within the field box
+        # A flat, rounded field on vector backends, a plain fill on a character
+        # grid. The fill goes first; the border is stroked last (end of draw),
+        # so the text/caret backgrounds cannot paint over the border line.
+        ctx.round_rect(0, 0, field_full_w, field_h, Style(bg=bg), radius=_FIELD_RADIUS, hints={"fill": True})
 
         # Lay out characters left to right in display columns (wide CJK glyphs
         # take two), stopping at the field edge. The caret column is tracked the
@@ -101,19 +104,24 @@ class TextEdit(Widget):
             marked = pre_start <= idx < pre_end
             attr = TextAttribute.UNDERLINE if marked else TextAttribute.NORMAL
             fg = theme.accent if marked else theme.text
-            ctx.draw_text(1 + col, 0, ch, Style(fg=fg, bg=bg, attr=attr))
+            ctx.draw_text(1 + col, ty, ch, Style(fg=fg, bg=bg, attr=attr))
             col += cw
         if caret_col is None:  # caret sits at/after the last visible glyph
             caret_col = col
 
         if ctx.focused:
-            self._draw_caret(ctx, theme, disp, caret, caret_col, field_w, bg)
+            self._draw_caret(ctx, theme, disp, caret, caret_col, field_w, bg, ty)
             self._notify_input_position(ctx, caret_col)
 
-    def _draw_caret(self, ctx, theme, disp, caret, caret_col, field_w, bg) -> None:
+        # Border stroked last so the glyph/caret backgrounds above cannot paint
+        # over it; accent while focused, a subtle outline otherwise.
+        border = theme.accent if ctx.focused else theme.control_border
+        ctx.round_rect(0, 0, field_full_w, field_h, Style(fg=border), radius=_FIELD_RADIUS)
+
+    def _draw_caret(self, ctx, theme, disp, caret, caret_col, field_w, bg, ty) -> None:
         if 0 <= caret_col < field_w:
             ch = disp[caret] if caret < len(disp) else " "
-            ctx.draw_text(1 + caret_col, 0, ch, Style(fg=theme.control_bg, bg=theme.accent))
+            ctx.draw_text(1 + caret_col, ty, ch, Style(fg=theme.control_bg, bg=theme.accent))
 
     def _notify_input_position(self, ctx: DrawContext, caret_col: int) -> None:
         if ctx.panel is None:

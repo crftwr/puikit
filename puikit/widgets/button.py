@@ -28,7 +28,7 @@ from ..layout import LayoutContext, SizeRequest
 from ..panel import DrawContext
 from ..theme import DEFAULT_THEME
 from ._input import is_activate
-from .base import Widget
+from .base import CONTROL_HEIGHT, Widget
 
 # Fits valid for a button face. The aspect modes ("width"/"height") size a
 # widget to an image's ratio; a button is sized by the layout or its label,
@@ -121,7 +121,7 @@ class Button(Widget):
         if ctx.focused and ctx.height < 2:  # no room for a box: underline instead
             attr |= TextAttribute.UNDERLINE
         tx = max(0, (ctx.width - len(self.label)) // 2)
-        ty = max(0, ctx.height // 2)
+        ty = max(0.0, (ctx.size_units[1] - 1.0) / 2.0)  # center the label line vertically
         ctx.draw_text(tx, ty, self.label, Style(fg=fg, bg=bg, attr=attr))
 
     def _draw_image(self, ctx: DrawContext) -> None:
@@ -150,17 +150,19 @@ class Button(Widget):
             hints={"w": icon_w, "h": inner_h, "fit": self.fit, "alt": self.alt},
         )
         tx = int(round(gx + icon_w + self.gap))
-        ty = max(0, ctx.height // 2)
+        ty = max(0.0, (ctx.size_units[1] - 1.0) / 2.0)  # center the label line vertically
         ctx.draw_text(tx, ty, self.label, Style(fg=fg, bg=bg, attr=TextAttribute.BOLD))
 
     # --- measure -------------------------------------------------------------
 
     def measure(self, ctx: LayoutContext, axis: str, available: float) -> SizeRequest:
         if axis == "y":
-            # Text-only is a fixed single row (min == pref == max, never flexes);
-            # any image fills its slot vertically (size it through the layout).
+            # Text-only is a single line: one cell on a grid, a little taller
+            # (centered label + padding) on pixel backends. An image button
+            # fills its slot vertically (size it through the layout).
             if self.image is None:
-                return SizeRequest(min=1.0, preferred=1.0, max=1.0)
+                h = 1.0 if ctx.snap else CONTROL_HEIGHT
+                return SizeRequest(min=1.0, preferred=h, max=h)
             return SizeRequest()
         # axis == "x": natural width.
         if self.image is None:

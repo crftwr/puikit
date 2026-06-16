@@ -10,6 +10,14 @@ from ..event import Event
 from ..layout import LayoutContext, SizeRequest
 from ..panel import DrawContext
 
+# Height of a single-line control box (field, button) in base units on
+# pixel backends: one text line plus a little vertical padding above and below
+# (the text is centered). Whole-unit (TUI) backends use a single cell instead —
+# a taller box there would spend extra rows and fall back to a box-drawing frame
+# that overdraws the text. Controls report this via ``view_height`` so a host
+# like ScrollView reserves the right room per backend.
+CONTROL_HEIGHT = 1.5
+
 
 class Widget:
     #: Whether this widget can take keyboard focus.

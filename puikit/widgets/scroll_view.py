@@ -2,9 +2,11 @@
 
 Children are stacked top to bottom, each with its own height; when the stack
 is taller than the viewport the view scrolls and a scroll bar appears on the
-right. A child height may be ``"auto"``, in which case the child is asked for
-its current ``view_height`` every frame — this is what lets an open DropDown
-grow inline and push the rest of the stack down.
+right. A child height may be a base-unit count, ``"auto"`` (the child is asked
+for its current ``view_height`` every frame, e.g. a widget that grows inline),
+or ``"content"`` (the child's preferred height is measured against the backend,
+so a single-line control is one cell on a grid and a little taller on pixel
+backends).
 
 Scrolling reuses the same fractional-offset model as ListView, so a backend
 that delivers sub-unit scroll deltas scrolls smoothly. Tab / Shift+Tab cycle
@@ -32,30 +34,52 @@ class ScrollView(Widget):
         gap: int = 1,
         style: Style = DEFAULT_STYLE,
     ):
-        # Each item is (widget, height); height is a base-unit count, or
-        # "auto" to read the widget's own view_height() each frame.
+        # Each item is (widget, height); height is a base-unit count, "auto"
+        # to read the widget's own view_height() each frame, or "content" to
+        # measure the widget's preferred height (backend-aware: 1 cell on a grid,
+        # a little taller on pixel backends). "content" is resolved against the
+        # backend at draw time and cached for the (context-free) event path.
         self._items = [(widget, height) for widget, height in items]
         self.gap = gap
         self.style = style
         self.offset: float = 0.0
         self._view_h: float = 1.0
+        self._content_h: dict[int, float] = {}
         self._focused: Any | None = next(
             (w for w, _ in self._items if getattr(w, "focusable", False)), None
         )
 
     # --- geometry -------------------------------------------------------------
 
-    def _child_height(self, widget: Any, height: int | str) -> int:
+    def _child_height(self, widget: Any, height: int | str) -> float:
+        # "auto"/"content" may be fractional (a control a little taller than one
+        # line on pixel backends), so the stack and hit-testing carry floats.
         if height == "auto":
             fn = getattr(widget, "view_height", None)
-            return int(fn()) if fn is not None else 1
-        return int(height)
+            return float(fn()) if fn is not None else 1.0
+        if height == "content":
+            # Resolved at draw against the real backend; cached for events.
+            return self._content_h.get(id(widget), 1.0)
+        return float(height)
 
-    def _entries(self) -> tuple[list[tuple[Any, float, int]], float]:
+    def _measure_content(self, ctx: DrawContext) -> None:
+        """Resolve every ``"content"`` child's height against this backend (its
+        LayoutContext carries the pixel-vs-grid rule), so the first frame already
+        reserves the right room — no settling on the next event."""
+        lc = None
+        for widget, height in self._items:
+            if height != "content":
+                continue
+            if lc is None:
+                lc = ctx.layout_context()
+            preferred = widget.measure(lc, "y", float(ctx.width)).preferred
+            self._content_h[id(widget)] = preferred if preferred > 0 else 1.0
+
+    def _entries(self) -> tuple[list[tuple[Any, float, float]], float]:
         """(widget, top, height) for each child plus the total content height,
         all in base units. Recomputed on demand so a child whose height changes
         (an opening DropDown) reflows immediately."""
-        entries: list[tuple[Any, float, int]] = []
+        entries: list[tuple[Any, float, float]] = []
         y = 0.0
         for widget, height in self._items:
             h = self._child_height(widget, height)
@@ -71,6 +95,7 @@ class ScrollView(Widget):
 
     def draw(self, ctx: DrawContext) -> None:
         self._view_h = ctx.size_units[1]
+        self._measure_content(ctx)
         entries, total = self._entries()
         show_bar = total > self._view_h + 1e-9
         content_w = ctx.width - (1 if show_bar else 0)

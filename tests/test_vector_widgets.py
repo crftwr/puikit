@@ -99,9 +99,16 @@ def test_textedit_field_is_rounded_with_accent_border_when_focused(backend):
     field = TextEdit("hi", width=12)
     panel.add(field, x=0, y=0, w=12, h=1)
     panel.render()
-    rr = backend.round_rect_calls[0]
-    assert rr[5].bg == panel.theme.control_bg
-    assert rr[5].fg == panel.theme.accent  # focused border
+    # Fill first (background only), border stroked last so the text cannot
+    # paint over it (full ring, not a partial line).
+    fill = backend.round_rect_calls[0]
+    assert fill[5].bg == panel.theme.control_bg
+    assert fill[5].fg is None
+    assert fill[6].get("fill") is True
+    border = backend.round_rect_calls[-1]
+    assert border[5].fg == panel.theme.accent  # focused border
+    assert border[5].bg is None
+    assert "fill" not in border[6]
 
 
 def test_dropdown_field_is_rounded(backend):

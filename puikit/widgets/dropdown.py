@@ -3,28 +3,40 @@
 Closed, it shows the current choice as a flat field with a chevron. Opening it
 pushes a popup *layer* onto the Panel — positioned under the field via
 ``ctx.screen_rect`` — instead of expanding in place, so the list floats above
-the page (with a drop shadow on capable backends) and the surrounding layout
-never reflows. The popup is modal: it commits on click/enter, and cancels on
-escape or an outside click. This is the same ``push_layer`` intent the demo
-dialogs use; the Panel resolves the compositing per backend.
+the page and the surrounding layout never reflows. On pixel backends the popup
+draws a framed, padded menu (a thin border line, not a drop shadow, sets it
+apart from the page); on a character grid the popup_bg contrast does that. The
+popup is modal: it commits on click/enter, and cancels on escape or an outside
+click. This is the same ``push_layer`` intent the demo dialogs use; the Panel
+resolves the compositing per backend.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 
-from ..backend import DEFAULT_STYLE, Style, TextAttribute
+from ..backend import DEFAULT_STYLE, Style
 from ..event import Event, EventType
 from ..layout import LayoutContext, SizeRequest
 from ..panel import DrawContext
 from ..theme import DEFAULT_THEME
 from ._input import is_activate
-from .base import Widget
+from .base import CONTROL_HEIGHT, Widget
 
 _POPUP_Z = 50
 
 # Corner radius of the closed field, in device pixels (dropped on a grid).
 _FIELD_RADIUS = 4.0
+# Popup geometry, in base units, used only on pixel backends (a grid keeps one
+# cell per row, flush to the frame). Rows match the control box height so the
+# list and the field read consistently; the centered text, not a gap between
+# the highlight and the frame, supplies the padding (so the selection bar is
+# even on every side).
+_POPUP_ROW_H = CONTROL_HEIGHT
+# Left inset of the option text, matching the closed field's text column, so the
+# field and the list line up horizontally on every backend.
+_POPUP_TEXT_X = 1
+_POPUP_RADIUS = 5.0  # frame corner radius, device pixels
 
 
 class DropDown(Widget):
@@ -48,16 +60,22 @@ class DropDown(Widget):
         # the popup) and knows where the field is on screen (to place it).
         self._panel = None
         self._screen_rect: tuple[float, float, float, float] | None = None
+        self._pixel = False  # backend places content at device-pixel precision
         self._popup: _DropDownPopup | None = None
 
     # --- geometry -------------------------------------------------------------
 
-    def view_height(self) -> int:
-        return 1  # the popup floats; the field itself is always one row
+    def view_height(self) -> float:
+        # The popup floats, so only the field is sized here: one cell on a grid,
+        # a little taller (centered text + padding) on pixel backends.
+        return CONTROL_HEIGHT if self._pixel else 1.0
 
     def measure(self, ctx: LayoutContext, axis: str, available: float) -> SizeRequest:
         if axis == "y":
-            return SizeRequest(min=1.0, preferred=1.0, max=1.0)
+            # One cell on a grid, a little taller (centered text + padding) on
+            # pixel backends — matching the other single-line controls.
+            h = 1.0 if ctx.snap else CONTROL_HEIGHT
+            return SizeRequest(min=1.0, preferred=h, max=h)
         w = float(self.width)
         return SizeRequest(min=w, preferred=w, max=w)
 
@@ -66,6 +84,7 @@ class DropDown(Widget):
     def draw(self, ctx: DrawContext) -> None:
         self._panel = ctx.panel
         self._screen_rect = ctx.screen_rect
+        self._pixel = ctx.vector_shapes
         if self.options:
             self.selected = max(0, min(self.selected, len(self.options) - 1))
         theme = ctx.theme or DEFAULT_THEME
@@ -73,21 +92,26 @@ class DropDown(Widget):
         if w < 5:
             return
         bg = theme.hover_bg if ctx.hovered else theme.control_bg
-        # A flat, rounded field with a subtle border (accent while focused) on
-        # vector backends; a plain fill on a character grid.
-        border = theme.accent if ctx.focused else theme.control_border
-        ctx.round_rect(
-            0, 0, min(float(self.width), ctx.size_units[0]), 1,
-            Style(bg=bg, fg=border), radius=_FIELD_RADIUS, hints={"fill": True},
-        )
+        field_w = min(float(self.width), ctx.size_units[0])
+        field_h = ctx.size_units[1]
+        ty = (field_h - 1.0) / 2.0  # center the text line within the field box
+        # A flat, rounded field on vector backends, a plain fill on a character
+        # grid. The fill goes down first and the border is stroked *last* (after
+        # the text), so the field text's own background cannot paint over the
+        # border line at the box's top/bottom edges.
+        ctx.round_rect(0, 0, field_w, field_h, Style(bg=bg), radius=_FIELD_RADIUS, hints={"fill": True})
 
-        attr = TextAttribute.UNDERLINE if ctx.focused else TextAttribute.NORMAL
         label = self.options[self.selected] if self.options else ""
         field = label[: w - 4].ljust(w - 4)
-        ctx.draw_text(1, 0, field, Style(fg=theme.text, bg=bg, attr=attr))
+        ctx.draw_text(1, ty, field, Style(fg=theme.text, bg=bg))
+        # The accent-colored chevron is the focus cue that reads on every
+        # backend (the vector border below adds to it on capable ones).
         arrow = "▴" if self.open else "▾"
         arrow_fg = theme.accent if ctx.focused else theme.text
-        ctx.draw_text(w - 2, 0, arrow, Style(fg=arrow_fg, bg=bg, attr=attr))
+        ctx.draw_text(w - 2, ty, arrow, Style(fg=arrow_fg, bg=bg))
+
+        border = theme.accent if ctx.focused else theme.control_border
+        ctx.round_rect(0, 0, field_w, field_h, Style(fg=border), radius=_FIELD_RADIUS)
 
     # --- events --------------------------------------------------------------
 
@@ -104,18 +128,21 @@ class DropDown(Widget):
     def _open_popup(self) -> None:
         if self.open or not self.options or self._panel is None or self._screen_rect is None:
             return
-        x, y, _w, _h = self._screen_rect
+        x, y, _w, fh = self._screen_rect
         self.open = True
         self._popup = _DropDownPopup(
             self.options, self.selected,
             on_commit=self._commit, on_cancel=self._cancel,
         )
+        # Rows are taller than one cell on pixel backends; the popup recomputes
+        # the same row height from its own context when drawing. The list opens
+        # just below the field (whatever its height), not always one row down.
+        row_h = _POPUP_ROW_H if self._pixel else 1.0
         self._panel.push_layer(
             self._popup, z=_POPUP_Z,
             hints={
-                "x": x, "y": y + 1,
-                "w": float(self.width), "h": float(len(self.options)),
-                "shadow": True,
+                "x": x, "y": y + fh,
+                "w": float(self.width), "h": float(len(self.options)) * row_h,
             },
         )
 
@@ -156,6 +183,7 @@ class _DropDownPopup(Widget):
         self.on_commit = on_commit
         self.on_cancel = on_cancel
         self._width = 0  # popup width in base units, captured at draw
+        self._row_h = 1.0  # row height in base units, captured at draw
 
     def _hover_row(self, ctx: DrawContext) -> int | None:
         panel = ctx.panel
@@ -163,18 +191,24 @@ class _DropDownPopup(Widget):
             return None
         px, py = panel.pointer
         rx, ry, rw, rh = ctx.screen_rect
-        if rx <= px < rx + rw and ry <= py < ry + rh:
-            return int(py - ry)
-        return None
+        if not (rx <= px < rx + rw and ry <= py < ry + rh):
+            return None
+        row = int((py - ry) / self._row_h)
+        return row if 0 <= row < len(self.options) else None
 
     def draw(self, ctx: DrawContext) -> None:
         theme = ctx.theme or DEFAULT_THEME
         wu, hu = ctx.size_units
         self._width = ctx.width
+        row_h = _POPUP_ROW_H if ctx.vector_shapes else 1.0
+        self._row_h = row_h
+        text_dy = (row_h - 1.0) / 2.0  # center the text line within the taller row
         ctx.fill_rect(0, 0, wu, hu, Style(bg=theme.popup_bg))
         hover_row = self._hover_row(ctx)
+        avail = max(0, ctx.width - _POPUP_TEXT_X - 1)
         for i, option in enumerate(self.options):
-            if i >= ctx.height:
+            top = i * row_h
+            if top >= hu:
                 break
             if i == self.cursor:
                 row_bg = theme.selection_bg
@@ -182,10 +216,17 @@ class _DropDownPopup(Widget):
                 row_bg = theme.hover_bg
             else:
                 row_bg = theme.popup_bg
-            ctx.fill_rect(0, i, wu, 1, Style(bg=row_bg))
-            bullet = "•" if i == self.selected else " "
-            text = option[: ctx.width - 3].ljust(ctx.width - 3)
-            ctx.draw_text(0, i, f" {bullet}{text}", Style(fg=theme.text, bg=row_bg))
+            # The highlight fills the whole row, edge to edge, so the selection
+            # bar's padding is even on every side (the centered text is the
+            # breathing room — no top-only gap). No bullet: the bar marks it.
+            if row_bg != theme.popup_bg:
+                ctx.fill_rect(0, top, wu, row_h, Style(bg=row_bg))
+            ctx.draw_text(_POPUP_TEXT_X, top + text_dy, option[:avail], Style(fg=theme.text, bg=row_bg))
+        # A visible frame line replaces the drop shadow as the separation cue
+        # (pixel backends only; on a character grid the popup_bg contrast already
+        # sets the list apart, and a box frame would overwrite the row edges).
+        if ctx.vector_shapes:
+            ctx.round_rect(0, 0, wu, hu, Style(fg=theme.popup_border), radius=_POPUP_RADIUS)
 
     def handle_event(self, event: Event) -> bool:
         if event.type is EventType.KEY:
@@ -199,7 +240,7 @@ class _DropDownPopup(Widget):
                 self.on_cancel()
             return True
         if event.type is EventType.MOUSE_CLICK:
-            row = int(event.y) if event.y is not None else -1
+            row = int(event.y / self._row_h) if event.y is not None else -1
             inside_x = event.x is not None and 0 <= event.x < self._width
             if inside_x and 0 <= row < len(self.options):
                 self.on_commit(row)

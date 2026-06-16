@@ -46,6 +46,7 @@ class Theme:
     selection_bg: Color = (9, 71, 113)     # active selection            #094771
     hover_bg: Color = (42, 45, 46)         # row hover                   #2A2D2E
     popup_bg: Color = (37, 37, 38)         # menu / popup surface        #252526
+    popup_border: Color = (84, 84, 92)     # menu / popup frame line     #54545C
 
     def surface_bg(self, role: str) -> Color | None:
         return self.surfaces.get(role)
