@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import curses
 import locale
+import os
 from typing import Any
 
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute
@@ -96,7 +97,21 @@ class CursesBackend(Backend):
             locale.setlocale(locale.LC_ALL, "")
         except locale.Error:
             pass
+        # ncurses defaults ESCDELAY to 1000ms: after a bare ESC it waits that
+        # long to see whether more bytes arrive to form an escape sequence
+        # (arrow / function keys all start with ESC), so a standalone ESC feels
+        # unresponsive. Shrink the window to 100ms before initscr() reads it, so
+        # ESC reports promptly while real sequences still assemble (100ms stays
+        # safe over slower links, e.g. SSH, where a sequence can arrive split;
+        # matches the tfm reference implementation).
+        os.environ.setdefault("ESCDELAY", "100")
         self._stdscr = curses.initscr()
+        # Belt-and-suspenders for ncurses builds that ignore the env var: apply
+        # the same delay through the API (no-op on Pythons without it).
+        try:
+            curses.set_escdelay(100)
+        except (AttributeError, curses.error):
+            pass
         curses.noecho()
         curses.cbreak()
         self._stdscr.keypad(True)
