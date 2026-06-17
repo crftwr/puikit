@@ -72,7 +72,7 @@ class ScrollView(Widget):
                 continue
             if lc is None:
                 lc = ctx.layout_context()
-            preferred = widget.measure(lc, "y", float(ctx.width)).preferred
+            preferred = widget.measure(lc, "y", ctx.size_units[0]).preferred
             self._content_h[id(widget)] = preferred if preferred > 0 else 1.0
 
     def _entries(self) -> tuple[list[tuple[Any, float, float]], float]:
@@ -94,11 +94,14 @@ class ScrollView(Widget):
     # --- drawing -------------------------------------------------------------
 
     def draw(self, ctx: DrawContext) -> None:
-        self._view_h = ctx.size_units[1]
+        # Use the exact (fractional) extent, not ctx.width/height: on pixel-layout
+        # backends those are truncated to whole base units, which would snap the
+        # content width to characters instead of tracking the pane pixel by pixel.
+        width, self._view_h = ctx.size_units
         self._measure_content(ctx)
         entries, total = self._entries()
         show_bar = total > self._view_h + 1e-9
-        content_w = ctx.width - (1 if show_bar else 0)
+        content_w = width - (1 if show_bar else 0)
         self._clamp(total)
 
         for widget, top, h in entries:
@@ -113,7 +116,7 @@ class ScrollView(Widget):
             denom = total - self._view_h
             pos = self.offset / denom if denom > 0 else 0.0
             ctx.draw_scrollbar(
-                ctx.width - 1, 0, self._view_h, max(0.0, min(1.0, pos)), ratio, self.style
+                width - 1, 0, self._view_h, max(0.0, min(1.0, pos)), ratio, self.style
             )
 
     # --- events --------------------------------------------------------------

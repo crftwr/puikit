@@ -120,9 +120,14 @@ class Button(Widget):
         attr = TextAttribute.BOLD
         if ctx.focused and ctx.height < 2:  # no room for a box: underline instead
             attr |= TextAttribute.UNDERLINE
-        tx = max(0, (ctx.width - len(self.label)) // 2)
+        style = Style(fg=fg, bg=bg, attr=attr)
+        # Center against the exact (fractional) pane width and measured label
+        # width, so the label tracks the pane pixel by pixel on pixel-layout
+        # backends instead of snapping to whole base units.
+        wu = ctx.size_units[0]
+        tx = max(0.0, (wu - ctx.measure_text(self.label, style)) / 2.0)
         ty = max(0.0, (ctx.size_units[1] - 1.0) / 2.0)  # center the label line vertically
-        ctx.draw_text(tx, ty, self.label, Style(fg=fg, bg=bg, attr=attr))
+        ctx.draw_text(tx, ty, self.label, style)
 
     def _draw_image(self, ctx: DrawContext) -> None:
         wu, hu = ctx.size_units
@@ -142,16 +147,19 @@ class Button(Widget):
         pad = self.pad
         inner_h = max(1.0, hu - 2 * pad)
         icon_w = inner_h
-        text_w = len(self.label)
+        style = Style(fg=fg, bg=bg, attr=TextAttribute.BOLD)
+        # Measured (fractional) label width and a fractional text origin, so the
+        # group stays centered at pixel granularity on pixel-layout backends.
+        text_w = ctx.measure_text(self.label, style)
         group_w = icon_w + self.gap + text_w
         gx = max(float(pad), (wu - group_w) / 2.0)
         ctx.draw_image(
             gx, pad, self.image,
             hints={"w": icon_w, "h": inner_h, "fit": self.fit, "alt": self.alt},
         )
-        tx = int(round(gx + icon_w + self.gap))
+        tx = gx + icon_w + self.gap
         ty = max(0.0, (ctx.size_units[1] - 1.0) / 2.0)  # center the label line vertically
-        ctx.draw_text(tx, ty, self.label, Style(fg=fg, bg=bg, attr=TextAttribute.BOLD))
+        ctx.draw_text(tx, ty, self.label, style)
 
     # --- measure -------------------------------------------------------------
 
