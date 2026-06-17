@@ -167,6 +167,17 @@ def test_content_item_reserves_measured_height():
     assert (rbelow.y, rbelow.h) == (3, 9)
 
 
+def test_wrapping_block_reserves_rows_for_the_given_width():
+    # A wrapping block is content-driven on both axes: the cross-axis width the
+    # VSplit hands in (10) folds the 30-col line into three display rows, so it
+    # reserves height 3 — not the single row an unwrapped block would.
+    block = TextBlock("x" * 30, wrap=True)
+    layout = VSplit(Item(block, size="content"), Item(Label("below"), weight=1))
+    rblock, rbelow = rects(layout.resolve(0, 0, 10, 12, SNAP))
+    assert rblock.h == 3
+    assert (rbelow.y, rbelow.h) == (3, 9)
+
+
 def test_intrinsic_scrollbar_coexists_with_weighted_split():
     # The worked example: a backend-fixed scrollbar takes its width first,
     # then 1:2 divides the *remainder* — no conflict with the weighted split.

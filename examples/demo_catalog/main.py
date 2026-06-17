@@ -212,6 +212,21 @@ def build_widgets_page(panel: Panel) -> VSplit:
                 ),
                 4,
             ),
+            (heading("Static text — word wrapped (TextBlock wrap=True)"), 1),
+            (
+                # wrap=True folds each long line to the pane width, measuring its
+                # own height ("content") so the ScrollView reserves every wrapped
+                # row. The same intent wraps to columns on TUI and to proportional
+                # pixels on GUI — the widget never branches on the backend.
+                TextBlock(
+                    "With wrapping on, a single long logical line is folded on "
+                    "word boundaries to fit the pane width, and the block grows "
+                    "as tall as the wrapped text needs. Resize the window and the "
+                    "same paragraph reflows to the new width.",
+                    wrap=True,
+                ),
+                "content",
+            ),
         ],
         gap=1,
     )
