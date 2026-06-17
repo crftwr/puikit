@@ -3,22 +3,32 @@
 Run from the repository root:
 
     python examples/hello_world/main.py            # TUI (curses)
+    python examples/hello_world/main.py --backend gui --font-size 18   # GUI
     python examples/hello_world/main.py --backend memory   # headless smoke test
 """
 
 import argparse
 
-from puikit import EventType, Panel, Style, TextAttribute
+from puikit import EventType, Font, Panel, Style, TextAttribute
 from puikit.backends import create_backend
 from puikit.widgets import Label
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="PuiKit hello world")
-    parser.add_argument("--backend", default="tui", help="backend name (tui, memory)")
+    parser.add_argument("--backend", default="tui", help="backend name (tui, gui, memory)")
+    parser.add_argument(
+        "--font-size",
+        type=float,
+        default=None,
+        help="base font size in points (GUI only; sets the base unit grid)",
+    )
     args = parser.parse_args()
 
-    backend = create_backend(args.backend)
+    kwargs = {}
+    if args.font_size is not None and args.backend in ("gui", "macos"):
+        kwargs["base_font"] = Font(size=args.font_size, monospace=True)
+    backend = create_backend(args.backend, **kwargs)
     with backend:
         panel = Panel(backend)
         panel.add(Label("Hello, PuiKit!", Style(attr=TextAttribute.BOLD)), x=2, y=1, w=30, h=1)

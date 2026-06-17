@@ -13,8 +13,9 @@ to device pixels on GUI, with surface roles and dividers.
 Keys: up/down in the nav switch pages, tab moves focus between the nav and
 the page, 1..9 jump to a page, d opens a layered dialog, q quits.
 
-    python examples/demo_catalog/main.py                  # TUI
-    python examples/demo_catalog/main.py --backend gui    # macOS GUI
+    python examples/demo_catalog/main.py                          # TUI
+    python examples/demo_catalog/main.py --backend gui            # macOS GUI
+    python examples/demo_catalog/main.py --backend gui --font-size 18
 """
 
 import argparse
@@ -963,9 +964,18 @@ PAGES = [
 def main() -> None:
     parser = argparse.ArgumentParser(description="PuiKit widget catalog")
     parser.add_argument("--backend", default="tui", help="backend name (tui, gui, memory)")
+    parser.add_argument(
+        "--font-size",
+        type=float,
+        default=None,
+        help="base font size in points (GUI only; sets the base unit grid)",
+    )
     args = parser.parse_args()
 
-    backend = create_backend(args.backend)
+    kwargs = {}
+    if args.font_size is not None and args.backend in ("gui", "macos"):
+        kwargs["base_font"] = Font(size=args.font_size, monospace=True)
+    backend = create_backend(args.backend, **kwargs)
     with backend:
         panel = Panel(backend)
         # The page host is itself a layout (LayoutView), not a coordinate

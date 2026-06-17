@@ -3,6 +3,10 @@ VENV := .venv
 VENV_PYTHON := $(VENV)/bin/python
 VENV_PIP := $(VENV)/bin/pip
 
+# Optional base font size for GUI targets, e.g. `make demo-gui FONT_SIZE=18`.
+FONT_SIZE :=
+FONT_SIZE_ARG := $(if $(FONT_SIZE),--font-size $(FONT_SIZE))
+
 .PHONY: help venv install test hello demo layout hello-gui demo-gui layout-gui clean
 
 help:
@@ -17,6 +21,8 @@ help:
 	@echo "  make demo-gui  - run the demo_catalog example (macOS GUI)"
 	@echo "  make layout-gui - run the layout demo (macOS GUI, pixel layout)"
 	@echo "  make clean     - remove build artifacts and caches"
+	@echo ""
+	@echo "  GUI targets accept FONT_SIZE, e.g. make demo-gui FONT_SIZE=18"
 
 venv:
 	$(PYTHON) -m venv $(VENV)
@@ -34,10 +40,10 @@ demo:
 	$(VENV_PYTHON) examples/demo_catalog/main.py
 
 hello-gui:
-	$(VENV_PYTHON) examples/hello_world/main.py --backend gui
+	$(VENV_PYTHON) examples/hello_world/main.py --backend gui $(FONT_SIZE_ARG)
 
 demo-gui:
-	$(VENV_PYTHON) examples/demo_catalog/main.py --backend gui
+	$(VENV_PYTHON) examples/demo_catalog/main.py --backend gui $(FONT_SIZE_ARG)
 
 layout:
 	$(VENV_PYTHON) examples/layout_demo/main.py
