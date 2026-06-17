@@ -481,8 +481,12 @@ def build_fonts_page(panel: Panel) -> VSplit:
     # on TUI the Panel folds weight/slant into bold/italic attributes and drops
     # face, size, and proportional flow — the same Style, degraded in one place
     # (docs/font_system.md §6). No row branches on the backend.
-    def row(label: str, style: Style = Style(), size: float = 1) -> Item:
-        return Item(Label(label, style), size=size)
+    # size="content" lets each Label reserve its *own* line height: the grid
+    # font is one base unit, a taller proportional/sized font more, so the rows
+    # never overlap regardless of face or point size — the height comes from the
+    # widget's own measure, not a number the page guesses.
+    def row(label: str, style: Style = Style()) -> Item:
+        return Item(Label(label, style), size="content")
 
     return VSplit(
         Item(
@@ -501,10 +505,10 @@ def build_fonts_page(panel: Panel) -> VSplit:
         # Slant: italic survives on TUI as the italic attribute.
         row("Italic — folds to italic on TUI", Style(font=Font(slant=FontSlant.ITALIC))),
         # A named installed family (GUI only; ignored on TUI).
-        row("Named family: Georgia, 16pt", Style(font=Font(family="Georgia", size=16)), size=2),
-        # Decorative size: it needs layout room to fit (size=3), else it clips
-        # at the pane edge like any overflow — size never reshapes implicitly.
-        row("Big Title — sized text", Style(font=Font(size=28, weight=FontWeight.SEMI_BOLD)), size=3),
+        row("Named family: Georgia, 16pt", Style(font=Font(family="Georgia", size=16))),
+        # Decorative size: content sizing reserves the 28pt line height for it,
+        # so it sits in its own tall row instead of overlapping its neighbours.
+        row("Big Title — sized text", Style(font=Font(size=28, weight=FontWeight.SEMI_BOLD))),
         Item(Label(""), weight=1),
         gap=0,
     )

@@ -193,6 +193,18 @@ def test_wrapping_block_measures_with_proportional_font():
     assert req.preferred == 3.0
 
 
+def test_label_height_is_its_font_line_height():
+    # A label sized to content reserves its font's row pitch, so a tall font's
+    # row does not overlap the next. The grid font (no Style.font) stays 1.0.
+    def line_height(style):
+        return 2.5 if (style is not None and style.font is not None) else 1.0
+
+    ctx = LayoutContext(base_w=10, base_h=20, snap=False, line_height=line_height)
+    tall = Label("Big", Style(font=Font(size=28)))
+    assert tall.measure(ctx, "y", available=100.0).preferred == 2.5
+    assert Label("plain").measure(ctx, "y", available=100.0).preferred == 1.0
+
+
 def test_textblock_reserves_taller_rows_for_a_tall_font():
     # A proportional/sized font reports a row pitch > 1 base unit; the block
     # reserves its line count times that pitch, so the lines do not overlap.
