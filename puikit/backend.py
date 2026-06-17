@@ -261,6 +261,25 @@ class Backend(ABC):
 
         return image_size(path)
 
+    # --- native menus (capability "native_menus"; Panel gates the calls) -----
+
+    def set_menu_bar(self, menu: Any) -> None:
+        """Install ``menu`` (a puikit.menu.Menu whose items carry submenus) as
+        the OS application menu bar. ``None`` clears it. Backends without the
+        ``native_menus`` capability never receive this — the Panel falls back
+        to a widget-rendered MenuBar placed in the app's own layout."""
+        raise CapabilityNotSupported("native_menus")
+
+    def popup_menu(
+        self, menu: Any, x: float, y: float, on_done: Callable[[], None] | None = None
+    ) -> None:
+        """Pop up ``menu`` as an OS context menu, its top-left near base-unit
+        position (x, y). The OS owns the interaction and fires each chosen
+        item's callback; ``on_done`` is invoked when the menu closes. Backends
+        without ``native_menus`` never receive this — the Panel falls back to a
+        widget-rendered popup layer."""
+        raise CapabilityNotSupported("native_menus")
+
     # --- event loop ---------------------------------------------------------
 
     @abstractmethod

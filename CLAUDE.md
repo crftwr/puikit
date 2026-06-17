@@ -197,8 +197,28 @@ event.hints   # backend-specific additional info
 | IME / CJK input    | Limited  | Full            | Full             | Full (virtual KB)| None             |
 | Native file dialog | None     | Available       | None             | None             | None             |
 | System tray        | None     | Available       | None             | None             | None             |
+| Native menus       | None (widget) | OS NSMenu  | None (widget)    | None (widget)    | None (widget)    |
 | Touch / gestures   | None     | None            | Limited          | Full             | Partial          |
 | Gamepad input      | None     | None            | None             | None             | Full             |
+
+**Menus** are intent, resolved by the Panel like every other axis. An app builds
+one backend-agnostic `Menu` (items carry an `on_select`, an optional `submenu`,
+a `shortcut` hint, separators, and `enabled`/`checked` that may be **predicates**
+re-evaluated when the menu opens), then hands it to the Panel:
+
+```python
+panel.popup_menu(menu, x, y)              # context menu
+# a MenuBar widget placed in the layout installs the bar:
+panel.set_layout(VSplit(Item(MenuBar(menu), size="content"), Item(body, weight=1)))
+```
+
+- `native_menus` backends (GUI-Desktop) realize it with the OS menu API
+  (macOS `NSMenu`): a real top-of-screen app menu bar and OS context menus,
+  with `validateMenuItem:` wired to each item's live predicate. A `MenuBar`
+  widget then claims **zero** in-window space (its `measure` collapses).
+- other backends fall back to a widget-rendered menu (`puikit.widgets.menu`):
+  an in-window `MenuBar` strip and floating `MenuPopup` layers (submenus open
+  nested popups), so the same `Menu` works on TUI. The app never branches.
 
 ---
 
@@ -219,6 +239,8 @@ PROFILE_TUI = {
     "clipboard_rich": False,
     "native_file_dialog": False,
     "system_tray": False,
+    "native_menus": False,    # OS menu bar / context menus; Panel falls back
+                              # to a widget-rendered menu (puikit.widgets.menu)
     "hover": False,
     "media_keys": False,
 }
@@ -235,6 +257,7 @@ PROFILE_GUI_WEB = {
     "clipboard_rich": False,  # security-limited
     "native_file_dialog": False,
     "system_tray": False,
+    "native_menus": False,    # no OS-level app menu bar in the browser
     "hover": True,
     "media_keys": False,
 }
@@ -244,6 +267,7 @@ PROFILE_GUI_DESKTOP = {
     "clipboard_rich": True,
     "native_file_dialog": True,
     "system_tray": True,
+    "native_menus": True,     # real NSMenu app menu bar + context menus
     "gpu_acceleration": True,
     "media_keys": True,
 }
@@ -402,4 +426,4 @@ PuiKit is primarily Python, but backends may include compiled components in othe
 Canonical examples live under `examples/`:
 
 1. **`hello_world/`** — minimal app; renders a single text label on both TUI and GUI backends
-2. **`demo_catalog/`** — widget showcase; one screen per widget type, switchable at runtime. Its **Widgets** page is the interactive-controls showcase: checkboxes, a radio group, a drop-down (its list opens as a floating `push_layer` popup positioned via `DrawContext.screen_rect`, not an inline expand), a single-line text edit with full IME/composition support (the macOS backend implements `NSTextInputClient`; preedit text is delivered as `IME_COMPOSITION` events and committed text as KEY events), a button, and single-/multi-line static text, stacked in a `ScrollView` that scrolls when the controls outgrow the pane. The controls follow a VS Code-like flat aesthetic from the `Theme` control palette (accent focus rings, hover tints via `DrawContext.hovered` + a `MOUSE_MOVE` event and `Panel.pointer`). Focus moves with tab / shift+tab (the ScrollView cycles its focusable children and scrolls them into view) and is drawn from `DrawContext.focused`, resolved down the parent chain so a control's focus cue lights only when the whole chain is focused — one focus mechanism, every backend. Its **Layout** page is the layout-system showcase (`LayoutView`): the same split layout snapped to base units on TUI and resolved at pixel granularity on GUI, with surface roles and dividers. Its **Intrinsic** page shows content-driven sizing: a message area sized to its line count, buttons sized to their labels (cross-axis centered), and a backend-fixed scrollbar coexisting with a weighted split. Its **Fonts** page is the font-system showcase (`docs/font_system.md`): one `Style.font` vocabulary that renders real faces / sizes / weights / slants (proportional or monospaced) on GUI and folds weight/slant to bold/italic attributes on TUI, all in one Panel seam — no row branches on the backend
+2. **`demo_catalog/`** — widget showcase; one screen per widget type, switchable at runtime. Its **Widgets** page is the interactive-controls showcase: checkboxes, a radio group, a drop-down (its list opens as a floating `push_layer` popup positioned via `DrawContext.screen_rect`, not an inline expand), a single-line text edit with full IME/composition support (the macOS backend implements `NSTextInputClient`; preedit text is delivered as `IME_COMPOSITION` events and committed text as KEY events), a button, and single-/multi-line static text, stacked in a `ScrollView` that scrolls when the controls outgrow the pane. The controls follow a VS Code-like flat aesthetic from the `Theme` control palette (accent focus rings, hover tints via `DrawContext.hovered` + a `MOUSE_MOVE` event and `Panel.pointer`). Focus moves with tab / shift+tab (the ScrollView cycles its focusable children and scrolls them into view) and is drawn from `DrawContext.focused`, resolved down the parent chain so a control's focus cue lights only when the whole chain is focused — one focus mechanism, every backend. Its **Layout** page is the layout-system showcase (`LayoutView`): the same split layout snapped to base units on TUI and resolved at pixel granularity on GUI, with surface roles and dividers. Its **Intrinsic** page shows content-driven sizing: a message area sized to its line count, buttons sized to their labels (cross-axis centered), and a backend-fixed scrollbar coexisting with a weighted split. Its **Fonts** page is the font-system showcase (`docs/font_system.md`): one `Style.font` vocabulary that renders real faces / sizes / weights / slants (proportional or monospaced) on GUI and folds weight/slant to bold/italic attributes on TUI, all in one Panel seam — no row branches on the backend. Its **Tabs** page shows a `Tabs` widget swapping a content pane under a strip of titles (accent-marked when focused). Its **Tree** page shows a `TreeView` flattening expandable `TreeNode`s with indentation and per-branch expander markers, scrolling like `ListView`. Its **Menu** page is the menu-system showcase: one backend-agnostic `Menu` drives a real `NSMenu` app menu bar and OS context menu on GUI and a widget-rendered `MenuBar` strip + floating `MenuPopup` layers on TUI (`puikit.widgets.menu`), demonstrating submenus, separators, shortcut hints, a live checkmark, and items whose `enabled` is a **custom predicate** re-evaluated when the menu opens (a checkbox gates the `Paste` items). Its **MessageBox** page shows modal alert/confirm dialogs via `show_message_box` — the same `push_layer` shadow + dim_below intent as the dialog page, sized to content, reporting the chosen button through `on_result`

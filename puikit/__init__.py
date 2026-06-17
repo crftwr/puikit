@@ -18,6 +18,7 @@ from .capability import (
 from .event import Event, EventType
 from .font import Font, FontSlant, FontWeight
 from .layout import HSplit, Item, VSplit
+from .menu import SEPARATOR, Menu, MenuItem, MenuSeparator
 from .panel import DrawContext, Panel, Rect
 from .theme import THEME_GUI, THEME_TUI, Theme, theme_for
 
@@ -36,6 +37,9 @@ __all__ = [
     "FontWeight",
     "HSplit",
     "Item",
+    "Menu",
+    "MenuItem",
+    "MenuSeparator",
     "Panel",
     "PROFILE_GAME",
     "PROFILE_GUI_DESKTOP",
@@ -43,6 +47,7 @@ __all__ = [
     "PROFILE_MOBILE",
     "PROFILE_TUI",
     "Rect",
+    "SEPARATOR",
     "Style",
     "TextAttribute",
     "THEME_GUI",

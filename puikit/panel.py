@@ -152,6 +152,14 @@ class DrawContext:
         return self._caps.supports("vector_shapes")
 
     @property
+    def native_menus(self) -> bool:
+        """True when the backend owns an OS menu bar / context menus. A MenuBar
+        widget reads it to know it should register the native bar and claim no
+        in-window space, instead of rendering an in-window strip. The
+        capability is resolved here, not by the widget."""
+        return self._caps.supports("native_menus")
+
+    @property
     def focused(self) -> bool:
         """True when this widget holds the keyboard focus. Interactive widgets
         use it to draw a focus cue (a reversed marker, a cursor); the value is
@@ -198,6 +206,7 @@ class DrawContext:
             cw, ch,
             snap=not self._caps.supports("pixel_layout"),
             hairline=self._caps.supports("hairline"),
+            native_menus=self._caps.supports("native_menus"),
             measure=self._backend.measure_text,
             line_height=self._backend.measure_line_height,
             scrollbar_units=self._backend.scrollbar_units,
@@ -599,6 +608,8 @@ class Panel:
         self._margin_px = 0.0
         self._margin_units = 0.0
         self._size_anims: dict[Any, _SizeAnimation] = {}
+        # The app menu bar model (puikit.menu.Menu), if one was installed.
+        self._menu_bar: Any | None = None
         # Last known pointer position in screen base units, fed by every mouse
         # event. DrawContext.hovered reads it to resolve hover styling.
         self._pointer: tuple[float, float] | None = None
@@ -668,6 +679,7 @@ class Panel:
         ctx = LayoutContext(
             cw, ch, snap,
             hairline=self.backend.capabilities.supports("hairline"),
+            native_menus=self.backend.capabilities.supports("native_menus"),
             measure=self.backend.measure_text,
             line_height=self.backend.measure_line_height,
             scrollbar_units=self.backend.scrollbar_units,
@@ -886,6 +898,50 @@ class Panel:
         request = getattr(self.backend, "request_text_input", None)
         if request is not None:
             request(x, y, hints or {})
+
+    # --- menus ----------------------------------------------------------------
+
+    def set_menu_bar(self, menu: Any | None) -> None:
+        """Install an app menu bar from a puikit.menu.Menu (its items each
+        carry a submenu). On ``native_menus`` backends this becomes the real
+        OS menu bar at the top of the screen; on others it is a no-op here —
+        the app places a MenuBar widget that renders the bar in-window. The
+        MenuBar widget calls this itself once it knows the backend, so the app
+        never branches on the capability."""
+        self._menu_bar = menu
+        if self.backend.capabilities.supports("native_menus"):
+            self.backend.set_menu_bar(menu)
+
+    def popup_menu(
+        self, menu: Any, x: float, y: float, on_done: Any | None = None
+    ) -> None:
+        """Open ``menu`` as a context menu with its top-left near base-unit
+        (x, y). Native backends hand it to the OS; others push a widget-rendered
+        popup layer. One intent, resolved per backend — the caller (a widget's
+        right-click handler) never branches."""
+        if self.backend.capabilities.supports("native_menus"):
+            self.backend.popup_menu(menu, x, y, on_done)
+            return
+        from .widgets.menu import MenuPopup, popup_geometry
+
+        vector = self.backend.capabilities.supports("vector_shapes")
+        w, h, row_h = popup_geometry(menu, self.backend.measure_text, vector)
+        popup = MenuPopup(menu, row_h=row_h)
+
+        def close() -> None:
+            # Pop only if our popup is still the top layer (a submenu it opened
+            # pops itself first).
+            if self._layers and self._layers[-1].widget is popup:
+                self.pop_layer()
+            if on_done is not None:
+                on_done()
+
+        popup.on_close = close
+        # Keep the popup on-screen: nudge it left/up if it would overflow.
+        sw, sh = self.backend.size_units
+        x = max(0.0, min(x, sw - w))
+        y = max(0.0, min(y, sh - h))
+        self.push_layer(popup, z=60, hints={"x": x, "y": y, "w": w, "h": h})
 
     # --- event routing ----------------------------------------------------------------
 

@@ -62,6 +62,8 @@ class LayoutContext:
     base_h: int
     snap: bool  # True: round all boundaries to whole base units (TUI)
     hairline: bool = False  # backend can draw sub-unit divider lines
+    native_menus: bool = False  # backend owns an OS menu bar (a MenuBar item
+                                # then claims no in-window space; see widgets/menu)
     # How a widget measures itself, supplied by the backend. measure_text
     # returns a width in base units; scrollbar_units is the backend's fixed
     # scrollbar thickness. Both let intrinsic widgets size themselves

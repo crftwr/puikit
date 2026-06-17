@@ -35,6 +35,8 @@ PROFILE_TUI = CapabilityProfile(
     clipboard_rich=False,
     native_file_dialog=False,
     system_tray=False,
+    native_menus=False,      # OS menu bar / context menus (NSMenu, HMENU, ...);
+                             # the Panel falls back to a widget-rendered menu
     hover=False,
     media_keys=False,
     icons=False,
@@ -56,6 +58,7 @@ PROFILE_GUI_WEB = CapabilityProfile(
     clipboard_rich=False,  # security-limited
     native_file_dialog=False,
     system_tray=False,
+    native_menus=False,    # no OS-level app menu bar in the browser
     hover=True,
     media_keys=False,
     icons=True,
@@ -68,6 +71,7 @@ PROFILE_GUI_DESKTOP = CapabilityProfile(
         "clipboard_rich": True,
         "native_file_dialog": True,
         "system_tray": True,
+        "native_menus": True,
         "gpu_acceleration": True,
         "media_keys": True,
     }

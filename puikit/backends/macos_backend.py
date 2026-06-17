@@ -516,6 +516,9 @@ class MacOSBackend(Backend):
         # On-screen caret position (base units) reported by the focused text
         # widget; positions the IME candidate window.
         self._input_caret: tuple[float, float] = (0.0, 0.0)
+        # Retained NSMenu target for the installed app menu bar, so item
+        # callbacks survive (an NSMenuItem does not retain its target).
+        self._menu_responder: Any = None
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -1102,6 +1105,28 @@ class MacOSBackend(Backend):
             ctx = self._view.inputContext()
             if ctx is not None:
                 ctx.invalidateCharacterCoordinates()
+
+    # --- native menus --------------------------------------------------------
+
+    def set_menu_bar(self, menu: Any) -> None:
+        from ._macos_menu import install_menu_bar
+
+        self._menu_responder = install_menu_bar(menu, self._title)
+
+    def popup_menu(
+        self, menu: Any, x: float, y: float, on_done: Any | None = None
+    ) -> None:
+        from Foundation import NSMakePoint
+
+        from ._macos_menu import build_popup_menu
+
+        ns_menu, responder = build_popup_menu(menu)
+        # `responder` stays referenced here through the synchronous popup loop,
+        # so its item callbacks survive the tracking session.
+        point = NSMakePoint(x * self._base_w, y * self._base_h)
+        ns_menu.popUpMenuPositioningItem_atLocation_inView_(None, point, self._view)
+        if on_done is not None:
+            on_done()
 
     def _dispatch(self, event: Event) -> None:
         if self._handler is not None:

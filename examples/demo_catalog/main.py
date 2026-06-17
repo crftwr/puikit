@@ -24,12 +24,15 @@ import math
 import os
 
 from puikit import (
+    SEPARATOR,
     EventType,
     Font,
     FontSlant,
     FontWeight,
     HSplit,
     Item,
+    Menu,
+    MenuItem,
     Panel,
     Style,
     TextAttribute,
@@ -45,12 +48,17 @@ from puikit.widgets import (
     Label,
     LayoutView,
     ListView,
+    MenuBar,
     RadioGroup,
     ScrollBar,
     ScrollView,
+    Tabs,
     TextBlock,
     TextEdit,
+    TreeNode,
+    TreeView,
     Widget,
+    show_message_box,
 )
 
 DIM = Style(attr=TextAttribute.DIM)
@@ -994,6 +1002,298 @@ def build_blending_page(panel: Panel) -> VSplit:
     )
 
 
+def build_tabs_page(panel: Panel) -> VSplit:
+    # A Tabs widget swaps a content pane under a strip of titles. Each tab is
+    # an ordinary widget — a label, a scrolling list, a text block — placed by
+    # the Tabs widget, not the page. Left/right (or a click on a title) switch
+    # the active tab; the active content fills the area below the strip and
+    # receives forwarded events (the list scrolls while its tab is active).
+    overview = TextBlock(
+        "Tabs pair a title with a content widget and show one at a time.\n"
+        "\n"
+        "  · ←/→ or click a title to switch tabs\n"
+        "  · the active tab is marked with the theme accent when focused\n"
+        "  · other keys and the mouse climb through to the active content\n"
+        "\n"
+        "The same Tabs widget runs on every backend — only the strip's accent\n"
+        "underline is a vector flourish the Panel layer drops on a grid.",
+    )
+    rows = ListView([f"List row {i:02d}" for i in range(40)])
+    notes = TextBlock(
+        "This tab holds a multi-line TextBlock.\n"
+        "Switch back and forth: each tab keeps its own state\n"
+        "(the list remembers its selection and scroll position).",
+    )
+    tabs = Tabs(
+        [("Overview", overview), ("A long list", rows), ("Notes", notes)],
+        on_change=lambda i, t: setattr(status, "text", f"Tab → {t}"),
+    )
+    status = Label("←/→ switch tabs · click a title · content fills below", DIM)
+    return VSplit(
+        Item(tabs, weight=1, hints={"surface": "content"}),
+        Item(status, size=1),
+        gap=1,
+    )
+
+
+def build_tree_page(panel: Panel) -> VSplit:
+    # A TreeView flattens the currently-visible nodes (respecting each node's
+    # expanded flag) and draws them indented by depth, with an expander marker
+    # per branch. It scrolls like ListView when the rows overflow.
+    status = Label("↑/↓ move · →/← expand/collapse · enter activate · click the marker", DIM)
+
+    def on_select(node: TreeNode) -> None:
+        status.text = f"Selected: {node.label}"
+
+    def on_activate(node: TreeNode) -> None:
+        kind = "branch" if node.children else "leaf"
+        status.text = f"Activated {kind}: {node.label}"
+
+    roots = [
+        TreeNode(
+            "puikit",
+            expanded=True,
+            children=[
+                TreeNode(
+                    "widgets",
+                    expanded=True,
+                    children=[
+                        TreeNode("list.py"),
+                        TreeNode("tabs.py"),
+                        TreeNode("tree.py"),
+                        TreeNode("menu.py"),
+                    ],
+                ),
+                TreeNode(
+                    "backends",
+                    children=[TreeNode("curses_backend.py"), TreeNode("macos_backend.py")],
+                ),
+                TreeNode("panel.py"),
+                TreeNode("layout.py"),
+            ],
+        ),
+        TreeNode("docs", children=[TreeNode("layout_system.md"), TreeNode("font_system.md")]),
+        TreeNode("README.md"),
+    ]
+    tree = TreeView(roots, on_select=on_select, on_activate=on_activate)
+    explainer = TextBlock(
+        "A node carries a label, optional children, and an expanded flag.\n"
+        "\n"
+        "  · →  expands a collapsed branch, or steps into the first child\n"
+        "  · ←  collapses an open branch, or jumps out to the parent\n"
+        "  · enter toggles a branch / activates a leaf\n"
+        "  · a click on the ▸ / ▾ marker toggles that branch\n"
+        "\n"
+        "The selection highlight, indentation, and scroll bar are the same\n"
+        "intents ListView uses — one implementation, every backend.",
+    )
+    return VSplit(
+        Item(
+            HSplit(
+                Item(tree, size=32, hints={"surface": "sidebar"}),
+                Item(explainer, weight=1, hints={"surface": "content"}),
+                gap=2,
+            ),
+            weight=1,
+        ),
+        Item(status, size=1),
+        gap=1,
+    )
+
+
+class MenuPlayground(Widget):
+    """The context-menu target on the Menu page. A right-click (or 'm' when
+    focused) asks the Panel to pop a context menu at the pointer — native on
+    GUI, a widget popup on TUI — so the page never branches on the backend."""
+
+    focusable = True
+
+    def __init__(self, build_menu, act):
+        self.build_menu = build_menu
+        self.act = act
+        self._panel = None
+        self._abs = (0.0, 0.0, 0.0, 0.0)
+
+    def draw(self, ctx) -> None:
+        self._panel = ctx.panel
+        self._abs = ctx.screen_rect
+        ctx.draw_text(0, 0, "Right-click anywhere in this area for a context menu", BOLD)
+        ctx.draw_text(0, 1, "(or focus it with tab and press 'm')")
+        ctx.draw_text(0, 3, "Its 'Paste' enables only while the checkbox above is on —", DIM)
+        ctx.draw_text(0, 4, "a custom condition the menu re-evaluates each time it opens.", DIM)
+
+    def _popup(self, x: float, y: float) -> None:
+        if self._panel is not None:
+            self._panel.popup_menu(self.build_menu(), x, y)
+
+    def handle_event(self, event) -> bool:
+        if event.type is EventType.MOUSE_CLICK and event.button == "right":
+            rx, ry, *_ = self._abs
+            self._popup(rx + (event.x or 0), ry + (event.y or 0))
+            return True
+        if event.type is EventType.KEY and event.key == "m":
+            rx, ry, *_ = self._abs
+            self._popup(rx + 2, ry + 2)
+            return True
+        return False
+
+
+def build_menu_page(panel: Panel) -> VSplit:
+    # One Menu model drives both an OS-native menu bar / context menu on GUI
+    # (NSMenu) and an in-window, widget-rendered menu on TUI — the Panel layer
+    # resolves which, so this page never branches on the capability. The model
+    # shows submenus, separators, keyboard-shortcut hints, a live checkmark,
+    # and items whose enabled state is a *custom condition* (a predicate
+    # evaluated when the menu opens).
+    status = Label("Use the menu bar or right-click the area; watch the status line", DIM)
+    state = {"clipboard": False, "wrap": True}
+
+    def act(msg: str) -> None:
+        status.text = msg
+
+    clip = Checkbox(
+        "Clipboard has content (enables the Paste items)",
+        checked=False,
+        on_change=lambda v: state.__setitem__("clipboard", v),
+    )
+
+    menu_model = Menu(
+        MenuItem(
+            "File",
+            submenu=Menu(
+                MenuItem("New", on_select=lambda: act("File ▸ New"), shortcut="Cmd+N"),
+                MenuItem("Open…", on_select=lambda: act("File ▸ Open"), shortcut="Cmd+O"),
+                SEPARATOR,
+                MenuItem("Close", on_select=lambda: act("File ▸ Close"), shortcut="Cmd+W"),
+            ),
+        ),
+        MenuItem(
+            "Edit",
+            submenu=Menu(
+                MenuItem("Undo", on_select=lambda: act("Edit ▸ Undo"), shortcut="Cmd+Z"),
+                MenuItem("Redo", on_select=lambda: act("Edit ▸ Redo"),
+                         enabled=False, shortcut="Cmd+Y"),
+                SEPARATOR,
+                MenuItem("Cut", on_select=lambda: act("Edit ▸ Cut"), shortcut="Cmd+X"),
+                MenuItem("Copy", on_select=lambda: act("Edit ▸ Copy"), shortcut="Cmd+C"),
+                MenuItem("Paste", on_select=lambda: act("Edit ▸ Paste"),
+                         enabled=lambda: state["clipboard"], shortcut="Cmd+V"),
+            ),
+        ),
+        MenuItem(
+            "View",
+            submenu=Menu(
+                MenuItem(
+                    "Word Wrap",
+                    on_select=lambda: (state.__setitem__("wrap", not state["wrap"]),
+                                       act("View ▸ Word Wrap"))[-1],
+                    checked=lambda: state["wrap"],
+                ),
+                SEPARATOR,
+                MenuItem(
+                    "Appearance",
+                    submenu=Menu(
+                        MenuItem("Light", on_select=lambda: act("Appearance ▸ Light")),
+                        MenuItem("Dark", on_select=lambda: act("Appearance ▸ Dark")),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    def context_menu() -> Menu:
+        return Menu(
+            MenuItem("Cut", on_select=lambda: act("Context ▸ Cut")),
+            MenuItem("Copy", on_select=lambda: act("Context ▸ Copy")),
+            MenuItem("Paste", on_select=lambda: act("Context ▸ Paste"),
+                     enabled=lambda: state["clipboard"]),
+            SEPARATOR,
+            MenuItem("Select All", on_select=lambda: act("Context ▸ Select All")),
+        )
+
+    heading = lambda text: Label(text, BOLD)  # noqa: E731
+    scroller = ScrollView(
+        [
+            (heading("Menu bar — native OS bar on GUI, in-window strip on TUI"), 1),
+            (MenuBar(menu_model), "content"),
+            (heading("Custom enable condition"), 1),
+            (clip, 1),
+            (heading("Context menu"), 1),
+            (MenuPlayground(context_menu, act), 6),
+        ],
+        gap=1,
+    )
+    return VSplit(
+        Item(scroller, weight=1, hints={"surface": "content"}),
+        Item(status, size=1),
+        gap=1,
+    )
+
+
+def build_messagebox_page(panel: Panel) -> VSplit:
+    # A MessageBox is a modal layer (the same shadow + dim_below intent the
+    # dialog page uses), sized to its content and reporting the chosen button.
+    # Pick a scenario and press enter; the result lands in the status line.
+    status = Label("Pick a dialog, press enter", DIM)
+
+    def result(prefix):
+        return lambda b: setattr(status, "text", f"{prefix} → {b}")
+
+    def show(_index: int, label: str) -> None:
+        if label.startswith("Alert"):
+            show_message_box(
+                panel, "Your changes have been saved.", title="Saved",
+                buttons=("OK",), icon="info", on_result=result("Alert"),
+            )
+        elif label.startswith("Confirm"):
+            show_message_box(
+                panel, "Delete the selected file?\nThis action cannot be undone.",
+                title="Confirm delete", buttons=("Delete", "Cancel"),
+                icon="warning", default=1, on_result=result("Confirm"),
+            )
+        elif label.startswith("Three"):
+            show_message_box(
+                panel, "Save changes before closing?", title="Unsaved changes",
+                buttons=("Save", "Don't Save", "Cancel"),
+                icon="warning", on_result=result("Choice"),
+            )
+        else:
+            show_message_box(
+                panel, "Could not open the file.\nCheck that it still exists.",
+                title="Error", buttons=("OK",), icon="error", on_result=result("Error"),
+            )
+
+    listview = ListView(
+        ["Alert (1 button)", "Confirm (2 buttons)", "Three buttons", "Error"],
+        on_select=show,
+    )
+    explainer = TextBlock(
+        "show_message_box pushes a modal layer over the Panel.\n"
+        "\n"
+        "  · ←/→ or tab move between buttons\n"
+        "  · enter / space activate the focused button\n"
+        "  · escape picks the cancel (last) button\n"
+        "  · a click activates a button directly\n"
+        "\n"
+        "GUI raises it with a real drop shadow over a dimmed page; TUI falls\n"
+        "back to draw order — one modal intent, two fidelities. The chosen\n"
+        "button label is reported back through on_result.",
+    )
+    return VSplit(
+        Item(Label("Modal alert / confirm dialogs, reported to the status line", DIM), size=1),
+        Item(
+            HSplit(
+                Item(listview, size=24),
+                Item(explainer, weight=1, hints={"surface": "content"}),
+                gap=2,
+            ),
+            weight=1,
+        ),
+        Item(status, size=1),
+        gap=1,
+    )
+
+
 # Each nav entry carries an emoji prefix: the same intent renders as a
 # full-color glyph on GUI and as a (wide) text glyph on TUI — the shared
 # wide-character accounting (puikit.text) keeps the labels column-aligned on
@@ -1003,6 +1303,10 @@ PAGES = [
     ("🎛️ Widgets", build_widgets_page),
     ("📋 ListView", build_list_page),
     ("🎚️ ScrollBar", build_scrollbar_page),
+    ("🗂️ Tabs", build_tabs_page),
+    ("🌲 Tree", build_tree_page),
+    ("📑 Menu", build_menu_page),
+    ("💬 MessageBox", build_messagebox_page),
     ("🎬 Animation", build_animation_page),
     ("🗂️ Layering", build_layer_page),
     ("📐 Layout", build_layout_page),

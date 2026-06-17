@@ -49,12 +49,19 @@ class MemoryBackend(Backend):
     @property
     def capabilities(self) -> CapabilityProfile:
         # This backend renders to a character grid, so it cannot draw vector
-        # shapes (rounded rects, ellipses, check marks) even when handed a GUI
-        # profile for a layout/input test. Force the capability off so the
-        # Panel layer falls back to the box-drawing + ASCII mark path, keeping
-        # the grid snapshot identical to a real terminal.
+        # shapes (rounded rects, ellipses, check marks) and owns no OS menus,
+        # even when handed a GUI profile for a layout/input test. Force those
+        # off so the Panel layer falls back to the box-drawing + ASCII mark path
+        # and the widget-rendered menu, keeping the grid snapshot identical to a
+        # real terminal. (A test that needs the native path subclasses and
+        # re-enables native_menus — see tests/test_menu.py.)
+        overrides = {}
         if self._capabilities.supports("vector_shapes"):
-            return CapabilityProfile({**self._capabilities, "vector_shapes": False})
+            overrides["vector_shapes"] = False
+        if self._capabilities.supports("native_menus"):
+            overrides["native_menus"] = False
+        if overrides:
+            return CapabilityProfile({**self._capabilities, **overrides})
         return self._capabilities
 
     # --- lifecycle ---------------------------------------------------------
