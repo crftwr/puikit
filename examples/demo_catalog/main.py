@@ -212,21 +212,6 @@ def build_widgets_page(panel: Panel) -> VSplit:
                 ),
                 4,
             ),
-            (heading("Static text — word wrapped (TextBlock wrap=True)"), 1),
-            (
-                # wrap=True folds each long line to the pane width, measuring its
-                # own height ("content") so the ScrollView reserves every wrapped
-                # row. The same intent wraps to columns on TUI and to proportional
-                # pixels on GUI — the widget never branches on the backend.
-                TextBlock(
-                    "With wrapping on, a single long logical line is folded on "
-                    "word boundaries to fit the pane width, and the block grows "
-                    "as tall as the wrapped text needs. Resize the window and the "
-                    "same paragraph reflows to the new width.",
-                    wrap=True,
-                ),
-                "content",
-            ),
         ],
         gap=1,
     )
@@ -522,6 +507,59 @@ def build_fonts_page(panel: Panel) -> VSplit:
         row("Big Title — sized text", Style(font=Font(size=28, weight=FontWeight.SEMI_BOLD)), size=3),
         Item(Label(""), weight=1),
         gap=0,
+    )
+
+
+def build_wrap_page(panel: Panel) -> VSplit:
+    # Text wrapping is content-driven on *both* axes: a long logical line is
+    # folded to the pane width and the block reserves the rows it needs
+    # (size="content"). The fold uses the pane's own text measurement, so it
+    # follows the font — column counts under the base grid font, proportional
+    # advances under a real Style.font on GUI — and wide CJK glyphs without the
+    # widget ever reading a font or branching on the backend. Resize the window
+    # (GUI) or the terminal (TUI) and every paragraph reflows to the new width.
+    heading = lambda text: Label(text, BOLD)  # noqa: E731 - tiny local helper
+
+    en = (
+        "With wrapping on, a long logical line is folded on word boundaries to "
+        "fit the pane width, and the block grows as tall as the wrapped text "
+        "needs. Resize the window and the same paragraph reflows."
+    )
+    # Japanese carries no ASCII spaces, so word wrap falls back to per-glyph
+    # breaks; each kana/kanji is two columns on the base grid font.
+    ja = (
+        "日本語のテキストは単語の区切りに空白を使わないため、"
+        "行折り返しは文字単位の境界で行われます。"
+        "ウィンドウの幅を変えると、同じ段落が新しい幅に合わせて流れ直します。"
+    )
+    PROP = Style(font=Font())  # proportional on GUI; folds to the grid font on TUI
+
+    scroller = ScrollView(
+        [
+            (heading("Word wrap — base grid font (column-aligned)"), 1),
+            (TextBlock(en, wrap=True), "content"),
+            (heading("Word wrap — proportional font (GUI flows by advances)"), 1),
+            # Same text, same width: GUI wraps at different points than the
+            # monospaced block above because the glyph advances differ; TUI
+            # folds the font to the grid and wraps identically. One intent.
+            (TextBlock(en, style=PROP, wrap=True), "content"),
+            (heading("Japanese — wraps between glyphs (no spaces)"), 1),
+            (TextBlock(ja, wrap=True), "content"),
+            (heading("Japanese — proportional font"), 1),
+            (TextBlock(ja, style=PROP, wrap=True), "content"),
+            (heading("Character wrap (wrap=\"char\") — breaks anywhere"), 1),
+            (TextBlock("x" * 200, wrap="char"), "content"),
+            (heading("Unwrapped (wrap=False) — clips at the pane edge"), 1),
+            (TextBlock("This single line is not wrapped, so it runs off the "
+                       "right edge of the pane and the overflow is clipped."), 1),
+        ],
+        gap=1,
+    )
+    status = Label("Resize the window / terminal — every paragraph reflows", DIM)
+    return VSplit(
+        Item(scroller, weight=1, hints={"surface": "content"}),
+        Item(status, size=1),
+        gap=1,
     )
 
 
@@ -966,6 +1004,7 @@ PAGES = [
     ("📐 Layout", build_layout_page),
     ("📏 Intrinsic", build_intrinsic_page),
     ("🔤 Fonts", build_fonts_page),
+    ("📜 Wrapping", build_wrap_page),
     ("🎨 Color", build_color_page),
     ("🖼️ Images", build_images_page),
     ("💧 Alpha", build_alpha_page),

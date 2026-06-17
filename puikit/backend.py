@@ -122,6 +122,15 @@ class Backend(ABC):
 
         return float(display_width(text))
 
+    def measure_line_height(self, style: Style = DEFAULT_STYLE) -> float:
+        """Vertical advance of one text row in base units. The base grid font
+        (font=None) is one base unit by definition; a taller per-Style font
+        needs more, so a multi-line widget asks here for its row pitch instead
+        of assuming one base unit. Whole-unit backends fold the font away and
+        always answer 1.0 — like measure_text, this routes font metrics through
+        the backend so the widget never reads a font."""
+        return 1.0
+
     # --- core drawing primitives (all backends implement) -------------------
 
     @abstractmethod

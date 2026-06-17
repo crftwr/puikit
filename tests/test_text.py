@@ -95,3 +95,57 @@ def test_wrap_text_wide_cjk_counts_two_columns():
     # Each CJK glyph is two columns, so only two fit in width 4; no spaces means
     # word wrap falls back to glyph breaks.
     assert wrap_text("あいうえ", 4, _cols) == ["あい", "うえ"]
+
+
+# --- proportional fonts ------------------------------------------------------------
+#
+# A real per-Style font is measured natively and divided by the base unit width
+# (see MacOSBackend.measure_text), so the wrap measure returns *fractional* base
+# units, not a column count. Modelling that as a callable here is exactly how the
+# DrawContext/LayoutContext feed wrap_text — narrow glyphs are < 1 unit, wide
+# glyphs > 1, and wrapping must honour the measured width, not character counts.
+
+def _proportional(text: str) -> float:
+    widths = {"i": 0.5, "l": 0.5, "w": 2.0, "m": 2.0, " ": 0.5}
+    return sum(widths.get(ch, 1.0) for ch in text)
+
+
+def test_wrap_text_proportional_font_fits_more_narrow_glyphs():
+    # Six 'i' glyphs measure 3.0 and fit a width a column count (6 cols) would
+    # reject — the wrap follows the measured width, not the glyph count.
+    assert wrap_text("iiiiii ii", 3.0, _proportional) == ["iiiiii", "ii"]
+    # Contrast: counting columns, only three 'i' fit in width 3.
+    assert wrap_text("iiiiii ii", 3.0, _cols) == ["iii", "iii", "ii"]
+
+
+def test_wrap_text_proportional_font_breaks_on_wide_glyph():
+    # Two 'w' glyphs measure 4.0, so they cannot share a 2.5-wide line even
+    # though a column count (2 cols) would have let them.
+    assert wrap_text("ww", 2.5, _proportional) == ["w", "w"]
+    # A narrow + wide word: "iw" (2.5) fits, the second wide word breaks.
+    assert wrap_text("iw iww", 4.0, _proportional) == ["iw", "iw", "w"]
+
+
+# --- Japanese ----------------------------------------------------------------------
+#
+# With the base grid font, Japanese is measured by display_width (each glyph two
+# columns) and carries no ASCII spaces, so word wrap falls back to per-glyph
+# breaks. _cols is display_width, matching the base-font branch of the backend.
+
+def test_wrap_text_japanese_breaks_between_glyphs():
+    # Each kana/kanji is two columns: three fit in width 6, the rest wrap.
+    assert wrap_text("今日は晴れ", 6, _cols) == ["今日は", "晴れ"]
+    # Width 5 cannot hold a straddling third wide glyph: two per line.
+    assert wrap_text("今日は晴れ", 5, _cols) == ["今日", "は晴", "れ"]
+
+
+def test_wrap_text_mixed_japanese_and_latin():
+    # A Latin word and a Japanese run are distinct wrap units; the Latin word
+    # stays whole and the Japanese run breaks between its glyphs to fit.
+    assert wrap_text("Run これをテスト", 6, _cols) == ["Run", "これを", "テスト"]
+
+
+def test_wrap_text_japanese_keeps_combined_glyph_together():
+    # An emoji-presentation sequence is one glyph (two columns); the wrap must
+    # never split the base from its selector at a break boundary.
+    assert wrap_text("あ🏷️い", 4, _cols) == ["あ🏷️", "い"]

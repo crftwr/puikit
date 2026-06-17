@@ -199,9 +199,17 @@ class DrawContext:
             snap=not self._caps.supports("pixel_layout"),
             hairline=self._caps.supports("hairline"),
             measure=self._backend.measure_text,
+            line_height=self._backend.measure_line_height,
             scrollbar_units=self._backend.scrollbar_units,
             image_size=self._backend.image_size,
         )
+
+    def line_height(self, style: Style = DEFAULT_STYLE) -> float:
+        """Row pitch of ``style``'s font in this pane's unit: one base unit for
+        the grid font, more for a taller per-Style font. A stacked-text widget
+        uses it to space its rows so a proportional/sized font does not overlap.
+        The font is folded first, matching what draw_text will draw."""
+        return self._backend.measure_line_height(self._resolve(style))
 
     def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
         """Displayed width of ``text`` in this pane's unit (base units;
@@ -221,13 +229,22 @@ class DrawContext:
         # the slice math is taken in whole cells so truncation stays grid-safe.
         if not -1 < y < self._rect.h:
             return
+        resolved = self._resolve(style)
+        if resolved.font is not None:
+            # Proportional / sized flow text: a character is not one base unit
+            # wide, so slicing by ceil(width) columns would chop trailing glyphs
+            # that still fit. Hand the whole run to the backend and let the pane
+            # clip rect trim it at the exact pixel edge instead.
+            if text:
+                self._backend.draw_text(self._rect.x + x, self._rect.y + y, text, resolved)
+            return
         if x < 0:
             text = text[int(math.ceil(-x)):]
             x = 0
         text = text[: max(0, math.ceil(self._rect.w - x))]
         if not text:
             return
-        self._backend.draw_text(self._rect.x + x, self._rect.y + y, text, self._resolve(style))
+        self._backend.draw_text(self._rect.x + x, self._rect.y + y, text, resolved)
 
     def draw_box(
         self,
@@ -652,6 +669,7 @@ class Panel:
             cw, ch, snap,
             hairline=self.backend.capabilities.supports("hairline"),
             measure=self.backend.measure_text,
+            line_height=self.backend.measure_line_height,
             scrollbar_units=self.backend.scrollbar_units,
             image_size=self.backend.image_size,
         )

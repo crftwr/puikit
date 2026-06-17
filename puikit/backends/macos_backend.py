@@ -640,6 +640,17 @@ class MacOSBackend(Backend):
         ).width
         return width / self._base_w if self._base_w else float(len(text))
 
+    def measure_line_height(self, style: Style = DEFAULT_STYLE) -> float:
+        """Row pitch in base units. The base grid font is exactly one base unit
+        (that is how the unit was derived in _init_fonts); a real per-Style font
+        reports its own line height, rounded up to whole pixels so successive
+        rows land on the device-pixel grid, then expressed in base units."""
+        if style.font is None or not self._base_h:
+            return 1.0
+        ns_font = self._resolve_style_font(style)
+        line_px = ns_font.ascender() - ns_font.descender() + ns_font.leading()
+        return math.ceil(line_px) / self._base_h
+
     # --- geometry ----------------------------------------------------------
 
     @property

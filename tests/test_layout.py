@@ -2,7 +2,7 @@
 
 import pytest
 
-from puikit import HSplit, Item, Panel, PROFILE_GUI_DESKTOP, VSplit
+from puikit import Font, HSplit, Item, Panel, PROFILE_GUI_DESKTOP, Style, VSplit
 from puikit.backends.memory_backend import MemoryBackend
 from puikit.layout import LayoutContext
 from puikit.widgets import Button, Label, ListView, ScrollBar, TextBlock, Widget
@@ -176,6 +176,39 @@ def test_wrapping_block_reserves_rows_for_the_given_width():
     rblock, rbelow = rects(layout.resolve(0, 0, 10, 12, SNAP))
     assert rblock.h == 3
     assert (rbelow.y, rbelow.h) == (3, 9)
+
+
+def test_wrapping_block_measures_with_proportional_font():
+    # A pixel backend hands TextBlock a proportional measure (narrow 'i' = 0.5
+    # base units), so more glyphs fit per row than a column count would allow and
+    # the block reserves rows by the measured width — font metrics enter layout
+    # only through the widget's own measure, never the layout system.
+    def measure(text, style=None):
+        return sum(0.5 if ch == "i" else 1.0 for ch in text)
+
+    ctx = LayoutContext(base_w=10, base_h=20, snap=False, measure=measure)
+    block = TextBlock("iiiiiiiiii", wrap=True)  # ten 'i' = 5.0 base units wide
+    # Width 2.0 holds four 'i' (2.0) per row -> 10 glyphs span three rows.
+    req = block.measure(ctx, "y", available=2.0)
+    assert req.preferred == 3.0
+
+
+def test_textblock_reserves_taller_rows_for_a_tall_font():
+    # A proportional/sized font reports a row pitch > 1 base unit; the block
+    # reserves its line count times that pitch, so the lines do not overlap.
+    # The pitch comes from the backend (via the widget's measure), never read
+    # by the layout itself.
+    def line_height(style):
+        return 2.0 if (style is not None and style.font is not None) else 1.0
+
+    ctx = LayoutContext(base_w=10, base_h=20, snap=False, line_height=line_height)
+    block = TextBlock("a\nb\nc", style=Style(font=Font()))  # three lines
+    req = block.measure(ctx, "y", available=100.0)
+    assert req.preferred == 6.0  # 3 lines x pitch 2.0
+    assert req.min == 2.0        # one line's height, the overflow floor
+    # The grid font (no Style.font) keeps the one-unit pitch unchanged.
+    plain = TextBlock("a\nb\nc")
+    assert plain.measure(ctx, "y", available=100.0).preferred == 3.0
 
 
 def test_intrinsic_scrollbar_coexists_with_weighted_split():

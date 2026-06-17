@@ -67,6 +67,10 @@ class LayoutContext:
     # scrollbar thickness. Both let intrinsic widgets size themselves
     # without the layout ever touching the backend.
     measure: Callable[[str, Any], float] | None = None
+    # Row pitch of a style's font in base units (1.0 for the base grid font), so
+    # a widget that stacks text lines can reserve a taller font's height without
+    # the layout itself reading a font. Falls back to 1.0 when unset.
+    line_height: Callable[[Any], float] | None = None
     scrollbar_units: float = 1.0
     # How a widget measures an image: its natural pixel size, supplied by the
     # backend so an ImageView can size itself to the aspect ratio without ever
@@ -82,6 +86,13 @@ class LayoutContext:
         if self.measure is not None:
             return self.measure(text, style)
         return float(len(text))
+
+    def measure_line_height(self, style: Any = None) -> float:
+        """Row pitch of ``style``'s font in base units (1.0 with no measurer or
+        the base grid font), so a stacked-text widget reserves the right height."""
+        if self.line_height is not None:
+            return self.line_height(style)
+        return 1.0
 
     def measure_image(self, path: str) -> tuple[int, int] | None:
         """Natural ``(width, height)`` of the image in pixels, or None when no

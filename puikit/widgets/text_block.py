@@ -57,20 +57,27 @@ class TextBlock(Widget):
     def draw(self, ctx: DrawContext) -> None:
         width, _ = ctx.size_units
         rows = self._display_lines(width, lambda t: ctx.measure_text(t, self.style))
+        # Advance by the font's row pitch, not a flat base unit: a taller
+        # proportional/sized font needs more vertical space per line, or the
+        # rows would overlap. The grid font reports 1.0, so this is unchanged
+        # for ordinary text.
+        pitch = ctx.line_height(self.style)
         for row, line in enumerate(rows):
-            if row >= ctx.height:
+            y = row * pitch
+            if y >= ctx.height:
                 break  # taller than the pane: clip the overflow at the edge
-            ctx.draw_text(0, row, line, self.style)
+            ctx.draw_text(0, y, line, self.style)
 
     def measure(self, ctx: LayoutContext, axis: str, available: float) -> SizeRequest:
         if axis == "y":
             # available is the cross-axis (width) the layout will give us; fold
             # the lines to it so a wrapped block reserves the rows it will use.
             rows = self._display_lines(available, lambda t: ctx.measure_text(t, self.style))
-            n = float(max(1, len(rows)))
-            # Prefer the full row count; may shrink to a single line under
+            pitch = ctx.measure_line_height(self.style)
+            n = float(max(1, len(rows))) * pitch
+            # Prefer the full wrapped height; may shrink to a single line under
             # overflow (the rest then clips), never grows past its content.
-            return SizeRequest(min=1.0, preferred=n, max=n)
+            return SizeRequest(min=pitch, preferred=n, max=n)
         # Width axis: the natural width is the widest logical line. A wrapping
         # block can shrink below it (min stays 0) — wrapping is what makes the
         # narrower width legal — while an unwrapped one would clip.

@@ -247,6 +247,34 @@ A widget that only ever uses the base monospaced font can keep counting
 characters and never call this; it exists for widgets that opt into real
 fonts.
 
+**Vertical companion — `measure_line_height`.** Width is not the only metric a
+font carries: a taller proportional or sized font also needs more *vertical*
+space per line. A widget that stacks lines (a wrapped `TextBlock`) asks for its
+row pitch the same way it asks for width — through the backend, in base units —
+so it never reads a font:
+
+```python
+DrawContext.line_height(style=DEFAULT_STYLE) -> float          # row pitch in base units
+LayoutContext.measure_line_height(style=DEFAULT_STYLE) -> float
+Backend.measure_line_height(style=DEFAULT_STYLE) -> float
+```
+
+- Default / whole-unit backends and the base grid font (`font=None`): `1.0` —
+  the base unit *is* the grid font's line height (§3), so ordinary text is
+  unchanged.
+- GUI with a real per-Style font: the font's line height (ascender − descender
+  + leading), rounded up to whole device pixels, divided by the base unit
+  height. A multi-line widget advances each row by this pitch in `draw` and
+  reserves `line_count × pitch` in its `measure`, so a 18pt run does not overlap
+  the row below it.
+
+One more consequence on the draw side: because a proportional glyph is **not**
+one base unit wide, `DrawContext.draw_text` must not slice a flow run to
+`ceil(width)` columns the way it does grid text — that would drop trailing
+glyphs that still fit. Flow text (a resolved `style.font`) is handed to the
+backend whole and trimmed by the pane clip rect at the exact pixel edge; only
+base-grid text is column-sliced.
+
 ---
 
 ## 9. Backend responsibilities

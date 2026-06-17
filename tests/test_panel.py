@@ -1,5 +1,14 @@
-from puikit import Event, EventType, Panel, PROFILE_GUI_DESKTOP
+from puikit import (
+    DEFAULT_STYLE,
+    Event,
+    EventType,
+    Font,
+    Panel,
+    PROFILE_GUI_DESKTOP,
+    Style,
+)
 from puikit.backends.memory_backend import MemoryBackend
+from puikit.text import display_width
 from puikit.widgets import Label, Widget
 
 
@@ -22,6 +31,42 @@ def test_text_is_clipped_to_widget_rect():
     panel.add(Label("0123456789"), x=0, y=0, w=4, h=1)
     lines = render(panel, backend)
     assert lines[0] == "0123" + " " * 16
+
+
+class _ProportionalBackend(MemoryBackend):
+    """A fonts-capable grid backend whose per-Style font measures at half a
+    base unit per glyph, so a proportional run packs more characters than its
+    base-unit width. It records the exact text each draw_text receives."""
+
+    def __init__(self, **kw):
+        super().__init__(capabilities=PROFILE_GUI_DESKTOP, **kw)
+        self.calls: list[str] = []
+
+    def measure_text(self, text, style=DEFAULT_STYLE):
+        if style.font is not None:
+            return 0.5 * len(text)
+        return float(display_width(text))
+
+    def draw_text(self, x, y, text, style=DEFAULT_STYLE):
+        self.calls.append(text)
+        super().draw_text(x, y, text, style)
+
+
+class _Para(Widget):
+    def draw(self, ctx):
+        ctx.draw_text(0, 0, "x" * 10, Style(font=Font()))
+
+
+def test_proportional_text_is_not_truncated_by_column_count():
+    # The 10-glyph run measures 5.0 base units and fits a width-5 pane, but a
+    # column count would cap it at ceil(5)=5 characters. Flow text must reach
+    # the backend whole and let the pane clip rect trim any overflow instead.
+    backend = _ProportionalBackend(width=20, height=3)
+    panel = Panel(backend)
+    panel.add(_Para(), x=0, y=0, w=5, h=1)
+    render(panel, backend)
+    assert "x" * 10 in backend.calls  # full run, not sliced to 5 chars
+    # (Grid font slicing stays covered by test_text_is_clipped_to_widget_rect.)
 
 
 class IconWidget(Widget):
