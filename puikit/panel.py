@@ -153,6 +153,16 @@ class DrawContext:
         return self._caps.supports("vector_shapes")
 
     @property
+    def animated(self) -> bool:
+        """True when the backend can render real transitions and per-frame
+        animation ticks. A widget that drives its own motion (a busy spinner)
+        reads it to decide whether to register ticks via
+        ``panel.request_animation_ticks``; on a still backend it just renders a
+        single frame whenever the panel re-renders. The capability is resolved
+        here, not by the widget."""
+        return self._caps.supports("animation")
+
+    @property
     def native_menus(self) -> bool:
         """True when the backend owns an OS menu bar / context menus. A MenuBar
         widget reads it to know it should register the native bar and claim no
@@ -877,6 +887,18 @@ class Panel:
             self._start_size_animation(widget, hints)
         else:
             self.backend.animate(widget, hints)
+
+    def request_animation_ticks(self, callback: Any) -> bool:
+        """Register a per-frame tick ``callback`` for a widget that animates
+        itself (a busy spinner). Gated on the ``animation`` capability: on a
+        still backend nothing is registered — the widget simply renders one
+        frame on each ordinary render — so the widget never branches on the
+        backend. The callback returns False to unregister. Returns whether
+        ticking started."""
+        if not self.backend.capabilities.supports("animation"):
+            return False
+        self.backend.request_animation_ticks(callback)
+        return True
 
     def _start_size_animation(self, widget: Any, hints: dict[str, Any]) -> None:
         # Works for any widget in the tree: the target size is whatever rect

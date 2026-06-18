@@ -41,8 +41,10 @@ from puikit import (
 )
 from puikit.backends import create_backend
 from puikit.widgets import (
+    BusyIndicator,
     Button,
     Checkbox,
+    ComboBox,
     Container,
     DropDown,
     ImageView,
@@ -50,9 +52,11 @@ from puikit.widgets import (
     LayoutView,
     ListView,
     MenuBar,
+    ProgressBar,
     RadioGroup,
     ScrollBar,
     ScrollView,
+    Splitter,
     Tabs,
     TextBlock,
     TextEdit,
@@ -1370,6 +1374,154 @@ def build_messagebox_page(panel: Panel) -> VSplit:
     )
 
 
+def build_progress_page(panel: Panel) -> VSplit:
+    # Determinate ProgressBars (a value along a track) next to indeterminate
+    # BusyIndicators (motion only). The spinners turn on their own on GUI (the
+    # animation capability drives per-frame ticks) and advance on each render on
+    # TUI — one widget, resolved in the Panel layer. A "Step" button advances a
+    # live bar; its percentage rides in a sibling Label (the bar itself is
+    # value-only, like ScrollBar).
+    state = {"value": 0.35}
+    live = ProgressBar(state["value"])
+    readout = Label("35 %", BOLD)
+
+    def step() -> None:
+        state["value"] = 0.0 if state["value"] >= 1.0 else min(1.0, state["value"] + 0.1)
+        live.value = state["value"]
+        readout.text = f"{round(state['value'] * 100):d} %"
+
+    def bar_row(caption: str, value: float) -> Item:
+        bar = ProgressBar(value)
+        return Item(
+            HSplit(
+                Item(Label(caption), size=14),
+                Item(bar, weight=1),
+                Item(Label(f"{round(value * 100):d} %", DIM), size=6),
+                gap=1,
+            ),
+            size=1,
+        )
+
+    return VSplit(
+        Item(Label("Determinate progress vs. indeterminate activity", DIM), size=1),
+        Item(Label("Determinate — ProgressBar fills a known fraction", BOLD), size=1),
+        bar_row("Downloading", 0.0),
+        bar_row("Indexing", 0.25),
+        bar_row("Building", 0.6),
+        bar_row("Finishing", 1.0),
+        Item(Label(""), size=1),
+        Item(Label("Live — press the button to advance", BOLD), size=1),
+        Item(
+            HSplit(
+                Item(Button("Step", style=BUTTON_FACE, on_click=step), size="content", align="center"),
+                Item(live, weight=1),
+                Item(readout, size=6),
+                gap=1,
+            ),
+            size=1,
+        ),
+        Item(Label(""), size=1),
+        Item(Label("Indeterminate — BusyIndicator shows motion only", BOLD), size=1),
+        Item(
+            HSplit(
+                Item(BusyIndicator("Loading…"), size="content"),
+                Item(BusyIndicator("Syncing", fps=6), size="content"),
+                Item(BusyIndicator(), size="content"),
+                Item(Label("(spinners turn on GUI; tick-advance on TUI)", DIM), weight=1),
+                gap=3,
+            ),
+            size=1,
+        ),
+        Item(Label(""), weight=1),
+        gap=1,
+    )
+
+
+def build_splitter_page(panel: Panel) -> VSplit:
+    # A Splitter hosts two panes and a draggable handle: the interactive form of
+    # a layout divider. The outer split is horizontal (drag the vertical handle
+    # left/right); its right pane is itself a vertical Splitter (drag the
+    # horizontal handle up/down). Children keep their own focus and events — Tab
+    # descends, clicks route to the pane under the pointer — so nesting is free.
+    status = Label("Drag a handle to resize · click a list · tab moves focus", DIM)
+
+    def on_select(which):
+        return lambda i, t: setattr(status, "text", f"{which}: {t}")
+
+    left = ListView([f"Files {i:02d}" for i in range(30)], on_select=on_select("Left"))
+    top_right = ListView(
+        [f"Preview line {i:02d}" for i in range(30)], on_select=on_select("Top-right")
+    )
+    bottom_right = TextBlock(
+        "This pane is the second child of a vertical Splitter.\n"
+        "\n"
+        "  · the outer Splitter divides left | right\n"
+        "  · the right side is a Splitter dividing top / bottom\n"
+        "  · drag either handle; the panes re-apportion live\n"
+        "  · neither pane shrinks past its minimum\n"
+        "\n"
+        "A dual-pane file manager is exactly this intent.",
+    )
+    right = Splitter(
+        top_right, bottom_right, orientation="vertical", fraction=0.5,
+        min_first=4, min_second=4,
+    )
+    split = Splitter(left, right, orientation="horizontal", fraction=0.4, min_first=10, min_second=16)
+    return VSplit(
+        Item(split, weight=1, hints={"surface": "content"}),
+        Item(status, size=1),
+        gap=1,
+    )
+
+
+def build_combo_page(panel: Panel) -> VSplit:
+    # A ComboBox is an editable DropDown: type to filter the floating list, or
+    # enter free text. It is composed from an embedded TextEdit (cursor, IME)
+    # and the same push_layer popup the DropDown uses; the page never branches
+    # on the backend.
+    status = Label("Type to filter · ↑/↓ choose · enter commit · esc cancel", DIM)
+
+    fruits = [
+        "Apple", "Apricot", "Avocado", "Banana", "Blueberry", "Cherry",
+        "Date", "Elderberry", "Fig", "Grape", "Kiwi", "Lemon", "Mango",
+        "Nectarine", "Orange", "Papaya", "Peach", "Pear", "Plum", "Raspberry",
+    ]
+    fixed = DropDown(
+        ["Red", "Green", "Blue"],
+        on_change=lambda i, t: setattr(status, "text", f"DropDown (read-only) → {t}"),
+    )
+    editable = ComboBox(
+        fruits, text="",
+        on_change=lambda s: setattr(status, "text", f"ComboBox → {s!r}"),
+        width=24,
+    )
+    custom = ComboBox(
+        ["localhost", "127.0.0.1", "0.0.0.0"], text="",
+        on_change=lambda s: setattr(status, "text", f"Host → {s!r}"),
+        width=24, allow_custom=True,
+    )
+
+    heading = lambda text: Label(text, BOLD)  # noqa: E731
+    scroller = ScrollView(
+        [
+            (heading("Read-only DropDown — pick one of a fixed set"), 1),
+            (fixed, "content"),
+            (heading("Editable ComboBox — type to filter the list"), 1),
+            (editable, "content"),
+            (Label("Try typing 'ap' or 'berry' to narrow the list", DIM), 1),
+            (heading("Free-text ComboBox — enter accepts custom text"), 1),
+            (custom, "content"),
+            (Label("Type a host not in the list and press enter", DIM), 1),
+        ],
+        gap=1,
+    )
+    return VSplit(
+        Item(scroller, weight=1, hints={"surface": "content"}),
+        Item(status, size=1),
+        gap=1,
+    )
+
+
 # Each nav entry carries an emoji prefix: the same intent renders as a
 # full-color glyph on GUI and as a (wide) text glyph on TUI — the shared
 # wide-character accounting (puikit.text) keeps the labels column-aligned on
@@ -1377,6 +1529,9 @@ def build_messagebox_page(panel: Panel) -> VSplit:
 PAGES = [
     ("🏷️ Label", build_label_page),
     ("🎛️ Widgets", build_widgets_page),
+    ("🔽 ComboBox", build_combo_page),
+    ("📊 Progress", build_progress_page),
+    ("↔️ Splitter", build_splitter_page),
     ("📋 ListView", build_list_page),
     ("🎚️ ScrollBar", build_scrollbar_page),
     ("🗂️ Tabs", build_tabs_page),

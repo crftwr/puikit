@@ -27,7 +27,11 @@ One implementation each, running unchanged on every backend.
 | `Checkbox` | `checkbox.py` | Boolean toggle |
 | `RadioGroup` | `radio.py` | Mutually exclusive choice |
 | `DropDown` | `dropdown.py` | Read-only selection; list opens as a `push_layer` popup |
+| `ComboBox` | `combo_box.py` | Editable drop-down: type-to-filter list + free text |
 | `TextEdit` | `text_edit.py` | Single-line editable text, full IME/composition |
+| `ProgressBar` | `progress_bar.py` | Read-only determinate ratio bar |
+| `BusyIndicator` | `busy_indicator.py` | Indeterminate activity spinner (`animation` fallback) |
+| `Splitter` | `splitter.py` | Two panes with a draggable divider (drag to resize) |
 | `ListView` | `list.py` | Scrollable selectable rows; text by default, or a widget per row via `row_factory` |
 | `TreeView` / `TreeNode` | `tree.py` | Expandable hierarchical rows with indentation |
 | `Tabs` | `tabs.py` | Title strip swapping a content pane |
@@ -83,15 +87,23 @@ Continuous or stepped value chosen by dragging a thumb.
   thumb with hover + `MOUSE_DRAG`. Good unification test for drag.
 - **Verdict:** Strong candidate. Small, isolates one axis.
 
-#### ProgressBar
-Read-only ratio display; determinate or indeterminate.
+#### ProgressBar + BusyIndicator — **shipped**
+Read-only ratio display, split into two intents instead of one widget.
 - **Existing flexibility?** Partly — a determinate bar is close to a styled,
-  non-interactive `Slider`. Worth considering whether `Slider(readonly=True)`
-  covers the determinate case before adding a class.
-- **Abstraction value:** High for the indeterminate case: it needs the
-  `animation` capability and demonstrates clean fallback (GUI animates; TUI
-  shows a static fill or marquee-by-tick).
-- **Verdict:** Build, but first check it isn't just a `Slider` mode.
+  non-interactive `Slider`. With no `Slider` yet, `ProgressBar` ships as its own
+  small value-only widget (painted like `ScrollBar` — pill on vector backends,
+  cell fills on a grid); a caption rides in a sibling `Label`.
+- **Resolved:** the *determinate* and *indeterminate* cases were separated.
+  `ProgressBar` carries a value (0..1); the indeterminate "busy but unmeasured"
+  case became its own `BusyIndicator`, because only it needs the `animation`
+  capability and a still-backend fallback — folding it into a value-bearing bar
+  would have made the bar carry machinery it has no value for.
+- **Abstraction value:** `BusyIndicator` is the clean `animation` test: it
+  drives its own per-frame ticks via `panel.request_animation_ticks` on capable
+  backends (GUI), and on a still backend (TUI) derives its frame from the wall
+  clock — advancing on any other re-render — so it never branches on the backend.
+- **Verdict:** Built as two widgets. Revisit folding the determinate bar into a
+  `Slider(readonly=True)` mode if/when `Slider` lands.
 
 #### SpinBox / NumberInput
 Numeric entry with +/- steppers and clamping.
@@ -105,22 +117,35 @@ Numeric entry with +/- steppers and clamping.
 
 ### 3.2 Medium — real need, more design surface
 
-#### ComboBox (editable dropdown)
+#### ComboBox (editable dropdown) — **shipped**
 Type-to-filter / free-text entry over a list.
-- **Existing flexibility?** This is the key call: is it a **new mode of
-  `DropDown`** (add an `editable` / `filter` configuration) or a new widget? It
-  shares the popup-list machinery with `DropDown` and the editing machinery with
-  `TextEdit`. Strong preference: extend `DropDown` rather than add a class.
-- **Abstraction value:** Moderate (combines IME editing with a floating popup).
-- **Verdict:** Pursue as a `DropDown` configuration first.
+- **Existing flexibility?** The call was whether to extend `DropDown` with an
+  `editable`/`filter` flag or add a class. It shipped as its **own class** that
+  *composes* the existing parts rather than re-deriving them: an embedded real
+  `TextEdit` owns the editing (cursor, IME composition, horizontal scroll) and
+  the floating list reuses `DropDown`'s `push_layer` popup pattern. A flag on
+  `DropDown` would have grown that read-only control two divergent modes; a thin
+  composing widget kept each part single-purpose.
+- **Abstraction value:** Moderate but real — while the popup is open it is the
+  modal layer, yet it *forwards* the editing keys back to the field underneath,
+  so typing filters the list live (IME and free text included).
+- **Verdict:** Built as a composing widget, not a `DropDown` mode.
 
-#### Splitter / resizable pane handle
-A draggable divider that mutates layout weights.
-- **Existing flexibility?** No — but it is **not a leaf widget.** It belongs at
-  the layout/Panel layer (your dividers already live there; this makes them
-  interactive). Build it there, not in `widgets/`.
-- **Abstraction value:** High and directly tfm-relevant (dual-pane resize).
-- **Verdict:** Pursue as a layout/Panel feature.
+#### Splitter / resizable pane handle — **shipped**
+A draggable divider between two panes.
+- **Existing flexibility?** The earlier verdict was "layout/Panel layer, not a
+  leaf." It shipped instead as a **self-contained two-pane widget** (`Splitter`,
+  a focus container hosting `first`/`second` plus a draggable handle) rather than
+  an interactive mutator of the declarative layout's weights. The deviation was
+  deliberate: a leaf split pane is reusable anywhere a widget goes (inside a
+  list row, a dialog, a tab), needs no new Panel/layout vocabulary, and isolates
+  the **drag** axis cleanly (`MOUSE_DRAG` → fraction, clamped to per-pane
+  minimums). A layout-weight-mutating divider is still worth building later for
+  splits declared in `set_layout`; the two can coexist.
+- **Abstraction value:** High and directly tfm-relevant (dual-pane resize); the
+  first widget to exercise drag.
+- **Verdict:** Built as a leaf composite. Revisit a layout-level interactive
+  divider separately.
 
 #### Table / DataGrid
 Multi-column rows with headers and per-column widths/alignment.
@@ -169,11 +194,17 @@ Inline mixed styles, links, flowing content.
 
 ## 4. Current recommendation
 
-- **To exercise the abstraction layer:** build **Slider** next (smallest widget
-  that isolates drag + cross-axis intrinsic sizing), then **ProgressBar** (after
-  confirming it isn't just a `Slider` mode) for the `animation` fallback story.
-- **To unblock tfm:** prioritize the **Splitter** (layout-layer) and **Table**
-  (or a `ListView` column helper).
-- **Resist adding:** SpinBox, ComboBox, Tooltip, Accordion — each is reachable
-  by configuring or combining what already exists. Add them only if real apps
-  keep re-deriving the same glue.
+Shipped since this doc was first written: **ProgressBar**, **BusyIndicator**,
+**ComboBox**, and **Splitter** (see §1 and the resolved entries in §3).
+
+- **To exercise the abstraction layer:** build **Slider** next — the one small
+  widget still missing that isolates drag *and* cross-axis intrinsic sizing
+  together (the determinate `ProgressBar` could then fold into a
+  `Slider(readonly=True)` mode). `BusyIndicator` already covers the `animation`
+  fallback story.
+- **To unblock tfm:** the dual-pane resize is covered by the new **Splitter**;
+  prioritize the **Table** (or a `ListView` column helper) next, and revisit a
+  *layout-level* interactive divider for splits declared in `set_layout`.
+- **Resist adding:** SpinBox, Tooltip, Accordion — each is reachable by
+  configuring or combining what already exists. Add them only if real apps keep
+  re-deriving the same glue.
