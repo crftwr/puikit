@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import colorsys
 import curses
+import dataclasses
 import locale
 import os
 from typing import Any
 
-from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute
+from ..backend import Backend, Color, DEFAULT_STYLE, EventHandler, Style, TextAttribute
 from ..capability import PROFILE_TUI
 from ..event import Event, EventType
 from ..text import display_width as _display_width
 from ..text import glyph_runs as _glyph_runs
 from ..text import truncate_to_width as _truncate_to_width
+from ..theme import DEFAULT_THEME, THEME_TUI
 
 # RGB values of the 8 basic curses colors, used for nearest-color mapping.
 _BASIC_COLORS = [
@@ -25,6 +28,72 @@ _BASIC_COLORS = [
     (curses.COLOR_CYAN, (17, 168, 205)),
     (curses.COLOR_WHITE, (229, 229, 229)),
 ]
+
+# --- curated TUI palette -----------------------------------------------------
+#
+# A terminal can show only a bounded number of colors and color *pairs* at once,
+# and the count is the same whether or not an app realizes it. Rather than map
+# every authored RGB straight onto the terminal's full palette on demand — which
+# is unbounded in distinct pairs and ordering-dependent — the curses backend
+# snaps every color to this one fixed, curated palette first. The set of colors
+# (and therefore pairs) the backend ever asks the terminal for is then bounded
+# and deterministic, and the look is designed rather than incidental.
+#
+# Tune the palette by editing these constants. The systematic ramp covers
+# arbitrary content colors; the built-in themes' own colors are folded in so the
+# default chrome (surface roles, accents, text) stays crisp and adjacent surface
+# roles keep the contrast the theme relies on for region separation (see
+# theme.py). Colors from a *custom* theme that aren't represented here snap to
+# the nearest entry.
+
+# Grayscale stops, denser below mid: UI surfaces are dark near-grays and must
+# stay distinguishable from one another.
+_PALETTE_GRAYS = (0, 16, 24, 32, 40, 48, 56, 64, 72, 80, 92, 110, 140, 170, 200, 230, 255)
+
+# Chromatic body: a bipyramid in HLS. The most hues sit at mid lightness, where
+# the eye separates them best; the count halves at each step toward black and
+# white (where hue barely registers), tapering to a single point at each end.
+# With a base of 64 that is 64 + 2*(32+16+8+4+2+1) = 190 colors.
+_PALETTE_HUE_BASE = 64
+
+
+def _theme_colors(theme: Any) -> list[Color]:
+    """Every concrete color a Theme defines (named fields + surface roles)."""
+    out: list[Color] = []
+    for f in dataclasses.fields(theme):
+        value = getattr(theme, f.name)
+        if isinstance(value, dict):  # surfaces: role -> Color
+            out.extend(c[:3] for c in value.values())
+        elif isinstance(value, tuple) and len(value) in (3, 4):
+            out.append(value[:3])
+    return out
+
+
+def _build_tui_palette() -> list[Color]:
+    palette: list[Color] = [(g, g, g) for g in _PALETTE_GRAYS]
+    # Bipyramid in HLS: lightness sweeps black -> white over (2*levels + 1)
+    # steps; the hue count peaks at mid lightness and halves each step toward
+    # either end (64 -> 32 -> ... -> 1).
+    levels = _PALETTE_HUE_BASE.bit_length() - 1  # halvings from base to 1 (64 -> 6)
+    for i in range(2 * levels + 1):
+        lightness = i / (2 * levels)
+        hues = _PALETTE_HUE_BASE >> abs(i - levels)
+        for k in range(hues):
+            r, g, b = colorsys.hls_to_rgb(k / hues, lightness, 1.0)
+            palette.append((round(r * 255), round(g * 255), round(b * 255)))
+    for theme in (THEME_TUI, DEFAULT_THEME):
+        palette.extend(_theme_colors(theme))
+    # Dedupe, preserving order (later theme colors that already appear are dropped).
+    seen: set[Color] = set()
+    unique: list[Color] = []
+    for color in palette:
+        if color not in seen:
+            seen.add(color)
+            unique.append(color)
+    return unique
+
+
+_TUI_PALETTE: list[Color] = _build_tui_palette()
 
 _KEY_NAMES = {
     curses.KEY_UP: "up",
@@ -80,6 +149,11 @@ class CursesBackend(Backend):
         self._quit_requested = False
         self._color_pairs: dict[tuple[int, int], int] = {}
         self._next_pair_id = 1
+        # Curated palette -> terminal color index, computed once at open() (an
+        # empty list until then means "map directly", e.g. in unit tests). Plus
+        # a cache of authored RGB -> curated palette index.
+        self._palette_term: list[int] = []
+        self._quant_cache: dict[Color, int] = {}
         self._clip_stack: list[tuple[int, int, int, int]] = []  # x0, y0, x1, y1
         # Where the focused text widget wants the terminal cursor (and thus the
         # terminal's own IME composition). Reset each frame; set via
@@ -122,6 +196,7 @@ class CursesBackend(Backend):
         if curses.has_colors():
             curses.start_color()
             curses.use_default_colors()
+            self._bind_palette()
         curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
 
     def close(self) -> None:
@@ -317,16 +392,72 @@ class CursesBackend(Backend):
         return attr
 
     def _color_pair(self, fg: tuple[int, int, int] | None, bg: tuple[int, int, int] | None) -> int:
-        fg_idx = self._nearest_color(fg) if fg else -1
-        bg_idx = self._nearest_color(bg) if bg else -1
+        fg_idx = self._term_index(fg) if fg else -1
+        bg_idx = self._term_index(bg) if bg else -1
         key = (fg_idx, bg_idx)
         pair = self._color_pairs.get(key)
         if pair is None:
+            # Out of color pairs: reuse the default pair rather than erroring.
+            # The curated palette bounds how many distinct pairs we ask for, so
+            # this only trips on terminals with an unusually small COLOR_PAIRS.
+            if self._next_pair_id >= getattr(curses, "COLOR_PAIRS", 256):
+                return 0
             pair = self._next_pair_id
             self._next_pair_id += 1
             curses.init_pair(pair, fg_idx, bg_idx)
             self._color_pairs[key] = pair
         return pair
+
+    def _bind_palette(self) -> None:
+        """Bind the curated palette to terminal color slots, once, at open().
+
+        Preferred: on terminals that can redefine colors (``ccc`` capability),
+        write each curated color into its own slot above the 16 ANSI colors via
+        init_color. This is exact and does not trust the terminal's default
+        palette for indices >= 16 — which is the right call precisely because a
+        ``ccc`` terminal (e.g. macOS Terminal.app) owns that palette and does
+        not guarantee the standard xterm-256 cube there. Every curated color
+        gets a slot (222 colors fit in 16..237), so quantization always lands
+        on a defined slot — no on-demand allocation, no clobbering.
+
+        Fallback: terminals that cannot redefine colors map each curated color
+        to the nearest entry in the terminal's existing palette."""
+        base = 16  # leave the 16 ANSI slots (and use_default_colors -1) alone
+        colors = getattr(curses, "COLORS", 0)
+        can_change = False
+        try:
+            can_change = curses.can_change_color()
+        except curses.error:
+            pass
+        if can_change and colors >= base + len(_TUI_PALETTE):
+            for i, (r, g, b) in enumerate(_TUI_PALETTE):
+                curses.init_color(base + i, r * 1000 // 255, g * 1000 // 255, b * 1000 // 255)
+            self._palette_term = [base + i for i in range(len(_TUI_PALETTE))]
+        else:
+            self._palette_term = [self._nearest_color(c) for c in _TUI_PALETTE]
+
+    def _term_index(self, rgb: tuple[int, int, int]) -> int:
+        """Terminal color index for an authored RGB: snap to the curated
+        palette, then to its bound terminal slot. Before open() (no palette
+        bound yet) map straight to the terminal."""
+        if self._palette_term:
+            return self._palette_term[self._quantize(rgb)]
+        return self._nearest_color(rgb)
+
+    def _quantize(self, rgb: tuple[int, int, int]) -> int:
+        """Index of the nearest curated-palette color to ``rgb`` (cached)."""
+        cached = self._quant_cache.get(rgb)
+        if cached is not None:
+            return cached
+        r, g, b = rgb
+        idx = min(
+            range(len(_TUI_PALETTE)),
+            key=lambda i: (_TUI_PALETTE[i][0] - r) ** 2
+            + (_TUI_PALETTE[i][1] - g) ** 2
+            + (_TUI_PALETTE[i][2] - b) ** 2,
+        )
+        self._quant_cache[rgb] = idx
+        return idx
 
     @staticmethod
     def _nearest_color(rgb: tuple[int, int, int]) -> int:
