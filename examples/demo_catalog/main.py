@@ -587,7 +587,12 @@ class Swatch(Widget):
         self.name = name
 
     def draw(self, ctx) -> None:
-        ctx.fill_rect(0, 0, ctx.width, ctx.height, Style(bg=self.color))
+        # Fill the exact (fractional) cell size, not ctx.width/height which
+        # truncate to whole base units: on pixel-layout (GUI) the cells have
+        # fractional widths, and truncating leaves the remainder unpainted —
+        # a visible gap between blocks. ctx.size is the unrounded extent.
+        w, h = ctx.size_units
+        ctx.fill_rect(0, 0, w, h, Style(bg=self.color))
         # A thin gradient cell has no room for a label: the color is the point.
         if ctx.width < 6:
             return
@@ -619,20 +624,29 @@ def _hsv_rgb(h: float, s: float, v: float) -> tuple[int, int, int]:
     return (round(r * 255), round(g * 255), round(b * 255))
 
 
+def _hls_rgb(h: float, l: float, s: float) -> tuple[int, int, int]:
+    r, g, b = colorsys.hls_to_rgb(h, l, s)
+    return (round(r * 255), round(g * 255), round(b * 255))
+
+
 def build_color_page(panel: Panel) -> VSplit:
     # One RGB intent per swatch; GUI paints exact channels, TUI snaps each to
-    # the nearest xterm-256 cell — same color, two fidelities (curses_backend
-    # ._xterm256_index). A 2D color table shows the difference plainly: hue
-    # sweeps across columns, brightness down rows. The grid reads as a smooth
-    # field on GUI and as discrete xterm-256 bands on TUI, where the palette
-    # quantizes it. The grid is built from the layout system — a VSplit of
-    # HSplit rows — so it re-resolves to fill the pane on every resize.
-    cols, rows = 32, 12
+    # the nearest curated-palette color. A 2D color table shows the difference
+    # plainly: hue sweeps across columns, lightness down rows — from light tints
+    # at the top, through vivid mid-tones, to dark shades at the bottom — so the
+    # table spans bright and dark colors alike. The grid reads as a smooth field
+    # on GUI and as discrete bands on TUI, where the palette quantizes it. The
+    # grid is built from the layout system — a VSplit of HSplit rows — so it
+    # re-resolves to fill the pane on every resize.
+    cols, rows = 32, 13
 
     def cell(cx: int, cy: int) -> Swatch:
         hue = cx / cols
-        value = 1.0 - 0.9 * (cy / (rows - 1))  # bright at top, dark at bottom
-        return Swatch(_hsv_rgb(hue, 1.0, value))
+        # Lightness sweeps the full range at full saturation: pure white at the
+        # top row, vivid mid-tones at the center, pure black at the bottom — so
+        # the table spans both extremes plus every tint and shade between.
+        lightness = 1.0 - (cy / (rows - 1))
+        return Swatch(_hls_rgb(hue, lightness, 1.0))
 
     grid = VSplit(
         *[
@@ -641,10 +655,10 @@ def build_color_page(panel: Panel) -> VSplit:
         ]
     )
     return VSplit(
-        Item(Label("GUI paints exact RGB; TUI snaps to the xterm-256 palette", DIM), size=1),
+        Item(Label("GUI paints exact RGB; TUI snaps to the curated palette", DIM), size=1),
         # Named palette: each swatch is wide enough to label with its RGB.
         Item(HSplit(*[Item(Swatch(c, n), weight=1) for n, c in PALETTE], gap=1), size=4),
-        Item(Label("Hue x brightness table (smooth on GUI, banded on TUI):", DIM), size=1),
+        Item(Label("Hue x lightness table — tints to shades (smooth on GUI, banded on TUI):", DIM), size=1),
         Item(grid, weight=1),
         gap=1,
     )
