@@ -28,7 +28,7 @@ One implementation each, running unchanged on every backend.
 | `RadioGroup` | `radio.py` | Mutually exclusive choice |
 | `DropDown` | `dropdown.py` | Read-only selection; list opens as a `push_layer` popup |
 | `TextEdit` | `text_edit.py` | Single-line editable text, full IME/composition |
-| `ListView` | `list.py` | Scrollable selectable rows |
+| `ListView` | `list.py` | Scrollable selectable rows; text by default, or a widget per row via `row_factory` |
 | `TreeView` / `TreeNode` | `tree.py` | Expandable hierarchical rows with indentation |
 | `Tabs` | `tabs.py` | Title strip swapping a content pane |
 | `MenuBar` / `MenuPopup` | `menu.py` | Widget-rendered menu fallback (non-`native_menus` backends) |
@@ -124,9 +124,10 @@ A draggable divider that mutates layout weights.
 
 #### Table / DataGrid
 Multi-column rows with headers and per-column widths/alignment.
-- **Existing flexibility?** Partly — a `ListView` with a custom row renderer can
-  approximate it. The question is whether column intrinsic-sizing/alignment is
-  common enough to standardize rather than re-derive per app.
+- **Existing flexibility?** Partly — `ListView`'s `row_factory` already makes
+  each row an arbitrary widget, so a row of column widgets approximates it. The
+  open question is whether column intrinsic-sizing/alignment is common enough to
+  standardize rather than re-derive per app.
 - **Abstraction value:** High; column intrinsic sizing is a meaty layout case.
   Directly relevant to tfm's name/size/date file list.
 - **Verdict:** Likely build (tfm needs it), but explore "`ListView` + column

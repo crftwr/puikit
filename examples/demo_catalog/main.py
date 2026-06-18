@@ -231,15 +231,76 @@ def build_widgets_page(panel: Panel) -> VSplit:
     )
 
 
+# Each row is two base units tall: a primary line and a dim details line. The
+# ListView reserves this height per row (row_height=ROW_H) and scrolls in base
+# units, so the taller rows page correctly on every backend.
+ROW_H = 2
+
+
+def _make_file_row(item: tuple[str, str, str, str]) -> Container:
+    """A custom, multi-line list row composed from ordinary widgets: a checkbox
+    and an icon+name on the first line, a dim "size · modified" details line
+    below it. The row is taller than one line, so it shows that a list item is
+    not limited to a single row. ListView routes clicks into this Container, so
+    the checkbox toggles where it is hit; the same row runs on every backend."""
+    name, icon, size, modified = item
+    row = Container()
+    row.add(Checkbox(""), x=0, y=0, w=3, h=1)
+    row.add(Label(f"{icon} {name}", BOLD), x=4, y=0, w=26, h=1)
+    # Second line: secondary detail, indented under the name and dimmed.
+    row.add(Label(f"{size}  ·  {modified}", DIM), x=4, y=1, w=26, h=1)
+    return row
+
+
 def build_list_page(panel: Panel) -> VSplit:
     items = [f"Item {i:03d}" for i in range(50)]
-    status = Label("Use arrows / page keys; enter to select", DIM)
+    status = Label("Use arrows / page keys; enter to select · space toggles a row", DIM)
     listview = ListView(
         items, on_select=lambda i, text: setattr(status, "text", f"Selected: {text}")
     )
+
+    # The same widget, now with a row_factory and a taller row_height: each item
+    # becomes a composed, multi-line widget instead of a plain string.
+    files = [
+        ("report.pdf", "📄", "1.2 MB", "Jun 14"),
+        ("photos", "📁", "48 items", "Jun 12"),
+        ("notes.md", "📝", "4.1 KB", "Jun 16"),
+        ("archive.zip", "🗜️", "92 MB", "May 30"),
+        ("music", "📁", "210 items", "Apr 02"),
+        ("readme.txt", "📄", "812 B", "Jun 01"),
+        ("budget.xlsx", "📊", "56 KB", "Jun 09"),
+        ("logo.png", "🖼️", "240 KB", "Mar 21"),
+        ("src", "📁", "37 items", "Jun 17"),
+        ("LICENSE", "📄", "1.1 KB", "Jan 05"),
+        ("config.toml", "⚙️", "640 B", "Jun 15"),
+        ("video.mp4", "🎬", "1.4 GB", "Feb 18"),
+    ]
+    rich = ListView(
+        files,
+        row_factory=_make_file_row,
+        row_height=ROW_H,
+        on_select=lambda i, item: setattr(status, "text", f"Selected: {item[0]}"),
+    )
+
     return VSplit(
-        # List capped to 30 base units wide; it flexes to fill the height.
-        Item(HSplit(Item(listview, size=30), Item(Label(""), weight=1)), weight=1),
+        Item(
+            HSplit(
+                Item(
+                    VSplit(Item(Label("Text rows", BOLD), size=1), Item(listview, weight=1)),
+                    size=24,
+                ),
+                Item(
+                    VSplit(
+                        Item(Label("Custom rows (taller, row_factory)", BOLD), size=1),
+                        Item(rich, weight=1),
+                    ),
+                    size=34,
+                ),
+                Item(Label(""), weight=1),
+                gap=2,
+            ),
+            weight=1,
+        ),
         Item(status, size=1),
         gap=1,
     )

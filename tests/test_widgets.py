@@ -180,6 +180,92 @@ def test_listview_on_change_fires_only_when_selection_moves(backend):
     assert changes == [(1, "b"), (0, "a")]
 
 
+def test_listview_row_factory_draws_a_widget_per_item(backend):
+    # With a row_factory each item becomes a widget; the rows draw their own
+    # content (here a Checkbox's label) instead of the item string.
+    from puikit.widgets import Checkbox
+
+    panel = Panel(backend)
+    listview = ListView(
+        [f"opt{i}" for i in range(8)],
+        row_factory=lambda item: Checkbox(item),
+    )
+    panel.add(listview, x=0, y=0, w=12, h=4)
+    panel.render()
+    line = backend.snapshot()[0]
+    assert "opt0" in line  # the row widget rendered its label
+
+
+def test_listview_row_factory_routes_click_to_inner_widget(backend):
+    from puikit.widgets import Checkbox
+
+    toggled: list[bool] = []
+    panel = Panel(backend)
+    listview = ListView(
+        ["a", "b", "c"],
+        row_factory=lambda item: Checkbox(item, on_change=toggled.append),
+    )
+    panel.add(listview, x=0, y=0, w=12, h=3)
+    panel.render()
+    # A click on row 1 selects it and toggles that row's checkbox.
+    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=1, y=1, button="left"))
+    assert listview.selected == 1
+    assert listview.row_widget(1).checked is True
+    assert toggled == [True]
+
+
+def test_listview_row_factory_space_activates_selected_row(backend):
+    from puikit.widgets import Checkbox
+
+    panel = Panel(backend)
+    listview = ListView(
+        ["a", "b", "c"],
+        row_factory=lambda item: Checkbox(item),
+    )
+    panel.add(listview, x=0, y=0, w=12, h=3)
+    panel.render()
+    panel.dispatch_event(Event(type=EventType.KEY, key="down"))
+    panel.dispatch_event(Event(type=EventType.KEY, key="space"))
+    assert listview.selected == 1
+    assert listview.row_widget(1).checked is True
+    assert listview.row_widget(0).checked is False
+
+
+def test_listview_row_factory_caches_row_widgets(backend):
+    calls: list[str] = []
+
+    def factory(item):
+        calls.append(item)
+        return Label(item)
+
+    panel = Panel(backend)
+    listview = ListView(["a", "b"], row_factory=factory)
+    panel.add(listview, x=0, y=0, w=12, h=3)
+    panel.render()
+    panel.render()
+    # Two visible rows, built once each and reused across renders.
+    assert calls == ["a", "b"]
+    # set_items discards the cache so the factory rebuilds.
+    listview.set_items(["x", "y"])
+    panel.render()
+    assert calls == ["a", "b", "x", "y"]
+
+
+def test_listview_row_height_scales_scroll_geometry(backend):
+    # Rows two units tall: ten items make a 20-unit content height, so a
+    # 6-unit pane scrolls and the offset clamps in base units, not item counts.
+    panel = Panel(backend)
+    listview = ListView(
+        [f"r{i}" for i in range(10)],
+        row_factory=lambda item: Label(item),
+        row_height=2,
+    )
+    panel.add(listview, x=0, y=0, w=12, h=6)
+    panel.render()
+    panel.dispatch_event(Event(type=EventType.MOUSE_SCROLL, x=1, y=1, scroll=-100))
+    assert listview.offset == 14  # 10*2 - 6
+
+
 def test_scrollbar_thumb_position(backend):
     panel = Panel(backend)
     panel.add(ScrollBar(pos=1.0, ratio=0.3), x=0, y=0, w=1, h=10)
