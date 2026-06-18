@@ -15,11 +15,12 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..backend import DEFAULT_STYLE, Style, TextAttribute
+from ..backend import DEFAULT_STYLE, Style
 from ..event import Event, EventType
 from ..panel import DrawContext
 from ..text import display_width, truncate_to_width
-from .base import Widget
+from ._input import is_activate
+from .base import Widget, selected_row_style
 
 _INDENT = 2  # columns per depth level
 _EXPANDED = "▾ "
@@ -108,7 +109,7 @@ class TreeView(Widget):
                 text = clipped + " " * (text_w - display_width(clipped))
                 style = self.style
                 if index == self.selected:
-                    style = Style(style.fg, style.bg, style.attr | TextAttribute.REVERSE)
+                    style = selected_row_style(style, theme, ctx.focused)
                 ctx.draw_text(0, y, text, style)
             row += 1
 
@@ -131,6 +132,14 @@ class TreeView(Widget):
 
     def handle_event(self, event: Event) -> bool:
         if event.type is EventType.KEY:
+            # Enter or space activates the selected node (toggle a branch, fire
+            # a leaf) — the same "activate" every other control honors.
+            if is_activate(event):
+                rows = self._visible()
+                if rows:
+                    self._activate(rows[self.selected][0])
+                    return True
+                return False
             return self._handle_key(event.key)
         if event.type is EventType.MOUSE_CLICK:
             return self._handle_click(event)
@@ -174,9 +183,6 @@ class TreeView(Widget):
             else:
                 self._select_parent(rows)
             self._finish_move(before)
-            return True
-        elif key == "enter":
-            self._activate(node)
             return True
         else:
             return False

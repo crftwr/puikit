@@ -15,13 +15,17 @@ from typing import Any
 
 from ..backend import DEFAULT_STYLE, Style, TextAttribute
 from ..event import Event, EventType
+from ..focus import FocusContainer
 from ..panel import DrawContext
 from ..theme import DEFAULT_THEME
 from .base import CONTROL_HEIGHT, Widget
 
 
-class Tabs(Widget):
+class Tabs(FocusContainer, Widget):
     focusable = True
+    # A tab strip is a focus stop even when the active content has no focusable
+    # child: left / right still switch tabs, so it must be reachable.
+    focus_stop_when_empty = True
 
     def __init__(
         self,
@@ -38,6 +42,28 @@ class Tabs(Widget):
         # for hit-testing.
         self._tab_x: list[tuple[int, int]] = []
         self._strip_h = 1.0
+
+    # --- focus ----------------------------------------------------------------
+    #
+    # The active tab's content is the single focused child: Tab descends into it
+    # (and through it, if it is itself a container) and escapes to the next pane
+    # at its ends. The strip stays a focus stop in its own right — when the
+    # content has no focusable, traversal lands on the Tabs widget as a leaf, so
+    # left/right can still switch tabs.
+
+    def focus_children(self) -> list[Any]:
+        if not self.tabs:
+            return []
+        content = self.tabs[self.selected][1]
+        return [content] if getattr(content, "focusable", False) else []
+
+    def get_focused(self) -> Any | None:
+        return self.tabs[self.selected][1] if self.tabs else None
+
+    def set_focused(self, widget: Any) -> None:
+        # The focused child always tracks the active tab; switching tabs
+        # (left/right) moves focus with it, so there is nothing to store.
+        pass
 
     # --- drawing -------------------------------------------------------------
 

@@ -9,9 +9,11 @@ so a single-line control is one cell on a grid and a little taller on pixel
 backends).
 
 Scrolling reuses the same fractional-offset model as ListView, so a backend
-that delivers sub-unit scroll deltas scrolls smoothly. Tab / Shift+Tab cycle
-focus through the focusable children (wrapping at the ends) and auto-scroll
-the focused child into view, so the page is fully keyboard navigable.
+that delivers sub-unit scroll deltas scrolls smoothly. Focus traversal is the
+shared one (puikit.focus): Tab / Shift+Tab step through the focusable children
+and, when they run off either end, let focus escape to the next pane instead of
+wrapping; the newly focused child is scrolled into view, so the page is fully
+keyboard navigable.
 """
 
 from __future__ import annotations
@@ -21,12 +23,16 @@ from typing import Any
 
 from ..backend import DEFAULT_STYLE, Style
 from ..event import Event, EventType
+from ..focus import FocusContainer, focus_on_click
 from ..panel import DrawContext
 from .base import Widget
 
 
-class ScrollView(Widget):
+class ScrollView(FocusContainer, Widget):
     focusable = True
+    # A scrollable view is a focus stop even with no focusable child: arrow /
+    # page keys scroll it, so the keyboard must be able to reach it.
+    focus_stop_when_empty = True
 
     def __init__(
         self,
@@ -48,6 +54,17 @@ class ScrollView(Widget):
         self._focused: Any | None = next(
             (w for w, _ in self._items if getattr(w, "focusable", False)), None
         )
+
+    # --- focus ----------------------------------------------------------------
+
+    def focus_children(self) -> list[Any]:
+        return [w for w, _ in self._items if getattr(w, "focusable", False)]
+
+    def _focus_moved(self) -> None:
+        # Keep whichever child now holds focus visible (the traversal may have
+        # landed on one scrolled out of the viewport).
+        if self._focused is not None:
+            self._ensure_visible(self._focused)
 
     # --- geometry -------------------------------------------------------------
 
@@ -144,36 +161,21 @@ class ScrollView(Widget):
         content_y = event.y + self.offset
         for widget, top, h in self._entries()[0]:
             if top <= content_y < top + h:
-                if event.type is EventType.MOUSE_CLICK and getattr(
-                    widget, "focusable", False
-                ):
-                    self._focused = widget
+                if event.type is EventType.MOUSE_CLICK:
+                    focus_on_click(self, widget)
                 local = event.translated(0, self.offset - top)
                 return bool(widget.handle_event(local))
         return False
 
     def _handle_key(self, event: Event) -> bool:
-        if event.key == "tab":
-            return self._move_focus(-1 if "shift" in event.modifiers else 1)
-        # The focused child gets first refusal; if it acts, keep it in view
-        # (a radio that moved, a dropdown that opened taller).
+        # Tab traversal is driven top-down by the Panel (puikit.focus), so it
+        # never reaches here. The focused child gets first refusal on the rest;
+        # if it acts, keep it in view (a radio that moved, a dropdown that
+        # opened taller). Otherwise the keys scroll the viewport.
         if self._focused is not None and self._focused.handle_event(event):
             self._ensure_visible(self._focused)
             return True
         return self._scroll_key(event.key)
-
-    def _move_focus(self, direction: int) -> bool:
-        focusables = [w for w, _ in self._items if getattr(w, "focusable", False)]
-        if not focusables:
-            return False
-        if self._focused in focusables:
-            index = focusables.index(self._focused)
-        else:
-            index = -1 if direction > 0 else 0
-        # Wrap at the ends so focus cycles within the page rather than escaping.
-        self._focused = focusables[(index + direction) % len(focusables)]
-        self._ensure_visible(self._focused)
-        return True
 
     def _ensure_visible(self, widget: Any) -> None:
         entries, total = self._entries()

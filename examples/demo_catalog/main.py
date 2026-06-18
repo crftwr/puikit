@@ -10,8 +10,9 @@ free-form internals (the animation card) stay `Container`s as *leaves*, placed
 by the layout. The layout re-resolves on resize, snapped to base units on TUI and
 to device pixels on GUI, with surface roles and dividers.
 
-Keys: up/down in the nav switch pages, tab moves focus between the nav and
-the page, 1..9 jump to a page, d opens a layered dialog, q quits.
+Keys: up/down in the nav switch pages, tab / shift+tab walk focus through the
+nav and the page's widgets (one tree, wrapping at the ends), 1..9 jump to a
+page, d opens a layered dialog, q quits.
 
     python examples/demo_catalog/main.py                          # TUI
     python examples/demo_catalog/main.py --backend gui            # macOS GUI
@@ -164,8 +165,8 @@ def build_widgets_page(panel: Panel) -> VSplit:
     # A form of basic interactive widgets, stacked in a ScrollView so the page
     # scrolls when the controls outgrow the pane. Each control reports a state
     # change into the shared status line. Focus moves with tab / shift+tab
-    # (the ScrollView cycles its focusable children and scrolls them into view);
-    # space / enter activates, arrows move within the focused control.
+    # (the Panel walks the whole focus tree; the ScrollView scrolls the focused
+    # child into view); space / enter activates, arrows move within the control.
     status = Label("tab: next field  ·  space/enter: activate  ·  arrows: adjust", DIM)
 
     def set_status(msg: str) -> None:
@@ -1349,7 +1350,7 @@ def main() -> None:
 
         def show_page(index: int, name: str) -> None:
             content.set_layout(PAGES[index][1](panel))
-            status.text = f" {name} — tab: focus page/nav, d: dialog, q: quit"
+            status.text = f" {name} — tab: move focus, d: dialog, q: quit"
 
         nav = ListView([name for name, _ in PAGES], on_change=show_page)
 
@@ -1390,8 +1391,10 @@ def main() -> None:
                 panel.dispatch_event(event)
                 panel.render()
                 return
-            # Focused widget (nav or page) gets the event first; a modal
-            # dialog takes it exclusively.
+            # Focused widget gets the event first; a modal dialog takes it
+            # exclusively. Tab / Shift+Tab are consumed here too — the Panel
+            # walks the whole focus tree (nav -> the page's widgets and back),
+            # so the app no longer toggles focus by hand.
             if panel.dispatch_event(event):
                 panel.render()
                 return
@@ -1402,9 +1405,6 @@ def main() -> None:
                 if event.key == "d":
                     open_dialog()
                     panel.render()
-                    return
-                if event.key == "tab":
-                    panel.focus(content if panel.focused is nav else nav)
                     return
                 if event.key and event.key.isdigit():
                     index = int(event.key) - 1

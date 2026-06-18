@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..event import Event, EventType
+from ..focus import FocusContainer, focus_on_click
 from ..panel import DrawContext, Rect
 from .base import Widget
 
@@ -24,7 +25,7 @@ class _ChildSlot:
     hints: dict[str, Any] = field(default_factory=dict)
 
 
-class Container(Widget):
+class Container(FocusContainer, Widget):
     focusable = True
 
     def __init__(self):
@@ -60,6 +61,9 @@ class Container(Widget):
     def focus(self, widget: Any) -> None:
         self._focused = widget
 
+    def focus_children(self) -> list[Any]:
+        return [s.widget for s in self._children if getattr(s.widget, "focusable", False)]
+
     # --- drawing -----------------------------------------------------------------
 
     def _slot_rect(self, slot: _ChildSlot) -> Rect:
@@ -86,10 +90,8 @@ class Container(Widget):
             for slot in reversed(self._children):
                 rect = self._slot_rect(slot)
                 if event.x is not None and rect.contains(event.x, event.y):
-                    if event.type is EventType.MOUSE_CLICK and getattr(
-                        slot.widget, "focusable", False
-                    ):
-                        self._focused = slot.widget
+                    if event.type is EventType.MOUSE_CLICK:
+                        focus_on_click(self, slot.widget)
                     local = event.translated(-rect.x, -rect.y)
                     return bool(slot.widget.handle_event(local))
             return False

@@ -6,6 +6,9 @@ backend directly, so one implementation runs on every backend.
 
 from __future__ import annotations
 
+from typing import Any
+
+from ..backend import Style, TextAttribute
 from ..event import Event
 from ..layout import LayoutContext, SizeRequest
 from ..panel import DrawContext
@@ -17,6 +20,19 @@ from ..panel import DrawContext
 # that overdraws the text. Controls report this via ``view_height`` so a host
 # like ScrollView reserves the right room per backend.
 CONTROL_HEIGHT = 1.5
+
+
+def selected_row_style(base: Style, theme: Any, focused: bool) -> Style:
+    """Style for the selected row of a list-like widget (ListView, TreeView).
+
+    A selection reads as *active* only while the widget holds focus: focused, it
+    gets the full reverse-video highlight; unfocused, it falls back to the
+    theme's muted selection background, so a list whose focus has moved
+    elsewhere dims its selection exactly like every other control dims its cue.
+    Without a theme in reach the highlight is kept (better visible than lost)."""
+    if focused or theme is None or getattr(theme, "selection_bg", None) is None:
+        return Style(base.fg, base.bg, base.attr | TextAttribute.REVERSE)
+    return Style(base.fg, theme.selection_bg, base.attr)
 
 
 class Widget:

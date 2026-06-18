@@ -15,6 +15,7 @@ from typing import Any
 from .backend import Backend, DEFAULT_STYLE, Style, TextAttribute
 from .capability import CapabilityProfile
 from .event import Event, EventType
+from .focus import focus_on_click, move_focus
 from .font import FontSlant, FontWeight
 from .theme import Theme, theme_for
 
@@ -744,6 +745,29 @@ class Panel:
     def focused(self) -> Any | None:
         return self._focused
 
+    # The Panel is the focus-traversal root. It exposes the same duck-typed
+    # interface every container does (puikit.focus), so one walk crosses the
+    # whole tree; only the root wraps, so focus cycles instead of escaping the
+    # window.
+
+    def focus_children(self) -> list[Any]:
+        return [s.widget for s in self._children if getattr(s.widget, "focusable", False)]
+
+    def get_focused(self) -> Any | None:
+        return self._focused
+
+    def set_focused(self, widget: Any) -> None:
+        self._focused = widget
+
+    def _focus_moved(self) -> None:
+        """Top-level panes do not scroll, so the root has nothing to do when
+        focus moves."""
+
+    def focus_tab(self, direction: int) -> bool:
+        """Advance focus to the next (direction > 0) or previous (< 0) focusable
+        in the whole tree, wrapping at the ends."""
+        return move_focus(self, direction, wrap=True)
+
     @property
     def pointer(self) -> tuple[float, float] | None:
         """Last pointer position in screen base units, or None."""
@@ -958,10 +982,18 @@ class Panel:
         if event.type is EventType.MOUSE_MOVE:
             return False
 
-        # The topmost layer gets events exclusively (modal behavior).
+        # The topmost layer gets events exclusively (modal behavior); it owns
+        # its own focus traversal (e.g. a dialog cycles its buttons), so Tab is
+        # routed in, not intercepted here.
         if self._layers:
             slot = self._layers[-1]
             return self._deliver(slot, event)
+
+        # Tab / Shift+Tab walk the whole focus tree from the root, crossing
+        # container boundaries and wrapping at the ends — one mechanism instead
+        # of each container cycling on its own.
+        if event.type is EventType.KEY and event.key == "tab":
+            return self.focus_tab(-1 if "shift" in event.modifiers else 1)
 
         if event.type in (EventType.MOUSE_CLICK, EventType.MOUSE_DRAG, EventType.MOUSE_SCROLL):
             for slot in reversed(self._children):
@@ -969,10 +1001,8 @@ class Panel:
                 # window margin belongs to the pane that visually owns it.
                 hit = slot.fill if slot.fill is not None else slot.rect
                 if event.x is not None and hit.contains(event.x, event.y):
-                    if event.type is EventType.MOUSE_CLICK and getattr(
-                        slot.widget, "focusable", False
-                    ):
-                        self._focused = slot.widget
+                    if event.type is EventType.MOUSE_CLICK:
+                        focus_on_click(self, slot.widget)
                     return self._deliver(slot, event, clamp=True)
             return False
 

@@ -13,11 +13,12 @@ from __future__ import annotations
 from typing import Any
 
 from ..event import Event, EventType
+from ..focus import FocusContainer, focus_on_click
 from ..panel import DrawContext, Rect
 from .base import Widget
 
 
-class LayoutView(Widget):
+class LayoutView(FocusContainer, Widget):
     focusable = True
 
     def __init__(
@@ -41,6 +42,11 @@ class LayoutView(Widget):
         self.layout = layout
         self._placements = []
         self._focused = None
+
+    def focus_children(self) -> list[Any]:
+        # Resolved from the last draw; the hosted layout's focusable widgets in
+        # placement order, so Tab descends from this host into the page's tree.
+        return [w for w, _ in self._placements if getattr(w, "focusable", False)]
 
     def _margins(self, lctx: Any) -> tuple[float, float]:
         if lctx.snap:
@@ -78,10 +84,8 @@ class LayoutView(Widget):
         ):
             for widget, rect in reversed(self._placements):
                 if event.x is not None and rect.contains(event.x, event.y):
-                    if event.type is EventType.MOUSE_CLICK and getattr(
-                        widget, "focusable", False
-                    ):
-                        self._focused = widget
+                    if event.type is EventType.MOUSE_CLICK:
+                        focus_on_click(self, widget)
                     local = event.translated(-rect.x, -rect.y)
                     return bool(widget.handle_event(local))
             return False
