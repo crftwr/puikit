@@ -51,6 +51,7 @@ from puikit.widgets import (
     Label,
     LayoutView,
     ListView,
+    LogView,
     MenuBar,
     ProgressBar,
     RadioGroup,
@@ -307,6 +308,60 @@ def build_list_page(panel: Panel) -> VSplit:
             weight=1,
         ),
         Item(status, size=1),
+        gap=1,
+    )
+
+
+def build_log_page(panel: Panel) -> VSplit:
+    # A virtualized, append-only stream: per-line color, word wrap, drag-select
+    # + copy, and tail-following. The buffer is seeded large to show that only
+    # the visible window is ever drawn — scrolling 10k lines stays cheap.
+    LEVELS = {
+        "DEBUG": Style(attr=TextAttribute.DIM),
+        "INFO": Style(fg=(180, 200, 230)),
+        "WARN": Style(fg=(229, 192, 16)),
+        "ERROR": Style(fg=(229, 80, 80), attr=TextAttribute.BOLD),
+    }
+    order = list(LEVELS)
+
+    def line(i: int) -> tuple[str, Style]:
+        level = order[i % len(order)]
+        msg = (
+            f"{i:05d} [{level:5}] event {i} — a longer message that wraps to the "
+            f"pane width so the word-wrap path and the row virtualization are "
+            f"exercised together"
+        )
+        return (msg, LEVELS[level])
+
+    log = LogView(
+        [line(i) for i in range(10000)],
+        wrap="word",
+        selectable=True,
+        auto_scroll=True,
+        max_lines=20000,
+    )
+    counter = {"n": 10000}
+
+    def add() -> None:
+        text, style = line(counter["n"])
+        counter["n"] += 1
+        log.append(text, style)
+
+    def clear() -> None:
+        log.clear()
+
+    controls = HSplit(
+        Item(Button("Append line", on_click=add), size="content"),
+        Item(Button("Clear", on_click=clear), size="content"),
+        Item(
+            Label("drag to select · ⌘/Ctrl+A all · ⌘/Ctrl+C copy · ↑↓/PgUp/PgDn/End scroll", DIM),
+            weight=1,
+        ),
+        gap=2,
+    )
+    return VSplit(
+        Item(log, weight=1, hints={"surface": "content"}),
+        Item(controls, size="content"),
         gap=1,
     )
 
@@ -1534,6 +1589,7 @@ PAGES = [
     ("📊 Progress", build_progress_page),
     ("↔️ Splitter", build_splitter_page),
     ("📋 ListView", build_list_page),
+    ("📜 LogView", build_log_page),
     ("🎚️ ScrollBar", build_scrollbar_page),
     ("🗂️ Tabs", build_tabs_page),
     ("🌲 Tree", build_tree_page),

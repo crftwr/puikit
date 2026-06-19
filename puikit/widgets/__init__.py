@@ -11,6 +11,7 @@ from .image import ImageView
 from .label import Label
 from .layout_view import LayoutView
 from .list import ListView
+from .log_view import LogView
 from .menu import MenuBar, MenuPopup
 from .message_box import MessageBox, show_message_box
 from .progress_bar import ProgressBar
@@ -34,6 +35,7 @@ __all__ = [
     "Label",
     "LayoutView",
     "ListView",
+    "LogView",
     "MenuBar",
     "MenuPopup",
     "MessageBox",
