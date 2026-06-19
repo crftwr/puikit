@@ -280,6 +280,22 @@ class Backend(ABC):
         widget-rendered popup layer."""
         raise CapabilityNotSupported("native_menus")
 
+    # --- clipboard ----------------------------------------------------------
+
+    def get_clipboard(self) -> str:
+        """Current plain-text clipboard contents (empty string if none).
+
+        The default is a process-local buffer, so widgets get working
+        copy/paste on every backend (curses, headless tests, ...) even where no
+        OS clipboard is reachable. Backends with a real system clipboard
+        (``clipboard_rich`` or otherwise) override both accessors to bridge to
+        it; the Panel/widget layer never branches on the capability."""
+        return getattr(self, "_clipboard", "")
+
+    def set_clipboard(self, text: str) -> None:
+        """Replace the plain-text clipboard contents. See ``get_clipboard``."""
+        self._clipboard = text
+
     # --- event loop ---------------------------------------------------------
 
     @abstractmethod

@@ -18,18 +18,22 @@ proportional fonts and wide CJK glyphs without the widget ever reading a font.
 from __future__ import annotations
 
 from ..backend import DEFAULT_STYLE, Style
+from ..event import Event
 from ..layout import LayoutContext, SizeRequest
 from ..panel import DrawContext
 from ..text import wrap_text
+from ..theme import DEFAULT_THEME
+from ._selection import SelectableText
 from .base import Widget
 
 
-class TextBlock(Widget):
+class TextBlock(SelectableText, Widget):
     def __init__(
         self,
         text: str,
         style: Style = DEFAULT_STYLE,
         wrap: bool | str = False,
+        selectable: bool = False,
     ):
         self.text = text
         self.style = style
@@ -37,6 +41,13 @@ class TextBlock(Widget):
         # True / "word": fold long lines on word boundaries. "char": break
         # anywhere. The mode only changes how a line maps to display rows.
         self.wrap = wrap
+        # Opt-in mouse selection + clipboard copy (copies the wrapped rows as
+        # separate lines — what is visually selected). Selectable blocks are
+        # focusable so the copy shortcut reaches them; plain ones are inert leaves.
+        self.selectable = selectable
+        if selectable:
+            self.focusable = True
+        self._init_selection()
 
     @property
     def lines(self) -> list[str]:
@@ -62,11 +73,20 @@ class TextBlock(Widget):
         # rows would overlap. The grid font reports 1.0, so this is unchanged
         # for ordinary text.
         pitch = ctx.line_height(self.style)
+        if self.selectable:
+            self._set_selection_rows(rows, pitch, ctx.panel)
+        theme = ctx.theme or DEFAULT_THEME
         for row, line in enumerate(rows):
             y = row * pitch
             if y >= ctx.height:
                 break  # taller than the pane: clip the overflow at the edge
-            ctx.draw_text(0, y, line, self.style)
+            if self.selectable:
+                self._draw_selected_row(ctx, row, line, y, self.style, theme)
+            else:
+                ctx.draw_text(0, y, line, self.style)
+
+    def handle_event(self, event: Event) -> bool:
+        return self.selectable and self._selection_handle_event(event)
 
     def measure(self, ctx: LayoutContext, axis: str, available: float) -> SizeRequest:
         if axis == "y":

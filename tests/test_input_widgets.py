@@ -11,6 +11,7 @@ from puikit.widgets import (
     Label,
     RadioGroup,
     ScrollView,
+    TextBlock,
     TextEdit,
 )
 
@@ -231,6 +232,171 @@ def test_textedit_requests_input_position_when_focused(backend):
     panel.add(field, x=2, y=1, w=12, h=1)
     panel.render()
     assert calls  # at least one caret report from the focused field
+
+
+def test_textedit_shift_arrow_selects_and_typing_replaces(backend):
+    panel = Panel(backend)
+    field = TextEdit("hello")
+    panel.add(field, x=0, y=0, w=12, h=1)
+    panel.dispatch_event(_key("home"))
+    panel.dispatch_event(_key("right", modifiers=frozenset({"shift"})))
+    panel.dispatch_event(_key("right", modifiers=frozenset({"shift"})))
+    assert field.selection_text == "he"
+    panel.dispatch_event(_key("X", char="X"))  # typing replaces the selection
+    assert field.text == "Xllo"
+    assert field.selection_text == ""  # selection cleared after the edit
+
+
+def test_textedit_backspace_deletes_selection(backend):
+    panel = Panel(backend)
+    field = TextEdit("hello")
+    panel.add(field, x=0, y=0, w=12, h=1)
+    panel.dispatch_event(_key("home"))
+    for _ in range(3):
+        panel.dispatch_event(_key("right", modifiers=frozenset({"shift"})))
+    assert field.selection_text == "hel"
+    panel.dispatch_event(_key("backspace"))
+    assert field.text == "lo"
+    assert field.cursor == 0
+
+
+def test_textedit_select_all_then_replace(backend):
+    panel = Panel(backend)
+    field = TextEdit("hello")
+    panel.add(field, x=0, y=0, w=12, h=1)
+    panel.dispatch_event(_key("a", char="a", modifiers=frozenset({"cmd"})))
+    assert field.selection_text == "hello"
+    panel.dispatch_event(_key("Z", char="Z"))
+    assert field.text == "Z"  # whole field replaced, "a" never typed in
+
+
+def test_textedit_plain_arrow_collapses_selection(backend):
+    panel = Panel(backend)
+    field = TextEdit("hello")
+    panel.add(field, x=0, y=0, w=12, h=1)
+    panel.dispatch_event(_key("a", char="a", modifiers=frozenset({"cmd"})))
+    panel.dispatch_event(_key("left"))  # collapse to selection start
+    assert field.selection_text == ""
+    assert field.cursor == 0
+
+
+def test_textedit_mouse_drag_selects(backend):
+    panel = Panel(backend)
+    field = TextEdit("hello", width=12)
+    panel.add(field, x=0, y=0, w=12, h=1)
+    panel.render()
+    # Press at column 1 (buffer index 0), drag to column 4 (index 3).
+    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=1, y=0, button="left"))
+    assert field.selection_text == ""
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=4, y=0, button="left"))
+    assert field.selection_text == "hel"
+
+
+def test_textedit_copy_and_paste(backend):
+    panel = Panel(backend)
+    field = TextEdit("hello", width=12)
+    panel.add(field, x=0, y=0, w=12, h=1)
+    panel.render()  # let the field capture its panel for clipboard access
+    panel.dispatch_event(_key("a", char="a", modifiers=frozenset({"cmd"})))  # select all
+    panel.dispatch_event(_key("c", char="c", modifiers=frozenset({"cmd"})))  # copy
+    assert panel.get_clipboard() == "hello"
+    panel.dispatch_event(_key("end"))  # collapse selection to the end
+    panel.dispatch_event(_key("v", char="v", modifiers=frozenset({"cmd"})))  # paste
+    assert field.text == "hellohello"
+
+
+def test_textedit_cut_removes_selection_to_clipboard(backend):
+    panel = Panel(backend)
+    field = TextEdit("hello", width=12)
+    panel.add(field, x=0, y=0, w=12, h=1)
+    panel.render()
+    panel.dispatch_event(_key("home"))
+    for _ in range(3):
+        panel.dispatch_event(_key("right", modifiers=frozenset({"shift"})))
+    panel.dispatch_event(_key("x", char="x", modifiers=frozenset({"cmd"})))  # cut "hel"
+    assert field.text == "lo"
+    assert panel.get_clipboard() == "hel"
+
+
+def test_textedit_paste_flattens_newlines(backend):
+    panel = Panel(backend)
+    field = TextEdit("", width=20)
+    panel.add(field, x=0, y=0, w=20, h=1)
+    panel.render()
+    panel.set_clipboard("a\nb\r\nc")
+    panel.dispatch_event(_key("v", char="v", modifiers=frozenset({"cmd"})))
+    assert field.text == "a b c"  # single-line field flattens newlines
+
+
+def test_textedit_selection_renders_highlight(backend):
+    panel = Panel(backend)
+    field = TextEdit("hello", width=12)
+    panel.add(field, x=0, y=0, w=12, h=1)
+    panel.dispatch_event(_key("home"))
+    panel.dispatch_event(_key("right", modifiers=frozenset({"shift"})))
+    panel.render()
+    # First glyph 'h' sits at field column 1 and is the only selected cell.
+    assert backend.style_at(1, 0).bg == panel.theme.selection_bg
+    assert backend.style_at(2, 0).bg != panel.theme.selection_bg
+
+
+# --- static text selection ---------------------------------------------------
+
+
+def test_label_not_selectable_by_default(backend):
+    panel = Panel(backend)
+    label = Label("hello")
+    panel.add(label, x=0, y=0, w=12, h=1)
+    assert label.focusable is False
+    consumed = panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=1, y=0, button="left"))
+    assert consumed is False  # a plain label ignores the click
+
+
+def test_label_drag_selects_and_copies(backend):
+    panel = Panel(backend)
+    label = Label("hello", selectable=True)
+    panel.add(label, x=0, y=0, w=12, h=1)
+    assert label.focusable is True
+    panel.render()
+    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=0, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=3, y=0, button="left"))
+    assert label.selection_text() == "hel"
+    panel.dispatch_event(_key("c", char="c", modifiers=frozenset({"cmd"})))
+    assert panel.get_clipboard() == "hel"
+
+
+def test_label_select_all_and_highlight(backend):
+    panel = Panel(backend)
+    label = Label("hi", selectable=True)
+    panel.add(label, x=0, y=0, w=12, h=1)
+    panel.render()
+    panel.dispatch_event(_key("a", char="a", modifiers=frozenset({"cmd"})))
+    assert label.selection_text() == "hi"
+    panel.render()
+    # Both glyphs sit selected: their cells take the selection background.
+    assert backend.style_at(0, 0).bg == panel.theme.selection_bg
+    assert backend.style_at(1, 0).bg == panel.theme.selection_bg
+
+
+def test_textblock_selects_across_rows(backend):
+    panel = Panel(backend)
+    block = TextBlock("ab\ncd", selectable=True)
+    panel.add(block, x=0, y=0, w=12, h=4)
+    panel.render()
+    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=0, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=1, y=1, button="left"))
+    # Whole first row plus the first glyph of the second, copied as two lines.
+    assert block.selection_text() == "ab\nc"
+
+
+def test_textblock_select_all_copies_all_rows(backend):
+    panel = Panel(backend)
+    block = TextBlock("ab\ncd", selectable=True)
+    panel.add(block, x=0, y=0, w=12, h=4)
+    panel.render()
+    panel.dispatch_event(_key("a", char="a", modifiers=frozenset({"cmd"})))
+    panel.dispatch_event(_key("c", char="c", modifiers=frozenset({"cmd"})))
+    assert panel.get_clipboard() == "ab\ncd"
 
 
 # --- hover / accent ----------------------------------------------------------

@@ -213,15 +213,16 @@ def build_widgets_page(panel: Panel) -> VSplit:
             (name, "content"),
             (heading("Button"), 1),
             (action, "content"),
-            (heading("Static text — single line (Label)"), 1),
-            (Label("The quick brown fox jumps over the lazy dog."), 1),
-            (heading("Static text — multi line (TextBlock)"), 1),
+            (heading("Static text — single line (Label, selectable)"), 1),
+            (Label("The quick brown fox jumps over the lazy dog.", selectable=True), 1),
+            (heading("Static text — multi line (TextBlock, selectable)"), 1),
             (
                 TextBlock(
-                    "TextBlock reserves one row per line:\n"
+                    "Drag to select, Cmd/Ctrl+A to select all, Cmd/Ctrl+C to copy:\n"
                     "  · it never reflows on the backend,\n"
                     "  · it just clips at the pane edge,\n"
                     "  · and the ScrollView scrolls past it.",
+                    selectable=True,
                 ),
                 4,
             ),

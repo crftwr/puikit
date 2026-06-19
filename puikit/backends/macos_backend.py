@@ -37,6 +37,8 @@ from AppKit import (
     NSEventModifierFlagOption,
     NSEventModifierFlagShift,
     NSEventTypeApplicationDefined,
+    NSPasteboard,
+    NSPasteboardTypeString,
     NSTimer,
     NSBoldFontMask,
     NSFont,
@@ -1105,6 +1107,18 @@ class MacOSBackend(Backend):
             ctx = self._view.inputContext()
             if ctx is not None:
                 ctx.invalidateCharacterCoordinates()
+
+    # --- clipboard -----------------------------------------------------------
+
+    def get_clipboard(self) -> str:
+        """Plain-text contents of the real system pasteboard."""
+        text = NSPasteboard.generalPasteboard().stringForType_(NSPasteboardTypeString)
+        return str(text) if text is not None else ""
+
+    def set_clipboard(self, text: str) -> None:
+        pb = NSPasteboard.generalPasteboard()
+        pb.clearContents()
+        pb.setString_forType_(text, NSPasteboardTypeString)
 
     # --- native menus --------------------------------------------------------
 

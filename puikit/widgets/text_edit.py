@@ -47,10 +47,38 @@ class TextEdit(Widget):
         self.width = width
         self.style = style
         self.cursor = len(text)
+        self._anchor: int | None = None  # selection start; None = no selection
         self._view = 0          # first visible index into the displayed string
         self._preedit = ""      # IME marked (composition) text, not yet committed
         self._preedit_caret = 0  # caret offset within the preedit
         self._panel = None
+
+    # --- selection -----------------------------------------------------------
+
+    def _selection(self) -> tuple[int, int] | None:
+        """The selected half-open index range ``(start, end)``, or None when
+        nothing is selected. The anchor is the fixed end; the cursor is the
+        moving end, so either order produces the same ordered range."""
+        if self._anchor is None or self._anchor == self.cursor:
+            return None
+        return (min(self._anchor, self.cursor), max(self._anchor, self.cursor))
+
+    @property
+    def selection_text(self) -> str:
+        sel = self._selection()
+        return self.text[sel[0] : sel[1]] if sel else ""
+
+    def _delete_selection(self) -> bool:
+        """Drop the selected range and collapse the cursor onto its start.
+        Returns True if anything was removed."""
+        sel = self._selection()
+        self._anchor = None
+        if sel is None:
+            return False
+        start, end = sel
+        self.text = self.text[:start] + self.text[end:]
+        self.cursor = start
+        return True
 
     # --- geometry -------------------------------------------------------------
 
@@ -73,11 +101,16 @@ class TextEdit(Widget):
             return
         field_w = w - 2  # one column of padding on each side
         self.cursor = max(0, min(self.cursor, len(self.text)))
+        if self._anchor is not None:
+            self._anchor = max(0, min(self._anchor, len(self.text)))
 
         # The displayed string has the preedit spliced in at the cursor.
         disp = self.text[: self.cursor] + self._preedit + self.text[self.cursor :]
         pre_start, pre_end = self.cursor, self.cursor + len(self._preedit)
         caret = self.cursor + (self._preedit_caret if self._preedit else 0)
+        # Selection indices address self.text directly, so they only line up
+        # with the display string while no preedit is spliced in.
+        sel = self._selection() if not self._preedit else None
         self._scroll_into_view(caret, field_w, len(disp))
 
         bg = theme.hover_bg if (ctx.hovered and not ctx.focused) else theme.control_bg
@@ -102,9 +135,11 @@ class TextEdit(Widget):
             if col + cw > field_w:
                 break
             marked = pre_start <= idx < pre_end
+            selected = sel is not None and sel[0] <= idx < sel[1]
             attr = TextAttribute.UNDERLINE if marked else TextAttribute.NORMAL
             fg = theme.accent if marked else theme.text
-            ctx.draw_text(1 + col, ty, ch, Style(fg=fg, bg=bg, attr=attr))
+            cell_bg = theme.selection_bg if selected else bg
+            ctx.draw_text(1 + col, ty, ch, Style(fg=fg, bg=cell_bg, attr=attr))
             col += cw
         if caret_col is None:  # caret sits at/after the last visible glyph
             caret_col = col
@@ -143,28 +178,130 @@ class TextEdit(Widget):
 
     def handle_event(self, event: Event) -> bool:
         if event.type is EventType.IME_COMPOSITION:
+            # Starting composition replaces any selection (it occupies the cursor).
+            if self._preedit == "":
+                self._delete_selection()
             self._preedit = event.hints.get("preedit", "")
             self._preedit_caret = event.hints.get("caret", len(self._preedit))
             return True
         if event.type is EventType.MOUSE_CLICK:
-            # Walk visible characters by display column to find the click target.
-            target = max(0, int(event.x or 0) - 1)
-            idx, col = self._view, 0
-            while idx < len(self.text) and col < target:
-                col += char_width(self.text[idx])
-                idx += 1
-            self.cursor = max(0, min(len(self.text), idx))
+            idx = self._index_at_column(int(event.x or 0) - 1)
+            if "shift" in event.modifiers:
+                # Shift+click extends from the existing cursor (or selection).
+                if self._anchor is None:
+                    self._anchor = self.cursor
+            else:
+                # A plain press collapses the cursor and seeds the anchor a drag
+                # will pivot around.
+                self._anchor = idx
+            self.cursor = idx
+            return True
+        if event.type is EventType.MOUSE_DRAG:
+            if self._anchor is None:
+                self._anchor = self.cursor
+            self.cursor = self._index_at_column(int(event.x or 0) - 1)
             return True
         if event.type is not EventType.KEY:
             return False
+
+        # Command shortcuts (Cmd/Ctrl) are consumed before text insertion, so a
+        # chord like Cmd+A never types its letter into the field.
+        if event.modifiers & {"ctrl", "cmd"}:
+            return self._handle_command(event.key)
 
         ch = typed_char(event)
         if ch is not None:
             self._insert(ch)
             return True
-        return self._handle_key(event.key)
+        return self._handle_key(event.key, "shift" in event.modifiers)
 
-    def _handle_key(self, key: str | None) -> bool:
+    def _index_at_column(self, target: int) -> int:
+        """The buffer index under display column ``target`` (field-local, padding
+        already removed), walking visible characters by display width."""
+        target = max(0, target)
+        idx, col = self._view, 0
+        while idx < len(self.text) and col < target:
+            col += char_width(self.text[idx])
+            idx += 1
+        return max(0, min(len(self.text), idx))
+
+    def _handle_command(self, key: str | None) -> bool:
+        if key == "a":  # select all
+            self._anchor = 0
+            self.cursor = len(self.text)
+            return True
+        if key == "c":  # copy
+            self._copy()
+            return True
+        if key == "x":  # cut
+            if self._copy():
+                self._delete_selection()
+                self._changed()
+            return True
+        if key == "v":  # paste
+            self._paste()
+            return True
+        return False
+
+    def _copy(self) -> bool:
+        """Put the current selection on the clipboard. Returns True if there was
+        a selection to copy (cut relies on this to know whether to delete)."""
+        text = self.selection_text
+        if not text or self._panel is None:
+            return False
+        self._panel.set_clipboard(text)
+        return True
+
+    def _paste(self) -> None:
+        if self._panel is None:
+            return
+        # A single-line field flattens any newlines the clipboard carries.
+        text = self._panel.get_clipboard().replace("\r", "").replace("\n", " ")
+        if not text:
+            return
+        self._preedit = ""
+        self._preedit_caret = 0
+        self._delete_selection()
+        self.text = self.text[: self.cursor] + text + self.text[self.cursor :]
+        self.cursor += len(text)
+        self._changed()
+
+    def _handle_key(self, key: str | None, extend: bool) -> bool:
+        if key in ("left", "right", "home", "end"):
+            return self._move(key, extend)
+        if key == "backspace":
+            if self._delete_selection():
+                self._changed()
+            elif self.cursor > 0:
+                self.text = self.text[: self.cursor - 1] + self.text[self.cursor :]
+                self.cursor -= 1
+                self._changed()
+            return True
+        if key == "delete":
+            if self._delete_selection():
+                self._changed()
+            elif self.cursor < len(self.text):
+                self.text = self.text[: self.cursor] + self.text[self.cursor + 1 :]
+                self._changed()
+            return True
+        if key == "enter":
+            if self.on_submit is not None:
+                self.on_submit(self.text)
+            return self.on_submit is not None
+        return False
+
+    def _move(self, key: str | None, extend: bool) -> bool:
+        sel = self._selection()
+        if extend:
+            if self._anchor is None:  # begin a keyboard selection from the cursor
+                self._anchor = self.cursor
+        elif sel is not None and key in ("left", "right"):
+            # Plain left/right collapse a selection onto the matching edge.
+            self.cursor = sel[0] if key == "left" else sel[1]
+            self._anchor = None
+            return True
+        else:
+            self._anchor = None
         if key == "left":
             self.cursor = max(0, self.cursor - 1)
         elif key == "right":
@@ -173,27 +310,13 @@ class TextEdit(Widget):
             self.cursor = 0
         elif key == "end":
             self.cursor = len(self.text)
-        elif key == "backspace":
-            if self.cursor > 0:
-                self.text = self.text[: self.cursor - 1] + self.text[self.cursor :]
-                self.cursor -= 1
-                self._changed()
-        elif key == "delete":
-            if self.cursor < len(self.text):
-                self.text = self.text[: self.cursor] + self.text[self.cursor + 1 :]
-                self._changed()
-        elif key == "enter":
-            if self.on_submit is not None:
-                self.on_submit(self.text)
-            return self.on_submit is not None
-        else:
-            return False
         return True
 
     def _insert(self, ch: str) -> None:
-        # A committed character ends any composition.
+        # A committed character ends any composition and replaces any selection.
         self._preedit = ""
         self._preedit_caret = 0
+        self._delete_selection()
         self.text = self.text[: self.cursor] + ch + self.text[self.cursor :]
         self.cursor += 1
         self._changed()

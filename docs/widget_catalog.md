@@ -21,14 +21,14 @@ One implementation each, running unchanged on every backend.
 |--------|--------|------|
 | `Widget` | `base.py` | Base class: geometry, `measure`, draw, event, focus |
 | `Container` | `container.py` | Groups children; layout host |
-| `Label` | `label.py` | Single-line static text |
-| `TextBlock` | `text_block.py` | Multi-line static text with wrapping |
+| `Label` | `label.py` | Single-line static text (opt-in `selectable`: drag-select + copy) |
+| `TextBlock` | `text_block.py` | Multi-line static text with wrapping (opt-in `selectable`: drag-select + copy) |
 | `Button` | `button.py` | Clickable, label-sized (intrinsic), `on_click` |
 | `Checkbox` | `checkbox.py` | Boolean toggle |
 | `RadioGroup` | `radio.py` | Mutually exclusive choice |
 | `DropDown` | `dropdown.py` | Read-only selection; list opens as a `push_layer` popup |
 | `ComboBox` | `combo_box.py` | Editable drop-down: type-to-filter list + free text |
-| `TextEdit` | `text_edit.py` | Single-line editable text, full IME/composition |
+| `TextEdit` | `text_edit.py` | Single-line editable text; full IME/composition, mouse + keyboard selection, clipboard copy/cut/paste |
 | `ProgressBar` | `progress_bar.py` | Read-only determinate ratio bar |
 | `BusyIndicator` | `busy_indicator.py` | Indeterminate activity spinner (`animation` fallback) |
 | `Splitter` | `splitter.py` | Two panes with a draggable divider (drag to resize) |

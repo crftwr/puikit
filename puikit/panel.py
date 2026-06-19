@@ -945,6 +945,18 @@ class Panel:
         if request is not None:
             request(x, y, hints or {})
 
+    # --- clipboard ------------------------------------------------------------
+
+    def get_clipboard(self) -> str:
+        """Plain-text clipboard contents, delegated to the backend (a real OS
+        clipboard where available, a process-local buffer otherwise). Widgets
+        call this for paste without knowing which backend they run on."""
+        return self.backend.get_clipboard()
+
+    def set_clipboard(self, text: str) -> None:
+        """Replace the plain-text clipboard contents. See ``get_clipboard``."""
+        self.backend.set_clipboard(text)
+
     # --- menus ----------------------------------------------------------------
 
     def set_menu_bar(self, menu: Any | None) -> None:
