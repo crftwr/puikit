@@ -38,9 +38,18 @@ from collections.abc import Iterable
 from ..backend import DEFAULT_STYLE, Style, TextAttribute
 from ..event import Event, EventType
 from ..panel import DrawContext
-from ..text import char_width, glyph_runs, truncate_to_width, wrap_text
+from ..text import (
+    attaches_to_base,
+    char_width,
+    display_width,
+    glyph_runs,
+    truncate_to_width,
+    wrap_text,
+)
 from ..theme import DEFAULT_THEME
 from .base import Widget
+
+_ZWJ = "‍"  # zero-width joiner: glues emoji into one combined glyph
 
 # A line as stored: its text and the style it draws in.
 LogLine = tuple[str, Style]
@@ -57,6 +66,141 @@ def _col_to_index(glyphs: list[str], target_col: int) -> int:
         col += char_width(glyphs[idx])
         idx += 1
     return idx
+
+
+def _glyphs_and_widths(text: str) -> tuple[list[str], list[int]]:
+    """Split ``text`` into display glyphs and their column widths in a single
+    pass, with an inline fast path for ASCII (one char = one column, no lookup).
+    Equivalent to ``glyph_runs(text)`` paired with a per-glyph ``display_width``,
+    but without a function call per character on the common ASCII run."""
+    glyphs: list[str] = []
+    widths: list[int] = []
+    for ch in text:
+        if ord(ch) < 128:
+            glyphs.append(ch)
+            widths.append(1)
+        elif glyphs and (attaches_to_base(ch) or glyphs[-1].endswith(_ZWJ)):
+            # A combining mark / variation selector / ZWJ-joined part attaches to
+            # the previous glyph; recompute that glyph's width in context (an
+            # emoji selector can promote its base from one column to two).
+            glyphs[-1] += ch
+            widths[-1] = display_width(glyphs[-1])
+        else:
+            glyphs.append(ch)
+            widths.append(char_width(ch))
+    return glyphs, widths
+
+
+def _break_columns(glyphs: list[str], widths: list[int], width: int) -> list[str]:
+    """Greedily pack glyph runs into segments each at most ``width`` columns,
+    breaking strictly between glyphs. A glyph wider than ``width`` on its own
+    gets its own segment rather than vanishing. ``widths`` is the per-glyph
+    column width, precomputed once so this stays O(n)."""
+    segs: list[str] = []
+    cur: list[str] = []
+    cw = 0
+    for g, gw in zip(glyphs, widths):
+        if cur and cw + gw > width:
+            segs.append("".join(cur))
+            cur, cw = [g], gw
+        else:
+            cur.append(g)
+            cw += gw
+    if cur:
+        segs.append("".join(cur))
+    return segs
+
+
+def _wrap_ascii(text: str, width: int, word: bool) -> list[str]:
+    """Wrap an all-ASCII line, where one character is exactly one column, so the
+    work is plain string slicing with no glyph splitting or width lookups. This
+    is the common case for logs and the cheapest path through wrapping."""
+    if len(text) <= width:
+        return [text]
+    if not word:
+        return [text[i : i + width] for i in range(0, len(text), width)] or [""]
+    lines: list[str] = []
+    cur = ""
+    i, n = 0, len(text)
+    while i < n:
+        space = text[i].isspace()
+        j = i
+        while j < n and text[j].isspace() == space:
+            j += 1
+        tok = text[i:j]
+        if len(cur) + len(tok) <= width:
+            cur += tok
+        elif space:
+            if cur:
+                lines.append(cur.rstrip())
+                cur = ""
+            # inter-word space at a wrap boundary: drop it
+        else:
+            if cur:
+                lines.append(cur.rstrip())
+                cur = ""
+            if len(tok) <= width:
+                cur = tok
+            else:
+                segs = [tok[k : k + width] for k in range(0, len(tok), width)]
+                lines.extend(segs[:-1])
+                cur = segs[-1]
+        i = j
+    if cur:
+        lines.append(cur)
+    return lines or [""]
+
+
+def wrap_columns(text: str, width: int, *, word: bool = True) -> list[str]:
+    """Column-based line wrap for grid (monospace) text — the same result as
+    :func:`puikit.text.wrap_text` for ``font=None`` text, but O(n) per line
+    instead of O(n²): it measures every glyph's column width once and tracks the
+    running width, rather than re-measuring a growing substring on each token.
+    This is what keeps a wrapped 10k-line log cheap to lay out."""
+    if width <= 0:
+        return [text]
+    if text.isascii():
+        return _wrap_ascii(text, width, word)
+    glyphs, widths = _glyphs_and_widths(text)
+    if sum(widths) <= width:
+        return [text]
+    if not word:
+        return _break_columns(glyphs, widths, width) or [""]
+    lines: list[str] = []
+    cur: list[str] = []
+    cur_w = 0
+    i, n = 0, len(glyphs)
+    while i < n:
+        space = glyphs[i].isspace()
+        j, tok_w = i, 0
+        while j < n and glyphs[j].isspace() == space:
+            tok_w += widths[j]
+            j += 1
+        if cur_w + tok_w <= width:
+            cur.extend(glyphs[i:j])
+            cur_w += tok_w
+            i = j
+            continue
+        if cur:
+            # The space run that pushed us over now ends the line; its trailing
+            # whitespace would only be invisible padding, so strip it.
+            lines.append("".join(cur).rstrip())
+            cur, cur_w = [], 0
+        if space:
+            i = j  # inter-word space falls at a wrap boundary: drop it
+            continue
+        if tok_w <= width:
+            cur = glyphs[i:j]
+            cur_w = tok_w
+        else:
+            segs = _break_columns(glyphs[i:j], widths[i:j], width)
+            lines.extend(segs[:-1])
+            cur = glyph_runs(segs[-1])
+            cur_w = display_width(segs[-1])
+        i = j
+    if cur:
+        lines.append("".join(cur))
+    return lines or [""]
 
 
 class LogView(Widget):
@@ -111,7 +255,6 @@ class LogView(Widget):
         self._pitch = 1.0
         self._view_h = 1.0
         self._content_h = 0.0
-        self._show_bar = False
 
         # Selection endpoints in global-display-row coordinates.
         self._sel_anchor: Pos | None = None
@@ -175,7 +318,14 @@ class LogView(Widget):
 
     def _wrap_line(self, text: str, style: Style, width: float, ctx: DrawContext) -> list[LogLine]:
         word = self.wrap != "char"
-        segs = wrap_text(text, width, lambda t: ctx.measure_text(t, style), word=word)
+        if style.font is None:
+            # Grid font: a base unit is one column, so wrap in integer columns
+            # without touching the backend. O(n) per line, the fast path that
+            # makes laying out a large wrapped buffer affordable.
+            segs = wrap_columns(text, int(width), word=word)
+        else:
+            # A real per-Style font is not column-aligned; measure it natively.
+            segs = wrap_text(text, width, lambda t: ctx.measure_text(t, style), word=word)
         return [(s, style) for s in segs]
 
     def _ensure_layout(self, width: float, ctx: DrawContext) -> None:
@@ -227,21 +377,27 @@ class LogView(Widget):
         self._pitch = pitch
         self._view_h = view_h
 
-        # Reserve the scrollbar gutter from the wrap width when the bar is
-        # showing. The decision is sticky (carried from the last frame), which
-        # settles in at most one frame and keeps the wrap width stable, so the
-        # cache is not rebuilt every draw. Removing the bar only ever widens the
-        # pane, which cannot turn a fitting buffer into an overflowing one, so
-        # this does not oscillate.
-        inner_w = ctx.width - (1 if self._show_bar else 0)
-        self._ensure_layout(inner_w, ctx)
+        # The wrap width must depend only on ctx.width, never on whether the
+        # scrollbar is showing: a width that flips with the bar's visibility
+        # would rebuild the whole wrap cache the moment the bar appears (and
+        # again if it disappears). When wrapping, reserve the gutter column
+        # unconditionally so the cached layout is stable across the bar
+        # toggling; an unused trailing column on a short log is invisible and
+        # far cheaper than re-wrapping the buffer. Unwrapped rows carry no
+        # cached layout, so their gutter can stay dynamic.
+        if self.wrap:
+            wrap_w = max(0, ctx.width - 1)
+            self._ensure_layout(wrap_w, ctx)
+        else:
+            self._ensure_layout(ctx.width, ctx)
 
         content_h = self._total_rows * pitch
         self._content_h = content_h
         show_bar = content_h > view_h
-        self._show_bar = show_bar
-        if not show_bar:
-            inner_w = ctx.width
+        if self.wrap:
+            inner_w = ctx.width - 1 if show_bar else ctx.width
+        else:
+            inner_w = ctx.width - (1 if show_bar else 0)
 
         if self._follow:
             self.offset = max(0.0, content_h - view_h)

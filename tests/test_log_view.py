@@ -4,7 +4,33 @@ import pytest
 
 from puikit import Event, EventType, Panel, PROFILE_GUI_DESKTOP, PROFILE_TUI, Style
 from puikit.backends.memory_backend import MemoryBackend
+from puikit.text import display_width, wrap_text
 from puikit.widgets import LogView
+from puikit.widgets.log_view import wrap_columns
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "short",
+        "the quick brown fox jumps over the lazy dog again and again",
+        "supercalifragilisticexpialidocious-is-one-very-long-unbreakable-token",
+        "trailing   spaces   between   words   here   too",
+        "日本語のテキストは空白を使わないため文字単位で折り返す",  # wide CJK, no spaces
+        "mixed 日本語 and ascii words 折り返し test line",
+        "emoji ⚠️ warning 🫧 bubble run with selectors",
+    ],
+)
+@pytest.mark.parametrize("width", [1, 5, 8, 12, 20])
+@pytest.mark.parametrize("word", [True, False])
+def test_wrap_columns_matches_wrap_text(text, width, word):
+    # wrap_columns is the O(n) fast path for grid (font=None) text; it must
+    # produce byte-identical output to the canonical wrap_text driven by the
+    # column measure (display_width), or a wrapped log would diverge from the
+    # rest of the framework's text handling.
+    expected = wrap_text(text, float(width), display_width, word=word)
+    assert wrap_columns(text, width, word=word) == expected
 
 
 @pytest.fixture(params=[PROFILE_TUI, PROFILE_GUI_DESKTOP], ids=["tui", "gui"])
