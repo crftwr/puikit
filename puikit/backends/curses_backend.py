@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 import colorsys
 import curses
 import dataclasses
 import locale
 import os
+import sys
 from typing import Any
 
 from ..backend import Backend, Color, DEFAULT_STYLE, EventHandler, Style, TextAttribute
@@ -134,8 +136,6 @@ _ATTR_MAP = [
     (TextAttribute.ITALIC, getattr(curses, "A_ITALIC", 0)),
 ]
 
-_BUTTON5_PRESSED = getattr(curses, "BUTTON5_PRESSED", 0x200000)
-
 # Scroll bar colors (shared intent with the GUI backends).
 _SCROLLBAR_THUMB = (150, 150, 150)
 _SCROLLBAR_TRACK = (60, 60, 60)
@@ -159,6 +159,9 @@ class CursesBackend(Backend):
         # terminal's own IME composition). Reset each frame; set via
         # request_text_input during draw; applied in present().
         self._input_pos: tuple[int, int] | None = None
+        # True while the left button is held, so a following motion report reads
+        # as a drag (text selection) rather than a bare hover.
+        self._mouse_down = False
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -187,7 +190,13 @@ class CursesBackend(Backend):
         except (AttributeError, curses.error):
             pass
         curses.noecho()
-        curses.cbreak()
+        # raw() (not cbreak()) so the terminal's control keys reach the app as
+        # input instead of generating signals: Ctrl+C must arrive as a key so it
+        # can drive the cross-backend copy shortcut (the same intent that copies
+        # on GUI), rather than raising SIGINT and killing a full-screen app. The
+        # app already quits on 'q'/Esc. Ctrl+Z (suspend) and Ctrl+S/Q (flow
+        # control) are likewise delivered to the app instead of the tty.
+        curses.raw()
         self._stdscr.keypad(True)
         try:
             curses.curs_set(0)
@@ -197,16 +206,38 @@ class CursesBackend(Backend):
             curses.start_color()
             curses.use_default_colors()
             self._bind_palette()
-        curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
+        # Drive mouse tracking directly rather than through curses.mousemask /
+        # getmouse(). On macOS, Python's curses loads the system
+        # libncurses.5.x at runtime, which does not decode xterm motion/drag
+        # (modes 1002/1003) or SGR encoding (1006), so getmouse() never sees a
+        # drag. Enabling SGR mouse here and parsing the escape sequences in the
+        # input loop makes drag selection work on any SGR-capable terminal
+        # (VS Code, iTerm2, modern Terminal.app), independent of the linked
+        # ncurses. 1002 = report motion only while a button is held (so no hover
+        # flood); 1006 = SGR extended coordinates.
+        self._set_mouse_tracking(True)
 
     def close(self) -> None:
         if self._stdscr is None:
             return
+        self._set_mouse_tracking(False)
         self._stdscr.keypad(False)
-        curses.nocbreak()
+        curses.noraw()
         curses.echo()
         curses.endwin()
         self._stdscr = None
+
+    @staticmethod
+    def _set_mouse_tracking(on: bool) -> None:
+        """Enable/disable xterm SGR mouse tracking by writing the DECSET/DECRST
+        sequences straight to the terminal (1000 click, 1002 button-drag motion,
+        1006 SGR encoding)."""
+        verb = "h" if on else "l"
+        try:
+            sys.stdout.write(f"\x1b[?1000{verb}\x1b[?1002{verb}\x1b[?1006{verb}")
+            sys.stdout.flush()
+        except (OSError, ValueError):
+            pass
 
     # --- geometry ----------------------------------------------------------
 
@@ -230,6 +261,35 @@ class CursesBackend(Backend):
         here in present(); otherwise composition appears wherever the last write
         left the cursor (e.g. the status bar)."""
         self._input_pos = (int(x), int(y))
+
+    # --- clipboard -----------------------------------------------------------
+
+    def set_clipboard(self, text: str) -> None:
+        """Copy to the clipboard via OSC 52: an escape sequence the terminal
+        turns into a clipboard write. Unlike a local pasteboard call, this rides
+        the terminal output stream, so it reaches the *user's* clipboard even
+        when the app runs on a remote host over SSH — the local terminal decodes
+        it. The process-local buffer is still kept so in-app paste works on
+        terminals that ignore OSC 52 (e.g. macOS Terminal.app) or where it is
+        disabled. Reading the system clipboard back is not attempted (terminals
+        widely forbid it), so paste draws from that buffer."""
+        self._clipboard = text
+        self._emit_osc52(text)
+
+    @staticmethod
+    def _emit_osc52(text: str) -> None:
+        try:
+            payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
+            seq = f"\x1b]52;c;{payload}\x07"
+            # Inside tmux the sequence must be wrapped in a passthrough envelope
+            # (and its own ESCs doubled) or tmux swallows it instead of relaying
+            # it to the outer terminal.
+            if os.environ.get("TMUX"):
+                seq = "\x1bPtmux;" + seq.replace("\x1b", "\x1b\x1b") + "\x1b\\"
+            sys.stdout.write(seq)
+            sys.stdout.flush()
+        except (OSError, ValueError):
+            pass
 
     def push_clip(self, x: float, y: float, w: float, h: float) -> None:
         x0, y0 = round(x), round(y)
@@ -508,10 +568,47 @@ class CursesBackend(Backend):
             ch = self._stdscr.get_wch()
         except curses.error:
             return not self._quit_requested
-        event = self._translate(ch)
+        # An ESC may begin an SGR mouse report (ESC [ < b ; x ; y M/m). Mouse
+        # tracking is driven directly (see open()), so these arrive as raw bytes
+        # rather than a KEY_MOUSE; assemble and parse them here. Real function /
+        # arrow keys never reach this branch — keypad() pre-assembles them into
+        # integer keycodes — so a bare ESC here is the Escape key.
+        if ch == 27 or ch == "\x1b":
+            event = self._read_escape_sequence()
+        else:
+            event = self._translate(ch)
         if event is not None:
             handler(event)
         return not self._quit_requested
+
+    def _read_escape_sequence(self) -> "Event | None":
+        seq = self._collect_escape()
+        if seq.startswith("[<") and seq[-1:] in ("M", "m"):
+            return self._parse_sgr_mouse(seq)
+        return Event(type=EventType.KEY, key="escape")
+
+    def _collect_escape(self) -> str:
+        """Read the bytes following an ESC without blocking, enough to capture a
+        short SGR mouse report. The terminal sends the whole sequence at once, so
+        the bytes are already buffered; a bare ESC collects nothing."""
+        assert self._stdscr is not None
+        self._stdscr.timeout(0)
+        buf = ""
+        for _ in range(32):
+            try:
+                c = self._stdscr.get_wch()
+            except curses.error:
+                break
+            if isinstance(c, int):
+                break  # a keycode mid-sequence: not a mouse report
+            buf += c
+            # Keep reading only while buf is still a viable SGR mouse prefix;
+            # stop once the closing M/m arrives or it diverges from "[<...".
+            if not ("[<".startswith(buf) or buf.startswith("[<")):
+                break
+            if buf.startswith("[<") and c in "Mm":
+                break
+        return buf
 
     def quit(self) -> None:
         self._quit_requested = True
@@ -522,8 +619,6 @@ class CursesBackend(Backend):
         if ch == curses.KEY_RESIZE:
             w, h = self.size
             return Event(type=EventType.RESIZE, hints={"w": w, "h": h})
-        if ch == curses.KEY_MOUSE:
-            return self._translate_mouse()
         if ch in _KEY_NAMES:
             return Event(type=EventType.KEY, key=_KEY_NAMES[ch])
         if 0 <= ch < 0x110000:
@@ -538,24 +633,66 @@ class CursesBackend(Backend):
         name = _CONTROL_CHARS.get(ch)
         if name is not None:
             return Event(type=EventType.KEY, key=name)
+        # Ctrl+<letter> arrives as a single byte 0x01..0x1A. Deliver it as a
+        # ctrl-modified KEY (key="a".."z") so the cross-backend selection /
+        # clipboard shortcuts (Ctrl+A/C/X/V) work in the terminal exactly as Cmd
+        # does on GUI. Letters whose control code is already a named key
+        # (Ctrl+I=tab, Ctrl+J/M=enter, Ctrl+H=backspace, Ctrl+[=escape) keep that
+        # meaning via _CONTROL_CHARS above.
+        if len(ch) == 1 and 0x01 <= ord(ch) <= 0x1A:
+            letter = chr(ord(ch) + 0x60)
+            return Event(type=EventType.KEY, key=letter, modifiers=frozenset({"ctrl"}))
         if ch.isprintable():
             return Event(type=EventType.KEY, key=ch, char=ch)
         return None
 
-    def _translate_mouse(self) -> Event | None:
+    # SGR mouse button-code bits (xterm 1006): low 2 bits select the button,
+    # plus flags for wheel, motion, and keyboard modifiers.
+    _SGR_BUTTON = 0x03
+    _SGR_SHIFT = 0x04
+    _SGR_ALT = 0x08
+    _SGR_CTRL = 0x10
+    _SGR_MOTION = 0x20
+    _SGR_WHEEL = 0x40
+
+    def _parse_sgr_mouse(self, seq: str) -> Event | None:
+        """Translate an SGR mouse report ``[<b;x;yM`` (press/motion) or
+        ``[<b;x;ym`` (release) into an Event. Coordinates are 1-based in the
+        protocol and converted to 0-based here. Drag tracking mirrors the GUI:
+        a left press arms it, a held-button motion becomes MOUSE_DRAG, release
+        disarms it."""
+        final = seq[-1]
         try:
-            _, x, y, _, bstate = curses.getmouse()
-        except curses.error:
+            b, x, y = (int(p) for p in seq[2:-1].split(";"))
+        except ValueError:
             return None
-        if bstate & curses.BUTTON4_PRESSED:
-            return Event(type=EventType.MOUSE_SCROLL, x=x, y=y, scroll=1)
-        if bstate & _BUTTON5_PRESSED:
-            return Event(type=EventType.MOUSE_SCROLL, x=x, y=y, scroll=-1)
-        for mask, button in [
-            (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED, "left"),
-            (curses.BUTTON2_CLICKED | curses.BUTTON2_PRESSED, "middle"),
-            (curses.BUTTON3_CLICKED | curses.BUTTON3_PRESSED, "right"),
-        ]:
-            if bstate & mask:
-                return Event(type=EventType.MOUSE_CLICK, x=x, y=y, button=button)
-        return None
+        x, y = x - 1, y - 1
+        mods = self._sgr_modifiers(b)
+        if b & self._SGR_WHEEL:
+            scroll = 1 if (b & self._SGR_BUTTON) == 0 else -1  # 64=up, 65=down
+            return Event(type=EventType.MOUSE_SCROLL, x=x, y=y, scroll=scroll, modifiers=mods)
+        button = {0: "left", 1: "middle", 2: "right"}.get(b & self._SGR_BUTTON, "left")
+        if final == "m":  # button release
+            self._mouse_down = False
+            return None
+        if b & self._SGR_MOTION:
+            # Motion is only reported while a button is held (mode 1002); a left
+            # drag selects, anything else is ignored.
+            if self._mouse_down:
+                return Event(type=EventType.MOUSE_DRAG, x=x, y=y, button="left", modifiers=mods)
+            return None
+        # A fresh button press: arm drag tracking for the left button.
+        self._mouse_down = (b & self._SGR_BUTTON) == 0
+        return Event(type=EventType.MOUSE_CLICK, x=x, y=y, button=button, modifiers=mods)
+
+    def _sgr_modifiers(self, b: int) -> frozenset[str]:
+        """Decode the shift/ctrl/alt bits of an SGR button code, so shift+click
+        extends a selection like it does on GUI."""
+        names = []
+        if b & self._SGR_SHIFT:
+            names.append("shift")
+        if b & self._SGR_CTRL:
+            names.append("ctrl")
+        if b & self._SGR_ALT:
+            names.append("alt")
+        return frozenset(names)
