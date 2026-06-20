@@ -33,6 +33,8 @@ One implementation each, running unchanged on every backend.
 | `BusyIndicator` | `busy_indicator.py` | Indeterminate activity spinner (`animation` fallback) |
 | `Splitter` | `splitter.py` | Two panes with a draggable divider (drag to resize) |
 | `ListView` | `list.py` | Scrollable selectable rows; text by default, or a widget per row via `row_factory` |
+| `LogView` | `log_view.py` | Virtualized append-only stream; per-line color, wrap, drag-select + copy, tail-follow |
+| `MarkdownView` | `markdown_view.py` | Scrolling read-only Markdown viewer; proportional prose + monospace/sized headings, clickable links, images |
 | `TreeView` / `TreeNode` | `tree.py` | Expandable hierarchical rows with indentation |
 | `Tabs` | `tabs.py` | Title strip swapping a content pane |
 | `MenuBar` / `MenuPopup` | `menu.py` | Widget-rendered menu fallback (non-`native_menus` backends) |
@@ -169,16 +171,37 @@ Hover-triggered transient popup.
 
 ### 3.3 Lower priority / defer
 
-#### Rich text
+#### Rich text / Markdown — **shipped** (`MarkdownView`)
 Inline mixed styles, links, flowing content.
-- **Existing flexibility?** `TextBlock` already wraps, and `Style.font` already
-  carries per-run faces. The real prerequisite is a **styled-run model**; once
-  that exists, rich text may be a `TextBlock` capability rather than a new
-  widget.
-- **Abstraction value:** High but large; mostly matters for content-heavy apps,
-  not a file manager.
-- **Verdict:** Defer. Define the styled-run model first, then fold into
-  `TextBlock` if possible.
+- **Existing flexibility?** `TextBlock` wraps and `Style.font` carries per-run
+  faces, but the missing piece was a **styled-run model** (intra-line mixed
+  styles + link hrefs). `MarkdownView` introduces it and uses it to render
+  Markdown: proportional prose vs. monospace code, per-level sized headings,
+  block quotes/lists/rules, fenced code, **clickable hyperlinks**
+  (`Panel.open_url`, new `os_open` capability, clipboard fallback on TUI), and
+  **block images** (sized to aspect ratio via `aspect_extent`, alt glyph on
+  TUI). Virtualized over variable row heights.
+- **Outcome:** the styled-run model now lives in `markdown_view.py`; if a second
+  consumer appears, lift it (span list + wrap) into a shared helper and let
+  `TextBlock` opt in, rather than duplicating it.
+
+##### Future work (TODO), roughly in priority order
+1. **Selection + copy.** `MarkdownView` cannot select text yet, unlike
+   `LogView` / `TextBlock` (`_selection.py`: drag-select + `Cmd`/`Ctrl`+`C`).
+   Reuse that machinery so a reader can copy passages. *(Highest-value gap.)*
+2. **Link hover affordance.** Use the `hover` capability to tint a link / show a
+   hand cursor over its hit rect. Needs a small cursor-shape hook on the backend
+   (none today) — a new, narrow capability-fallback path.
+3. **Inline images.** Only standalone `![alt](url)` lines are blocks today;
+   support an image *run* inside a wrapped paragraph (a row whose height is the
+   tallest run, image or text).
+4. **GitHub-flavored blocks.** Tables (`| a | b |`) and task lists (`- [ ]`) —
+   tables likely reuse a future `Table`/`ListView` column helper (§3.2).
+5. **Code-block polish.** A continuous background fill behind the whole block
+   (not just per-glyph `bg`), and optional syntax highlighting.
+6. **More block nesting.** Nested block quotes, lists inside quotes, and setext
+   headings (`===` / `---` underline form).
+7. **Intra-document anchors.** `[jump](#section)` scrolls the view to a heading.
 
 #### Accordion / collapsible panel
 - **Existing flexibility?** **Yes** — `Tree` (disclosure) and `Tabs` (swapping)
@@ -195,7 +218,8 @@ Inline mixed styles, links, flowing content.
 ## 4. Current recommendation
 
 Shipped since this doc was first written: **ProgressBar**, **BusyIndicator**,
-**ComboBox**, and **Splitter** (see §1 and the resolved entries in §3).
+**ComboBox**, **Splitter**, **LogView**, and **MarkdownView** (see §1 and the
+resolved entries in §3); `MarkdownView` carries open future work in §3.3.
 
 - **To exercise the abstraction layer:** build **Slider** next — the one small
   widget still missing that isolates drag *and* cross-axis intrinsic sizing
