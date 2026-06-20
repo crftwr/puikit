@@ -30,7 +30,11 @@ PROFILE_TUI = CapabilityProfile(
     transparency=False,
     shadow=False,
     animation=False,
-    drag_and_drop=False,
+    drag_and_drop=False,     # drop-IN: accept files/text dropped onto the app
+    os_drag_drop=False,      # drag-OUT: be an OS drag *source* (e.g. drag a file
+                             # to Finder). Needs a native window/view, so a
+                             # terminal app can never be one; the Panel falls
+                             # back to copying paths to the clipboard.
     ime=False,
     clipboard_rich=False,
     native_file_dialog=False,
@@ -53,7 +57,8 @@ PROFILE_GUI_WEB = CapabilityProfile(
     transparency=True,
     shadow=True,
     animation=True,
-    drag_and_drop=True,    # browser-limited
+    drag_and_drop=True,    # drop-IN, browser-limited
+    os_drag_drop=False,    # drag-OUT: no OS file-drag source from the browser
     ime=True,
     clipboard_rich=False,  # security-limited
     native_file_dialog=False,
@@ -72,6 +77,7 @@ PROFILE_GUI_DESKTOP = CapabilityProfile(
         "native_file_dialog": True,
         "system_tray": True,
         "native_menus": True,
+        "os_drag_drop": True,  # native NSDraggingSource: drag files to other apps
         "gpu_acceleration": True,
         "media_keys": True,
     }

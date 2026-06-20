@@ -957,6 +957,24 @@ class Panel:
         """Replace the plain-text clipboard contents. See ``get_clipboard``."""
         self.backend.set_clipboard(text)
 
+    # --- drag source ----------------------------------------------------------
+
+    def begin_file_drag(self, paths: Any, event: Event | None = None) -> bool:
+        """Export ``paths`` (file paths) as an OS drag, so the user can drop
+        them onto another app. One intent, resolved per backend: ``os_drag_drop``
+        backends start a native drag session (macOS NSDraggingSource); others —
+        notably TUI, where the terminal owns the window and no app can be a drag
+        source — fall back to copying the paths to the clipboard so the user can
+        paste them into the target. The caller (a file list's drag handler)
+        never branches. Returns True if a real drag session began, False if the
+        clipboard fallback was used. ``event`` is the originating MOUSE_DRAG
+        event; a native session must start from it."""
+        paths = [str(p) for p in paths]
+        if self.backend.capabilities.supports("os_drag_drop"):
+            return self.backend.begin_file_drag(paths, event)
+        self.backend.set_clipboard("\n".join(paths))
+        return False
+
     # --- menus ----------------------------------------------------------------
 
     def set_menu_bar(self, menu: Any | None) -> None:

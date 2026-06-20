@@ -1579,6 +1579,123 @@ def build_combo_page(panel: Panel) -> VSplit:
     )
 
 
+def _drag_demo_files() -> list[str]:
+    """Create a few small real files once and return their paths. Real files
+    make the GUI drag actually drop usable content into the target app."""
+    import tempfile
+
+    folder = os.path.join(tempfile.gettempdir(), "puikit_drag_demo")
+    os.makedirs(folder, exist_ok=True)
+    specs = {
+        "puikit-notes.txt": "Dragged out of the PuiKit demo catalog.\n",
+        "puikit-data.csv": "name,value\nalpha,1\nbeta,2\n",
+        "puikit-readme.md": "# PuiKit\nDrag me onto another app.\n",
+    }
+    paths = []
+    for name, body in specs.items():
+        path = os.path.join(folder, name)
+        if not os.path.exists(path):
+            with open(path, "w") as handle:
+                handle.write(body)
+        paths.append(path)
+    return paths
+
+
+class _DragWell(Widget):
+    """A box you drag *from* to export files. On a drag gesture it issues one
+    intent — panel.begin_file_drag(paths, event) — and lets the Panel resolve
+    it: a native OS drag on GUI, a clipboard copy of the paths on TUI. The well
+    never branches on the backend; it just reports what happened to the status
+    line."""
+
+    focusable = True
+
+    def __init__(self, panel, title, paths, status):
+        self.panel = panel
+        self.title = title
+        self.paths = paths
+        self.status = status
+        self._armed = False  # a press arms; the first drag after it fires once
+
+    def draw(self, ctx):
+        ctx.draw_box(0, 0, ctx.width, ctx.height, hints={"fill": True})
+        inner = max(0, ctx.width - 4)
+        ctx.draw_text(2, 1, self.title[:inner], BOLD)
+        hint = "drag from here ⇢" + ("  (focused)" if ctx.focused else "")
+        ctx.draw_text(2, 2, hint[:inner], DIM)
+        for i, path in enumerate(self.paths):
+            ctx.draw_text(2, 4 + i, ("• " + os.path.basename(path))[:inner])
+
+    def handle_event(self, event):
+        if event.type is EventType.MOUSE_CLICK and event.button == "left":
+            self._armed = True
+            return True
+        if event.type is EventType.MOUSE_DRAG and event.button == "left" and self._armed:
+            self._armed = False
+            started = self.panel.begin_file_drag(self.paths, event)
+            n = len(self.paths)
+            if started:
+                self.status.text = (
+                    f"Started a native OS drag of {n} file(s) — "
+                    "drop onto Finder, an editor, a chat window"
+                )
+            else:
+                self.status.text = (
+                    f"No OS drag source in a terminal — copied {n} path(s) to "
+                    "the clipboard; paste them into the target app"
+                )
+            return True
+        return False
+
+
+def build_drag_page(panel: Panel) -> VSplit:
+    # Dragging files OUT to other apps is an OS-window capability: GUI-Desktop
+    # owns a native view and can be an NSDraggingSource; a terminal app cannot,
+    # so the Panel falls back to copying the paths to the clipboard. One intent
+    # (panel.begin_file_drag), resolved per backend — see docs/drag_drop.md.
+    paths = _drag_demo_files()
+    status = Label(
+        "Drag a well onto another app (GUI), or watch it copy paths to the "
+        "clipboard (TUI)",
+        DIM,
+    )
+    one = _DragWell(panel, "One file", paths[:1], status)
+    many = _DragWell(panel, "Three files", paths, status)
+    explainer = TextBlock(
+        "panel.begin_file_drag(paths, event) — one intent, two fidelities:\n"
+        "\n"
+        "  · GUI-Desktop  -> a real OS drag session (NSDraggingSource).\n"
+        "                    Drop the files onto Finder, an editor, a chat.\n"
+        "  · TUI / others -> no app can be an OS drag source inside a\n"
+        "                    terminal, so the Panel copies the paths to the\n"
+        "                    clipboard instead — paste them into the target.\n"
+        "\n"
+        "The page never branches on the backend; it just asks to export files.\n"
+        "Tab focuses a well; press and drag with the mouse to start.",
+    )
+    return VSplit(
+        Item(Label("Drag files out to other apps — one intent, two fidelities", DIM), size=1),
+        Item(
+            HSplit(
+                Item(
+                    VSplit(
+                        Item(one, size=7),
+                        Item(many, size=7),
+                        Item(Label(""), weight=1),
+                        gap=1,
+                    ),
+                    size=30,
+                ),
+                Item(explainer, weight=1, hints={"surface": "content"}),
+                gap=2,
+            ),
+            weight=1,
+        ),
+        Item(status, size=1),
+        gap=1,
+    )
+
+
 # Each nav entry carries an emoji prefix: the same intent renders as a
 # full-color glyph on GUI and as a (wide) text glyph on TUI — the shared
 # wide-character accounting (puikit.text) keeps the labels column-aligned on
@@ -1596,6 +1713,7 @@ PAGES = [
     ("🌲 Tree", build_tree_page),
     ("📑 Menu", build_menu_page),
     ("💬 MessageBox", build_messagebox_page),
+    ("🫳 Drag", build_drag_page),
     ("🎬 Animation", build_animation_page),
     ("🗂️ Layering", build_layer_page),
     ("📐 Layout", build_layout_page),

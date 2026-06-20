@@ -296,6 +296,22 @@ class Backend(ABC):
         """Replace the plain-text clipboard contents. See ``get_clipboard``."""
         self._clipboard = text
 
+    # --- drag source (capability "os_drag_drop"; Panel gates the calls) ------
+
+    def begin_file_drag(self, paths: list[str], event: Event | None = None) -> bool:
+        """Begin an OS drag session exporting ``paths`` as files, so the user
+        can drop them onto another application (Finder, an editor, ...).
+
+        Only backends with the ``os_drag_drop`` capability implement this:
+        being a drag *source* requires a native window/view (macOS
+        ``NSDraggingSource``), which a terminal app does not own. The Panel
+        gates the call on the capability and, where it is missing, falls back to
+        copying the paths to the clipboard — so the app issues one intent and
+        never branches. ``event`` is the originating ``MOUSE_DRAG`` event when
+        available (a native session must start from the live mouse event).
+        Returns True if a real drag session began."""
+        raise CapabilityNotSupported("os_drag_drop")
+
     # --- event loop ---------------------------------------------------------
 
     @abstractmethod

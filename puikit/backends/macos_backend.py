@@ -30,6 +30,8 @@ from AppKit import (
     NSColor,
     NSDate,
     NSDefaultRunLoopMode,
+    NSDragOperationCopy,
+    NSDraggingItem,
     NSEvent,
     NSEventMaskAny,
     NSEventModifierFlagCommand,
@@ -64,6 +66,7 @@ from AppKit import (
     NSUnderlineStyleAttributeName,
     NSUnderlineStyleSingle,
     NSView,
+    NSWorkspace,
     NSWindow,
     NSWindowStyleMaskClosable,
     NSWindowStyleMaskMiniaturizable,
@@ -77,6 +80,7 @@ from Foundation import (
     NSNotFound,
     NSObject,
     NSString,
+    NSURL,
     NSZeroPoint,
 )
 import objc
@@ -423,6 +427,9 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
         return (point.x / cw, point.y / ch)
 
     def mouseDown_(self, ns_event):
+        # Keep the live NSEvent: a native drag session (begin_file_drag) must be
+        # started from the mouse event that produced it.
+        self._last_mouse_event = ns_event
         x, y = self._mouse_unit(ns_event)
         self.backend._dispatch(Event(type=EventType.MOUSE_CLICK, x=x, y=y, button="left"))
 
@@ -431,8 +438,15 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
         self.backend._dispatch(Event(type=EventType.MOUSE_CLICK, x=x, y=y, button="right"))
 
     def mouseDragged_(self, ns_event):
+        self._last_mouse_event = ns_event
         x, y = self._mouse_unit(ns_event)
         self.backend._dispatch(Event(type=EventType.MOUSE_DRAG, x=x, y=y, button="left"))
+
+    # NSDraggingSource: what operations this view offers as a drag source. Copy
+    # leaves the originals in place (a file manager export), which is the right
+    # default for dragging files out to another app.
+    def draggingSession_sourceOperationMaskForDraggingContext_(self, session, context):
+        return NSDragOperationCopy
 
     def scrollWheel_(self, ns_event):
         delta = ns_event.scrollingDeltaY()
@@ -472,7 +486,8 @@ class MacOSBackend(Backend):
         {
             **PROFILE_GUI_DESKTOP,
             # Not implemented yet in the MVP; flip these on as features land.
-            "drag_and_drop": False,
+            "drag_and_drop": False,  # drop-IN not wired up yet
+            "os_drag_drop": True,    # drag-OUT: native NSDraggingSource (below)
             "ime": True,
             "clipboard_rich": False,
             "native_file_dialog": False,
@@ -1127,6 +1142,40 @@ class MacOSBackend(Backend):
         pb = NSPasteboard.generalPasteboard()
         pb.clearContents()
         pb.setString_forType_(text, NSPasteboardTypeString)
+
+    # --- drag source ---------------------------------------------------------
+
+    def begin_file_drag(self, paths: list[str], event: Event | None = None) -> bool:
+        """Begin a native file-drag session from the content view.
+
+        The view adopts ``NSDraggingSource``; each path becomes an
+        ``NSDraggingItem`` whose pasteboard writer is a file ``NSURL`` (so the
+        receiver gets real files), imaged with the file's Finder icon. The
+        session starts from the live mouse ``NSEvent`` last seen by the view —
+        AppKit requires a drag to begin from the originating mouse event, which
+        is why we cache it rather than synthesize one from ``event``."""
+        if self._view is None or not paths:
+            return False
+        ns_event = getattr(self._view, "_last_mouse_event", None) or NSApp.currentEvent()
+        if ns_event is None:
+            return False
+        origin = self._view.convertPoint_fromView_(ns_event.locationInWindow(), None)
+        workspace = NSWorkspace.sharedWorkspace()
+        side = 32.0  # icon box in points; stagger stacked items so each shows
+        items = []
+        for i, path in enumerate(paths):
+            path = str(path)
+            url = NSURL.fileURLWithPath_(path)
+            item = NSDraggingItem.alloc().initWithPasteboardWriter_(url)
+            frame = NSMakeRect(
+                origin.x - side / 2, origin.y - side / 2 - i * 6.0, side, side
+            )
+            item.setDraggingFrame_contents_(frame, workspace.iconForFile_(path))
+            items.append(item)
+        self._view.beginDraggingSessionWithItems_event_source_(
+            items, ns_event, self._view
+        )
+        return True
 
     # --- native menus --------------------------------------------------------
 
