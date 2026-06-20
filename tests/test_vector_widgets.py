@@ -54,56 +54,73 @@ def test_unchecked_checkbox_has_box_but_no_check(backend):
     assert backend.check_calls == []  # nothing to check
 
 
-def test_checkbox_mark_box_is_pixel_square_and_accent(backend):
+def test_checkbox_mark_box_is_pixel_square_and_neutral(backend):
     panel = Panel(backend)
     box = Checkbox("x", checked=True)
-    panel.add(box, x=0, y=0, w=12, h=1)
+    other = Checkbox("y")  # takes focus, so `box` renders unfocused
+    panel.add(box, x=0, y=0, w=12, h=2)
+    panel.add(other, x=0, y=2, w=12, h=2)
+    panel.focus(other)
     panel.render()
     x, y, w, h, radius, style, hints = backend.round_rect_calls[0]
     assert hints.get("fill") is True
-    assert style.bg == panel.theme.accent          # checked -> accent fill
-    assert style.fg == panel.theme.accent          # checked -> accent border
+    # Accent is reserved for focus: an unfocused checked box is neutral
+    # (control_bg fill, a neutral text-colored border emphasis) — not accent.
+    assert style.bg == panel.theme.control_bg      # checked -> neutral fill
+    assert style.fg == panel.theme.text            # checked + unfocused -> neutral border
     # Square in pixels: w*base_w ~= h*base_h.
     bw, bh = backend.base_size
     assert w * bw == pytest.approx(h * bh, rel=1e-6)
-    # Focus is a separate channel: a halo ring (no fill) drawn outside the box.
-    halo = backend.round_rect_calls[1]
-    assert halo[5].fg == panel.theme.accent and halo[5].bg is None
-    assert halo[0] < x and halo[2] > w               # larger than, around, the box
+
+
+def test_checkbox_focus_recolors_box_without_halo(backend):
+    panel = Panel(backend)
+    box = Checkbox("x", checked=True)
+    panel.add(box, x=0, y=0, w=12, h=2)
+    panel.focus(box)
+    panel.render()
+    # One box only — focus recolors its border to the accent, no second ring.
+    assert len(backend.round_rect_calls) == 1
+    style = backend.round_rect_calls[0][5]
+    assert style.bg == panel.theme.control_bg
+    assert style.fg == panel.theme.accent          # focused -> blue border
 
 
 def test_radio_selected_draws_circle_and_dot(backend):
     panel = Panel(backend)
-    panel.add(RadioGroup(["a", "b"], selected=1), x=0, y=0, w=12, h=2)
-    panel.render()
-    # Two rows -> two ring circles; the selected row adds an inner dot circle
-    # (all fully rounded, radius None). The focused group adds one focus ring
-    # (a rounded outline with a radius — drawn around the group, not per row).
-    circles = [c for c in backend.round_rect_calls if c[4] is None]
-    assert len(circles) == 3
-    dot = circles[-1]
-    assert dot[5].bg == panel.theme.accent          # the dot is accent-filled
-    rings = [c for c in backend.round_rect_calls if c[4] is not None]
-    assert len(rings) == 1 and rings[0][5].fg == panel.theme.accent
-    assert not _snapshot_has_ascii_marks(backend)
-
-
-def test_radio_focus_ring_has_margin_and_offsets_rows(backend):
-    # Given vertical slack, the group insets its rows so the focus ring clears
-    # the text on every side, and hit-testing backs the inset out again.
-    panel = Panel(backend)
-    rg = RadioGroup(["a", "b", "c"])
+    rg = RadioGroup(["a", "b"], selected=1)
     panel.add(rg, x=0, y=0, w=12, h=5)
     panel.focus(rg)
     panel.render()
+    # Two rows -> two ring circles; the selected row adds an inner dot circle
+    # (all fully rounded, radius None). No box around the group.
+    circles = [c for c in backend.round_rect_calls if c[4] is None]
+    assert len(circles) == 3
+    dot = circles[-1]
+    assert dot[5].bg == panel.theme.text            # the dot is neutral, not accent
+    # Focus colors the selected circle's border accent; no radius-bearing ring.
+    selected_circle = circles[1]
+    assert selected_circle[5].fg == panel.theme.accent
+    assert [c for c in backend.round_rect_calls if c[4] is not None] == []
+    assert not _snapshot_has_ascii_marks(backend)
+
+
+def test_radio_focus_colors_selected_circle_and_offsets_rows(backend):
+    # Focus colors the selected circle blue (no box around the group); the rows
+    # stay inset and the taller pitch is backed out again for hit-testing.
+    panel = Panel(backend)
+    rg = RadioGroup(["a", "b", "c"], selected=1)
+    panel.add(rg, x=0, y=0, w=12, h=8)
+    panel.focus(rg)
+    panel.render()
     assert rg._pad_y > 0                                   # rows inset from the top
-    ring = [c for c in backend.round_rect_calls if c[4] is not None][0]
-    rx, ry, rw, rh = ring[:4]
-    assert ry < rg._pad_y                                  # ring top above first row
-    assert ry + rh > rg._pad_y + 3                         # ring bottom below last row
-    assert rx < 0.5                                        # ring left of the marks
-    # A click lands on the right row despite the inset.
-    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=1, y=rg._pad_y + 2, button="left"))
+    assert [c for c in backend.round_rect_calls if c[4] is not None] == []  # no ring
+    circles = [c for c in backend.round_rect_calls if c[4] is None]
+    accent = [c for c in circles if c[5].fg == panel.theme.accent]
+    assert len(accent) == 1                                # only the selected circle
+    # A click lands on the right row despite the inset and the taller row pitch.
+    click_y = rg._pad_y + 2 * rg._pitch + 0.1
+    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=1, y=click_y, button="left"))
     assert rg.selected == 2
 
 

@@ -219,8 +219,8 @@ def build_widgets_page(panel: Panel) -> VSplit:
     scroller = ScrollView(
         [
             (heading("Check boxes"), 1),
-            (feature, 1),
-            (hidden, 1),
+            (feature, "content"),
+            (hidden, "content"),
             (heading("Radio buttons"), 1),
             (size, "content"),
             (heading("Drop-down (opens a floating popup over the page)"), 1),

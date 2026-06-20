@@ -113,11 +113,17 @@ Both are valid; the difference is which channel carries it.
 
 ### 4a. Whole-widget focus — dedicated Outline
 
-For Button, Checkbox, Radio **group**, Tabs, TextEdit, dropdown/combo fields:
-focus is a **ring/border around the whole control**, one clear full perimeter
-(not an underline). This is where checkbox, radio, button, and tabs failed —
-focus was smuggled into the mark or the text color instead of getting its own
-outline.
+For Button, Tabs, TextEdit, dropdown/combo fields: focus is a **ring/border
+around the whole control**, one clear full perimeter (not an underline). This is
+where button and tabs failed — focus was smuggled into a channel already
+carrying another state.
+
+Small binary controls (Checkbox, Radio) are a deliberate exception: the mark
+*is* a box/circle outline, and now that its checked/selected value is drawn in
+**neutral** colors (never accent), the mark's own border is free to carry focus.
+So focus simply **recolors that border to the accent** — one shape, no separate
+halo ring and no box around the group. The collision §3 warns about is gone
+because value and focus no longer both want the accent.
 
 ### 4b. List-selection focus — Fill ordering
 
@@ -135,15 +141,19 @@ list *widget as a whole* — if it needs a frame — would use 4a.
 
 ## 5. Color discipline
 
-Give accent **one job: the value / active color** — the checked mark, the
-selected/active fill, the active-tab indicator, the radio dot, the *active*
-(focused) list selection. Then three rules keep it from colliding:
+Give accent **one job: the value / active color** — the selected/active fill,
+the active-tab indicator, the *active* (focused) list selection. Small binary
+controls are the exception: a **checkbox/radio reserves the accent for *focus***
+(its checked/selected state is a neutral mark), because on these the focus ring
+and a tiny accent mark sit so close that overloading the hue makes focus
+illegible. Then three rules keep accent from colliding:
 
 1. **Focus never reuses accent on an element whose value is already accent.**
    A focus ring on an accent-filled button must be a **light/neutral
    high-contrast** color (or drawn just *outside* the control on the pane
    background) — never accent-on-accent. A focus ring on a *neutral* control
-   (text field, checkbox box) *may* be accent, because there is no collision.
+   (text field, checkbox/radio mark) *is* accent — the mark itself is neutral,
+   so there is no collision.
 
 2. **Selection color ≠ focus color.** When an item is both selected and
    focused, the *fill ordering* (4b) carries focus; the selection hue stays
@@ -208,8 +218,8 @@ resolves to white on GUI, which inverts the emphasis. The Panel re-resolves
 |---|---|---|
 | **Button** | **Press** darkens the fill (hover lightens — opposite directions, so rest/hover/press read distinctly). Focus = full-perimeter ring whose color **contrasts the fill** (near-white on the accent fill, accent on a neutral fill), at any size — no faint underline on vector backends; a grid box only at ≥3 rows (below that it would eat the label), else an underline. Adds `variant="primary"` / `"secondary"` for the accent / no-accent faces. | ✅ done |
 | **TextEdit** | Caret = fg-colored **blinking I-beam** via the Panel `draw_caret` intent (Motion channel), reset to visible on every caret move/edit; focus stays on the border only (removed the duplicate accent caret); selection is focus-dependent — `text_selection_bg` while focused, `text_selection_inactive_bg` when blurred. | ✅ done |
-| **Checkbox** | Focus → a dedicated accent halo drawn *outside* the mark box on the pane background (so it contrasts even on a checked, accent-filled box); the Mark border stays accent for *checked* only. Focus is visible whether checked or not. | ✅ done |
-| **Radio** | Focus → one ring around the **group's content** (§4a) on vector, the reversed selected mark on a grid; the per-row mark no longer carries focus. The selected dot stays accent. The group reserves a little padding around its rows (vector only) so the ring clears the text rather than hugging it; hit-testing backs the inset out. | ✅ done |
+| **Checkbox** | Focus → the mark box's **own border is recolored to the accent** (one box, no separate halo). The checked state is a **neutral** mark: a neutral check glyph on the `control_bg` box, with a neutral text-colored border emphasis only when unfocused — so the accent means focus and nothing else. The mark box is a pixel-square that can exceed one base-unit cell, so the widget reserves a taller content row on vector backends and centers the mark/label in it; a cap in `_mark_box` also shrinks the box to fit any tighter row so its rounded top/bottom never clip. | ✅ done |
+| **Radio** | Focus → the **selected circle's border is recolored to the accent** (no box around the group), the reversed selected mark on a grid. The selected dot stays **neutral**. A per-row pitch taller than one cell (the mark box is a pixel-square that can exceed a base-unit cell) keeps the enlarged circles from overlapping, and rows are inset on vector backends; hit-testing backs the inset and pitch out. | ✅ done |
 | **Nav / ListView / TreeView** | Un-inverted the ordering: focused selection = `selection_active_bg` (loud) — accent fill on vector, REVERSE on a grid; unfocused = `selection_inactive_bg` (quiet). | ✅ done |
 | **Tabs** | Hover lightens whichever tab the pointer is over (the active one too), resolved against last frame's positions so it actually fires; active-tab text stays high-contrast on the fill (never accent-on-blue); the accent **indicator line = selection, always on for the active tab, on the top (outer) edge away from the content**; focus thickens the line (grid: reverses the active label). | ✅ done |
 

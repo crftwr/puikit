@@ -22,6 +22,22 @@ from .theme import Theme, theme_for
 # Caret blink half-period (seconds); only matters on animation-capable backends.
 _CARET_BLINK = 0.53
 
+# Checkbox / radio mark box side as a fraction of min(line_height, 2*advance).
+# >1.0 makes the mark a touch larger than a single base-unit cell, so widgets
+# that stack marks (RadioGroup) must reserve more than one row of pitch — see
+# mark_box_units and RadioGroup's row pitch.
+_MARK_FACTOR = 1.12
+
+
+def mark_box_units(bw: int, bh: int) -> tuple[float, float, float]:
+    """Geometry of a checkbox/radio mark box for a ``(bw, bh)`` base size:
+    ``(side_px, width_units, height_units)``. The box is a pixel-square (square
+    in device pixels even though a base unit cell is taller than it is wide), so
+    its height in base units can exceed 1.0 — the single source of truth for how
+    much vertical room a mark needs."""
+    side = min(bh, bw * 2) * _MARK_FACTOR
+    return side, (side / bw if bw else 1.0), (side / bh if bh else 1.0)
+
 # How far inside the far edge a clamped margin click lands, so it stays within
 # the content rect (whose right/bottom bound is exclusive) without losing
 # sub-unit precision. A whole-cell widget floors this to the last cell.
@@ -475,62 +491,67 @@ class DrawContext:
 
     def draw_check_mark(
         self, x: float, y: float, *, checked: bool, focused: bool, theme: "Theme",
-        row_bg: tuple[int, int, int] | None = None,
+        row_bg: tuple[int, int, int] | None = None, row_h: float = 1.0,
     ) -> None:
-        """Draw a checkbox mark whose first cell sits at (x, y). Vector backends
-        get a rounded box — accent-filled with a check when on, bordered when
-        off, plus a separate accent focus halo around it; grid backends fall back
-        to the ``[x]`` / ``[ ]`` text mark (reverse-video when focused). The
-        caller reserves the same column slot either way, so the label aligns
-        identically on every backend.
+        """Draw a checkbox mark whose row band starts at (x, y), vertically
+        centered in the ``row_h``-unit band. Vector backends get a rounded box —
+        a neutral fill with a check when on; focus recolors the box border to the
+        accent. Grid backends fall back to the ``[x]`` / ``[ ]`` text mark
+        (reverse-video when focused). The caller reserves the same column slot
+        either way, so the label aligns identically on every backend.
 
-        Focus and "checked" live in different channels (interaction_states.md
-        §3/§5): "checked" owns the fill/border (accent), focus owns a halo ring
-        drawn *outside* the box on the pane background — so the accent halo
-        contrasts even on a checked (accent-filled) box, where an accent border
-        would simply merge."""
+        Focus owns the border *color* (accent), "checked" owns the check glyph
+        plus a neutral border emphasis when unfocused — one box, not a box plus a
+        separate focus halo."""
         if not self._caps.supports("vector_shapes"):
             mark = "[x]" if checked else "[ ]"
             if focused:
                 style = Style(fg=theme.button_text, bg=theme.accent)
             else:
-                style = Style(fg=theme.accent if checked else theme.text, bg=row_bg)
+                style = Style(fg=theme.text, bg=row_bg)
             self.draw_text(int(x), y, mark, style)
             return
-        bx, by, w_u, h_u, side = self._mark_box(x, y)
-        fill = theme.accent if checked else theme.control_bg
-        border = theme.accent if checked else theme.control_border
+        bx, by, w_u, h_u, side = self._mark_box(x, y, row_h)
+        # Focus recolors the box border to the accent (no separate halo ring);
+        # otherwise the border carries "checked" as a neutral emphasis.
+        if focused:
+            border = theme.accent
+        else:
+            border = theme.text if checked else theme.control_border
         self.round_rect(
-            bx, by, w_u, h_u, Style(bg=fill, fg=border),
+            bx, by, w_u, h_u, Style(bg=theme.control_bg, fg=border),
             radius=max(2.0, side * 0.28), hints={"fill": True},
         )
         if checked:
-            self._draw_check(bx, by, w_u, h_u, Style(fg=theme.button_text))
-        if focused:
-            self._draw_focus_halo(bx, by, w_u, h_u, side, theme)
+            self._draw_check(bx, by, w_u, h_u, Style(fg=theme.text))
 
     def draw_radio_mark(
         self, x: float, y: float, *, selected: bool, focused: bool, theme: "Theme",
-        row_bg: tuple[int, int, int] | None = None,
+        row_bg: tuple[int, int, int] | None = None, row_h: float = 1.0,
     ) -> None:
-        """Draw a radio mark whose first cell sits at (x, y). Vector backends get
-        a circle — accent-ringed with a filled accent dot when selected; grid
-        backends fall back to the ``(•)`` / ``( )`` text mark.
+        """Draw a radio mark whose row band starts at (x, y). Vector backends get
+        a circle — with a filled neutral dot when selected — vertically centered
+        in the ``row_h``-unit band; grid backends fall back to the ``(•)`` /
+        ``( )`` text mark.
 
-        On vector backends focus is *not* drawn here: a radio is a group-level
-        choice, so the RadioGroup draws one focus ring around the whole group
-        (interaction_states.md §4a). ``focused`` only drives the grid cue, where
-        the focused group reverses its selected mark."""
+        Focus is shown by recoloring the *selected* circle to the accent (a radio
+        is a group-level choice, and the selected circle is always present), not
+        by a box around the group. On a grid the focused group reverses its
+        selected mark."""
         if not self._caps.supports("vector_shapes"):
             mark = "(•)" if selected else "( )"
             if focused and selected:
                 style = Style(fg=theme.button_text, bg=theme.accent)
             else:
-                style = Style(fg=theme.accent if selected else theme.text, bg=row_bg)
+                style = Style(fg=theme.text, bg=row_bg)
             self.draw_text(int(x), y, mark, style)
             return
-        bx, by, w_u, h_u, side = self._mark_box(x, y)
-        border = theme.accent if selected else theme.control_border
+        bx, by, w_u, h_u, side = self._mark_box(x, y, row_h)
+        # Focus recolors the selected circle to the accent; otherwise neutral.
+        if focused and selected:
+            border = theme.accent
+        else:
+            border = theme.text if selected else theme.control_border
         self.round_rect(
             bx, by, w_u, h_u, Style(bg=theme.control_bg, fg=border),
             radius=None, hints={"fill": True},
@@ -539,7 +560,7 @@ class DrawContext:
             dw, dh = w_u * 0.46, h_u * 0.46
             self.round_rect(
                 bx + (w_u - dw) / 2.0, by + (h_u - dh) / 2.0, dw, dh,
-                Style(bg=theme.accent), radius=None, hints={"fill": True},
+                Style(bg=theme.text), radius=None, hints={"fill": True},
             )
 
     def draw_caret(
@@ -564,30 +585,26 @@ class DrawContext:
             # No sub-cell drawing: a reverse block in the foreground color.
             self.draw_text(int(x), int(y), glyph or " ", Style(fg=theme.control_bg, bg=theme.text))
 
-    def _mark_box(self, x: float, y: float) -> tuple[float, float, float, float, float]:
+    def _mark_box(
+        self, x: float, y: float, row_h: float = 1.0
+    ) -> tuple[float, float, float, float, float]:
         """Geometry for a checkbox/radio mark box: a pixel-square, vertically
-        centered in the row, returned as (x, y, w, h) in base units plus the
-        side length in device pixels. Square in pixels even though a base unit
-        cell is taller than it is wide."""
+        centered in a ``row_h``-unit row band starting at ``y``, returned as
+        (x, y, w, h) in base units plus the side length in device pixels. Square
+        in pixels even though a base unit cell is taller than it is wide, so the
+        box may be taller than one unit — callers that stack marks pass a
+        ``row_h`` large enough to contain it (see RadioGroup). As a safety net the
+        box is also capped to ``row_h`` so its rounded top/bottom are never
+        clipped, even if a layout hands the widget a tighter row than it asked
+        for."""
         bw, bh = self.base_size
-        side = min(bh, bw * 2) * 0.80  # device pixels
-        w_u = side / bw if bw else 1.0
-        h_u = side / bh if bh else 1.0
-        return (x + 0.2, y + (1.0 - h_u) / 2.0, w_u, h_u, side)
-
-    def _draw_focus_halo(
-        self, bx: float, by: float, w_u: float, h_u: float, side: float, theme: "Theme"
-    ) -> None:
-        """An accent focus ring around a mark box, drawn one or two device pixels
-        *outside* it (on the pane background) with a gap, so it reads as a
-        separate focus channel even on an accent-filled mark."""
-        bw, bh = self.base_size
-        gx = 2.0 / bw if bw else 0.12
-        gy = 2.0 / bh if bh else 0.12
-        self.round_rect(
-            bx - gx, by - gy, w_u + 2 * gx, h_u + 2 * gy,
-            Style(fg=theme.accent), radius=max(2.0, side * 0.28) + 1.5,
-        )
+        side, w_u, h_u = mark_box_units(bw, bh)
+        max_side = row_h * bh * 0.96  # leave a hair of vertical margin
+        if max_side > 0 and side > max_side:
+            side = max_side
+            w_u = side / bw if bw else 1.0
+            h_u = side / bh if bh else 1.0
+        return (x + 0.2, y + (row_h - h_u) / 2.0, w_u, h_u, side)
 
     def _draw_check(
         self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE
