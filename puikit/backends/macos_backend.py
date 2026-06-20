@@ -84,6 +84,7 @@ from Foundation import (
     NSMakeRect,
     NSMakeSize,
     NSNotFound,
+    NSNumber,
     NSObject,
     NSURL,
     NSZeroPoint,
@@ -113,6 +114,11 @@ except ImportError:  # animation gracefully degrades to immediate switches
 
 _DEFAULT_FG = (230, 230, 230)
 _DEFAULT_BG = (24, 24, 24)
+
+# Upper bound on the attributed-string / measured-width caches. Picked well
+# above the run count of any single frame so steady-state UIs never evict, yet
+# small enough that a flood of unique text stays a bounded blip.
+_ATTR_CACHE_MAX = 8192
 
 # Formal NSTextInputClient conformance: adopting the protocol makes PyObjC
 # apply Apple's own method signatures (NSRange struct args, the CGRect return
@@ -232,7 +238,16 @@ def _attr_string(text: str, attrs) -> Any:
     frames issue hundreds to thousands of such calls per render, so the leak
     accumulated into the hundreds of MB / GB as the view redrew. The equivalent
     NSAttributedString methods (-drawAtPoint: / -size) do not leak, so every
-    text draw and measurement routes through this helper instead."""
+    text draw and measurement routes through this helper instead.
+
+    A second, subtler leak motivates the cache in front of this builder (see
+    MacOSBackend._cached_attr_string): drawing an attributed string built from a
+    *fresh* Python str into a layer-backed view leaves the bridged
+    OC_PythonUnicode proxy retained by the layer's display list. Widgets that
+    rebuild their text every render (e.g. a re-wrapping MarkdownView) thus
+    minted a new proxy per run per frame that never came back. Reusing one
+    immutable NSAttributedString per (text, style) keeps the proxy count bounded
+    by distinct content rather than growing with frame count."""
     return NSAttributedString.alloc().initWithString_attributes_(text, attrs)
 
 
@@ -583,6 +598,13 @@ class MacOSBackend(Backend):
         self._fonts: dict[TextAttribute, Any] = {}
         # Per-Style font cache: resolved NSFonts keyed by (Font, bold, italic).
         self._style_fonts: dict[tuple, Any] = {}
+        # Immutable NSAttributedStrings keyed by (text, style-signature), and
+        # measured widths keyed the same way. Both bound the per-render text
+        # work AND the OC_PythonUnicode proxy retention described in
+        # _attr_string; cleared wholesale when they exceed _ATTR_CACHE_MAX so a
+        # stream of unique text (a busy log) can never grow them without bound.
+        self._attr_cache: dict[tuple, Any] = {}
+        self._width_cache: dict[tuple, float] = {}
         # Decoded images keyed by path. Without this, _render_image decoded a
         # fresh NSImage from disk on every frame for every visible image; the
         # AppKit/CoreGraphics backing-store caches behind those accumulate as
@@ -699,6 +721,14 @@ class MacOSBackend(Backend):
         # run can be drawn in a single call yet still land on the grid columns
         # (see _render_text).
         self._grid_advance = advance
+        # Pre-bridge the kern as ONE NSNumber, reused for every text run. The
+        # kern goes into the id-typed NSKernAttributeName slot, so PyObjC has to
+        # wrap the Python number in an ObjC object; a *fresh* Python float per
+        # call (e.g. recomputing base_w - grid_advance inline) makes a new
+        # wrapper each time that is then retained for the process lifetime — a
+        # ~16 byte-per-text-run leak that, across redraws, grew RSS without
+        # bound (verified in isolation). One shared NSNumber bridges once.
+        self._grid_kern = NSNumber.numberWithDouble_(self._base_w - advance)
 
     def _resolve_style_font(self, style: Style) -> Any:
         """The NSFont for a Style carrying a per-widget font, cached by request.
@@ -714,6 +744,18 @@ class MacOSBackend(Backend):
             self._style_fonts[key] = ns
         return ns
 
+    def _cached_attr_string(self, key: tuple, text: str, attrs) -> Any:
+        """An NSAttributedString for (text, style ``key``), reused across frames.
+        ``attrs`` is only built by the caller on a miss. See _attr_string for the
+        leak this prevents and _ATTR_CACHE_MAX for the bound."""
+        s = self._attr_cache.get(key)
+        if s is None:
+            s = _attr_string(text, attrs)
+            if len(self._attr_cache) >= _ATTR_CACHE_MAX:
+                self._attr_cache.clear()
+            self._attr_cache[key] = s
+        return s
+
     def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
         """Displayed width in base units. Base-font (font=None) text tiles the
         grid one column per glyph; a real per-Style font is measured natively
@@ -721,7 +763,13 @@ class MacOSBackend(Backend):
         if style.font is None:
             return float(display_width(text))
         ns_font = self._resolve_style_font(style)
-        width = _attr_string(text, {NSFontAttributeName: ns_font}).size().width
+        key = (text, id(ns_font))
+        width = self._width_cache.get(key)
+        if width is None:
+            width = _attr_string(text, {NSFontAttributeName: ns_font}).size().width
+            if len(self._width_cache) >= _ATTR_CACHE_MAX:
+                self._width_cache.clear()
+            self._width_cache[key] = width
         return width / self._base_w if self._base_w else float(len(text))
 
     def measure_line_height(self, style: Style = DEFAULT_STYLE) -> float:
@@ -1007,11 +1055,12 @@ class MacOSBackend(Backend):
             return
 
         weight = TextAttribute.BOLD if style.attr & TextAttribute.BOLD else TextAttribute.NORMAL
+        underline = bool(style.attr & TextAttribute.UNDERLINE)
         attrs = {
             NSFontAttributeName: self._fonts[weight],
             NSForegroundColorAttributeName: _ns_color(fg, alpha),
         }
-        if style.attr & TextAttribute.UNDERLINE:
+        if underline:
             attrs[NSUnderlineStyleAttributeName] = NSUnderlineStyleSingle
 
         # Lock each glyph to its base unit column without drawing it in its own
@@ -1032,7 +1081,8 @@ class MacOSBackend(Backend):
             _ns_color(bg).setFill()
             NSRectFill(self._unit_rect(x, y, total, 1))
         kerned = dict(attrs)
-        kerned[NSKernAttributeName] = self._base_w - self._grid_advance
+        kerned[NSKernAttributeName] = self._grid_kern
+        sig = (weight, fg, alpha, underline)
         col = 0
         i = 0
         n = len(runs)
@@ -1041,13 +1091,14 @@ class MacOSBackend(Backend):
                 j = i
                 while j < n and widths[j] == 1:
                     j += 1
-                _attr_string("".join(runs[i:j]), kerned).drawAtPoint_(
+                seg = "".join(runs[i:j])
+                self._cached_attr_string(("g1", seg, *sig), seg, kerned).drawAtPoint_(
                     self._unit_rect(x + col, y, 1, 1).origin
                 )
                 col += j - i
                 i = j
             else:
-                _attr_string(runs[i], attrs).drawAtPoint_(
+                self._cached_attr_string(("g2", runs[i], *sig), runs[i], attrs).drawAtPoint_(
                     self._unit_rect(x + col, y, widths[i], 1).origin
                 )
                 col += widths[i]
@@ -1061,13 +1112,15 @@ class MacOSBackend(Backend):
         proportional and sized text flow continuously; the pane clip trims the
         overflow. This is the GUI "no text grid" path (docs/font_system.md §9)."""
         ns_font = self._resolve_style_font(style)
+        underline = bool(style.attr & TextAttribute.UNDERLINE)
         attrs = {
             NSFontAttributeName: ns_font,
             NSForegroundColorAttributeName: _ns_color(fg, alpha),
         }
-        if style.attr & TextAttribute.UNDERLINE:
+        if underline:
             attrs[NSUnderlineStyleAttributeName] = NSUnderlineStyleSingle
-        ns_text = _attr_string(text, attrs)
+        key = ("f", text, id(ns_font), tuple(fg) if fg else None, alpha, underline)
+        ns_text = self._cached_attr_string(key, text, attrs)
         origin = self._unit_rect(x, y, 1, 1).origin
         if bg is not None:
             width = ns_text.size().width
