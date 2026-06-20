@@ -13,6 +13,7 @@ from .label import Label
 from .layout_view import LayoutView
 from .list import ListView
 from .log_view import LogView
+from .markdown_view import MarkdownView
 from .menu import MenuBar, MenuPopup
 from .message_box import MessageBox, show_message_box
 from .progress_bar import ProgressBar
@@ -38,6 +39,7 @@ __all__ = [
     "LayoutView",
     "ListView",
     "LogView",
+    "MarkdownView",
     "MenuBar",
     "MenuPopup",
     "MessageBox",

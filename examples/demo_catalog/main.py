@@ -53,6 +53,7 @@ from puikit.widgets import (
     LayoutView,
     ListView,
     LogView,
+    MarkdownView,
     MenuBar,
     ProgressBar,
     RadioGroup,
@@ -365,6 +366,56 @@ def build_log_page(panel: Panel) -> VSplit:
     return VSplit(
         Item(log, weight=1, hints={"surface": "content"}),
         Item(controls, size="content"),
+        gap=1,
+    )
+
+
+_MARKDOWN_SAMPLE = """\
+# MarkdownView
+
+A read-only **rich-text** viewer for *Markdown*, parsed once into semantic
+blocks whose inline roles (`bold`, `code`, links) are colored by the active
+`Theme` — so the same document follows each backend's palette.
+
+## Inline runs
+
+Mix **bold**, *italic*, ***both***, inline `code`, and a [link](https://x)
+in one sentence; emphasis is drawn with text attributes, so the body stays on
+the monospaced base grid on every backend.
+
+## Lists
+
+- first bullet, long enough to wrap to the pane width and show the hanging
+  indent that keeps the continuation aligned under the text
+- second bullet
+  - a nested item
+1. ordered one
+2. ordered two
+
+## Block quote
+
+> Quotes render muted and italic, with a bar in the gutter.
+
+## Fenced code
+
+```
+def greet(name):
+    print(f"hello {name}")  # not inline-parsed
+```
+
+---
+
+Scroll with the arrow / page keys, Home / End, or the mouse wheel.
+"""
+
+
+def build_markdown_page(panel: Panel) -> VSplit:
+    # One source string parsed to semantic blocks; the Theme colors the roles,
+    # so headings/links/code read correctly on TUI and GUI from the same widget.
+    view = MarkdownView(_MARKDOWN_SAMPLE)
+    return VSplit(
+        Item(view, weight=1, hints={"surface": "content"}),
+        Item(Label("↑↓/PgUp/PgDn/Home/End or wheel to scroll", DIM), size="content"),
         gap=1,
     )
 
@@ -1814,6 +1865,7 @@ PAGES = [
     ("↔️ Splitter", build_splitter_page),
     ("📋 ListView", build_list_page),
     ("📜 LogView", build_log_page),
+    ("📝 Markdown", build_markdown_page),
     ("🎚️ ScrollBar", build_scrollbar_page),
     ("🗂️ Tabs", build_tabs_page),
     ("🌲 Tree", build_tree_page),
