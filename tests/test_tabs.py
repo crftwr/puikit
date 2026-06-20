@@ -74,6 +74,31 @@ def test_tabs_click_selects_tab(backend):
     assert tabs.selected == 1
 
 
+def test_tabs_hover_lightens_tab(backend):
+    # Hover must resolve against last frame's tab positions, not the list being
+    # rebuilt this frame — otherwise it never matches and no tab ever lightens.
+    panel = Panel(backend)
+    tabs = _tabs()
+    panel.add(tabs, x=0, y=0, w=40, h=10)
+    panel.render()  # frame 1 records tab_x
+    x1 = tabs._tab_x[1][0]
+    panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=x1 + 1, y=0))
+    panel.render()  # frame 2 resolves the hover
+    bg = backend.style_at(x1 + 1, 0).bg
+    assert bg is not None and bg != panel.theme.popup_bg  # the inactive tab lit up
+
+
+def test_tabs_active_text_is_high_contrast_not_accent(backend):
+    # The active tab's label never recolors into the fill's hue (blue on blue);
+    # it stays the high-contrast text color.
+    panel = Panel(backend)
+    tabs = _tabs()
+    panel.add(tabs, x=0, y=0, w=40, h=10)
+    panel.focus(tabs)
+    panel.render()
+    assert backend.style_at(1, 0).fg == panel.theme.text
+
+
 def test_tabs_forward_event_to_active_content(backend):
     seen = []
 

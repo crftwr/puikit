@@ -22,17 +22,36 @@ from ..panel import DrawContext
 CONTROL_HEIGHT = 1.5
 
 
-def selected_row_style(base: Style, theme: Any, focused: bool) -> Style:
+def selected_row_style(
+    base: Style, theme: Any, focused: bool, vector: bool = False
+) -> Style:
     """Style for the selected row of a list-like widget (ListView, TreeView).
 
-    A selection reads as *active* only while the widget holds focus: focused, it
-    gets the full reverse-video highlight; unfocused, it falls back to the
-    theme's muted selection background, so a list whose focus has moved
-    elsewhere dims its selection exactly like every other control dims its cue.
-    Without a theme in reach the highlight is kept (better visible than lost)."""
-    if focused or theme is None or getattr(theme, "selection_bg", None) is None:
-        return Style(base.fg, base.bg, base.attr | TextAttribute.REVERSE)
-    return Style(base.fg, theme.selection_bg, base.attr)
+    A selection reads as *active* only while the widget holds focus, and the
+    **louder** cue always marks the focused state — never the reverse
+    (interaction_states.md §4b/§6). That ordering is resolved per backend, not
+    ported as a fixed attribute:
+
+    - focused, grid: a reverse-video highlight (the loudest cue a terminal has);
+    - focused, vector: the accent selection fill, with the row's own (light)
+      text kept legible on it — *not* reverse, whose white fill would read
+      louder than any unfocused color and invert the emphasis;
+    - unfocused, either: the muted inactive fill, so a list whose focus moved
+      away dims its selection like every other control dims its cue.
+
+    Without the theme tokens in reach the highlight is kept when focused and
+    dropped otherwise (better visible than lost)."""
+    active = getattr(theme, "selection_active_bg", None) if theme is not None else None
+    inactive = getattr(theme, "selection_inactive_bg", None) if theme is not None else None
+    if active is None or inactive is None:
+        if focused:
+            return Style(base.fg, base.bg, base.attr | TextAttribute.REVERSE)
+        return base
+    if not focused:
+        return Style(base.fg, inactive, base.attr)
+    if vector:
+        return Style(base.fg, active, base.attr)
+    return Style(base.fg, base.bg, base.attr | TextAttribute.REVERSE)
 
 
 class Widget:

@@ -463,9 +463,16 @@ class DrawContext:
     ) -> None:
         """Draw a checkbox mark whose first cell sits at (x, y). Vector backends
         get a rounded box — accent-filled with a check when on, bordered when
-        off, an accent ring on focus; grid backends fall back to the ``[x]`` /
-        ``[ ]`` text mark. The caller reserves the same column slot either way,
-        so the label aligns identically on every backend."""
+        off, plus a separate accent focus halo around it; grid backends fall back
+        to the ``[x]`` / ``[ ]`` text mark (reverse-video when focused). The
+        caller reserves the same column slot either way, so the label aligns
+        identically on every backend.
+
+        Focus and "checked" live in different channels (interaction_states.md
+        §3/§5): "checked" owns the fill/border (accent), focus owns a halo ring
+        drawn *outside* the box on the pane background — so the accent halo
+        contrasts even on a checked (accent-filled) box, where an accent border
+        would simply merge."""
         if not self._caps.supports("vector_shapes"):
             mark = "[x]" if checked else "[ ]"
             if focused:
@@ -476,13 +483,15 @@ class DrawContext:
             return
         bx, by, w_u, h_u, side = self._mark_box(x, y)
         fill = theme.accent if checked else theme.control_bg
-        border = theme.accent if (focused or checked) else theme.control_border
+        border = theme.accent if checked else theme.control_border
         self.round_rect(
             bx, by, w_u, h_u, Style(bg=fill, fg=border),
             radius=max(2.0, side * 0.28), hints={"fill": True},
         )
         if checked:
             self._draw_check(bx, by, w_u, h_u, Style(fg=theme.button_text))
+        if focused:
+            self._draw_focus_halo(bx, by, w_u, h_u, side, theme)
 
     def draw_radio_mark(
         self, x: float, y: float, *, selected: bool, focused: bool, theme: "Theme",
@@ -490,7 +499,12 @@ class DrawContext:
     ) -> None:
         """Draw a radio mark whose first cell sits at (x, y). Vector backends get
         a circle — accent-ringed with a filled accent dot when selected; grid
-        backends fall back to the ``(•)`` / ``( )`` text mark."""
+        backends fall back to the ``(•)`` / ``( )`` text mark.
+
+        On vector backends focus is *not* drawn here: a radio is a group-level
+        choice, so the RadioGroup draws one focus ring around the whole group
+        (interaction_states.md §4a). ``focused`` only drives the grid cue, where
+        the focused group reverses its selected mark."""
         if not self._caps.supports("vector_shapes"):
             mark = "(•)" if selected else "( )"
             if focused and selected:
@@ -500,7 +514,7 @@ class DrawContext:
             self.draw_text(int(x), y, mark, style)
             return
         bx, by, w_u, h_u, side = self._mark_box(x, y)
-        border = theme.accent if (focused or selected) else theme.control_border
+        border = theme.accent if selected else theme.control_border
         self.round_rect(
             bx, by, w_u, h_u, Style(bg=theme.control_bg, fg=border),
             radius=None, hints={"fill": True},
@@ -544,6 +558,20 @@ class DrawContext:
         w_u = side / bw if bw else 1.0
         h_u = side / bh if bh else 1.0
         return (x + 0.2, y + (1.0 - h_u) / 2.0, w_u, h_u, side)
+
+    def _draw_focus_halo(
+        self, bx: float, by: float, w_u: float, h_u: float, side: float, theme: "Theme"
+    ) -> None:
+        """An accent focus ring around a mark box, drawn one or two device pixels
+        *outside* it (on the pane background) with a gap, so it reads as a
+        separate focus channel even on an accent-filled mark."""
+        bw, bh = self.base_size
+        gx = 2.0 / bw if bw else 0.12
+        gy = 2.0 / bh if bh else 0.12
+        self.round_rect(
+            bx - gx, by - gy, w_u + 2 * gx, h_u + 2 * gy,
+            Style(fg=theme.accent), radius=max(2.0, side * 0.28) + 1.5,
+        )
 
     def _draw_check(
         self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE

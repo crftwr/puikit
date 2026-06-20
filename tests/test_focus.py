@@ -212,7 +212,7 @@ def test_list_selection_is_a_strong_cue_only_while_focused(backend):
     panel.render()
     sel = backend.style_at(0, 0)
     assert not sel.attr & TextAttribute.REVERSE                  # dimmed, not active
-    assert sel.bg == panel.theme.selection_bg
+    assert sel.bg == panel.theme.selection_inactive_bg          # muted, focus elsewhere
 
 
 def test_tab_descends_through_layoutview_host(backend):

@@ -48,6 +48,11 @@ class Theme:
     button_secondary_bg: Color = (58, 61, 65)         # secondary face   #3A3D41
     button_secondary_hover_bg: Color = (69, 73, 78)   # secondary hover  #45494E
     selection_bg: Color = (9, 71, 113)     # active selection            #094771
+    # List/row selection split by focus (interaction_states.md §4b/§5): the loud
+    # accent fill goes to the *focused* widget, the muted neutral to a list whose
+    # focus has moved away — the louder cue always marks focus, never the reverse.
+    selection_active_bg: Color = (9, 71, 113)         # focused  #094771
+    selection_inactive_bg: Color = (55, 55, 61)       # blurred  #37373D
     # Text-field selection, split by focus: a clearly legible blue while the
     # field is focused, a muted neutral when focus is elsewhere (the editor
     # selection / inactive-selection pair from VS Code).

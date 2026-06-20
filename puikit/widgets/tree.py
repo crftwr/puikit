@@ -109,7 +109,9 @@ class TreeView(Widget):
                 text = clipped + " " * (text_w - display_width(clipped))
                 style = self.style
                 if index == self.selected:
-                    style = selected_row_style(style, theme, ctx.focused)
+                    style = selected_row_style(
+                        style, theme, ctx.focused, ctx.vector_shapes
+                    )
                 ctx.draw_text(0, y, text, style)
             row += 1
 

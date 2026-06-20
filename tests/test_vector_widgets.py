@@ -62,23 +62,29 @@ def test_checkbox_mark_box_is_pixel_square_and_accent(backend):
     x, y, w, h, radius, style, hints = backend.round_rect_calls[0]
     assert hints.get("fill") is True
     assert style.bg == panel.theme.accent          # checked -> accent fill
-    assert style.fg == panel.theme.accent          # focused -> accent ring
+    assert style.fg == panel.theme.accent          # checked -> accent border
     # Square in pixels: w*base_w ~= h*base_h.
     bw, bh = backend.base_size
     assert w * bw == pytest.approx(h * bh, rel=1e-6)
+    # Focus is a separate channel: a halo ring (no fill) drawn outside the box.
+    halo = backend.round_rect_calls[1]
+    assert halo[5].fg == panel.theme.accent and halo[5].bg is None
+    assert halo[0] < x and halo[2] > w               # larger than, around, the box
 
 
 def test_radio_selected_draws_circle_and_dot(backend):
     panel = Panel(backend)
     panel.add(RadioGroup(["a", "b"], selected=1), x=0, y=0, w=12, h=2)
     panel.render()
-    # Two rows -> two ring circles; the selected row adds an inner dot circle.
-    assert len(backend.round_rect_calls) == 3
-    # Every circle asks for full rounding (radius None).
-    assert all(call[4] is None for call in backend.round_rect_calls)
-    # The dot is filled with the accent color.
-    dot = backend.round_rect_calls[-1]
-    assert dot[5].bg == panel.theme.accent
+    # Two rows -> two ring circles; the selected row adds an inner dot circle
+    # (all fully rounded, radius None). The focused group adds one focus ring
+    # (a rounded outline with a radius — drawn around the group, not per row).
+    circles = [c for c in backend.round_rect_calls if c[4] is None]
+    assert len(circles) == 3
+    dot = circles[-1]
+    assert dot[5].bg == panel.theme.accent          # the dot is accent-filled
+    rings = [c for c in backend.round_rect_calls if c[4] is not None]
+    assert len(rings) == 1 and rings[0][5].fg == panel.theme.accent
     assert not _snapshot_has_ascii_marks(backend)
 
 

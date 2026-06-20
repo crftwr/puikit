@@ -131,7 +131,9 @@ class ListView(Widget):
                 text = clipped + " " * (text_w - display_width(clipped))
                 style = self.style
                 if index == self.selected:
-                    style = selected_row_style(style, ctx.theme, ctx.focused)
+                    style = selected_row_style(
+                        style, ctx.theme, ctx.focused, ctx.vector_shapes
+                    )
                 ctx.draw_text(0, y, text, style)
             row += 1
 
@@ -156,14 +158,14 @@ class ListView(Widget):
 
     def _selection_bg(self, ctx: DrawContext) -> tuple[int, int, int] | None:
         """Background fill for the selected row of a widget list. The selection
-        reads as *active* only while the list holds focus: focused, it uses the
-        theme's accent selection color; unfocused, a muted control fill — the
-        same active/inactive distinction the text path draws with REVERSE vs a
-        muted background. Inner widgets inherit this as their pane background."""
+        reads as *active* only while the list holds focus: focused, the loud
+        accent selection fill; unfocused, the muted inactive fill — the louder
+        cue marks focus (interaction_states.md §4b). Inner widgets inherit this
+        as their pane background."""
         theme = ctx.theme
         if theme is None:
             return None
-        return theme.selection_bg if ctx.focused else theme.control_bg
+        return theme.selection_active_bg if ctx.focused else theme.selection_inactive_bg
 
     def _clamp_offset(self, viewport_h: float) -> None:
         self.offset = max(0, min(self.offset, max(0, len(self.items) * self._row_h - viewport_h)))

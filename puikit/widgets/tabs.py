@@ -21,6 +21,12 @@ from ..theme import DEFAULT_THEME
 from .base import CONTROL_HEIGHT, Widget
 
 
+def _lighten(color: tuple[int, int, int], amount: float = 0.16) -> tuple[int, int, int]:
+    """Nudge a color toward white, for the hover tint of a tab fill — a clearly
+    visible delta, not the near-imperceptible row-hover gray."""
+    return tuple(round(c + (255 - c) * amount) for c in color)  # type: ignore[return-value]
+
+
 class Tabs(FocusContainer, Widget):
     focusable = True
     # A tab strip is a focus stop even when the active content has no focusable
@@ -77,31 +83,39 @@ class Tabs(FocusContainer, Widget):
         ty = (strip_h - 1.0) / 2.0
         ctx.fill_rect(0, 0, wu, strip_h, Style(bg=theme.popup_bg))
 
+        # Resolve the hovered tab against last frame's positions *before* we
+        # rebuild them — _tab_x is emptied below, so hit-testing the list while
+        # it is still being filled would never match the current tab.
+        hover = ctx.panel.pointer if ctx.panel is not None else None
+        hovered_idx = self._hit_strip(ctx, hover) if hover is not None else None
+
         self._tab_x = []
         x = 0
-        hover = ctx.panel.pointer if ctx.panel is not None else None
         for i, (title, _content) in enumerate(self.tabs):
             label = f" {title} "
             w = max(1, int(ctx.measure_text(label)))
             active = i == self.selected
-            hovered = (
-                hover is not None
-                and self._hit_strip(ctx, hover) == i
-            )
-            if active:
-                row_bg = theme.selection_bg
-            elif hovered:
-                row_bg = theme.hover_bg
-            else:
-                row_bg = theme.popup_bg
+            hovered = i == hovered_idx
+            # Fill channel: the active tab wears the loud selection fill (always,
+            # so you can see which page is shown regardless of focus); hover
+            # lightens whichever tab the pointer is over — the active one too.
+            base_bg = theme.selection_active_bg if active else theme.popup_bg
+            row_bg = _lighten(base_bg) if hovered else base_bg
             if row_bg != theme.popup_bg:
                 ctx.fill_rect(x, 0, w, strip_h, Style(bg=row_bg))
-            fg = theme.accent if (active and ctx.focused) else theme.text
+            # Text stays high-contrast on the fill — never recolored into the
+            # fill's hue (interaction_states.md §5). On a grid the focused strip
+            # reverses its active label, since it has no room for an edge line.
             attr = TextAttribute.BOLD if active else TextAttribute.NORMAL
-            ctx.draw_text(x, ty, label, Style(fg=fg, bg=row_bg, attr=attr))
-            if active and ctx.focused and ctx.vector_shapes:
-                px = 1.0 / max(1, ctx.base_size[1])
-                ctx.fill_rect(x, strip_h - px, w, px, Style(bg=theme.accent))
+            if active and ctx.focused and not ctx.vector_shapes:
+                attr |= TextAttribute.REVERSE
+            ctx.draw_text(x, ty, label, Style(fg=theme.text, bg=row_bg, attr=attr))
+            # Selection indicator: an accent line on the strip's OUTER edge — the
+            # top, away from the content below — always on for the active tab.
+            # Focus thickens it (its own channel; the text never carries focus).
+            if active and ctx.vector_shapes:
+                ph = (2.0 if ctx.focused else 1.0) / max(1, ctx.base_size[1])
+                ctx.fill_rect(x, 0, w, ph, Style(bg=theme.accent))
             self._tab_x.append((x, x + w))
             x += w
 
