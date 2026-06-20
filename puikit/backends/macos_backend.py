@@ -55,6 +55,7 @@ from AppKit import (
     NSForegroundColorAttributeName,
     NSItalicFontMask,
     NSImage,
+    NSKernAttributeName,
     NSCompositingOperationSourceOver,
     NSGraphicsContext,
     NSRectClip,
@@ -568,6 +569,12 @@ class MacOSBackend(Backend):
         self._fonts: dict[TextAttribute, Any] = {}
         # Per-Style font cache: resolved NSFonts keyed by (Font, bold, italic).
         self._style_fonts: dict[tuple, Any] = {}
+        # Decoded images keyed by path. Without this, _render_image decoded a
+        # fresh NSImage from disk on every frame for every visible image; the
+        # AppKit/CoreGraphics backing-store caches behind those accumulate as
+        # animations drive repeated redraws (a native memory leak invisible to
+        # Python object counts). Bounded by the number of distinct image paths.
+        self._image_cache: dict[str, Any] = {}
         self._animations: dict[int, Animation] = {}  # keyed by id(widget)
         self._anim_timer = None
         self._tick_callbacks: list[Any] = []
@@ -674,6 +681,12 @@ class MacOSBackend(Backend):
         ).width
         self._base_w = math.ceil(advance)
         self._base_h = math.ceil(regular.ascender() - regular.descender() + regular.leading())
+        # Natural advance of the monospaced base font, before the base unit was
+        # rounded up. A constant kern of (base_w - grid_advance) added after each
+        # glyph makes a run advance exactly one base unit per glyph, so a whole
+        # run can be drawn in a single call yet still land on the grid columns
+        # (see _render_text).
+        self._grid_advance = advance
 
     def _resolve_style_font(self, style: Style) -> Any:
         """The NSFont for a Style carrying a per-widget font, cached by request.
@@ -991,31 +1004,45 @@ class MacOSBackend(Backend):
         if style.attr & TextAttribute.UNDERLINE:
             attrs[NSUnderlineStyleAttributeName] = NSUnderlineStyleSingle
 
-        # The base unit width is the glyph advance rounded *up* (see _init_fonts),
-        # so a run drawn as one NSString flows narrower than the base unit grid and
-        # drifts left a fraction of a pixel per glyph — over a wide pane the
-        # drift accumulates to whole base units, so base unit-based clipping/truncation
-        # cuts text that visually still fits. Place every glyph on its own
-        # base unit instead: columns stay aligned and the clip rect trims the
-        # boundary glyph at the exact pane edge, matching the base-unit coordinates
-        # the rest of the framework works in. The run's background fills whole
-        # base units (not just glyph advances) so reversed/selected runs have no
-        # sub-pixel seams.
-        # Advance by each glyph's display width (East Asian wide glyphs span two
-        # base units), so a wide CJK glyph gets a 2-cell slot and the next glyph
-        # does not overlap it.
+        # Lock each glyph to its base unit column without drawing it in its own
+        # call. The base unit width is the monospaced advance rounded *up*, so a
+        # run drawn as one NSString would drift left a fraction of a pixel per
+        # glyph; a constant kern of (base_w - grid_advance) added after each
+        # glyph cancels that drift exactly, so columns stay aligned and the clip
+        # rect still trims the boundary glyph at the pane edge. This matters for
+        # memory, not just speed: -[NSString drawAtPoint:withAttributes:] retains
+        # per call inside CoreText, so a per-glyph loop leaked megabytes per frame
+        # as the display redrew. Drawing each contiguous single-width segment in
+        # one kerned call collapses thousands of calls per frame to a handful.
+        # Wide glyphs (East Asian, display width 2) break a segment: they get a
+        # 2-cell slot drawn on their own so the next glyph does not overlap.
         runs = _glyph_runs(text)
         widths = [max(1, display_width(glyph)) for glyph in runs]
         total = sum(widths)
         if bg is not None:
             _ns_color(bg).setFill()
             NSRectFill(self._unit_rect(x, y, total, 1))
+        kerned = dict(attrs)
+        kerned[NSKernAttributeName] = self._base_w - self._grid_advance
         col = 0
-        for glyph, w in zip(runs, widths):
-            NSString.stringWithString_(glyph).drawAtPoint_withAttributes_(
-                self._unit_rect(x + col, y, w, 1).origin, attrs
-            )
-            col += w
+        i = 0
+        n = len(runs)
+        while i < n:
+            if widths[i] == 1:
+                j = i
+                while j < n and widths[j] == 1:
+                    j += 1
+                NSString.stringWithString_("".join(runs[i:j])).drawAtPoint_withAttributes_(
+                    self._unit_rect(x + col, y, 1, 1).origin, kerned
+                )
+                col += j - i
+                i = j
+            else:
+                NSString.stringWithString_(runs[i]).drawAtPoint_withAttributes_(
+                    self._unit_rect(x + col, y, widths[i], 1).origin, attrs
+                )
+                col += widths[i]
+                i += 1
 
     def _render_flow_text(
         self, x: int, y: int, text: str, style: Style, fg, bg, alpha: float
@@ -1173,9 +1200,12 @@ class MacOSBackend(Backend):
         NSRectFill(NSMakeRect(track.origin.x, thumb_y, track.size.width, thumb_h))
 
     def _render_image(self, x: int, y: int, path: str, hints: dict[str, Any]) -> None:
-        image = NSImage.alloc().initWithContentsOfFile_(path)
+        image = self._image_cache.get(path)
         if image is None:
-            return
+            image = NSImage.alloc().initWithContentsOfFile_(path)
+            if image is None:
+                return
+            self._image_cache[path] = image
         iw, ih = image.size().width, image.size().height
         w_units = hints.get("w", max(1, round(iw / self._base_w)))
         h_units = hints.get("h", max(1, round(ih / self._base_h)))
