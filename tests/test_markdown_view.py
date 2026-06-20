@@ -125,3 +125,41 @@ def test_empty_source_is_safe(backend):
     panel = Panel(backend)
     panel.add(MarkdownView(""), x=0, y=0, w=24, h=8)
     panel.render()  # must not raise
+
+
+def test_prose_is_proportional_and_code_is_mono():
+    # On a fonts-capable backend the styles reach the backend with their fonts
+    # intact, so prose carries the proportional face and code the monospace one.
+    backend = MemoryBackend(width=40, height=10, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    panel.add(MarkdownView("text and `code` here"), x=0, y=0, w=40, h=10)
+    panel.render()
+    snap = backend.snapshot()[0]
+    body = backend.style_at(0, 0).font
+    code = backend.style_at(snap.index("code"), 0).font
+    assert body is not None and not body.monospace
+    assert code is not None and code.monospace
+
+
+def test_fenced_code_block_is_mono():
+    backend = MemoryBackend(width=40, height=10, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    panel.add(MarkdownView("```\nmono\n```"), x=0, y=0, w=40, h=10)
+    panel.render()
+    for y, row in enumerate(backend.snapshot()):
+        if row.startswith("mono"):
+            assert backend.style_at(0, y).font.monospace
+            return
+    raise AssertionError("code block not rendered")
+
+
+def test_fonts_fold_to_attrs_on_terminal(backend):
+    # Under the TUI profile the Panel folds fonts away; the document still reads
+    # (bold heading survives as an attribute) and stays column-aligned.
+    if backend.capabilities.supports("fonts"):
+        pytest.skip("GUI profile keeps fonts")
+    panel = Panel(backend)
+    panel.add(MarkdownView("# Hi\n\nbody"), x=0, y=0, w=24, h=8)
+    panel.render()
+    assert backend.style_at(0, 0).font is None
+    assert backend.style_at(0, 0).attr & TextAttribute.BOLD

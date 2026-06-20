@@ -380,8 +380,8 @@ blocks whose inline roles (`bold`, `code`, links) are colored by the active
 ## Inline runs
 
 Mix **bold**, *italic*, ***both***, inline `code`, and a [link](https://x)
-in one sentence; emphasis is drawn with text attributes, so the body stays on
-the monospaced base grid on every backend.
+in one sentence. Prose uses a proportional font and `code` a monospace one on
+GUI; both fold to the one grid font (bold / italic kept) on a terminal.
 
 ## Lists
 
