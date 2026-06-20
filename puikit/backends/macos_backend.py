@@ -26,6 +26,7 @@ from AppKit import (
     NSApp,
     NSApplication,
     NSApplicationActivationPolicyRegular,
+    NSAttributedString,
     NSBackingStoreBuffered,
     NSBezierPath,
     NSColor,
@@ -84,7 +85,6 @@ from Foundation import (
     NSMakeSize,
     NSNotFound,
     NSObject,
-    NSString,
     NSURL,
     NSZeroPoint,
 )
@@ -220,6 +220,20 @@ def _ns_color(color: tuple[int, ...], alpha: float = 1.0):
     else:
         r, g, b = color
     return NSColor.colorWithSRGBRed_green_blue_alpha_(r / 255, g / 255, b / 255, alpha)
+
+
+def _attr_string(text: str, attrs) -> Any:
+    """Build an NSAttributedString for drawing or measuring.
+
+    The convenience methods -[NSString drawAtPoint:withAttributes:],
+    -drawInRect:withAttributes:, and -sizeWithAttributes: each leak ~1.5 KB
+    *per call* in this AppKit/PyObjC stack (verified in isolation), independent
+    of the string or whether an autorelease pool wraps the call. Text-heavy
+    frames issue hundreds to thousands of such calls per render, so the leak
+    accumulated into the hundreds of MB / GB as the view redrew. The equivalent
+    NSAttributedString methods (-drawAtPoint: / -size) do not leak, so every
+    text draw and measurement routes through this helper instead."""
+    return NSAttributedString.alloc().initWithString_attributes_(text, attrs)
 
 
 def _fill_rect(rect, color) -> None:
@@ -676,9 +690,7 @@ class MacOSBackend(Backend):
         regular = self.resolve_font(self._base_font)
         bold = self.resolve_font(self._base_font, bold=True)
         self._fonts = {TextAttribute.NORMAL: regular, TextAttribute.BOLD: bold}
-        advance = NSString.stringWithString_("M").sizeWithAttributes_(
-            {NSFontAttributeName: regular}
-        ).width
+        advance = _attr_string("M", {NSFontAttributeName: regular}).size().width
         self._base_w = math.ceil(advance)
         self._base_h = math.ceil(regular.ascender() - regular.descender() + regular.leading())
         # Natural advance of the monospaced base font, before the base unit was
@@ -709,9 +721,7 @@ class MacOSBackend(Backend):
         if style.font is None:
             return float(display_width(text))
         ns_font = self._resolve_style_font(style)
-        width = NSString.stringWithString_(text).sizeWithAttributes_(
-            {NSFontAttributeName: ns_font}
-        ).width
+        width = _attr_string(text, {NSFontAttributeName: ns_font}).size().width
         return width / self._base_w if self._base_w else float(len(text))
 
     def measure_line_height(self, style: Style = DEFAULT_STYLE) -> float:
@@ -1006,14 +1016,13 @@ class MacOSBackend(Backend):
 
         # Lock each glyph to its base unit column without drawing it in its own
         # call. The base unit width is the monospaced advance rounded *up*, so a
-        # run drawn as one NSString would drift left a fraction of a pixel per
+        # run drawn as one string would drift left a fraction of a pixel per
         # glyph; a constant kern of (base_w - grid_advance) added after each
         # glyph cancels that drift exactly, so columns stay aligned and the clip
-        # rect still trims the boundary glyph at the pane edge. This matters for
-        # memory, not just speed: -[NSString drawAtPoint:withAttributes:] retains
-        # per call inside CoreText, so a per-glyph loop leaked megabytes per frame
-        # as the display redrew. Drawing each contiguous single-width segment in
-        # one kerned call collapses thousands of calls per frame to a handful.
+        # rect still trims the boundary glyph at the pane edge. Drawing each
+        # contiguous single-width segment in one call (rather than per glyph)
+        # also collapses the draw count; see _attr_string for why these go
+        # through NSAttributedString rather than -[NSString draw…WithAttributes:].
         # Wide glyphs (East Asian, display width 2) break a segment: they get a
         # 2-cell slot drawn on their own so the next glyph does not overlap.
         runs = _glyph_runs(text)
@@ -1032,14 +1041,14 @@ class MacOSBackend(Backend):
                 j = i
                 while j < n and widths[j] == 1:
                     j += 1
-                NSString.stringWithString_("".join(runs[i:j])).drawAtPoint_withAttributes_(
-                    self._unit_rect(x + col, y, 1, 1).origin, kerned
+                _attr_string("".join(runs[i:j]), kerned).drawAtPoint_(
+                    self._unit_rect(x + col, y, 1, 1).origin
                 )
                 col += j - i
                 i = j
             else:
-                NSString.stringWithString_(runs[i]).drawAtPoint_withAttributes_(
-                    self._unit_rect(x + col, y, widths[i], 1).origin, attrs
+                _attr_string(runs[i], attrs).drawAtPoint_(
+                    self._unit_rect(x + col, y, widths[i], 1).origin
                 )
                 col += widths[i]
                 i += 1
@@ -1058,13 +1067,13 @@ class MacOSBackend(Backend):
         }
         if style.attr & TextAttribute.UNDERLINE:
             attrs[NSUnderlineStyleAttributeName] = NSUnderlineStyleSingle
-        ns_text = NSString.stringWithString_(text)
+        ns_text = _attr_string(text, attrs)
         origin = self._unit_rect(x, y, 1, 1).origin
         if bg is not None:
-            width = ns_text.sizeWithAttributes_({NSFontAttributeName: ns_font}).width
+            width = ns_text.size().width
             _ns_color(bg).setFill()
             NSRectFill(NSMakeRect(origin.x, origin.y, width, self._base_h))
-        ns_text.drawAtPoint_withAttributes_(origin, attrs)
+        ns_text.drawAtPoint_(origin)
 
     def _render_box(
         self, x: int, y: int, w: int, h: int, style: Style, hints: dict[str, Any]
