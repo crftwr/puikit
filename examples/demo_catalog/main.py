@@ -65,6 +65,7 @@ from puikit.widgets import (
     TreeNode,
     TreeView,
     Widget,
+    show_drawer,
     show_message_box,
 )
 
@@ -1432,6 +1433,81 @@ def build_messagebox_page(panel: Panel) -> VSplit:
     )
 
 
+def build_drawer_page(panel: Panel) -> VSplit:
+    # A Drawer slides in from a screen edge as a Panel layer, hosting an
+    # arbitrary content widget. One intent (show_drawer with a side), resolved
+    # per backend: GUI slides it in over a dimmed page with a drop shadow, TUI
+    # shows it at once and separates it by the surface background. Escape (or a
+    # click on the dimmed scrim) closes it; tab cycles the controls inside.
+    status = Label("Pick an edge, press enter — esc / scrim-click closes the drawer", DIM)
+
+    def open_drawer(_index: int, label: str) -> None:
+        side = label.split()[-1].lower()  # "Slide in from left" -> "left"
+
+        # The drawer hosts a small form built from ordinary widgets; it is fully
+        # interactive (tab moves focus, the button closes the drawer itself).
+        controls = ScrollView(
+            [
+                (Label(f"This drawer is anchored to the {side} edge.", DIM), 1),
+                (Label("Filters", BOLD), 1),
+                (Checkbox("Show hidden files", checked=True), 1),
+                (Checkbox("Follow symlinks"), 1),
+                (Label("Sort by", BOLD), 1),
+                (RadioGroup(["Name", "Size", "Modified"], selected=0), 3),
+                (Label("Search", BOLD), 1),
+                (TextEdit("", on_submit=lambda s: setattr(status, "text", f"Search → {s!r}")), "content"),
+                (Button("Close drawer", on_click=lambda: drawer.close()), "content"),
+            ],
+            gap=1,
+        )
+        drawer = show_drawer(
+            panel,
+            controls,
+            side=side,
+            title=f"  {side.capitalize()} drawer",
+            on_close=lambda: setattr(status, "text", f"{side.capitalize()} drawer closed"),
+        )
+        status.text = f"{side.capitalize()} drawer open — tab to move, esc to close"
+
+    listview = ListView(
+        [
+            "Slide in from left",
+            "Slide in from right",
+            "Slide in from top",
+            "Slide in from bottom",
+        ],
+        on_select=open_drawer,
+    )
+    explainer = TextBlock(
+        "show_drawer(panel, content, side=...) pushes a layer anchored to a\n"
+        "screen edge and slides it in.\n"
+        "\n"
+        "  · side: left / right / top / bottom\n"
+        "  · the drawer fills the whole cross-axis (full height for a side\n"
+        "    drawer, full width for a top/bottom drawer)\n"
+        "  · it hosts any content widget — here a small filters form\n"
+        "  · esc, or a click on the dimmed scrim, closes it\n"
+        "  · tab / shift+tab cycle the controls inside (modal focus root)\n"
+        "\n"
+        "GUI slides it in over a dimmed page with a drop shadow; TUI shows it\n"
+        "at once and leans on the surface background for separation — one\n"
+        "intent, every backend. The page never branches on the capability.",
+    )
+    return VSplit(
+        Item(Label("Edge drawers slide in over the page — one intent, every backend", DIM), size=1),
+        Item(
+            HSplit(
+                Item(listview, size=24),
+                Item(explainer, weight=1, hints={"surface": "content"}),
+                gap=2,
+            ),
+            weight=1,
+        ),
+        Item(status, size=1),
+        gap=1,
+    )
+
+
 def build_progress_page(panel: Panel) -> VSplit:
     # Determinate ProgressBars (a value along a track) next to indeterminate
     # BusyIndicators (motion only). The spinners turn on their own on GUI (the
@@ -1743,6 +1819,7 @@ PAGES = [
     ("🌲 Tree", build_tree_page),
     ("📑 Menu", build_menu_page),
     ("💬 MessageBox", build_messagebox_page),
+    ("🚪 Drawer", build_drawer_page),
     ("🫳 Drag", build_drag_page),
     ("🎬 Animation", build_animation_page),
     ("🗂️ Layering", build_layer_page),
