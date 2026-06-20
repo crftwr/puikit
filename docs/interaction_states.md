@@ -1,11 +1,21 @@
 # PuiKit Interaction States — Design
 
-Status: **describes the target system.** The principles here are the contract
-the interactive widgets should conform to; parts are already in place
-(`DrawContext.focused`/`.hovered`, `selected_row_style`, the per-backend
-`Theme`), parts are gaps this document defines a fix for (`DrawContext.pressed`,
-a `draw_caret` intent, a `selection_bg` token split, and several widget
-corrections catalogued in §7).
+Status: **partly implemented.** The model — four channels (§3), two focus
+patterns (§4), the gating rule (§2), the color discipline (§5) — is the contract
+every interactive widget should meet. Landed so far:
+
+- `DrawContext.focused` / `.hovered` / **`.pressed`**, the last a real
+  MOUSE_DOWN/MOUSE_UP press gesture — the click fires on release *over* the
+  control, and a drag-off **cancels** it (§2, §8).
+- the **`draw_caret`** blinking-I-beam intent, with a blink reset on caret
+  movement so the caret is always visible where you just acted (§8).
+- the focus-dependent **text-field selection** tokens (§5).
+- the **Button** and **TextEdit** corrections in §7, including Button's
+  `primary` / `secondary` (accent / no-accent) variants and its fill-adaptive
+  focus ring.
+
+Still pending: the checkbox / radio / nav / tabs corrections in §7, and the
+*row* selection active/inactive token split (§5).
 
 This document is the single reference for how PuiKit draws the three
 interaction states — **focus**, **hover**, and **press/click** — plus their
@@ -147,6 +157,14 @@ selected/active fill, the active-tab indicator, the radio dot, the *active*
    read against (the TextEdit bug). If `selection_bg` is too dark to read, it is
    wrong.
 
+**Realized in Button.** A button chooses its focus-ring color from its own fill
+— a near-white ring on the accent fill, the **accent** on a neutral fill — so
+rule 1 lives in one place. The two faces are the `variant="primary"` (accent)
+and `variant="secondary"` (neutral, *no accent*) API: secondary is the
+non-primary action, and its accent focus ring is legal precisely because its
+fill is neutral. A bare-icon tile is always neutral; an explicit `style=` fill
+overrides both.
+
 ### The `selection_bg` token is overloaded
 
 One token, `theme.selection_bg` (#094771), is currently shared by the nav
@@ -154,15 +172,19 @@ unfocused selection, the active tab fill, list/dropdown/combo/menu selected
 rows, and the TextEdit text selection — roles that want *different* values
 (active vs inactive vs text-selection). Split it:
 
-- `selection_active_bg` — a list/row selection while the widget holds focus
-  (loud, accent-family).
-- `selection_inactive_bg` — the same selection while focus is elsewhere
-  (quiet, neutral/muted — **not** a saturated blue).
-- `text_selection_bg` — selected text in an editable field (light enough to
-  read white text on).
+- `text_selection_bg` — selected text in a focused editable field (a legible
+  blue, light enough to read white text on). **Implemented.**
+- `text_selection_inactive_bg` — the same text selection while the field is
+  blurred (a muted neutral). **Implemented** — the field reads as active only
+  while focused, the same active/inactive distinction list rows draw.
+- `selection_active_bg` / `selection_inactive_bg` — a list/row selection while
+  the widget holds focus (loud, accent-family) vs. focus elsewhere (quiet,
+  muted — **not** a saturated blue). **Pending:** nav/list still go through
+  `selected_row_style` + the shared `selection_bg`, so the nav inversion is not
+  yet fixed.
 
-This directly fixes the nav inversion (the loud color goes to the *focused*
-state) and the unreadable TextEdit selection.
+The text-field pair fixes the unreadable TextEdit selection; the row pair will
+fix the nav inversion (the loud color must go to the *focused* state).
 
 ---
 
@@ -187,34 +209,41 @@ resolves to white on GUI, which inverts the emphasis. The Panel re-resolves
 
 ## 7. What changes, per widget
 
-| Widget | Correction |
-|---|---|
-| **Checkbox** | Focus → dedicated Outline ring; the Mark border stays accent for *checked* only. Focus becomes visible whether checked or not. |
-| **Radio** | Focus → ring around the **group** (§4a); the selected dot stays accent. Focus is no longer pinned to the selected row. |
-| **Nav / ListView** | Un-invert the ordering: focused selection = `selection_active_bg` (loud), unfocused = `selection_inactive_bg` (quiet). |
-| **Button** | Add **press** (darken fill); focus = full-perimeter ring in a **non-blue** contrasting color; drop the underline. |
-| **Tabs** | Hover = a *visible* fill delta (including on the active tab); active-tab text stays white on the blue fill; the accent **indicator line = selection (always on for the active tab), on the edge *away from* the content**; focus = thicken/brighten that line or a strip-level ring. |
-| **TextEdit** | Caret = fg-colored **blinking I-beam** via a Panel `draw_caret` intent (Motion channel); focus stays on the border only (remove the duplicate); selection uses the lighter `text_selection_bg`. |
+| Widget | Correction | Status |
+|---|---|---|
+| **Button** | **Press** darkens the fill (hover lightens — opposite directions, so rest/hover/press read distinctly). Focus = full-perimeter ring whose color **contrasts the fill** (near-white on the accent fill, accent on a neutral fill), at any size — no faint underline on vector backends; a grid box only at ≥3 rows (below that it would eat the label), else an underline. Adds `variant="primary"` / `"secondary"` for the accent / no-accent faces. | ✅ done |
+| **TextEdit** | Caret = fg-colored **blinking I-beam** via the Panel `draw_caret` intent (Motion channel), reset to visible on every caret move/edit; focus stays on the border only (removed the duplicate accent caret); selection is focus-dependent — `text_selection_bg` while focused, `text_selection_inactive_bg` when blurred. | ✅ done |
+| **Checkbox** | Focus → dedicated Outline ring; the Mark border stays accent for *checked* only. Focus becomes visible whether checked or not. | ⬜ pending |
+| **Radio** | Focus → ring around the **group** (§4a); the selected dot stays accent. Focus is no longer pinned to the selected row. | ⬜ pending |
+| **Nav / ListView** | Un-invert the ordering: focused selection = `selection_active_bg` (loud), unfocused = `selection_inactive_bg` (quiet). | ⬜ pending |
+| **Tabs** | Hover = a *visible* fill delta (including on the active tab); active-tab text stays white on the blue fill; the accent **indicator line = selection (always on for the active tab), on the edge *away from* the content**; focus = thicken/brighten that line or a strip-level ring. | ⬜ pending |
 
 ---
 
-## 8. Mechanisms this requires
+## 8. Mechanisms
 
-Three additions, all in the Panel layer:
+Three Panel-layer additions, the first two **implemented**, the third partial:
 
-1. **`DrawContext.pressed`** — the Panel tracks the widget under an active
-   mouse-down (press-captured between MOUSE_DOWN and release) and exposes it
-   like `.focused` / `.hovered`. Read only by **action controls** (§2).
+1. **`DrawContext.pressed` + the press gesture** ✅ — the event model gained
+   `MOUSE_DOWN` / `MOUSE_UP`; the Panel captures the press between them and
+   synthesizes a `MOUSE_CLICK` only on a release *over the same widget* (a
+   drag-off cancels). `.pressed` reads true while the press began in the widget
+   **and** the pointer is still over it, so the held cue tracks the pointer and
+   clears on drag-off. Resolved by the same hit region clicks/focus/hover use,
+   at sub-unit precision. Read only by **action controls** (§2). Backends with
+   no down/up may still emit an atomic `MOUSE_CLICK`.
 
-2. **`Panel.draw_caret` intent + blink** — a capability-resolved caret
+2. **`Panel.draw_caret` intent + blink** ✅ — a capability-resolved caret
    (vector: thin blinking I-beam in the foreground color; grid: reverse block),
-   driven by `DrawContext.animated` + `request_animation_ticks`, so the caret
-   blinks on GUI and is a static cell on a still backend. Replaces the
-   hardcoded accent block in `TextEdit._draw_caret`.
+   driven by `DrawContext.caret_visible` + `request_animation_ticks`, so the
+   caret blinks on GUI and is a solid cell on a still backend. `reset_caret_blink`
+   restarts the cycle *on* whenever the caret moves. Replaced the hardcoded
+   accent block in `TextEdit._draw_caret`.
 
-3. **`selection_bg` token split** (§5) — `selection_active_bg`,
-   `selection_inactive_bg`, `text_selection_bg` on `Theme`, with the existing
-   `selection_bg` retained as the active alias during migration.
+3. **`selection_bg` token split** (§5) — `text_selection_bg` /
+   `text_selection_inactive_bg` are on `Theme` and in use ✅; the row pair
+   `selection_active_bg` / `selection_inactive_bg` is still **pending** (nav /
+   list keep `selected_row_style` + `selection_bg` for now).
 
 ---
 
