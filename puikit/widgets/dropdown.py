@@ -61,6 +61,7 @@ class DropDown(Widget):
         self._panel = None
         self._screen_rect: tuple[float, float, float, float] | None = None
         self._pixel = False  # backend places content at device-pixel precision
+        self._field_w = float("inf")  # field width; set at draw (permissive until then)
         self._popup: _DropDownPopup | None = None
 
     # --- geometry -------------------------------------------------------------
@@ -91,8 +92,9 @@ class DropDown(Widget):
         w = min(self.width, ctx.width)
         if w < 5:
             return
-        bg = theme.hover_bg if ctx.hovered else theme.control_bg
         field_w = min(float(self.width), ctx.size_units[0])
+        self._field_w = field_w  # captured for hit-testing
+        bg = theme.hover_bg if ctx.hovered_in(field_w) else theme.control_bg
         field_h = ctx.size_units[1]
         ty = (field_h - 1.0) / 2.0  # center the text line within the field box
         # A flat, rounded field on vector backends, a plain fill on a character
@@ -118,9 +120,13 @@ class DropDown(Widget):
     def handle_event(self, event: Event) -> bool:
         # While the popup is up it is modal and receives events directly; the
         # field only needs to handle the closed state here.
-        if event.type is EventType.MOUSE_CLICK or is_activate(event) or (
-            event.type is EventType.KEY and event.key == "down"
-        ):
+        if event.type is EventType.MOUSE_CLICK:
+            # Only the field is clickable, not the empty slot to its right.
+            if event.x is not None and event.x >= self._field_w:
+                return False
+            self._open_popup()
+            return True
+        if is_activate(event) or (event.type is EventType.KEY and event.key == "down"):
             self._open_popup()
             return True
         return False

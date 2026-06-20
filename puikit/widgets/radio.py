@@ -45,6 +45,7 @@ class RadioGroup(Widget):
         self.on_change = on_change
         self.style = style
         self._pad_y = 0.0  # top inset of the rows, captured at draw for hit-testing
+        self._row_x = (0.0, float("inf"))  # content x-range; set at draw (permissive until then)
 
     # --- drawing -------------------------------------------------------------
 
@@ -64,6 +65,7 @@ class RadioGroup(Widget):
         cw = self._content_width(ctx)
         x0 = max(0.0, pad_x - _MARGIN) if vector else 0.0
         x1 = min(wu, pad_x + cw + _MARGIN) if vector else min(wu, cw)
+        self._row_x = (x0, x1)
         label_x = len(_UNSELECTED) + len(_GAP)
 
         hover_row = self._hover_row(ctx)
@@ -112,8 +114,10 @@ class RadioGroup(Widget):
         if panel is None or panel.pointer is None:
             return None
         px, py = panel.pointer
-        rx, ry, rw, rh = ctx.screen_rect
-        if not (rx <= px < rx + rw and ry <= py < ry + rh):
+        rx, ry, _rw, rh = ctx.screen_rect
+        x0, x1 = self._row_x
+        # Limit the hover to the content's x-range, not the full (wider) slot.
+        if not (rx + x0 <= px < rx + x1 and ry <= py < ry + rh):
             return None
         row = int(py - ry - self._pad_y)  # back out the rows' top inset
         return row if 0 <= row < len(self.options) else None
@@ -138,6 +142,9 @@ class RadioGroup(Widget):
         if not self.options:
             return False
         if event.type is EventType.MOUSE_CLICK:
+            x0, x1 = self._row_x
+            if event.x is not None and not (x0 <= event.x < x1):
+                return False  # outside the options' x-range (the empty slot)
             row = int((event.y or 0) - self._pad_y)  # back out the rows' top inset
             if 0 <= row < len(self.options):
                 self._select(row)

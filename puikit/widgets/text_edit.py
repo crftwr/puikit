@@ -52,6 +52,7 @@ class TextEdit(Widget):
         self._preedit = ""      # IME marked (composition) text, not yet committed
         self._preedit_caret = 0  # caret offset within the preedit
         self._panel = None
+        self._field_w = float("inf")  # field width; set at draw (permissive until then)
         self._focused_now = False  # last-drawn focus state, read by the blink tick
         self._blinking = False     # whether a caret-blink tick is registered
 
@@ -115,8 +116,9 @@ class TextEdit(Widget):
         sel = self._selection() if not self._preedit else None
         self._scroll_into_view(caret, field_w, len(disp))
 
-        bg = theme.hover_bg if (ctx.hovered and not ctx.focused) else theme.control_bg
         field_full_w = min(float(self.width), ctx.size_units[0])
+        self._field_w = field_full_w  # captured for hit-testing
+        bg = theme.hover_bg if (ctx.hovered_in(field_full_w) and not ctx.focused) else theme.control_bg
         field_h = ctx.size_units[1]
         ty = (field_h - 1.0) / 2.0  # center the text line within the field box
         # A flat, rounded field on vector backends, a plain fill on a character
@@ -229,6 +231,9 @@ class TextEdit(Widget):
             self._preedit_caret = event.hints.get("caret", len(self._preedit))
             return True
         if event.type is EventType.MOUSE_DOWN:
+            # Only the field is clickable, not the empty slot to its right.
+            if event.x is not None and event.x >= self._field_w:
+                return False
             idx = self._index_at_column(int(event.x or 0) - 1)
             if "shift" in event.modifiers:
                 # Shift+click extends from the existing cursor (or selection).

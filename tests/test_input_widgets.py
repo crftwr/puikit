@@ -63,6 +63,20 @@ def test_checkbox_toggles_on_space_enter_and_click(backend):
     assert changes == [True, False, True]
 
 
+def test_checkbox_hit_region_limited_to_content(backend):
+    # In a slot wider than the control, a click in the empty space to the right
+    # of the mark + label is ignored; only the control itself is clickable.
+    changes = []
+    box = Checkbox("Feature", on_change=changes.append)
+    panel = Panel(backend)
+    panel.add(box, x=0, y=0, w=40, h=1)
+    panel.render()  # draw captures the content width
+    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=30, y=0, button="left"))
+    assert box.checked is False and changes == []   # empty area: no toggle
+    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=2, y=0, button="left"))
+    assert box.checked is True                       # on the control: toggles
+
+
 # --- RadioGroup --------------------------------------------------------------
 
 

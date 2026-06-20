@@ -62,6 +62,7 @@ class ComboBox(Widget):
         self._panel = None
         self._screen_rect: tuple[float, float, float, float] | None = None
         self._pixel = False
+        self._content_w = float("inf")  # field + chevron width; set at draw (permissive until then)
         self._popup: _ComboPopup | None = None
 
     # --- value ---------------------------------------------------------------
@@ -97,6 +98,7 @@ class ComboBox(Widget):
         wu, hu = ctx.size_units
         fw = max(1.0, min(float(self.width), wu) - _CHEVRON_W)
         self._field.width = int(fw)
+        self._content_w = fw + _CHEVRON_W  # the field + chevron occupy only this
         # The field shows its caret while the combo holds focus or the popup is
         # open (the open popup is the modal layer, but the field is what the
         # typing flows into, so it reads as the active control).
@@ -126,7 +128,10 @@ class ComboBox(Widget):
 
     def handle_event(self, event: Event) -> bool:
         if event.type is EventType.MOUSE_CLICK:
-            on_chevron = event.x is not None and event.x >= self.width - _CHEVRON_W
+            # Only the field + chevron is clickable, not the empty slot beyond it.
+            if event.x is not None and event.x >= self._content_w:
+                return False
+            on_chevron = event.x is not None and event.x >= self._content_w - _CHEVRON_W
             if not on_chevron:
                 self._field.handle_event(event)  # place the caret at the click
             self._open_popup()

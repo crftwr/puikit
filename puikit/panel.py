@@ -202,6 +202,22 @@ class DrawContext:
         px, py = self._panel.pointer
         return self._hit_rect is not None and self._hit_rect.contains(px, py)
 
+    def hovered_in(self, w: float, h: float | None = None) -> bool:
+        """True when the pointer is over the local sub-rect ``(0, 0, w, h)`` of
+        this widget. A control that draws narrower than its slot (e.g. a checkbox
+        or a field in a full-width ScrollView row) restricts its hover to the
+        part it actually occupies, so the cue does not light up the empty space
+        to its right. ``h`` defaults to the full widget height."""
+        if self._panel is None or self._panel.pointer is None:
+            return False
+        px, py = self._panel.pointer
+        hh = self._rect.h if h is None else h
+        within = (
+            self._rect.x <= px < self._rect.x + w
+            and self._rect.y <= py < self._rect.y + hh
+        )
+        return within and self._clip.contains(px, py)
+
     @property
     def pressed(self) -> bool:
         """True while the active press both *began* inside this widget and the

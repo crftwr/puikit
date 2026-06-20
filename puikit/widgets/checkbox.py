@@ -40,21 +40,26 @@ class Checkbox(Widget):
         self.checked = checked
         self.on_change = on_change
         self.style = style
+        self._content_w = float("inf")  # mark + label width; set at draw (permissive until then)
 
     # --- drawing -------------------------------------------------------------
 
     def draw(self, ctx: DrawContext) -> None:
         theme = ctx.theme or DEFAULT_THEME
-        row_bg = theme.hover_bg if ctx.hovered else None
+        label_x = len(_UNCHECKED) + len(_GAP)
+        # The control occupies only the mark + label, even in a wider slot, so
+        # hover and clicks are limited to that width — not the empty space to
+        # the right (interaction_states.md hit-region consistency).
+        self._content_w = label_x + ctx.measure_text(self.label, self.style)
+        row_bg = theme.hover_bg if ctx.hovered_in(self._content_w, 1.0) else None
         if row_bg is not None:
-            ctx.fill_rect(0, 0, ctx.size_units[0], 1, Style(bg=row_bg))
+            ctx.fill_rect(0, 0, self._content_w, 1, Style(bg=row_bg))
 
         # The mark is an intent: a rounded check box on vector backends, the
         # "[x]"/"[ ]" text mark on a character grid — the Panel layer chooses.
         ctx.draw_check_mark(
             0, 0, checked=self.checked, focused=ctx.focused, theme=theme, row_bg=row_bg
         )
-        label_x = len(_UNCHECKED) + len(_GAP)
         ctx.draw_text(label_x, 0, self.label, Style(fg=theme.text, bg=row_bg))
 
     def measure(self, ctx: LayoutContext, axis: str, available: float) -> SizeRequest:
@@ -66,7 +71,13 @@ class Checkbox(Widget):
     # --- events --------------------------------------------------------------
 
     def handle_event(self, event: Event) -> bool:
-        if event.type is EventType.MOUSE_CLICK or is_activate(event):
+        if event.type is EventType.MOUSE_CLICK:
+            # Only the mark + label is clickable, not the empty slot to its right.
+            if event.x is not None and event.x >= self._content_w:
+                return False
+            self.toggle()
+            return True
+        if is_activate(event):
             self.toggle()
             return True
         return False
