@@ -57,10 +57,15 @@ The app issues one intent and never branches on the backend:
 
 ```python
 # In a file list's drag handler, on a MOUSE_DRAG that leaves the pane:
-started = panel.begin_file_drag(selected_paths, event)
+started = panel.begin_file_drag(
+    selected_paths, event,
+    operations=("copy", "move"),
+    on_complete=lambda op: paths_moved(selected_paths) if op == "move" else None,
+)
 ```
 
-- `Panel.begin_file_drag(paths, event=None) -> bool` resolves the capability.
+- `Panel.begin_file_drag(paths, event=None, operations=("copy",), on_complete=None) -> bool`
+  resolves the capability.
 - On `os_drag_drop` backends it delegates to `Backend.begin_file_drag`, which
   starts a real OS drag session and returns `True`.
 - On every other backend — TUI especially — it **falls back to copying the
@@ -70,6 +75,24 @@ started = panel.begin_file_drag(selected_paths, event)
 
 This keeps the framework contract intact: the app declares "export these files
 by drag," and the backend decides how to realize it.
+
+### Copy vs. move
+
+`operations` is the set the source offers — any of `"copy"`, `"move"`, `"link"`.
+The destination app chooses one (Finder picks by modifier key / drop target).
+
+The file bytes are always *copied* to the receiver; a move differs only in that
+the **source** must then delete the originals. **PuiKit never deletes files.**
+Instead the chosen operation is reported back through `on_complete(op)` once the
+session ends (`op` is `"copy"` / `"move"` / `"link"`, or `"none"` if cancelled),
+and the *app* performs the move and any undo bookkeeping. This keeps the
+consequential deletion in the app layer — where tfm's file-manager logic and
+undo already live — rather than buried in the framework.
+
+On macOS this rides the view's `draggingSession:sourceOperationMaskForDraggingContext:`
+(the offered mask) and `draggingSession:endedAtPoint:operation:` (the result).
+The clipboard fallback is copy semantics, so it reports `"copy"`; a terminal
+cannot express a cross-app move.
 
 ## Drop-in (`drag_and_drop`)
 

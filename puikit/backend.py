@@ -298,7 +298,13 @@ class Backend(ABC):
 
     # --- drag source (capability "os_drag_drop"; Panel gates the calls) ------
 
-    def begin_file_drag(self, paths: list[str], event: Event | None = None) -> bool:
+    def begin_file_drag(
+        self,
+        paths: list[str],
+        event: Event | None = None,
+        operations: tuple[str, ...] = ("copy",),
+        on_complete: Callable[[str], None] | None = None,
+    ) -> bool:
         """Begin an OS drag session exporting ``paths`` as files, so the user
         can drop them onto another application (Finder, an editor, ...).
 
@@ -309,6 +315,15 @@ class Backend(ABC):
         copying the paths to the clipboard — so the app issues one intent and
         never branches. ``event`` is the originating ``MOUSE_DRAG`` event when
         available (a native session must start from the live mouse event).
+
+        ``operations`` is the set of operations the source offers — any of
+        ``"copy"``, ``"move"``, ``"link"``; the destination app chooses one.
+        The bytes are always copied to the receiver: for ``"move"`` the *source*
+        is responsible for removing the originals. PuiKit never deletes files —
+        it reports the chosen operation through ``on_complete(op)`` (``op`` is
+        ``"copy"`` / ``"move"`` / ``"link"`` / ``"none"`` if cancelled) so the
+        app performs the move (and any undo bookkeeping) itself.
+
         Returns True if a real drag session began."""
         raise CapabilityNotSupported("os_drag_drop")
 

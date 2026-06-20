@@ -959,20 +959,36 @@ class Panel:
 
     # --- drag source ----------------------------------------------------------
 
-    def begin_file_drag(self, paths: Any, event: Event | None = None) -> bool:
+    def begin_file_drag(
+        self,
+        paths: Any,
+        event: Event | None = None,
+        operations: tuple[str, ...] = ("copy",),
+        on_complete: Any | None = None,
+    ) -> bool:
         """Export ``paths`` (file paths) as an OS drag, so the user can drop
         them onto another app. One intent, resolved per backend: ``os_drag_drop``
         backends start a native drag session (macOS NSDraggingSource); others —
         notably TUI, where the terminal owns the window and no app can be a drag
         source — fall back to copying the paths to the clipboard so the user can
         paste them into the target. The caller (a file list's drag handler)
-        never branches. Returns True if a real drag session began, False if the
-        clipboard fallback was used. ``event`` is the originating MOUSE_DRAG
-        event; a native session must start from it."""
+        never branches.
+
+        ``operations`` is the offered set (``"copy"`` / ``"move"`` / ``"link"``);
+        the destination chooses one. PuiKit never deletes files — for a ``move``
+        the app does it, prompted by ``on_complete(op)`` once the session ends
+        (``op`` is the chosen operation, or ``"none"`` if cancelled). The
+        clipboard fallback is copy semantics, so it reports ``"copy"``.
+
+        Returns True if a real drag session began, False if the clipboard
+        fallback was used. ``event`` is the originating MOUSE_DRAG event; a
+        native session must start from it."""
         paths = [str(p) for p in paths]
         if self.backend.capabilities.supports("os_drag_drop"):
-            return self.backend.begin_file_drag(paths, event)
+            return self.backend.begin_file_drag(paths, event, operations, on_complete)
         self.backend.set_clipboard("\n".join(paths))
+        if on_complete is not None:
+            on_complete("copy")
         return False
 
     # --- menus ----------------------------------------------------------------

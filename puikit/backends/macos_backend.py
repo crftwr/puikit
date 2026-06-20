@@ -19,6 +19,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass, field, replace
+from collections.abc import Callable
 from typing import Any
 
 from AppKit import (
@@ -31,6 +32,9 @@ from AppKit import (
     NSDate,
     NSDefaultRunLoopMode,
     NSDragOperationCopy,
+    NSDragOperationLink,
+    NSDragOperationMove,
+    NSDragOperationNone,
     NSDraggingItem,
     NSEvent,
     NSEventMaskAny,
@@ -148,6 +152,33 @@ _ICON_GLYPHS = {
     "info": "ℹ️",
     "check": "✅",
 }
+
+
+# PuiKit drag-operation names <-> AppKit NSDragOperation bits. Move is checked
+# before copy when naming the *result*, since a session that ended as a move
+# also implies the bytes were copied to the receiver — the move is the stronger
+# intent and the one the app must act on (delete the originals).
+_DRAG_OP_BITS = {
+    "copy": NSDragOperationCopy,
+    "move": NSDragOperationMove,
+    "link": NSDragOperationLink,
+}
+
+
+def _drag_mask(operations: tuple[str, ...]) -> int:
+    """OR the named operations into an NSDragOperation mask (copy if empty)."""
+    mask = 0
+    for op in operations:
+        mask |= _DRAG_OP_BITS.get(op, 0)
+    return mask or NSDragOperationCopy
+
+
+def _drag_op_name(operation: int) -> str:
+    """Name the operation a finished drag session settled on."""
+    for name in ("move", "copy", "link"):  # priority: report move over copy
+        if operation & _DRAG_OP_BITS[name]:
+            return name
+    return "none"
 
 
 def translate_key(characters: str, modifier_flags: int = 0) -> Event | None:
@@ -442,11 +473,21 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
         x, y = self._mouse_unit(ns_event)
         self.backend._dispatch(Event(type=EventType.MOUSE_DRAG, x=x, y=y, button="left"))
 
-    # NSDraggingSource: what operations this view offers as a drag source. Copy
-    # leaves the originals in place (a file manager export), which is the right
-    # default for dragging files out to another app.
+    # NSDraggingSource: the operations this view offers as a drag source, set
+    # per session by begin_file_drag (copy / move / link). The receiver picks
+    # one from this mask.
     def draggingSession_sourceOperationMaskForDraggingContext_(self, session, context):
-        return NSDragOperationCopy
+        return getattr(self, "_drag_mask", NSDragOperationCopy)
+
+    # NSDraggingSource: the session finished. ``operation`` is what the receiver
+    # settled on; report it to the app so it performs a move (PuiKit never
+    # deletes files itself) or undo bookkeeping.
+    def draggingSession_endedAtPoint_operation_(self, session, point, operation):
+        callback = getattr(self, "_drag_on_complete", None)
+        self._drag_on_complete = None
+        self._drag_mask = NSDragOperationNone
+        if callback is not None:
+            callback(_drag_op_name(operation))
 
     def scrollWheel_(self, ns_event):
         delta = ns_event.scrollingDeltaY()
@@ -1145,7 +1186,13 @@ class MacOSBackend(Backend):
 
     # --- drag source ---------------------------------------------------------
 
-    def begin_file_drag(self, paths: list[str], event: Event | None = None) -> bool:
+    def begin_file_drag(
+        self,
+        paths: list[str],
+        event: Event | None = None,
+        operations: tuple[str, ...] = ("copy",),
+        on_complete: Callable[[str], None] | None = None,
+    ) -> bool:
         """Begin a native file-drag session from the content view.
 
         The view adopts ``NSDraggingSource``; each path becomes an
@@ -1153,7 +1200,12 @@ class MacOSBackend(Backend):
         receiver gets real files), imaged with the file's Finder icon. The
         session starts from the live mouse ``NSEvent`` last seen by the view —
         AppKit requires a drag to begin from the originating mouse event, which
-        is why we cache it rather than synthesize one from ``event``."""
+        is why we cache it rather than synthesize one from ``event``.
+
+        ``operations`` becomes the session's source mask; the chosen operation
+        is reported to ``on_complete`` when the session ends (the view's
+        ``draggingSession:endedAtPoint:operation:``). PuiKit never deletes the
+        originals on a move — the app does, from ``on_complete``."""
         if self._view is None or not paths:
             return False
         ns_event = getattr(self._view, "_last_mouse_event", None) or NSApp.currentEvent()
@@ -1172,6 +1224,8 @@ class MacOSBackend(Backend):
             )
             item.setDraggingFrame_contents_(frame, workspace.iconForFile_(path))
             items.append(item)
+        self._view._drag_mask = _drag_mask(operations)
+        self._view._drag_on_complete = on_complete
         self._view.beginDraggingSessionWithItems_event_source_(
             items, ns_event, self._view
         )

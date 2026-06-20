@@ -1632,14 +1632,28 @@ class _DragWell(Widget):
             return True
         if event.type is EventType.MOUSE_DRAG and event.button == "left" and self._armed:
             self._armed = False
-            started = self.panel.begin_file_drag(self.paths, event)
             n = len(self.paths)
+
+            def done(op: str) -> None:
+                # The app decides what an operation means. PuiKit never deletes
+                # files: on a "move" the file manager would remove the originals
+                # here — the demo only reports what the user chose.
+                if op == "move":
+                    self.status.text = f"Drag ended: MOVE of {n} file(s) (app would delete originals)"
+                elif op == "none":
+                    self.status.text = "Drag cancelled — nothing dropped"
+                else:
+                    self.status.text = f"Drag ended: {op.upper()} of {n} file(s)"
+
+            started = self.panel.begin_file_drag(
+                self.paths, event, operations=("copy", "move"), on_complete=done
+            )
             if started:
                 self.status.text = (
-                    f"Started a native OS drag of {n} file(s) — "
-                    "drop onto Finder, an editor, a chat window"
+                    f"Dragging {n} file(s) — drop onto Finder/an editor "
+                    "(hold a modifier to choose copy vs. move)"
                 )
-            else:
+            elif self.panel.get_clipboard():
                 self.status.text = (
                     f"No OS drag source in a terminal — copied {n} path(s) to "
                     "the clipboard; paste them into the target app"
@@ -1662,13 +1676,18 @@ def build_drag_page(panel: Panel) -> VSplit:
     one = _DragWell(panel, "One file", paths[:1], status)
     many = _DragWell(panel, "Three files", paths, status)
     explainer = TextBlock(
-        "panel.begin_file_drag(paths, event) — one intent, two fidelities:\n"
+        "panel.begin_file_drag(paths, event, operations, on_complete) —\n"
+        "one intent, two fidelities:\n"
         "\n"
         "  · GUI-Desktop  -> a real OS drag session (NSDraggingSource).\n"
         "                    Drop the files onto Finder, an editor, a chat.\n"
         "  · TUI / others -> no app can be an OS drag source inside a\n"
         "                    terminal, so the Panel copies the paths to the\n"
         "                    clipboard instead — paste them into the target.\n"
+        "\n"
+        "The wells offer copy AND move. PuiKit never deletes files: it reports\n"
+        "the chosen operation through on_complete(op), and the app performs a\n"
+        "move itself (the status line shows what it would do).\n"
         "\n"
         "The page never branches on the backend; it just asks to export files.\n"
         "Tab focuses a well; press and drag with the mouse to start.",
