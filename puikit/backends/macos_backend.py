@@ -794,8 +794,16 @@ class MacOSBackend(Backend):
         self._front = self._back
         self._back = []
         if self._view is not None:
+            # Mark the view dirty and let AppKit coalesce the actual redraw to
+            # one drawRect_ per display refresh. Do NOT force a synchronous draw
+            # here (displayIfNeeded): a trackpad emits a flood of precise scroll
+            # events, and rasterizing the whole window in CoreText on every one
+            # cannot keep pace, so scrolling stutters. Because each present()
+            # overwrites _front, a burst of events collapses to a single
+            # rasterization of the latest frame — the intermediate frames'
+            # expensive draw work is skipped. The display list itself is rebuilt
+            # per event, but that is cheap; the cost was always the rasterization.
             self._view.setNeedsDisplay_(True)
-            self._view.displayIfNeeded()
 
     # --- pixel rendering (called from the view's drawRect) --------------------
 
