@@ -315,7 +315,8 @@ def build_list_page(panel: Panel) -> VSplit:
 def build_log_page(panel: Panel) -> VSplit:
     # A virtualized, append-only stream: per-line color, word wrap, drag-select
     # + copy, and tail-following. The buffer is seeded large to show that only
-    # the visible window is ever drawn — scrolling 10k lines stays cheap.
+    # the visible window is ever drawn — scrolling stays cheap regardless of
+    # buffer size.
     LEVELS = {
         "DEBUG": Style(attr=TextAttribute.DIM),
         "INFO": Style(fg=(180, 200, 230)),
@@ -334,13 +335,13 @@ def build_log_page(panel: Panel) -> VSplit:
         return (msg, LEVELS[level])
 
     log = LogView(
-        [line(i) for i in range(10000)],
+        [line(i) for i in range(1000)],
         wrap="word",
         selectable=True,
         auto_scroll=True,
         max_lines=20000,
     )
-    counter = {"n": 10000}
+    counter = {"n": 1000}
 
     def add() -> None:
         text, style = line(counter["n"])
