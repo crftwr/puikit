@@ -9,7 +9,7 @@ Panel layer is the only place that branch lives.
 
 import pytest
 
-from puikit import CapabilityProfile, PROFILE_GUI_DESKTOP, Panel
+from puikit import CapabilityProfile, Event, EventType, PROFILE_GUI_DESKTOP, Panel
 from puikit.backends.memory_backend import MemoryBackend
 from puikit.widgets import Button, Checkbox, DropDown, RadioGroup, TextEdit
 
@@ -86,6 +86,25 @@ def test_radio_selected_draws_circle_and_dot(backend):
     rings = [c for c in backend.round_rect_calls if c[4] is not None]
     assert len(rings) == 1 and rings[0][5].fg == panel.theme.accent
     assert not _snapshot_has_ascii_marks(backend)
+
+
+def test_radio_focus_ring_has_margin_and_offsets_rows(backend):
+    # Given vertical slack, the group insets its rows so the focus ring clears
+    # the text on every side, and hit-testing backs the inset out again.
+    panel = Panel(backend)
+    rg = RadioGroup(["a", "b", "c"])
+    panel.add(rg, x=0, y=0, w=12, h=5)
+    panel.focus(rg)
+    panel.render()
+    assert rg._pad_y > 0                                   # rows inset from the top
+    ring = [c for c in backend.round_rect_calls if c[4] is not None][0]
+    rx, ry, rw, rh = ring[:4]
+    assert ry < rg._pad_y                                  # ring top above first row
+    assert ry + rh > rg._pad_y + 3                         # ring bottom below last row
+    assert rx < 0.5                                        # ring left of the marks
+    # A click lands on the right row despite the inset.
+    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=1, y=rg._pad_y + 2, button="left"))
+    assert rg.selected == 2
 
 
 def test_button_face_is_rounded(backend):

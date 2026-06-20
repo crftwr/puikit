@@ -222,7 +222,7 @@ def build_widgets_page(panel: Panel) -> VSplit:
             (feature, 1),
             (hidden, 1),
             (heading("Radio buttons"), 1),
-            (size, 3),
+            (size, "content"),
             (heading("Drop-down (opens a floating popup over the page)"), 1),
             (color, "content"),
             (heading("Text edit"), 1),

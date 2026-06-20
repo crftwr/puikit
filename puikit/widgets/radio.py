@@ -21,6 +21,14 @@ _SELECTED = "(•)"   # (•)
 _UNSELECTED = "( )"
 _GAP = " "
 
+# Padding (base units) reserved around the option rows on vector backends, so
+# the group focus ring has breathing room instead of hugging the text. Grid
+# backends keep tight whole-cell rows (their focus cue is the reversed mark, not
+# a ring). _MARGIN is the gap between the ring and the content it surrounds.
+_PAD_X = 0.5
+_PAD_Y = 0.4
+_MARGIN = 0.3
+
 
 class RadioGroup(Widget):
     focusable = True
@@ -36,6 +44,7 @@ class RadioGroup(Widget):
         self.selected = selected
         self.on_change = on_change
         self.style = style
+        self._pad_y = 0.0  # top inset of the rows, captured at draw for hit-testing
 
     # --- drawing -------------------------------------------------------------
 
@@ -43,35 +52,49 @@ class RadioGroup(Widget):
         if self.options:
             self.selected = max(0, min(self.selected, len(self.options) - 1))
         theme = ctx.theme or DEFAULT_THEME
+        wu, hu = ctx.size_units
+        n = len(self.options)
+        # Inset the rows on vector backends so the focus ring (and hover) clears
+        # the text; whole-cell grids keep tight rows. pad_y centers the rows in
+        # any slack, capped so a tall slot does not float them too far.
+        vector = ctx.vector_shapes
+        pad_x = _PAD_X if vector else 0.0
+        pad_y = min(_PAD_Y, max(0.0, (hu - n) / 2.0)) if vector else 0.0
+        self._pad_y = pad_y
+        cw = self._content_width(ctx)
+        x0 = max(0.0, pad_x - _MARGIN) if vector else 0.0
+        x1 = min(wu, pad_x + cw + _MARGIN) if vector else min(wu, cw)
+        label_x = len(_UNSELECTED) + len(_GAP)
+
         hover_row = self._hover_row(ctx)
         rows = 0
         for i, option in enumerate(self.options):
-            if i >= ctx.height:
+            ry = pad_y + i
+            if ry + 1.0 > hu + 1e-6:
                 break  # taller than the slot: clip the overflow at the edge
             rows = i + 1
             row_bg = theme.hover_bg if i == hover_row else None
             if row_bg is not None:
-                ctx.fill_rect(0, i, ctx.size_units[0], 1, Style(bg=row_bg))
+                ctx.fill_rect(x0, ry, x1 - x0, 1, Style(bg=row_bg))
             # The mark is an intent: a circle with an accent dot on vector
             # backends, the "(•)"/"( )" text mark on a character grid. Focus is a
             # group-level cue (the ring below / the grid reverse), not per-row.
             selected = i == self.selected
             ctx.draw_radio_mark(
-                0, i, selected=selected, focused=ctx.focused,
+                pad_x, ry, selected=selected, focused=ctx.focused,
                 theme=theme, row_bg=row_bg,
             )
-            label_x = len(_UNSELECTED) + len(_GAP)
-            ctx.draw_text(label_x, i, option, Style(fg=theme.text, bg=row_bg))
+            ctx.draw_text(pad_x + label_x, ry, option, Style(fg=theme.text, bg=row_bg))
 
         # Focus is a property of the whole group, so on vector backends it draws
-        # one ring around the group's content — not smuggled onto the selected
-        # row's mark (interaction_states.md §4a).
-        if ctx.focused and ctx.vector_shapes and rows > 0:
-            cw = self._content_width(ctx)
-            inset = 0.12
+        # one ring around the group's content — with a margin so it never hugs
+        # the text — not smuggled onto the selected row's mark
+        # (interaction_states.md §4a).
+        if ctx.focused and vector and rows > 0:
+            y0 = max(0.0, pad_y - _MARGIN)
+            y1 = min(hu, pad_y + rows + _MARGIN)
             ctx.round_rect(
-                inset, inset, cw - 2 * inset, rows - 2 * inset,
-                Style(fg=theme.accent), radius=4.0,
+                x0, y0, x1 - x0, y1 - y0, Style(fg=theme.accent), radius=4.0,
             )
 
     def _content_width(self, ctx: DrawContext) -> float:
@@ -90,16 +113,21 @@ class RadioGroup(Widget):
             return None
         px, py = panel.pointer
         rx, ry, rw, rh = ctx.screen_rect
-        if rx <= px < rx + rw and ry <= py < ry + rh:
-            return int(py - ry)
-        return None
+        if not (rx <= px < rx + rw and ry <= py < ry + rh):
+            return None
+        row = int(py - ry - self._pad_y)  # back out the rows' top inset
+        return row if 0 <= row < len(self.options) else None
 
     def measure(self, ctx: LayoutContext, axis: str, available: float) -> SizeRequest:
+        # Reserve the focus-ring padding on pixel backends so a content-sized
+        # group has room for the ring; whole-unit grids keep tight cells.
+        pad_x = 0.0 if ctx.snap else 2.0 * _PAD_X
+        pad_y = 0.0 if ctx.snap else 2.0 * _PAD_Y
         if axis == "y":
-            n = float(len(self.options))
+            n = float(len(self.options)) + pad_y
             return SizeRequest(min=1.0, preferred=n, max=n)
         prefix = len(_SELECTED) + len(_GAP)
-        w = max(
+        w = pad_x + max(
             (prefix + ctx.measure_text(o, self.style) for o in self.options), default=0.0
         )
         return SizeRequest(min=w, preferred=w, max=w)
@@ -110,7 +138,7 @@ class RadioGroup(Widget):
         if not self.options:
             return False
         if event.type is EventType.MOUSE_CLICK:
-            row = int(event.y or 0)
+            row = int((event.y or 0) - self._pad_y)  # back out the rows' top inset
             if 0 <= row < len(self.options):
                 self._select(row)
             return True
