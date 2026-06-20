@@ -40,6 +40,7 @@ from puikit import (
     VSplit,
 )
 from puikit.backends import create_backend
+from puikit.layout import SizeRequest
 from puikit.widgets import (
     BusyIndicator,
     Button,
@@ -1617,6 +1618,15 @@ class _DragWell(Widget):
         self.status = status
         self._armed = False  # a press arms; the first drag after it fires once
 
+    def measure(self, ctx, axis, available):
+        # Height is content-driven: top border, title, hint, a blank row, one
+        # row per file, a blank pad, then the bottom border. The box never
+        # clips its own file list regardless of how many paths it carries.
+        if axis == "y":
+            h = float(len(self.paths) + 6)
+            return SizeRequest(min=h, preferred=h, max=h)
+        return SizeRequest(min=0.0, preferred=0.0, max=0.0)
+
     def draw(self, ctx):
         ctx.draw_box(0, 0, ctx.width, ctx.height, hints={"fill": True})
         inner = max(0, ctx.width - 4)
@@ -1679,18 +1689,19 @@ def build_drag_page(panel: Panel) -> VSplit:
         "panel.begin_file_drag(paths, event, operations, on_complete) —\n"
         "one intent, two fidelities:\n"
         "\n"
-        "  · GUI-Desktop  -> a real OS drag session (NSDraggingSource).\n"
-        "                    Drop the files onto Finder, an editor, a chat.\n"
-        "  · TUI / others -> no app can be an OS drag source inside a\n"
-        "                    terminal, so the Panel copies the paths to the\n"
-        "                    clipboard instead — paste them into the target.\n"
+        "  · GUI-Desktop -> a real OS drag session (NSDraggingSource). "
+        "Drop the files onto Finder, an editor, a chat.\n"
+        "  · TUI / others -> no app can be an OS drag source inside a "
+        "terminal, so the Panel copies the paths to the clipboard "
+        "instead — paste them into the target.\n"
         "\n"
-        "The wells offer copy AND move. PuiKit never deletes files: it reports\n"
-        "the chosen operation through on_complete(op), and the app performs a\n"
-        "move itself (the status line shows what it would do).\n"
+        "The wells offer copy AND move. PuiKit never deletes files: it "
+        "reports the chosen operation through on_complete(op), and the app "
+        "performs a move itself (the status line shows what it would do).\n"
         "\n"
-        "The page never branches on the backend; it just asks to export files.\n"
-        "Tab focuses a well; press and drag with the mouse to start.",
+        "The page never branches on the backend; it just asks to export "
+        "files. Tab focuses a well; press and drag with the mouse to start.",
+        wrap=True,
     )
     return VSplit(
         Item(Label("Drag files out to other apps — one intent, two fidelities", DIM), size=1),
@@ -1698,8 +1709,8 @@ def build_drag_page(panel: Panel) -> VSplit:
             HSplit(
                 Item(
                     VSplit(
-                        Item(one, size=7),
-                        Item(many, size=7),
+                        Item(one, size="content"),
+                        Item(many, size="content"),
                         Item(Label(""), weight=1),
                         gap=1,
                     ),
