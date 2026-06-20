@@ -89,6 +89,25 @@ def test_busyindicator_ticks_only_on_animation_backend(backend):
         assert backend.tick_callbacks == []
 
 
+def test_busyindicator_unregisters_tick_when_detached(backend):
+    # A spinner whose page is swapped out stops being drawn. Its tick must
+    # self-unregister so it neither pins the detached widget alive nor keeps
+    # driving off-screen re-renders forever (the demo-catalog memory leak).
+    if not backend.capabilities.supports("animation"):
+        pytest.skip("still backend never registers a tick")
+    panel = Panel(backend)
+    spin = BusyIndicator()
+    panel.add(spin, x=0, y=0, w=8, h=1)
+    panel.render()
+    assert backend.tick_callbacks  # registered while drawn
+    # Detach the spinner from the panel: it is no longer drawn on render.
+    panel.remove(spin)
+    panel.render()
+    backend.run_animation_ticks()  # last tick that still saw _drawn from before
+    backend.run_animation_ticks()  # now no draw intervened -> unregisters
+    assert backend.tick_callbacks == []
+
+
 def test_busyindicator_intrinsic_width_covers_glyph_and_label(backend):
     from puikit.layout import LayoutContext
 

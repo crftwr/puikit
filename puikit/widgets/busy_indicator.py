@@ -47,6 +47,11 @@ class BusyIndicator(Widget):
         self.style = style
         self._panel = None
         self._ticking = False
+        # Set on every draw, cleared on every tick: a liveness flag. If a tick
+        # fires without an intervening draw, this widget has left the layout
+        # (e.g. its page was swapped out), so the tick unregisters itself rather
+        # than pinning the detached widget alive and re-rendering forever.
+        self._drawn = False
 
     # --- control -------------------------------------------------------------
 
@@ -67,6 +72,7 @@ class BusyIndicator(Widget):
 
     def draw(self, ctx: DrawContext) -> None:
         self._panel = ctx.panel
+        self._drawn = True
         theme = ctx.theme or DEFAULT_THEME
         fg = self.style.fg or theme.accent
         ctx.draw_text(0, 0, self._frame(), Style(fg=fg, bg=self.style.bg))
@@ -87,9 +93,12 @@ class BusyIndicator(Widget):
             self._ticking = ctx.panel.request_animation_ticks(self._tick)
 
     def _tick(self) -> bool:
-        if not self.running or self._panel is None:
+        # Unregister if stopped, detached, or no longer being drawn (its page
+        # was swapped out). A later draw flips _ticking back on and re-registers.
+        if not self.running or self._panel is None or not self._drawn:
             self._ticking = False
             return False
+        self._drawn = False
         self._panel.render()
         return True
 
