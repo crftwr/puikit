@@ -2,14 +2,24 @@
 
 import pytest
 
-from puikit import Event, EventType, Panel, PROFILE_GUI_DESKTOP, PROFILE_TUI
+from puikit import CapabilityProfile, Event, EventType, Panel, PROFILE_GUI_DESKTOP, PROFILE_TUI
 from puikit.widgets import Button, Container, Label, show_drawer
+from puikit.widgets.drawer import ROUNDED_CORNERS
 from puikit.backends.memory_backend import MemoryBackend
 
 
 @pytest.fixture(params=[PROFILE_TUI, PROFILE_GUI_DESKTOP], ids=["tui", "gui"])
 def backend(request):
     return MemoryBackend(width=60, height=20, capabilities=request.param)
+
+
+class _VectorBackend(MemoryBackend):
+    """A grid backend that *claims* vector_shapes so the rounded-face path can
+    be exercised headlessly (the real MemoryBackend masks it off)."""
+
+    @property
+    def capabilities(self) -> CapabilityProfile:
+        return CapabilityProfile({**self._capabilities, "vector_shapes": True})
 
 
 def _key(name, modifiers=frozenset()):
@@ -120,3 +130,46 @@ def test_invalid_side_rejected(backend):
     panel = Panel(backend)
     with pytest.raises(ValueError):
         show_drawer(panel, Label("x"), side="middle")
+
+
+# --- rounded face (vector backends) --------------------------------------------
+
+
+@pytest.mark.parametrize("side", ["left", "right", "top", "bottom"])
+def test_vector_drawer_rounds_inner_corners(side):
+    # On a vector backend the drawer paints a rounded face whose rounded corners
+    # are the inner ones (facing the page); the edge-flush corners stay square.
+    backend = _VectorBackend(width=60, height=20, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    show_drawer(panel, Label("x"), side=side, radius=10)
+    panel.render()
+    assert backend.round_rect_calls, "drawer painted no rounded face"
+    *_, radius, style, hints = backend.round_rect_calls[0]
+    assert radius == 10
+    assert hints.get("corners") == ROUNDED_CORNERS[side]
+    assert hints.get("fill") is True
+
+
+@pytest.mark.parametrize("side", ["left", "right", "top", "bottom"])
+def test_shadow_silhouette_matches_rounded_corners(side):
+    # The drop shadow is cast with the same radius/corners as the face, so it
+    # follows the rounded outline instead of a square rect.
+    backend = _VectorBackend(width=60, height=20, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    show_drawer(panel, Label("x"), side=side, radius=10)
+    panel.render()
+    assert backend.shadow_calls, "no shadow drawn"
+    *_, radius, corners = backend.shadow_calls[0]
+    assert radius == 10
+    assert corners == ROUNDED_CORNERS[side]
+
+
+def test_tui_drawer_has_flat_fill_and_no_shadow():
+    # A character grid cannot round corners: the round_rect fallback fills the
+    # rect flat (no recorded vector call) and there is no shadow capability.
+    backend = MemoryBackend(width=60, height=20, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+    show_drawer(panel, Label("x"), side="left")
+    panel.render()
+    assert backend.round_rect_calls == []
+    assert backend.shadow_calls == []

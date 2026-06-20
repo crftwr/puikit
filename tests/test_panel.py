@@ -168,7 +168,7 @@ def test_shadow_hint_respects_capability():
     panel = Panel(backend)
     panel.push_layer(BoxWidget(), z=10, hints={"shadow": True, "w": 8, "h": 4})
     panel.render()
-    assert backend.shadow_calls == [(6, 3, 8, 4)]
+    assert backend.shadow_calls == [(6, 3, 8, 4, None, None)]
 
 
 def test_box_fill_clears_interior():

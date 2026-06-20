@@ -855,12 +855,21 @@ class Panel:
             self.backend.dim_rect(0, 0, sw, sh)
         rect = self._interpolate_rect(slot.widget, slot.rect)
         self.backend.begin_group(slot.widget, rect)
-        # The shadow blurs beyond the rect, so it is drawn before clipping.
+        # The shadow blurs beyond the rect, so it is drawn before clipping. A
+        # layer that paints a rounded face (e.g. a Drawer) passes "radius" /
+        # "corners" hints so the shadow silhouette matches the rounding.
         if slot.hints.get("shadow") and self.backend.capabilities.supports("shadow"):
-            self.backend.draw_shadow(rect.x, rect.y, rect.w, rect.h)
+            self.backend.draw_shadow(
+                rect.x, rect.y, rect.w, rect.h,
+                slot.hints.get("radius"), slot.hints.get("corners"),
+            )
         self.backend.push_clip(rect.x, rect.y, rect.w, rect.h)
         background = self._pane_background(slot.hints)
-        if background is not None:
+        # A "self_paint" layer (e.g. a Drawer with a rounded face) paints its
+        # own background, so the Panel skips the square fill but still hands the
+        # resolved color down for content inheritance — otherwise the square
+        # fill would show under/around the rounded corners.
+        if background is not None and not slot.hints.get("self_paint"):
             self.backend.fill_rect(rect.x, rect.y, rect.w, rect.h, Style(bg=background))
         layer_ctx = DrawContext(
             self.backend, rect, self.backend.capabilities,

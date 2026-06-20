@@ -39,7 +39,7 @@ class MemoryBackend(Backend):
         self.image_calls: list[tuple[float, float, str, dict[str, Any]]] = []
         self.round_rect_calls: list[tuple] = []
         self.check_calls: list[tuple] = []
-        self.shadow_calls: list[tuple[int, int, int, int]] = []
+        self.shadow_calls: list[tuple] = []
         self.animate_calls: list[tuple[Any, dict[str, Any]]] = []
         self.tick_callbacks: list[Any] = []
         self.present_count = 0
@@ -173,8 +173,16 @@ class MemoryBackend(Backend):
                 old = self._styles[row][col]
                 self._styles[row][col] = Style(old.fg, old.bg, old.attr | TextAttribute.DIM)
 
-    def draw_shadow(self, x: int, y: int, w: int, h: int) -> None:
-        self.shadow_calls.append((x, y, w, h))
+    def draw_shadow(
+        self,
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        radius: float | None = None,
+        corners: tuple[str, ...] | None = None,
+    ) -> None:
+        self.shadow_calls.append((x, y, w, h, radius, corners))
 
     def animate(self, widget: Any, hints: dict[str, Any] | None = None) -> None:
         self.animate_calls.append((widget, hints or {}))

@@ -24,12 +24,26 @@ from ..event import Event, EventType
 from ..focus import FocusContainer, focus_on_click, move_focus
 from ..layout import Divider
 from ..panel import DrawContext, Rect
+from ..theme import DEFAULT_THEME
 from .base import Widget
 
 _BOLD = Style(attr=TextAttribute.BOLD)
 
 #: The four edges a drawer can anchor to.
 SIDES = ("left", "right", "top", "bottom")
+
+#: Default corner radius (device pixels) on the drawer's inner edge.
+DEFAULT_RADIUS = 12.0
+
+#: Which corners each side rounds — the inner ones (the edge facing the page);
+#: the corners flush to the screen edge stay square. Corner names are
+#: screen-oriented: "tl"/"tr"/"br"/"bl".
+ROUNDED_CORNERS = {
+    "left": ("tr", "br"),
+    "right": ("tl", "bl"),
+    "top": ("bl", "br"),
+    "bottom": ("tl", "tr"),
+}
 
 
 class Drawer(FocusContainer, Widget):
@@ -53,6 +67,8 @@ class Drawer(FocusContainer, Widget):
         title: str = "",
         on_close: Callable[[], None] | None = None,
         modal: bool = True,
+        surface: str = "sidebar",
+        radius: float = DEFAULT_RADIUS,
     ):
         if side not in SIDES:
             raise ValueError(f"side must be one of {SIDES}, got {side!r}")
@@ -61,6 +77,10 @@ class Drawer(FocusContainer, Widget):
         self.title = title
         self.on_close = on_close
         self.modal = modal
+        # Surface role resolved to a fill color by the theme, and the inner-edge
+        # corner radius (device pixels) for the rounded face on GUI.
+        self.surface = surface
+        self.radius = radius
         self._panel: Any = None
         # The drawer's own extent and the content sub-rect, captured at draw
         # time so event handling can tell a content click from a scrim click.
@@ -98,8 +118,24 @@ class Drawer(FocusContainer, Widget):
     def draw(self, ctx: DrawContext) -> None:
         self._panel = ctx.panel
         self._size = ctx.size_units
+        wu, hu = ctx.size_units
         w, h = ctx.width, ctx.height
-        ctx.draw_divider(self._inner_divider(ctx))
+
+        # Paint the drawer's own face. On vector backends it is a rounded
+        # rectangle whose *inner* corners are rounded (a shadow, set up by the
+        # Panel with the same radius/corners, separates it from the page); on a
+        # grid the round_rect fallback fills the whole rect flat and a
+        # box-drawing line on the inner edge carries the separation instead.
+        theme = ctx.theme or DEFAULT_THEME
+        bg = theme.surface_bg(self.surface)
+        if bg is not None:
+            ctx.round_rect(
+                0, 0, wu, hu, Style(bg=bg),
+                radius=self.radius,
+                hints={"fill": True, "corners": ROUNDED_CORNERS[self.side]},
+            )
+        if not ctx.vector_shapes:
+            ctx.draw_divider(self._inner_divider(ctx))
 
         # One base unit of padding inside the drawer, with the divider edge kept
         # clear (its line is already drawn at the very edge). A title, when
@@ -175,6 +211,7 @@ def show_drawer(
     dim: bool = True,
     shadow: bool = True,
     surface: str = "sidebar",
+    radius: float = DEFAULT_RADIUS,
     z: int = 80,
     duration_ms: int = 200,
 ) -> Drawer:
@@ -191,7 +228,10 @@ def show_drawer(
     Panel resolves them per backend, so the caller never branches."""
     if side not in SIDES:
         raise ValueError(f"side must be one of {SIDES}, got {side!r}")
-    drawer = Drawer(content, side=side, title=title, on_close=on_close, modal=modal)
+    drawer = Drawer(
+        content, side=side, title=title, on_close=on_close, modal=modal,
+        surface=surface, radius=radius,
+    )
     sw, sh = panel.backend.size_units
 
     if side in ("left", "right"):
@@ -211,7 +251,15 @@ def show_drawer(
         from_dx = 0.0
         from_dy = -h if side == "top" else h
 
-    hints: dict[str, Any] = {"x": x, "y": y, "w": w, "h": h, "surface": surface}
+    # The drawer paints its own (rounded) face, so "self_paint" tells the Panel
+    # to skip the square background fill while still passing the surface color
+    # down for content inheritance. "radius"/"corners" let the drop shadow match
+    # the rounded inner edge.
+    hints: dict[str, Any] = {
+        "x": x, "y": y, "w": w, "h": h,
+        "surface": surface, "self_paint": True,
+        "radius": radius, "corners": ROUNDED_CORNERS[side],
+    }
     if dim:
         hints["dim_below"] = True
     if shadow:

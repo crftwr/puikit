@@ -189,7 +189,19 @@ class Backend(ABC):
     def draw_icon(self, x: int, y: int, icon_name: str, style: Style = DEFAULT_STYLE) -> None:
         raise CapabilityNotSupported("icons")
 
-    def draw_shadow(self, x: int, y: int, w: int, h: int) -> None:
+    def draw_shadow(
+        self,
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        radius: float | None = None,
+        corners: "tuple[str, ...] | None" = None,
+    ) -> None:
+        """Cast a drop shadow from the layer's silhouette. ``radius`` (device
+        pixels) and ``corners`` (a subset of ``"tl"``/``"tr"``/``"br"``/``"bl"``)
+        round the silhouette so the shadow matches a rounded panel; ``None``
+        means a square rect / all four corners."""
         raise CapabilityNotSupported("shadow")
 
     def draw_round_rect(

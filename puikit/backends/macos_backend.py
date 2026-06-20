@@ -780,8 +780,16 @@ class MacOSBackend(Backend):
     def dim_rect(self, x: int, y: int, w: int, h: int) -> None:
         self._back.append(("dim", x, y, w, h))
 
-    def draw_shadow(self, x: int, y: int, w: int, h: int) -> None:
-        self._back.append(("shadow", x, y, w, h))
+    def draw_shadow(
+        self,
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        radius: float | None = None,
+        corners: tuple[str, ...] | None = None,
+    ) -> None:
+        self._back.append(("shadow", x, y, w, h, radius, corners))
 
     def begin_group(self, key: Any, rect: Any = None) -> None:
         self._back.append(("group_begin", id(key), rect))
@@ -1049,17 +1057,50 @@ class MacOSBackend(Backend):
     def _render_fill(self, x: float, y: float, w: float, h: float, style: Style) -> None:
         _fill_rect(self._unit_rect(x, y, w, h), style.bg or _DEFAULT_BG)
 
+    def _rounded_path(self, rect, r: float, corners: tuple[str, ...] | None):
+        """An NSBezierPath around ``rect`` with corner radius ``r`` on the named
+        ``corners`` (``"tl"``/``"tr"``/``"br"``/``"bl"``, screen-oriented; the
+        view is flipped so top = smaller y). ``corners is None`` rounds all four,
+        matching the stock rounded-rect path."""
+        if corners is None:
+            return NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(rect, r, r)
+        minx, miny = rect.origin.x, rect.origin.y
+        maxx, maxy = minx + rect.size.width, miny + rect.size.height
+
+        def rad(name: str) -> float:
+            return r if name in corners else 0.0
+
+        path = NSBezierPath.bezierPath()
+        path.moveToPoint_((minx + rad("tl"), miny))
+        path.lineToPoint_((maxx - rad("tr"), miny))
+        if rad("tr"):
+            path.appendBezierPathWithArcFromPoint_toPoint_radius_((maxx, miny), (maxx, maxy), r)
+        path.lineToPoint_((maxx, maxy - rad("br")))
+        if rad("br"):
+            path.appendBezierPathWithArcFromPoint_toPoint_radius_((maxx, maxy), (minx, maxy), r)
+        path.lineToPoint_((minx + rad("bl"), maxy))
+        if rad("bl"):
+            path.appendBezierPathWithArcFromPoint_toPoint_radius_((minx, maxy), (minx, miny), r)
+        path.lineToPoint_((minx, miny + rad("tl")))
+        if rad("tl"):
+            path.appendBezierPathWithArcFromPoint_toPoint_radius_((minx, miny), (maxx, miny), r)
+        path.closePath()
+        return path
+
     def _render_round_rect(
         self, x: float, y: float, w: float, h: float, radius, style: Style, hints: dict[str, Any]
     ) -> None:
         rect = self._unit_rect(x, y, w, h)
         r = radius if radius is not None else min(rect.size.width, rect.size.height) / 2.0
         r = max(0.0, min(r, rect.size.width / 2.0, rect.size.height / 2.0))
+        # A subset of corners to round (the rest stay square), e.g. a Drawer's
+        # inner edge; absent means a uniformly rounded rect.
+        corners = hints.get("corners")
         if hints.get("fill") and style.bg is not None:
             # NSBezierPath.fill composites source-over by default, so an RGBA
             # fill (translucent control face) blends over what is already drawn.
             _ns_color(style.bg).setFill()
-            NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(rect, r, r).fill()
+            self._rounded_path(rect, r, corners).fill()
         if style.fg is not None:
             line = float(hints.get("line_width", 1.0))
             # Inset by half the line width so the stroke lands on the pixel grid.
@@ -1069,7 +1110,7 @@ class MacOSBackend(Backend):
             )
             ir = max(0.0, min(r, inset.size.width / 2.0, inset.size.height / 2.0))
             _ns_color(style.fg).setStroke()
-            path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(inset, ir, ir)
+            path = self._rounded_path(inset, ir, corners)
             path.setLineWidth_(line)
             path.stroke()
 
@@ -1094,10 +1135,14 @@ class MacOSBackend(Backend):
         _ns_color((0, 0, 0), 0.45).setFill()
         NSRectFillUsingOperation(self._unit_rect(x, y, w, h), NSCompositingOperationSourceOver)
 
-    def _render_shadow(self, x: int, y: int, w: int, h: int) -> None:
-        # Fill the layer's rect with the window background while an NSShadow
-        # is active; the blurred shadow remains visible around the layer
-        # content drawn on top.
+    def _render_shadow(
+        self, x: int, y: int, w: int, h: int,
+        radius: float | None = None, corners: tuple[str, ...] | None = None,
+    ) -> None:
+        # Fill the layer's silhouette with the window background while an
+        # NSShadow is active; the blurred shadow remains visible around the
+        # layer content drawn on top. A rounded panel (a Drawer) passes a radius
+        # and a corner subset so the shadow follows the rounded outline.
         NSGraphicsContext.saveGraphicsState()
         shadow = NSShadow.alloc().init()
         shadow.setShadowOffset_(NSMakeSize(4.0, 6.0))
@@ -1105,7 +1150,12 @@ class MacOSBackend(Backend):
         shadow.setShadowColor_(_ns_color((0, 0, 0), 0.7))
         shadow.set()
         _ns_color(_DEFAULT_BG).setFill()
-        NSRectFill(self._unit_rect(x, y, w, h))
+        rect = self._unit_rect(x, y, w, h)
+        if radius:
+            r = max(0.0, min(radius, rect.size.width / 2.0, rect.size.height / 2.0))
+            self._rounded_path(rect, r, corners).fill()
+        else:
+            NSRectFill(rect)
         NSGraphicsContext.restoreGraphicsState()
 
     def _render_scrollbar(
