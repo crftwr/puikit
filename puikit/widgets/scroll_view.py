@@ -146,7 +146,10 @@ class ScrollView(FocusContainer, Widget):
             self.offset -= amount
             self._clamp(self._entries()[1])
             return True
-        if event.type in (EventType.MOUSE_CLICK, EventType.MOUSE_DRAG):
+        if event.type in (
+            EventType.MOUSE_DOWN, EventType.MOUSE_UP,
+            EventType.MOUSE_CLICK, EventType.MOUSE_DRAG,
+        ):
             return self._handle_mouse(event)
         if event.type is EventType.KEY:
             return self._handle_key(event)
@@ -161,7 +164,9 @@ class ScrollView(FocusContainer, Widget):
         content_y = event.y + self.offset
         for widget, top, h in self._entries()[0]:
             if top <= content_y < top + h:
-                if event.type is EventType.MOUSE_CLICK:
+                # Focus descends on the press so a click focuses the child
+                # immediately, not on release.
+                if event.type is EventType.MOUSE_DOWN:
                     focus_on_click(self, widget)
                 local = event.translated(0, self.offset - top)
                 return bool(widget.handle_event(local))

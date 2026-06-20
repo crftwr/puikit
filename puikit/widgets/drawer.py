@@ -178,11 +178,12 @@ class Drawer(FocusContainer, Widget):
             return True  # modal: swallow keys even with nothing focusable
 
         if event.type in (
+            EventType.MOUSE_DOWN, EventType.MOUSE_UP,
             EventType.MOUSE_CLICK, EventType.MOUSE_DRAG, EventType.MOUSE_SCROLL
         ):
             inside = event.x is not None and self._content_rect.contains(event.x, event.y)
             if inside:
-                if event.type is EventType.MOUSE_CLICK:
+                if event.type is EventType.MOUSE_DOWN:
                     focus_on_click(self, self.content)
                 local = event.translated(-self._content_rect.x, -self._content_rect.y)
                 self.content.handle_event(local)

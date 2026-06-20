@@ -145,6 +145,8 @@ _CONTROL_KEYS = {
     "\n": "enter",
     "\x03": "enter",  # numeric keypad enter
     "\t": "tab",
+    "\x19": "tab",    # Shift+Tab: AppKit sends NSBackTabCharacter (0x19), with
+                      # the shift flag set, so it resolves to a shift-modified tab
     "\x1b": "escape",
     "\x7f": "backspace",
 }
@@ -492,9 +494,16 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
         # started from the mouse event that produced it.
         self._last_mouse_event = ns_event
         x, y = self._mouse_unit(ns_event)
-        self.backend._dispatch(Event(type=EventType.MOUSE_CLICK, x=x, y=y, button="left"))
+        # Press and release are reported separately; the Panel decides when the
+        # gesture becomes a click (release over the same widget).
+        self.backend._dispatch(Event(type=EventType.MOUSE_DOWN, x=x, y=y, button="left"))
+
+    def mouseUp_(self, ns_event):
+        x, y = self._mouse_unit(ns_event)
+        self.backend._dispatch(Event(type=EventType.MOUSE_UP, x=x, y=y, button="left"))
 
     def rightMouseDown_(self, ns_event):
+        # Right-click acts on press (context menus), so it stays an atomic click.
         x, y = self._mouse_unit(ns_event)
         self.backend._dispatch(Event(type=EventType.MOUSE_CLICK, x=x, y=y, button="right"))
 

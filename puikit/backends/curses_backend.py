@@ -619,6 +619,10 @@ class CursesBackend(Backend):
         if ch == curses.KEY_RESIZE:
             w, h = self.size
             return Event(type=EventType.RESIZE, hints={"w": w, "h": h})
+        if ch == getattr(curses, "KEY_BTAB", 0x161):
+            # Shift+Tab arrives as a distinct key code in curses, not as a
+            # modified tab; deliver it as one so focus traversal goes backward.
+            return Event(type=EventType.KEY, key="tab", modifiers=frozenset({"shift"}))
         if ch in _KEY_NAMES:
             return Event(type=EventType.KEY, key=_KEY_NAMES[ch])
         if 0 <= ch < 0x110000:
@@ -673,7 +677,13 @@ class CursesBackend(Backend):
             return Event(type=EventType.MOUSE_SCROLL, x=x, y=y, scroll=scroll, modifiers=mods)
         button = {0: "left", 1: "middle", 2: "right"}.get(b & self._SGR_BUTTON, "left")
         if final == "m":  # button release
+            was_left = self._mouse_down
             self._mouse_down = False
+            # The left release completes a press; the Panel turns it into a click
+            # if it lands over the same widget. Other buttons have no down/up
+            # gesture and were delivered as a click on press.
+            if was_left:
+                return Event(type=EventType.MOUSE_UP, x=x, y=y, button="left", modifiers=mods)
             return None
         if b & self._SGR_MOTION:
             # Motion is only reported while a button is held (mode 1002); a left
@@ -681,8 +691,12 @@ class CursesBackend(Backend):
             if self._mouse_down:
                 return Event(type=EventType.MOUSE_DRAG, x=x, y=y, button="left", modifiers=mods)
             return None
-        # A fresh button press: arm drag tracking for the left button.
-        self._mouse_down = (b & self._SGR_BUTTON) == 0
+        # A fresh button press. The left button arms drag tracking and reports a
+        # press the Panel will pair with the release; other buttons act on press.
+        if (b & self._SGR_BUTTON) == 0:
+            self._mouse_down = True
+            return Event(type=EventType.MOUSE_DOWN, x=x, y=y, button="left", modifiers=mods)
+        self._mouse_down = False
         return Event(type=EventType.MOUSE_CLICK, x=x, y=y, button=button, modifiers=mods)
 
     def _sgr_modifiers(self, b: int) -> frozenset[str]:

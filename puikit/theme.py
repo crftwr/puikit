@@ -44,6 +44,11 @@ class Theme:
     button_hover_bg: Color = (17, 119, 187)  # button hover              #1177BB
     button_text: Color = (255, 255, 255)
     selection_bg: Color = (9, 71, 113)     # active selection            #094771
+    # Text-field selection, split by focus: a clearly legible blue while the
+    # field is focused, a muted neutral when focus is elsewhere (the editor
+    # selection / inactive-selection pair from VS Code).
+    text_selection_bg: Color = (38, 79, 120)          # focused  #264F78
+    text_selection_inactive_bg: Color = (58, 61, 65)  # blurred  #3A3D41
     hover_bg: Color = (42, 45, 46)         # row hover                   #2A2D2E
     popup_bg: Color = (37, 37, 38)         # menu / popup surface        #252526
     popup_border: Color = (84, 84, 92)     # menu / popup frame line     #54545C

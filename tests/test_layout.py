@@ -466,6 +466,40 @@ def test_margin_clicks_route_to_edge_pane_with_clamped_coords():
     assert (event.x, event.y) == (0, 0)
 
 
+def test_margin_hover_and_press_match_the_click_region():
+    # Hover/press must react in the same bled margin that clicks and focus route
+    # to, so the hit region is consistent across every pointer operation.
+    from puikit import Event, EventType
+
+    class StateProbe(Widget):
+        focusable = True
+
+        def __init__(self):
+            self.hovered = False
+            self.pressed = False
+
+        def draw(self, ctx):
+            self.hovered = ctx.hovered
+            self.pressed = ctx.pressed
+
+        def handle_event(self, event):
+            return True
+
+    backend = FakeGuiBackend(width=10, height=6)  # 100 x 120 px
+    panel = Panel(backend)
+    left, right = StateProbe(), StateProbe()
+    panel.set_layout(HSplit(left, right), margin_px=8)
+    panel.render()
+    # (0, 0) is in the left pane's bled margin (content starts at 0.8, 0.4).
+    panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=0.0, y=0.0))
+    panel.render()
+    assert left.hovered and not right.hovered
+    # A press in the same margin shows the held pressed cue (and focuses the pane).
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=0.0, y=0.0, button="left"))
+    panel.render()
+    assert left.pressed and panel.focused is left
+
+
 def test_layout_margin_units_applies_on_whole_unit_grid():
     backend = MemoryBackend(width=20, height=10)
     panel = Panel(backend)

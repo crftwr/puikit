@@ -73,11 +73,14 @@ def test_sgr_mouse_press_drag_release_emits_drag():
     # press (b=0) arms drag tracking; a held-button motion (b=32) becomes a
     # MOUSE_DRAG; the lowercase 'm' release disarms it. Coords are 1-based.
     be = CursesBackend()
+    # A left press is reported as MOUSE_DOWN (the Panel pairs it with the
+    # release); a held-button motion becomes MOUSE_DRAG; the release is MOUSE_UP.
     press = be._parse_sgr_mouse("[<0;5;3M")
-    assert press.type is EventType.MOUSE_CLICK and (press.x, press.y) == (4, 2)
+    assert press.type is EventType.MOUSE_DOWN and (press.x, press.y) == (4, 2)
     drag = be._parse_sgr_mouse("[<32;8;3M")
     assert drag.type is EventType.MOUSE_DRAG and (drag.x, drag.y) == (7, 2)
-    assert be._parse_sgr_mouse("[<0;8;3m") is None   # release delivers nothing
+    release = be._parse_sgr_mouse("[<0;8;3m")
+    assert release.type is EventType.MOUSE_UP and (release.x, release.y) == (7, 2)
     # A stray motion after release (button no longer held) is ignored.
     assert be._parse_sgr_mouse("[<32;9;3M") is None
 
@@ -85,7 +88,7 @@ def test_sgr_mouse_press_drag_release_emits_drag():
 def test_sgr_mouse_shift_click_and_wheel():
     be = CursesBackend()
     shifted = be._parse_sgr_mouse("[<4;2;2M")  # b=4 -> shift + left press
-    assert shifted.type is EventType.MOUSE_CLICK and "shift" in shifted.modifiers
+    assert shifted.type is EventType.MOUSE_DOWN and "shift" in shifted.modifiers
     up = be._parse_sgr_mouse("[<64;2;2M")      # wheel up
     down = be._parse_sgr_mouse("[<65;2;2M")    # wheel down
     assert up.type is EventType.MOUSE_SCROLL and up.scroll == 1

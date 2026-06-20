@@ -152,6 +152,48 @@ def test_click_moves_focus_across_panes(backend):
     assert b1.checked is True
 
 
+def test_click_focuses_nested_child_on_press_not_release(backend):
+    # Clicking a control inside a container must move focus into it on the press
+    # (MOUSE_DOWN), not wait for the release — so the focus cue is immediate.
+    a1, b1 = Checkbox("a1"), Checkbox("b1")
+    pane_a, pane_b = _scroller(a1), _scroller(b1)
+    panel = Panel(backend)
+    panel.add(pane_a, x=0, y=0, w=14, h=12)
+    panel.add(pane_b, x=15, y=0, w=14, h=12)
+    panel.render()
+
+    assert panel.focused is pane_a and pane_a._focused is a1
+    # b1 sits in pane_b (head row 0, gap row 1) at content y=2; pane_b is at x=15.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=16, y=2, button="left"))
+    # Focus has descended all the way to b1 on the press, before any release.
+    assert panel.focused is pane_b
+    assert pane_b._focused is b1
+
+
+def test_event_translated_keeps_subunit_precision():
+    # Routing must not quantize coordinates to whole cells, or a fractional edge
+    # hit-tests differently than the geometric hover/press cue.
+    e = Event(type=EventType.MOUSE_DOWN, x=5.7, y=2.5, button="left")
+    t = e.translated(-1.0, -0.4)
+    assert (t.x, t.y) == pytest.approx((4.7, 2.1))
+
+
+def test_click_top_edge_routes_to_widget_at_fractional_boundary(backend):
+    # A child whose top edge sits at a fractional base unit (pixel layout) must
+    # receive a press at that exact edge, so focus lands on it — not on the row
+    # above — matching where the geometric press cue lights.
+    top, bottom = Checkbox("top"), Checkbox("bottom")
+    cont = Container()
+    cont.add(top, x=0, y=0, w=6, h=1.5)
+    cont.add(bottom, x=0, y=1.5, w=6, h=1.5)
+    panel = Panel(backend)
+    panel.add(cont, x=0, y=0, w=6, h=3)
+    panel.render()
+    # Press exactly on the bottom child's top edge (y = 1.5).
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=1.0, y=1.5, button="left"))
+    assert cont.get_focused() is bottom
+
+
 def test_list_selection_is_a_strong_cue_only_while_focused(backend):
     # A list's selected row reads as active (reverse video) while the list holds
     # focus, and dims to the muted selection background when focus is elsewhere

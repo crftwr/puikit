@@ -133,6 +133,7 @@ class Splitter(FocusContainer, Widget):
 
     def handle_event(self, event: Event) -> bool:
         if event.type in (
+            EventType.MOUSE_DOWN, EventType.MOUSE_UP,
             EventType.MOUSE_CLICK, EventType.MOUSE_DRAG, EventType.MOUSE_SCROLL
         ):
             return self._handle_mouse(event)
@@ -148,17 +149,19 @@ class Splitter(FocusContainer, Widget):
             self._dragging = True
             self._drag_to(x, y)
             return True
-        if event.type is EventType.MOUSE_CLICK:
+        if event.type is EventType.MOUSE_DOWN:
             if on_handle:
                 self._dragging = True
                 self._drag_to(x, y)
                 return True
-            self._dragging = False  # a click elsewhere ends any drag
+            self._dragging = False  # a press elsewhere ends any drag
+        if event.type is EventType.MOUSE_UP:
+            self._dragging = False
         for child, rect in (
             (self.first, self._first_rect), (self.second, self._second_rect)
         ):
             if x is not None and rect.contains(x, y):
-                if event.type is EventType.MOUSE_CLICK:
+                if event.type is EventType.MOUSE_DOWN:
                     focus_on_click(self, child)
                 local = event.translated(-rect.x, -rect.y)
                 return bool(child.handle_event(local))

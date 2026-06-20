@@ -80,11 +80,12 @@ class LayoutView(FocusContainer, Widget):
 
     def handle_event(self, event: Event) -> bool:
         if event.type in (
+            EventType.MOUSE_DOWN, EventType.MOUSE_UP,
             EventType.MOUSE_CLICK, EventType.MOUSE_DRAG, EventType.MOUSE_SCROLL
         ):
             for widget, rect in reversed(self._placements):
                 if event.x is not None and rect.contains(event.x, event.y):
-                    if event.type is EventType.MOUSE_CLICK:
+                    if event.type is EventType.MOUSE_DOWN:
                         focus_on_click(self, widget)
                     local = event.translated(-rect.x, -rect.y)
                     return bool(widget.handle_event(local))

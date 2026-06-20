@@ -285,8 +285,9 @@ def test_textedit_mouse_drag_selects(backend):
     field = TextEdit("hello", width=12)
     panel.add(field, x=0, y=0, w=12, h=1)
     panel.render()
-    # Press at column 1 (buffer index 0), drag to column 4 (index 3).
-    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=1, y=0, button="left"))
+    # Press at column 1 (buffer index 0), drag to column 4 (index 3). The press
+    # is a MOUSE_DOWN (the click only fires on release, over the same widget).
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=1, y=0, button="left"))
     assert field.selection_text == ""
     panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=4, y=0, button="left"))
     assert field.selection_text == "hel"
@@ -335,9 +336,16 @@ def test_textedit_selection_renders_highlight(backend):
     panel.dispatch_event(_key("home"))
     panel.dispatch_event(_key("right", modifiers=frozenset({"shift"})))
     panel.render()
-    # First glyph 'h' sits at field column 1 and is the only selected cell.
-    assert backend.style_at(1, 0).bg == panel.theme.selection_bg
-    assert backend.style_at(2, 0).bg != panel.theme.selection_bg
+    # First glyph 'h' sits at field column 1 and is the only selected cell. The
+    # field holds focus, so the selection uses the focused text-selection color.
+    assert backend.style_at(1, 0).bg == panel.theme.text_selection_bg
+    assert backend.style_at(2, 0).bg != panel.theme.text_selection_bg
+    # Move focus away: the same selection falls back to the muted (inactive) color.
+    other = TextEdit("x", width=4)
+    panel.add(other, x=0, y=2, w=4, h=1)
+    panel.focus(other)
+    panel.render()
+    assert backend.style_at(1, 0).bg == panel.theme.text_selection_inactive_bg
 
 
 # --- static text selection ---------------------------------------------------
@@ -430,6 +438,63 @@ def test_button_focus_ring_and_hover(backend):
     panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=3, y=0))
     panel.render()
     assert backend.style_at(0, 0).bg == panel.theme.button_hover_bg
+
+
+def test_button_fires_on_release_over_button(backend):
+    fired = []
+    panel = Panel(backend)
+    btn = Button("OK", on_click=lambda: fired.append(True))
+    panel.add(btn, x=0, y=0, w=10, h=1)
+    panel.render()
+    # Press does not fire; the release over the button does.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=2, y=0, button="left"))
+    assert fired == []
+    panel.dispatch_event(Event(type=EventType.MOUSE_UP, x=2, y=0, button="left"))
+    assert fired == [True]
+
+
+def test_press_moves_focus_and_reports_handled(backend):
+    # A press must report handled so the host re-renders immediately — otherwise
+    # focus moves internally but the cue only repaints on the next event.
+    panel = Panel(backend)
+    first, second = Button("A"), Button("B")
+    panel.add(first, x=0, y=0, w=6, h=1)
+    panel.add(second, x=0, y=2, w=6, h=1)
+    panel.render()
+    assert panel.focused is first
+    handled = panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=1, y=2, button="left"))
+    assert panel.focused is second  # focus moved on press
+    assert handled is True          # so the host re-renders the new focus cue
+
+
+def test_button_press_cancelled_by_dragging_off(backend):
+    fired = []
+    panel = Panel(backend)
+    btn = Button("OK", on_click=lambda: fired.append(True))
+    panel.add(btn, x=0, y=0, w=10, h=1)
+    panel.render()
+    # Press, drag the pointer off the button, then release: no click fires.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=2, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=40, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_UP, x=40, y=0, button="left"))
+    assert fired == []
+
+
+def test_button_pressed_cue_held_then_cleared(backend):
+    from puikit.widgets.button import _darken
+    panel = Panel(backend)
+    btn = Button("OK")
+    panel.add(btn, x=0, y=0, w=10, h=1)
+    panel.render()
+    base = backend.style_at(0, 0).bg
+    # While pressed the fill darkens; the press anchor is captured.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=2, y=0, button="left"))
+    panel.render()
+    assert backend.style_at(0, 0).bg == _darken(base)
+    # Dragging off clears the cue (the press is cancelled), fill returns to base.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=40, y=0, button="left"))
+    panel.render()
+    assert backend.style_at(0, 0).bg == base
 
 
 def test_dropdown_outside_click_dismisses(backend):

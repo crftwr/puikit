@@ -39,10 +39,21 @@ _FACE_FITS = frozenset({FILL, CONTAIN, COVER})
 # backends (the face renders as a plain fill there).
 _RADIUS = 5.0
 
+# Focus-ring color: a bright near-white that contrasts with both the blue
+# primary fill and the neutral icon-tile fill, so the ring never collides with
+# the accent the way an accent-on-accent ring would.
+_FOCUS_RING = (240, 240, 245)
+
 
 def _lighten(color: tuple[int, int, int], amount: float = 0.12) -> tuple[int, int, int]:
     """Nudge a color toward white, for the hover state of a fill."""
     return tuple(round(c + (255 - c) * amount) for c in color)  # type: ignore[return-value]
+
+
+def _darken(color: tuple[int, int, int], amount: float = 0.18) -> tuple[int, int, int]:
+    """Nudge a color toward black, for the pressed state of a fill — the
+    opposite direction from hover, so rest/hover/pressed stay distinct."""
+    return tuple(round(c * (1.0 - amount)) for c in color)  # type: ignore[return-value]
 
 
 class Button(Widget):
@@ -93,7 +104,16 @@ class Button(Widget):
         else:
             # A bare icon is a neutral tile, not a primary action.
             bg, fg, hover = theme.control_bg, theme.button_text, _lighten(theme.control_bg)
-        return (hover if ctx.hovered else bg), fg, theme
+        # Press wins over hover (the pointer is over the button while pressed),
+        # and moves the fill the opposite way — darker — so the three states
+        # read distinctly (docs/interaction_states.md §3).
+        if ctx.pressed:
+            face = _darken(bg)
+        elif ctx.hovered:
+            face = hover
+        else:
+            face = bg
+        return face, fg, theme
 
     # --- draw ----------------------------------------------------------------
 
@@ -110,15 +130,30 @@ class Button(Widget):
         else:
             self._draw_label(ctx, bg, fg)
 
-        # Focus cue: a rounded accent ring when there is an image or the height
-        # for a box; the single-row text underline is applied in _draw_label.
-        if ctx.focused and (self.image is not None or ctx.height >= 2):
-            if ctx.width >= 1 and ctx.height >= 1:
+        # Focus cue.
+        # - Vector backends: a full-perimeter ring in a high-contrast *non-blue*
+        #   color, inset slightly so it reads as a focus halo rather than the
+        #   fill edge — accent-on-accent would vanish against the blue fill
+        #   (docs/interaction_states.md §5). Drawn at any size, so even a
+        #   one-row text button gets a real ring instead of a faint underline.
+        # - Character grid: a box-drawing frame when there is room (an image or
+        #   a 2+ row button); a one-row text button has no room for a box, so
+        #   _draw_label underlines instead.
+        if ctx.focused:
+            if ctx.vector_shapes and wu >= 1 and hu >= 1:
+                inset = min(0.12, wu / 2, hu / 2)
+                ctx.round_rect(
+                    inset, inset, wu - 2 * inset, hu - 2 * inset,
+                    Style(fg=_FOCUS_RING, bg=bg), radius=_RADIUS,
+                )
+            elif not ctx.vector_shapes and (self.image is not None or ctx.height >= 2):
                 ctx.round_rect(0, 0, wu, hu, Style(fg=theme.accent, bg=bg), radius=_RADIUS)
 
     def _draw_label(self, ctx: DrawContext, bg, fg) -> None:
         attr = TextAttribute.BOLD
-        if ctx.focused and ctx.height < 2:  # no room for a box: underline instead
+        # Underline is the grid-only cue for a one-row text button (no room for a
+        # box); vector backends draw a perimeter ring, taller grids draw a box.
+        if ctx.focused and not ctx.vector_shapes and ctx.height < 2:
             attr |= TextAttribute.UNDERLINE
         style = Style(fg=fg, bg=bg, attr=attr)
         # Center against the exact (fractional) pane width and measured label

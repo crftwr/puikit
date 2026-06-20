@@ -52,6 +52,8 @@ class TextEdit(Widget):
         self._preedit = ""      # IME marked (composition) text, not yet committed
         self._preedit_caret = 0  # caret offset within the preedit
         self._panel = None
+        self._focused_now = False  # last-drawn focus state, read by the blink tick
+        self._blinking = False     # whether a caret-blink tick is registered
 
     # --- selection -----------------------------------------------------------
 
@@ -138,13 +140,23 @@ class TextEdit(Widget):
             selected = sel is not None and sel[0] <= idx < sel[1]
             attr = TextAttribute.UNDERLINE if marked else TextAttribute.NORMAL
             fg = theme.accent if marked else theme.text
-            cell_bg = theme.selection_bg if selected else bg
+            # The selection reads as active only while the field holds focus: a
+            # visible blue when focused, a muted neutral when focus is elsewhere
+            # (docs/interaction_states.md §5).
+            sel_bg = theme.text_selection_bg if ctx.focused else theme.text_selection_inactive_bg
+            cell_bg = sel_bg if selected else bg
             ctx.draw_text(1 + col, ty, ch, Style(fg=fg, bg=cell_bg, attr=attr))
             col += cw
         if caret_col is None:  # caret sits at/after the last visible glyph
             caret_col = col
 
+        self._focused_now = ctx.focused
         if ctx.focused:
+            # Drive the blink: register one tick the first time we draw focused;
+            # it re-renders each frame so caret_visible toggles, and unregisters
+            # itself once focus leaves (the tick reads _focused_now).
+            if ctx.animated and not self._blinking and ctx.panel is not None:
+                self._blinking = ctx.panel.request_animation_ticks(self._blink_tick)
             self._draw_caret(ctx, theme, disp, caret, caret_col, field_w, bg, ty)
             self._notify_input_position(ctx, caret_col)
 
@@ -156,7 +168,29 @@ class TextEdit(Widget):
     def _draw_caret(self, ctx, theme, disp, caret, caret_col, field_w, bg, ty) -> None:
         if 0 <= caret_col < field_w:
             ch = disp[caret] if caret < len(disp) else " "
-            ctx.draw_text(1 + caret_col, ty, ch, Style(fg=theme.control_bg, bg=theme.accent))
+            # A thin blinking I-beam in the foreground color (vector) or a reverse
+            # block (grid) — the caret marks the insertion point only; focus is
+            # carried by the field border (docs/interaction_states.md §3).
+            ctx.draw_caret(
+                1 + caret_col, ty, height=1.0, theme=theme,
+                glyph=ch, visible=ctx.caret_visible,
+            )
+
+    def _blink_tick(self) -> bool:
+        # Unregister once focus has left (or the panel is gone); otherwise
+        # re-render so the caret's blink phase advances on screen — the tick is
+        # the only thing that rebuilds the display list.
+        if not self._focused_now or self._panel is None:
+            self._blinking = False
+            return False
+        self._panel.render()
+        return True
+
+    def _reset_blink(self) -> None:
+        """Show the caret now by restarting its blink cycle — called whenever the
+        caret moves or the text changes."""
+        if self._panel is not None:
+            self._panel.reset_caret_blink()
 
     def _notify_input_position(self, ctx: DrawContext, caret_col: int) -> None:
         if ctx.panel is None:
@@ -177,6 +211,16 @@ class TextEdit(Widget):
     # --- events --------------------------------------------------------------
 
     def handle_event(self, event: Event) -> bool:
+        handled = self._handle_event(event)
+        if handled and event.type in (
+            EventType.KEY, EventType.MOUSE_DOWN, EventType.MOUSE_DRAG,
+            EventType.IME_COMPOSITION,
+        ):
+            # Any caret move or edit shows the caret immediately (resets blink).
+            self._reset_blink()
+        return handled
+
+    def _handle_event(self, event: Event) -> bool:
         if event.type is EventType.IME_COMPOSITION:
             # Starting composition replaces any selection (it occupies the cursor).
             if self._preedit == "":
@@ -184,7 +228,7 @@ class TextEdit(Widget):
             self._preedit = event.hints.get("preedit", "")
             self._preedit_caret = event.hints.get("caret", len(self._preedit))
             return True
-        if event.type is EventType.MOUSE_CLICK:
+        if event.type is EventType.MOUSE_DOWN:
             idx = self._index_at_column(int(event.x or 0) - 1)
             if "shift" in event.modifiers:
                 # Shift+click extends from the existing cursor (or selection).

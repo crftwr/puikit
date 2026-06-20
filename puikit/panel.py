@@ -19,6 +19,14 @@ from .focus import focus_on_click, move_focus
 from .font import FontSlant, FontWeight
 from .theme import Theme, theme_for
 
+# Caret blink half-period (seconds); only matters on animation-capable backends.
+_CARET_BLINK = 0.53
+
+# How far inside the far edge a clamped margin click lands, so it stays within
+# the content rect (whose right/bottom bound is exclusive) without losing
+# sub-unit precision. A whole-cell widget floors this to the last cell.
+_EDGE_EPS = 1e-3
+
 # Text fallbacks used when a backend cannot draw real icons.
 ICON_TEXT_FALLBACKS = {
     "folder": "📁",
@@ -82,6 +90,7 @@ class DrawContext:
         panel: "Panel | None" = None,
         background: tuple[int, int, int] | None = None,
         focused: bool = False,
+        hit_rect: Rect | None = None,
     ):
         self._backend = backend
         self._rect = rect
@@ -89,6 +98,12 @@ class DrawContext:
         self._clip = clip if clip is not None else rect
         self._panel = panel
         self._background = background
+        # The region pointer operations (hover, press) test against, so they
+        # match exactly what the Panel routes clicks and focus to. By default it
+        # is the visible rect clipped to the parent — but a top-level pane passes
+        # its bled fill (which reaches into the window margin), so hovering and
+        # pressing the margin react the same as clicking it does.
+        self._hit_rect = hit_rect if hit_rect is not None else _intersect(self._rect, self._clip)
         # Whether this widget currently holds the focus, resolved down the
         # parent chain (a widget is focused only if every container above it is
         # focused too). Interactive widgets read it to draw a focus cue; the
@@ -185,7 +200,36 @@ class DrawContext:
         if self._panel is None or self._panel.pointer is None:
             return False
         px, py = self._panel.pointer
-        return self._rect.contains(px, py) and self._clip.contains(px, py)
+        return self._hit_rect is not None and self._hit_rect.contains(px, py)
+
+    @property
+    def pressed(self) -> bool:
+        """True while the active press both *began* inside this widget and the
+        pointer is *still* over it — the held pressed state of an action control
+        (a button, a tab title; docs/interaction_states.md §2). Read only by
+        controls whose click is otherwise invisible; value/navigation controls
+        ignore it. Resolved by geometry against the Panel's press anchor and
+        current pointer, so the cue lights on press, clears if the pointer drags
+        off (a cancel), and lights again if it returns — widgets never track the
+        mouse button. Always False on a backend with no press/release events."""
+        if self._panel is None:
+            return False
+        down = self._panel.press_down
+        cur = self._panel.pointer
+        if down is None or cur is None or self._hit_rect is None:
+            return False
+        return (
+            self._hit_rect.contains(down[0], down[1])
+            and self._hit_rect.contains(cur[0], cur[1])
+        )
+
+    @property
+    def caret_visible(self) -> bool:
+        """Current on/off phase of the text caret blink. A field reads it when
+        drawing its caret (via ``draw_caret``); the Panel owns the blink clock,
+        so every blinking caret shares one phase. Always True on a still backend
+        (a solid, non-blinking caret)."""
+        return self._panel.caret_visible if self._panel is not None else True
 
     @property
     def panel(self) -> "Panel | None":
@@ -468,6 +512,28 @@ class DrawContext:
                 Style(bg=theme.accent), radius=None, hints={"fill": True},
             )
 
+    def draw_caret(
+        self, x: float, y: float, *, height: float, theme: "Theme",
+        glyph: str = " ", visible: bool = True,
+    ) -> None:
+        """Draw a text caret whose top-left sits at (x, y), ``height`` base units
+        tall. Vector backends get a thin vertical I-beam in the foreground color
+        between glyphs; grid backends fall back to a reverse-video block over the
+        ``glyph`` cell (a terminal cannot draw a sub-cell bar). The bar is the
+        regular ``theme.text`` color, not the accent — focus is carried by the
+        field border, so the caret only marks the insertion point
+        (docs/interaction_states.md §3). ``visible`` is the blink phase: when
+        False the caret is not drawn this frame."""
+        if not visible:
+            return
+        if self._caps.supports("vector_shapes"):
+            bw = self.base_size[0]
+            w = 1.0 / bw if bw else 0.1  # ~one device pixel wide
+            self.fill_rect(x, y, w, height, Style(bg=theme.text))
+        else:
+            # No sub-cell drawing: a reverse block in the foreground color.
+            self.draw_text(int(x), int(y), glyph or " ", Style(fg=theme.control_bg, bg=theme.text))
+
     def _mark_box(self, x: float, y: float) -> tuple[float, float, float, float, float]:
         """Geometry for a checkbox/radio mark box: a pixel-square, vertically
         centered in the row, returned as (x, y, w, h) in base units plus the
@@ -624,6 +690,18 @@ class Panel:
         # Last known pointer position in screen base units, fed by every mouse
         # event. DrawContext.hovered reads it to resolve hover styling.
         self._pointer: tuple[float, float] | None = None
+        # Active left-button press, captured between MOUSE_DOWN and MOUSE_UP so
+        # action controls can show a held pressed cue (DrawContext.pressed) and
+        # so a release only fires a click over the widget the press began on.
+        # _press_down is the screen base-unit point of the press; _press_slot is
+        # the slot (child or layer) it landed in.
+        self._press_down: tuple[float, float] | None = None
+        self._press_slot: "_Slot | None" = None
+        self._press_is_layer = False
+        # Reference time the caret blink square wave is measured from; resetting
+        # it (on a caret move/edit) restarts the cycle with the caret on, so it
+        # never blinks out at the moment the user is looking for it.
+        self._caret_phase0 = time.monotonic()
 
     # --- layout management ---------------------------------------------------
 
@@ -783,6 +861,28 @@ class Panel:
         """Last pointer position in screen base units, or None."""
         return self._pointer
 
+    @property
+    def press_down(self) -> tuple[float, float] | None:
+        """Screen base-unit point where the active left press began, or None.
+        DrawContext.pressed pairs it with the current pointer."""
+        return self._press_down
+
+    @property
+    def caret_visible(self) -> bool:
+        """Current blink phase shared by every text caret. Solid (always True)
+        on a still backend; a ~``_CARET_BLINK`` second square wave on an
+        animation-capable one, measured from the last blink reset so the caret
+        shows immediately after a move."""
+        if not self.backend.capabilities.supports("animation"):
+            return True
+        return int((time.monotonic() - self._caret_phase0) / _CARET_BLINK) % 2 == 0
+
+    def reset_caret_blink(self) -> None:
+        """Restart the caret blink cycle with the caret on. A field calls this
+        whenever the caret moves or the text changes, so the caret is always
+        visible at the spot the user just acted on."""
+        self._caret_phase0 = time.monotonic()
+
     # --- rendering --------------------------------------------------------------
 
     def render(self) -> None:
@@ -840,6 +940,9 @@ class Panel:
             self.backend, rect, self.backend.capabilities,
             panel=self, background=background,
             focused=slot.widget is self._focused,
+            # Hover/press use the same region clicks and focus route to: the
+            # bled fill, so the window margin belongs to the pane consistently.
+            hit_rect=slot.fill if slot.fill is not None else rect,
         )
         slot.widget.draw(slot_ctx)
         slot_ctx._close()
@@ -1058,10 +1161,10 @@ class Panel:
 
     def dispatch_event(self, event: Event) -> bool:
         """Route an event to widgets. Returns True if it was consumed."""
-        # Track the pointer for hover styling on any positioned mouse event.
+        # Track the pointer for hover/press styling on any positioned mouse event.
         if event.x is not None and event.type in (
-            EventType.MOUSE_CLICK, EventType.MOUSE_DRAG,
-            EventType.MOUSE_MOVE, EventType.MOUSE_SCROLL,
+            EventType.MOUSE_CLICK, EventType.MOUSE_DOWN, EventType.MOUSE_UP,
+            EventType.MOUSE_DRAG, EventType.MOUSE_MOVE, EventType.MOUSE_SCROLL,
         ):
             self._pointer = (event.x, event.y)
         # Plain hover movement updates the pointer but is not delivered to a
@@ -1074,7 +1177,7 @@ class Panel:
         # routed in, not intercepted here.
         if self._layers:
             slot = self._layers[-1]
-            return self._deliver(slot, event)
+            return self._route_mouse(slot, event, clamp=False, is_layer=True)
 
         # Tab / Shift+Tab walk the whole focus tree from the root, crossing
         # container boundaries and wrapping at the ends — one mechanism instead
@@ -1082,15 +1185,21 @@ class Panel:
         if event.type is EventType.KEY and event.key == "tab":
             return self.focus_tab(-1 if "shift" in event.modifiers else 1)
 
-        if event.type in (EventType.MOUSE_CLICK, EventType.MOUSE_DRAG, EventType.MOUSE_SCROLL):
+        if event.type in (
+            EventType.MOUSE_CLICK, EventType.MOUSE_DOWN, EventType.MOUSE_UP,
+            EventType.MOUSE_DRAG, EventType.MOUSE_SCROLL,
+        ):
+            # A drag/release belongs to the slot the press began on, so a gesture
+            # that wanders off its origin (a button drag-off, a selection drag
+            # past the pane edge) still reaches the right widget.
+            if event.type in (EventType.MOUSE_UP, EventType.MOUSE_DRAG) and self._press_slot is not None:
+                return self._route_mouse(self._press_slot, event, clamp=True, is_layer=self._press_is_layer)
             for slot in reversed(self._children):
                 # Hit-test against the fill extent: a click in the bled
                 # window margin belongs to the pane that visually owns it.
                 hit = slot.fill if slot.fill is not None else slot.rect
                 if event.x is not None and hit.contains(event.x, event.y):
-                    if event.type is EventType.MOUSE_CLICK:
-                        focus_on_click(self, slot.widget)
-                    return self._deliver(slot, event, clamp=True)
+                    return self._route_mouse(slot, event, clamp=True, is_layer=False)
             return False
 
         if self._focused is not None:
@@ -1099,14 +1208,65 @@ class Panel:
                     return self._deliver(slot, event)
         return False
 
+    def _route_mouse(
+        self, slot: "_Slot", event: Event, *, clamp: bool, is_layer: bool
+    ) -> bool:
+        """Route a positioned mouse event to ``slot``, owning the press→click
+        gesture: a left MOUSE_DOWN is captured (and focuses the slot), and the
+        matching MOUSE_UP synthesizes a MOUSE_CLICK only when the release lands
+        back over the press slot — a release elsewhere cancels. An atomic
+        MOUSE_CLICK (backends without down/up, or the right button) passes
+        straight through."""
+        if event.type is EventType.MOUSE_DOWN:
+            self._press_down = (event.x, event.y) if event.x is not None else None
+            self._press_slot = slot
+            self._press_is_layer = is_layer
+            if not is_layer:
+                focus_on_click(self, slot.widget)
+            self._deliver(slot, event, clamp=clamp)
+            # A press always reports handled: it may have moved focus or armed a
+            # pressed cue, so the host must re-render even if the widget itself
+            # ignored the down (most widgets act on the synthesized click).
+            return True
+        if event.type is EventType.MOUSE_DRAG:
+            handled = self._deliver(slot, event, clamp=clamp)
+            # While a press is captured, the held pressed cue tracks the pointer
+            # (and clears on drag-off), so the frame needs a redraw regardless.
+            return handled or self._press_down is not None
+        if event.type is EventType.MOUSE_UP:
+            self._press_down = None
+            self._press_slot = None
+            self._press_is_layer = False
+            self._deliver(slot, event, clamp=clamp)
+            # Fire the click only if the pointer is still over the press slot (a
+            # modal layer always owns it); otherwise the gesture was cancelled.
+            over = is_layer or self._over_slot(slot, event)
+            if over:
+                click = replace(event, type=EventType.MOUSE_CLICK)
+                self._deliver(slot, click, clamp=clamp)
+            # A release ends a captured press; re-render to settle the cue / show
+            # the click result.
+            return True
+        if event.type is EventType.MOUSE_CLICK and not is_layer:
+            focus_on_click(self, slot.widget)
+        return self._deliver(slot, event, clamp=clamp)
+
+    def _over_slot(self, slot: "_Slot", event: Event) -> bool:
+        if event.x is None:
+            return False
+        hit = slot.fill if slot.fill is not None else slot.rect
+        return hit.contains(event.x, event.y)
+
     def _deliver(self, slot: _Slot, event: Event, clamp: bool = False) -> bool:
         local = event.translated(-slot.rect.x, -slot.rect.y)
         if clamp and local.x is not None:
-            # Margin clicks land outside the content rect; act on the
-            # nearest content base unit instead of handing widgets coordinates
-            # they never drew.
-            x = min(max(local.x, 0), max(0, math.ceil(slot.rect.w) - 1))
-            y = min(max(local.y, 0), max(0, math.ceil(slot.rect.h) - 1))
+            # Margin clicks land outside the content rect; pull them just inside
+            # the nearest edge so the widget acts on a coordinate it actually
+            # drew. In-bounds clicks are left untouched (no quantizing to whole
+            # cells), so routing keeps the same sub-unit precision the hover /
+            # press cue reads from the raw pointer.
+            x = min(max(local.x, 0.0), max(0.0, slot.rect.w - _EDGE_EPS))
+            y = min(max(local.y, 0.0), max(0.0, slot.rect.h - _EDGE_EPS))
             if (x, y) != (local.x, local.y):
                 local = replace(local, x=x, y=y)
         return bool(slot.widget.handle_event(local))

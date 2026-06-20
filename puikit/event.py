@@ -6,7 +6,6 @@ travel in ``hints`` so the core model stays uniform.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -14,6 +13,14 @@ from typing import Any
 
 class EventType(str, Enum):
     KEY = "key"
+    # A backend reports a raw left-button press and release as MOUSE_DOWN /
+    # MOUSE_UP; the Panel owns the press→activate gesture, synthesizing a
+    # MOUSE_CLICK only on a release over the same widget the press began on (so a
+    # drag-off cancels). Widgets that need the raw press (drag-select) handle
+    # MOUSE_DOWN; widgets that act on activation handle MOUSE_CLICK. A backend
+    # with no press/release distinction may still emit MOUSE_CLICK directly.
+    MOUSE_DOWN = "mouse_down"
+    MOUSE_UP = "mouse_up"
     MOUSE_CLICK = "mouse_click"
     MOUSE_DRAG = "mouse_drag"
     MOUSE_MOVE = "mouse_move"
@@ -43,17 +50,20 @@ class Event:
     def translated(self, dx: float, dy: float) -> "Event":
         """A copy with mouse coordinates shifted by (dx, dy).
 
-        Results are floored to whole base units, so a widget placed at a
-        fractional base unit origin (pixel layout) still receives integer
-        widget-local base-unit coordinates."""
+        Coordinates keep their sub-unit precision (pixel-layout backends place
+        widgets at fractional base-unit origins): the shift is a pure
+        translation, so routing hit-tests a widget's edges exactly where it was
+        drawn — matching the geometric hover/press cue, which reads the raw
+        pointer. Widgets that address a whole cell (a list row, a text column)
+        floor the value themselves where they need it."""
         if self.x is None or self.y is None:
             return self
         return Event(
             type=self.type,
             key=self.key,
             char=self.char,
-            x=math.floor(self.x + dx),
-            y=math.floor(self.y + dy),
+            x=self.x + dx,
+            y=self.y + dy,
             button=self.button,
             scroll=self.scroll,
             modifiers=self.modifiers,

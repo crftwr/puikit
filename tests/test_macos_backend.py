@@ -91,6 +91,17 @@ def test_translate_control_keys():
     assert translate_key("\x7f").key == "backspace"
 
 
+def test_translate_shift_tab_is_backward_tab():
+    from AppKit import NSEventModifierFlagShift
+
+    # Shift+Tab: charactersIgnoringModifiers applies Shift, so the payload is
+    # NSBackTabCharacter (0x19). It must resolve to a shift-modified tab so
+    # focus traversal goes backward.
+    event = translate_key("\x19", NSEventModifierFlagShift)
+    assert event.key == "tab"
+    assert "shift" in event.modifiers
+
+
 def test_translate_modifiers():
     from AppKit import NSEventModifierFlagCommand, NSEventModifierFlagShift
 
