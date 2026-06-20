@@ -2,19 +2,26 @@
 
 One button class covers three faces:
 
-- **text** (``Button("OK")``) — a bold centered label on a flat accent fill;
-  it sizes its width to the label via ``measure``.
+- **text** (``Button("OK")``) — a bold centered label on a flat fill; it sizes
+  its width to the label via ``measure``.
 - **image** (``Button(image="play.png")``) — a picture inset over a neutral
   control surface, scaled by ``fit`` (contain/cover/fill); it fills its slot.
 - **image + text** (``Button("Play", image="play.png")``) — an icon and a
-  label side by side, centered as a group on the accent fill.
+  label side by side, centered as a group on the fill.
 
-All three share one interaction: a click or activate (space/enter) fires
-``on_click``, the face lightens on hover, and an accent focus cue marks focus
-(a framed ring when there is an image or room for a box, an underline for a
-single-row text button). The image face is an intent — GUI renders the real
-picture, TUI falls back in the Panel layer to the alt emoji — so the button
-reads as interactive on every backend, and no draw branches on it.
+A labeled button comes in two variants: ``variant="primary"`` (default) wears
+the **accent** fill — the prominent action; ``variant="secondary"`` wears a
+**neutral** fill for a non-primary action, so a screen with two buttons reads
+one as the obvious choice. Either way the focus ring picks a color that
+contrasts its own fill (a light ring on the accent fill, the accent on a
+neutral fill), so focus never collides with the fill (docs/interaction_states.md §5).
+
+All faces share one interaction: a click or activate (space/enter) fires
+``on_click``, the face lightens on hover and darkens while pressed, and the
+focus ring marks focus (a framed ring on vector backends, a box or underline on
+a character grid). The image face is an intent — GUI renders the real picture,
+TUI falls back in the Panel layer to the alt emoji — so the button reads as
+interactive on every backend, and no draw branches on it.
 """
 
 from __future__ import annotations
@@ -39,10 +46,12 @@ _FACE_FITS = frozenset({FILL, CONTAIN, COVER})
 # backends (the face renders as a plain fill there).
 _RADIUS = 5.0
 
-# Focus-ring color: a bright near-white that contrasts with both the blue
-# primary fill and the neutral icon-tile fill, so the ring never collides with
-# the accent the way an accent-on-accent ring would.
+# Focus-ring color on an accent (primary) fill: a bright near-white, so the ring
+# never collides with the accent the way an accent-on-accent ring would. A
+# neutral fill uses the theme accent for its ring instead (resolved in _colors).
 _FOCUS_RING = (240, 240, 245)
+
+_VARIANTS = frozenset({"primary", "secondary"})
 
 
 def _lighten(color: tuple[int, int, int], amount: float = 0.12) -> tuple[int, int, int]:
@@ -65,6 +74,7 @@ class Button(Widget):
         on_click: Callable[[], None] | None = None,
         image: str | None = None,
         style: Style | None = None,
+        variant: str = "primary",
         fit: str = CONTAIN,
         alt: str | None = None,
         pad_x: int = 2,
@@ -77,11 +87,19 @@ class Button(Widget):
             raise ValueError(
                 f"unknown image fit {fit!r}; a button face expects one of {sorted(_FACE_FITS)}"
             )
+        if variant not in _VARIANTS:
+            raise ValueError(
+                f"unknown button variant {variant!r}; expected one of {sorted(_VARIANTS)}"
+            )
         self.label = label or ""
         self.on_click = on_click
         self.image = image
         # None -> the theme's button colors; a Style overrides the fill.
         self.style = style
+        # "primary" -> accent fill (prominent action); "secondary" -> neutral
+        # fill (non-primary action). Ignored for a bare-icon tile, which is
+        # always neutral.
+        self.variant = variant
         self.fit = fit
         # Emoji/glyph shown in place of the picture on backends without images
         # (TUI). None -> a neutral "●".
@@ -94,16 +112,24 @@ class Button(Widget):
 
     def _colors(self, ctx: DrawContext):
         theme = ctx.theme or DEFAULT_THEME
+        # `ring` is the focus-ring color, chosen to contrast the fill: a light
+        # ring on the accent fill, the accent on a neutral fill.
         if self.style is not None and self.style.bg is not None:
             bg = self.style.bg
             fg = self.style.fg or theme.button_text
             hover = _lighten(bg)
+            ring = _FOCUS_RING
+        elif self.variant == "secondary":
+            # A non-primary action: a neutral fill, no accent.
+            bg = theme.button_secondary_bg
+            fg, hover, ring = theme.button_text, theme.button_secondary_hover_bg, theme.accent
         elif self.label:
-            # A label denotes a primary action: the accent button fill.
-            bg, fg, hover = theme.button_bg, theme.button_text, theme.button_hover_bg
+            # A primary labeled action: the accent button fill.
+            bg, fg, hover, ring = theme.button_bg, theme.button_text, theme.button_hover_bg, _FOCUS_RING
         else:
             # A bare icon is a neutral tile, not a primary action.
-            bg, fg, hover = theme.control_bg, theme.button_text, _lighten(theme.control_bg)
+            bg, fg = theme.control_bg, theme.button_text
+            hover, ring = _lighten(theme.control_bg), theme.accent
         # Press wins over hover (the pointer is over the button while pressed),
         # and moves the fill the opposite way — darker — so the three states
         # read distinctly (docs/interaction_states.md §3).
@@ -113,12 +139,12 @@ class Button(Widget):
             face = hover
         else:
             face = bg
-        return face, fg, theme
+        return face, fg, theme, ring
 
     # --- draw ----------------------------------------------------------------
 
     def draw(self, ctx: DrawContext) -> None:
-        bg, fg, theme = self._colors(ctx)
+        bg, fg, theme, ring = self._colors(ctx)
         wu, hu = ctx.size_units
         # A rounded fill on vector backends, a plain fill on a character grid.
         ctx.round_rect(0, 0, wu, hu, Style(bg=bg), radius=_RADIUS, hints={"fill": True})
@@ -144,16 +170,20 @@ class Button(Widget):
                 inset = min(0.12, wu / 2, hu / 2)
                 ctx.round_rect(
                     inset, inset, wu - 2 * inset, hu - 2 * inset,
-                    Style(fg=_FOCUS_RING, bg=bg), radius=_RADIUS,
+                    Style(fg=ring, bg=bg), radius=_RADIUS,
                 )
-            elif not ctx.vector_shapes and (self.image is not None or ctx.height >= 2):
-                ctx.round_rect(0, 0, wu, hu, Style(fg=theme.accent, bg=bg), radius=_RADIUS)
+            elif not ctx.vector_shapes and (self.image is not None or ctx.height >= 3):
+                # A grid box needs three rows — top border, label, bottom border;
+                # at two rows the borders would eat the label, so a short text
+                # button underlines instead (handled in _draw_label).
+                ctx.round_rect(0, 0, wu, hu, Style(fg=ring, bg=bg), radius=_RADIUS)
 
     def _draw_label(self, ctx: DrawContext, bg, fg) -> None:
         attr = TextAttribute.BOLD
-        # Underline is the grid-only cue for a one-row text button (no room for a
-        # box); vector backends draw a perimeter ring, taller grids draw a box.
-        if ctx.focused and not ctx.vector_shapes and ctx.height < 2:
+        # Underline is the grid-only cue for a short text button (under three
+        # rows, where a box would overwrite the label); vector backends draw a
+        # perimeter ring, taller grids draw a box.
+        if ctx.focused and not ctx.vector_shapes and ctx.height < 3:
             attr |= TextAttribute.UNDERLINE
         style = Style(fg=fg, bg=bg, attr=attr)
         # Center against the exact (fractional) pane width and measured label

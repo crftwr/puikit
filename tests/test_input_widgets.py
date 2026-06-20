@@ -440,6 +440,38 @@ def test_button_focus_ring_and_hover(backend):
     assert backend.style_at(0, 0).bg == panel.theme.button_hover_bg
 
 
+def test_focused_short_text_button_keeps_label_on_grid(backend):
+    # A two-row focused text button must not draw a box-drawing frame on a grid
+    # (its top/bottom borders would overwrite the single label row); it uses an
+    # underline instead, so the label stays visible.
+    panel = Panel(backend)
+    btn = Button("Apply")
+    panel.add(btn, x=0, y=0, w=10, h=2)
+    panel.render()
+    snap = "\n".join(backend.snapshot())
+    assert "Apply" in snap
+    if not panel.backend.capabilities.supports("vector_shapes"):
+        assert "┌" not in snap and "─" not in snap  # no box frame ate the label
+
+
+def test_button_variants_use_accent_and_neutral_fills(backend):
+    panel = Panel(backend)
+    primary = Button("OK")                          # default variant
+    secondary = Button("Cancel", variant="secondary")
+    panel.add(primary, x=0, y=0, w=10, h=1)
+    panel.add(secondary, x=0, y=2, w=10, h=1)
+    panel.render()
+    # Primary wears the accent fill; secondary wears the neutral fill, no accent.
+    assert backend.style_at(0, 0).bg == panel.theme.button_bg
+    assert backend.style_at(0, 2).bg == panel.theme.button_secondary_bg
+    assert panel.theme.button_secondary_bg != panel.theme.button_bg
+
+
+def test_button_rejects_unknown_variant():
+    with pytest.raises(ValueError):
+        Button("OK", variant="tertiary")
+
+
 def test_button_fires_on_release_over_button(backend):
     fired = []
     panel = Panel(backend)

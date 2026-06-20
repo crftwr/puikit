@@ -202,6 +202,18 @@ def build_widgets_page(panel: Panel) -> VSplit:
         on_submit=lambda s: set_status(f"TextEdit submitted -> {s!r}"),
     )
     action = Button("Apply", on_click=lambda: set_status("Button 'Apply' clicked"))
+    cancel = Button(
+        "Cancel", variant="secondary",
+        on_click=lambda: set_status("Button 'Cancel' clicked"),
+    )
+    # The two variants side by side: each sized to its label, a trailing spacer
+    # pushes the pair to the left.
+    buttons = LayoutView(HSplit(
+        Item(action, size="content"),
+        Item(cancel, size="content"),
+        Item(Label(""), weight=1),
+        gap=2,
+    ))
 
     heading = lambda text: Label(text, BOLD)  # noqa: E731 - tiny local helper
     scroller = ScrollView(
@@ -215,8 +227,8 @@ def build_widgets_page(panel: Panel) -> VSplit:
             (color, "content"),
             (heading("Text edit"), 1),
             (name, "content"),
-            (heading("Button"), 1),
-            (action, "content"),
+            (heading("Button (primary / secondary variants)"), 1),
+            (buttons, "content"),
             (heading("Static text — single line (Label, selectable)"), 1),
             (Label("The quick brown fox jumps over the lazy dog.", selectable=True), 1),
             (heading("Static text — multi line (TextBlock, selectable)"), 1),

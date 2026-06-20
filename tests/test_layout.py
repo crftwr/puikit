@@ -109,6 +109,23 @@ def test_nested_split_recurses():
     assert (rc.x, rc.w) == (5, 5)
 
 
+def test_layout_view_measures_hosted_layout_content_height():
+    # A LayoutView reports its hosted layout's intrinsic size, so a button row
+    # can be placed with size="content" and track the buttons' own height (a
+    # little taller than one line on pixel backends, one row on a grid) instead
+    # of a fixed, over-tall row.
+    from puikit.widgets import Button, LayoutView
+    from puikit.widgets.base import CONTROL_HEIGHT
+
+    row = LayoutView(HSplit(
+        Item(Button("OK"), size="content"),
+        Item(Button("Cancel", variant="secondary"), size="content"),
+        Item(Label(""), weight=1),
+    ))
+    assert row.measure(PIXEL, "y", 40.0).preferred == pytest.approx(CONTROL_HEIGHT)
+    assert row.measure(SNAP, "y", 40.0).preferred == pytest.approx(1.0)
+
+
 def test_divider_subtle_costs_nothing_on_whole_unit_grid():
     a, b = Label("a"), Label("b")
     layout = HSplit(Item(a), Item(b), divider="subtle")

@@ -318,6 +318,41 @@ class Split:
                 ctx.dividers.append(Divider(rect, vertical=horizontal, level=self.divider))
         return placements
 
+    def measure(self, ctx: LayoutContext, axis: str, available: float) -> SizeRequest:
+        """Intrinsic size of the whole split along ``axis``, so a split can be
+        hosted as a ``size="content"`` item (e.g. inside a LayoutView). Along the
+        split axis the items lie end to end — the size is their sum plus the
+        gaps and dividers; across it they overlap — the size is the largest
+        child. Mirrors ``_measure`` for widgets, so nested splits compose."""
+        if not self.items:
+            return SizeRequest()
+        horizontal = self._axis == "x"
+        base_px = ctx.base_w if horizontal else ctx.base_h
+        px_aware = not ctx.snap
+        if axis == self._axis:
+            spacing = self.gap + self._divider_thickness(base_px, ctx)
+            total = spacing * (len(self.items) - 1)
+            for item in self.items:
+                if item.category == "fixed":
+                    total += item.fixed_units(base_px, px_aware)
+                elif item.category == "content":
+                    total += _measure(item.content, ctx, axis, available).clamped(available)
+                else:  # a flex item has no natural main size — only its floor
+                    total += item.min_units(base_px, px_aware, None)
+            return SizeRequest(min=total, preferred=total, max=total)
+        # Cross axis: the tallest/widest child sets the size.
+        lo = pref = hi = 0.0
+        bounded = True
+        for item in self.items:
+            req = _measure(item.content, ctx, axis, available)
+            lo = max(lo, req.min)
+            pref = max(pref, req.preferred)
+            if req.max is None:
+                bounded = False
+            else:
+                hi = max(hi, req.max)
+        return SizeRequest(min=lo, preferred=pref, max=(hi if bounded else None))
+
     def _divider_thickness(self, base_px: int, ctx: LayoutContext) -> float:
         """Space reserved between items for the divider, in base units."""
         if self.divider is None:

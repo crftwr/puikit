@@ -43,6 +43,10 @@ class Theme:
     button_bg: Color = (14, 99, 156)       # primary button face         #0E639C
     button_hover_bg: Color = (17, 119, 187)  # button hover              #1177BB
     button_text: Color = (255, 255, 255)
+    # Secondary (no-accent) button face: a neutral fill for a non-primary
+    # action, so a screen with two buttons reads one as the prominent choice.
+    button_secondary_bg: Color = (58, 61, 65)         # secondary face   #3A3D41
+    button_secondary_hover_bg: Color = (69, 73, 78)   # secondary hover  #45494E
     selection_bg: Color = (9, 71, 113)     # active selection            #094771
     # Text-field selection, split by focus: a clearly legible blue while the
     # field is focused, a muted neutral when focus is elsewhere (the editor

@@ -14,6 +14,7 @@ from typing import Any
 
 from ..event import Event, EventType
 from ..focus import FocusContainer, focus_on_click
+from ..layout import SizeRequest
 from ..panel import DrawContext, Rect
 from .base import Widget
 
@@ -47,6 +48,22 @@ class LayoutView(FocusContainer, Widget):
         # Resolved from the last draw; the hosted layout's focusable widgets in
         # placement order, so Tab descends from this host into the page's tree.
         return [w for w, _ in self._placements if getattr(w, "focusable", False)]
+
+    def measure(self, ctx: Any, axis: str, available: float) -> SizeRequest:
+        """Intrinsic size of the hosted layout plus this host's margins, so a
+        LayoutView can be placed with ``size="content"`` (e.g. a button row
+        inside a ScrollView sizes to the buttons' own height)."""
+        fn = getattr(self.layout, "measure", None)
+        if fn is None:
+            return SizeRequest()
+        mx, my = self._margins(ctx)
+        pad = 2.0 * (mx if axis == "x" else my)
+        req = fn(ctx, axis, max(0.0, available - pad))
+        return SizeRequest(
+            min=req.min + pad,
+            preferred=req.preferred + pad,
+            max=(req.max + pad if req.max is not None else None),
+        )
 
     def _margins(self, lctx: Any) -> tuple[float, float]:
         if lctx.snap:
