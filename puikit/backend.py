@@ -308,6 +308,19 @@ class Backend(ABC):
         """Replace the plain-text clipboard contents. See ``get_clipboard``."""
         self._clipboard = text
 
+    # --- open a URL / file (capability "os_open"; Panel falls back) ----------
+
+    def open_url(self, url: str) -> bool:
+        """Open ``url`` in the OS handler (a browser for ``http(s)``, the default
+        app for a file path), used for a clicked hyperlink.
+
+        Only backends with the ``os_open`` capability really launch a handler —
+        it needs an OS shell a terminal app does not own. The default copies the
+        URL to the clipboard so the user can paste it, and returns False; the
+        Panel issues one ``open_url`` intent and never branches."""
+        self.set_clipboard(url)
+        return False
+
     # --- drag source (capability "os_drag_drop"; Panel gates the calls) ------
 
     def begin_file_drag(

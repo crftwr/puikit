@@ -966,6 +966,16 @@ class Panel:
         """Replace the plain-text clipboard contents. See ``get_clipboard``."""
         self.backend.set_clipboard(text)
 
+    # --- open a URL -----------------------------------------------------------
+
+    def open_url(self, url: str) -> bool:
+        """Open ``url`` (a clicked hyperlink) in the OS handler. One intent,
+        resolved per backend: ``os_open`` backends launch the default handler
+        (a browser, the file's app); others — notably TUI — fall back to copying
+        the URL to the clipboard. Returns True if a handler was launched, False
+        if the clipboard fallback was used. The caller never branches."""
+        return self.backend.open_url(url)
+
     # --- drag source ----------------------------------------------------------
 
     def begin_file_drag(

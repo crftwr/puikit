@@ -1234,6 +1234,14 @@ class MacOSBackend(Backend):
         pb.clearContents()
         pb.setString_forType_(text, NSPasteboardTypeString)
 
+    def open_url(self, url: str) -> bool:
+        """Open ``url`` via the workspace: an http(s) URL in the default browser,
+        anything else (a bare path) as a file URL in its default app."""
+        ns = NSURL.URLWithString_(url)
+        if ns is None or ns.scheme() is None:
+            ns = NSURL.fileURLWithPath_(url)
+        return bool(NSWorkspace.sharedWorkspace().openURL_(ns))
+
     # --- drag source ---------------------------------------------------------
 
     def begin_file_drag(

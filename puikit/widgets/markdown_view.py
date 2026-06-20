@@ -13,19 +13,20 @@ PuiKit seam intact while still drawing that:
   concrete ``Style``s, so the same document follows the backend's palette —
   accent links and headings on GUI, the nearest xterm-256 cell on TUI;
 - prose carries a **proportional** ``Font`` and code (fenced blocks and inline
-  spans) a **monospace** ``Font``; on ``fonts``-capable backends they render as
-  real proportional / fixed-advance faces, and on a terminal both fold back to
-  the one grid font (with bold / italic preserved as attributes) — one
-  implementation, every backend, no per-row branch.
+  spans) a **monospace** ``Font``; headings carry a larger point size per level
+  (``#`` biggest). On ``fonts``-capable backends these render as real
+  proportional / fixed-advance faces at their sizes, and on a terminal they all
+  fold back to the one grid font (bold / italic preserved as attributes, size
+  dropped) — one implementation, every backend, no per-row branch.
 
-Because prose is proportional, wrapping measures runs through
-``DrawContext.measure_text`` (not a column count) and the row pitch comes from
-``DrawContext.line_height``, so a taller face does not overlap the next row.
-Like ``LogView`` it is **virtualized**: the source is wrapped to the pane width
-once (re-wrapped only on a resize) into display rows, and only the rows inside
-the viewport are ever drawn, so a long document scrolls cheaply. Navigation is
-pure scrolling (a document has no "current item"): arrows / page keys / home /
-end move the viewport and the mouse wheel scrolls.
+Because prose is proportional and headings are sized, wrapping measures runs
+through ``DrawContext.measure_text`` (not a column count) and **each display row
+keeps its own height** from ``DrawContext.line_height`` — a big heading reserves
+its taller row without spacing the body to match. The view is **virtualized**
+over those heights: rows carry a cumulative-top index so a draw binary-searches
+to the first visible row and stops at the pane edge, so a long document scrolls
+cheaply. Navigation is pure scrolling (a document has no "current item"):
+arrows / page keys / home / end move the viewport and the mouse wheel scrolls.
 
 The Markdown subset is deliberately small but covers the common cases: ATX
 headings (``#``..``######``), paragraphs, ``-``/``*``/``+`` and ordered list
@@ -36,12 +37,14 @@ code, ``---`` horizontal rules, and the inline runs ``**bold**``, ``*italic*`` /
 
 from __future__ import annotations
 
+import bisect
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ..backend import DEFAULT_STYLE, Style, TextAttribute
 from ..event import Event, EventType
 from ..font import Font
+from ..image import aspect_extent
 from ..panel import DrawContext
 from ..text import glyph_runs
 from ..theme import DEFAULT_THEME, Theme
@@ -54,10 +57,18 @@ from .base import Widget
 DEFAULT_TEXT_FONT = Font()
 DEFAULT_CODE_FONT = Font(monospace=True)
 
-# A drawn fragment: text plus the style it draws in.
-Span = tuple[str, Style]
-# An inline run as parsed: text plus the set of semantic roles on it.
-InlineRun = tuple[str, frozenset]
+# Heading point sizes per level (## smaller than #, down to the ~14pt body).
+# Visual only — a font size never reshapes the layout, it just draws bigger and
+# reserves a taller row (docs/font_system.md §7). Dropped on a terminal, where
+# every heading is simply bold. Override via MarkdownView(heading_sizes=...).
+DEFAULT_HEADING_SIZES = {1: 28.0, 2: 22.0, 3: 18.0, 4: 16.0, 5: 15.0, 6: 14.0}
+
+# A drawn fragment: text, the style it draws in, and an optional hyperlink
+# target (a clickable link span carries its URL; everything else is None).
+Span = tuple[str, Style, "str | None"]
+# An inline run as parsed: text, the set of semantic roles on it, and the link
+# URL if the run is (inside) a ``[text](url)`` link.
+InlineRun = tuple[str, frozenset, "str | None"]
 
 # Inline code reads as a distinct face independent of the surface; the body fg
 # is theme-driven but code keeps a stable warm tint over a panel-ish fill, the
@@ -69,6 +80,10 @@ _HRULE_RE = re.compile(r"^(?:-{3,}|\*{3,}|_{3,})$")
 _LIST_RE = re.compile(r"^(\s*)([-*+]|\d+[.)])\s+(.*)$")
 _FENCE_RE = re.compile(r"^\s*(```+|~~~+)")
 _LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)\s]*)(?:\s+\"[^\"]*\")?\)")
+# A standalone image line: ![alt](path). Rendered as its own block, sized to
+# the image's aspect ratio (the inline form mid-paragraph is intentionally not
+# supported — an image is a block here).
+_IMAGE_RE = re.compile(r"^!\[([^\]]*)\]\(([^)\s]*)(?:\s+\"[^\"]*\")?\)$")
 
 
 @dataclass
@@ -76,29 +91,45 @@ class _SemLine:
     """One semantic line of the document: its block kind, an optional rendered
     prefix (a list marker, a quote bar), and its inline runs (role-tagged, not
     yet colored). ``wrap`` is False for atoms that must stay on one row (a fenced
-    code line, a rule, a blank spacer)."""
+    code line, a rule, a blank spacer). ``data`` carries the image path for an
+    ``image`` block."""
 
-    block: str  # heading | para | list | quote | code | rule | blank
+    block: str  # heading | para | list | quote | code | rule | blank | image
     level: int  # heading level, or list nesting depth
     prefix: str  # rendered indent / marker, drawn before the inline runs
     runs: list[InlineRun] = field(default_factory=list)
     wrap: bool = True
+    data: str | None = None
+
+
+@dataclass
+class _Row:
+    """One laid-out display row. ``x0`` is the base-unit x of its first span (a
+    hanging indent under a list marker / quote bar); ``height`` is the row's own
+    height (a sized heading or an image is taller than body text). A text row
+    carries ``spans``; an ``image`` row carries ``(path, alt, w, h)`` instead and
+    is drawn with ``draw_image``."""
+
+    x0: float
+    spans: list[Span]
+    height: float
+    image: tuple[str, str | None, float, float] | None = None
 
 
 # --- inline parsing -----------------------------------------------------------
 
 
-def _scan_inline(text: str, roles: frozenset) -> list[InlineRun]:
+def _scan_inline(text: str, roles: frozenset, href: str | None = None) -> list[InlineRun]:
     """Split ``text`` into role-tagged runs, recursing so emphasis nests
     (``**bold _and italic_**``). ``roles`` is the set already in force from the
-    enclosing scan."""
+    enclosing scan; ``href`` is the link URL when scanning inside a link."""
     out: list[InlineRun] = []
     buf: list[str] = []
     i, n = 0, len(text)
 
     def flush() -> None:
         if buf:
-            out.append(("".join(buf), roles))
+            out.append(("".join(buf), roles, href))
             buf.clear()
 
     while i < n:
@@ -116,7 +147,7 @@ def _scan_inline(text: str, roles: frozenset) -> list[InlineRun]:
             if close != -1:
                 flush()
                 # An inline code span is literal: its contents are not re-parsed.
-                out.append((text[k:close], roles | {"code"}))
+                out.append((text[k:close], roles | {"code"}, href))
                 i = close + len(fence)
                 continue
             buf.append(c)
@@ -126,7 +157,9 @@ def _scan_inline(text: str, roles: frozenset) -> list[InlineRun]:
             m = _LINK_RE.match(text, i)
             if m:
                 flush()
-                out.extend(_scan_inline(m.group(1), roles | {"link"}))
+                # Carry the link's URL into every run of its (still inline-parsed)
+                # label, so a click anywhere on the label opens it.
+                out.extend(_scan_inline(m.group(1), roles | {"link"}, m.group(2)))
                 i = m.end()
                 continue
             buf.append(c)
@@ -143,7 +176,7 @@ def _scan_inline(text: str, roles: frozenset) -> list[InlineRun]:
             close = text.find(marker, k)
             if close != -1 and close > k:
                 flush()
-                out.extend(_scan_inline(text[k:close], roles | added))
+                out.extend(_scan_inline(text[k:close], roles | added, href))
                 i = close + len(marker)
                 continue
             buf.append(text[i:k])
@@ -189,13 +222,22 @@ def parse_markdown(src: str) -> list[_SemLine]:
             marker = fence.group(1)[0]
             i += 1
             while i < n and not lines[i].lstrip().startswith(marker * 3):
-                out.append(_SemLine("code", 0, "", [(lines[i], frozenset())], wrap=False))
+                out.append(_SemLine("code", 0, "", [(lines[i], frozenset(), None)], wrap=False))
                 i += 1
             i += 1  # consume the closing fence (or run off the end)
             continue
 
         if stripped == "":
             out.append(_SemLine("blank", 0, "", [], wrap=False))
+            i += 1
+            continue
+
+        img = _IMAGE_RE.match(stripped)
+        if img:
+            alt, path = img.group(1), img.group(2)
+            out.append(
+                _SemLine("image", 0, "", [(alt, frozenset(), None)], wrap=False, data=path)
+            )
             i += 1
             continue
 
@@ -246,17 +288,26 @@ def parse_markdown(src: str) -> list[_SemLine]:
 
 
 def _block_style(
-    block: str, level: int, base: Style, theme: Theme, text_font: Font, code_font: Font
+    block: str,
+    level: int,
+    base: Style,
+    theme: Theme,
+    text_font: Font,
+    code_font: Font,
+    heading_sizes: dict[int, float],
 ) -> Style:
     """Base style for a whole semantic line, before inline roles are layered.
-    Prose blocks carry the proportional ``text_font``; a fenced code block
-    carries the monospace ``code_font``."""
+    Prose blocks carry the proportional ``text_font``; a heading carries it at
+    its per-level point size; a fenced code block carries the monospace
+    ``code_font``."""
     if block == "heading":
+        # A heading reads as a heading by weight and size alone — same color as
+        # the body, no underline. On a terminal the size folds away, leaving the
+        # bold that still distinguishes it.
         attr = base.attr | TextAttribute.BOLD
-        if level <= 2:
-            attr |= TextAttribute.UNDERLINE
-            return Style(fg=theme.accent, bg=base.bg, attr=attr, font=text_font)
-        return Style(fg=base.fg, bg=base.bg, attr=attr, font=text_font)
+        size = heading_sizes.get(level)
+        font = replace(text_font, size=size) if size is not None else text_font
+        return Style(fg=base.fg, bg=base.bg, attr=attr, font=font)
     if block == "quote":
         return Style(
             fg=theme.muted_text, bg=base.bg, attr=base.attr | TextAttribute.ITALIC, font=text_font
@@ -284,40 +335,41 @@ def _run_style(run_roles: frozenset, base: Style, theme: Theme, code_font: Font)
 # --- span wrapping (style-preserving) -----------------------------------------
 
 
-def _merge_cells(cells: list[tuple[str, Style]]) -> list[Span]:
-    """Collapse a run of (glyph, style) cells into spans, joining neighbors that
-    share a style so the row draws in as few ``draw_text`` calls as possible."""
+def _merge_cells(cells: list[Span]) -> list[Span]:
+    """Collapse a run of (glyph, style, href) cells into spans, joining neighbors
+    that share a style *and* href so the row draws in as few ``draw_text`` calls
+    as possible (and a link stays one contiguous hit region)."""
     spans: list[Span] = []
-    for glyph, style in cells:
-        if spans and spans[-1][1] == style:
-            spans[-1] = (spans[-1][0] + glyph, style)
+    for glyph, style, href in cells:
+        if spans and spans[-1][1] == style and spans[-1][2] == href:
+            spans[-1] = (spans[-1][0] + glyph, style, href)
         else:
-            spans.append((glyph, style))
+            spans.append((glyph, style, href))
     return spans
 
 
-def _measure_cells(cells: list[tuple[str, Style]], measure) -> float:
-    """Width of a run of (glyph, style) cells, measuring each maximal same-style
-    sub-run as a unit (so proportional kerning within a run is honored)."""
-    return sum(measure(text, style) for text, style in _merge_cells(cells))
+def _measure_cells(cells: list[Span], measure) -> float:
+    """Width of a run of (glyph, style, href) cells, measuring each maximal
+    same-style sub-run as a unit (so proportional kerning within a run is honored)."""
+    return sum(measure(text, style) for text, style, _ in _merge_cells(cells))
 
 
 def _wrap_spans(spans: list[Span], width: float, measure, *, word: bool) -> list[list[Span]]:
     """Word-wrap a styled line to ``width`` base units, preserving each glyph's
-    style across the break. ``measure(text, style)`` reports a fragment's width
-    in base units (a column count on the grid, native metrics for a proportional
-    font), so the same wrap follows both. ``word=False`` breaks between glyphs
-    regardless (the fenced-code path), so no content is lost to a long token."""
-    cells: list[tuple[str, Style]] = [
-        (g, st) for text, st in spans for g in glyph_runs(text)
+    style (and link href) across the break. ``measure(text, style)`` reports a
+    fragment's width in base units (a column count on the grid, native metrics
+    for a proportional font), so the same wrap follows both. ``word=False`` breaks
+    between glyphs regardless (the fenced-code path), so no content is lost."""
+    cells: list[Span] = [
+        (g, st, href) for text, st, href in spans for g in glyph_runs(text)
     ]
     if width <= 0 or not cells:
         return [_merge_cells(cells)] if cells else [[]]
-    rows: list[list[tuple[str, Style]]] = []
-    cur: list[tuple[str, Style]] = []
+    rows: list[list[Span]] = []
+    cur: list[Span] = []
     cur_w = 0.0
 
-    def hard_break(token: list[tuple[str, Style]]) -> None:
+    def hard_break(token: list[Span]) -> None:
         nonlocal cur, cur_w
         for cell in token:
             w = measure(cell[0], cell[1])
@@ -369,26 +421,38 @@ class MarkdownView(Widget):
         style: Style = DEFAULT_STYLE,
         text_font: Font = DEFAULT_TEXT_FONT,
         code_font: Font = DEFAULT_CODE_FONT,
+        heading_sizes: dict[int, float] = DEFAULT_HEADING_SIZES,
     ):
         self.style = style
         # Prose face (proportional on GUI) and code face (monospace). Both fold
         # to the single grid font on a terminal; bold/italic survive as attrs.
         self.text_font = text_font
         self.code_font = code_font
+        # Heading point size per level (visual only; dropped on a terminal).
+        self.heading_sizes = heading_sizes
         self._sems: list[_SemLine] = parse_markdown(source)
 
-        # Top of the viewport, in base units. A display row is self._pitch base
-        # units tall (1.0 for the grid font, more for a taller proportional one),
-        # so the virtualization is a uniform multiply like LogView.
+        # Top of the viewport, in base units.
         self.offset: float = 0.0
-        self._pitch: float = 1.0
+        # Row pitch of the body face, the unit a line-scroll moves by (1.0 on a
+        # terminal). Set each layout.
+        self._line_pitch: float = 1.0
 
-        # Wrap cache: each row is (x0, spans) — the x of its first span in base
-        # units (a hanging indent under a list marker / quote bar) and the styled
-        # fragments. Valid only at self._wrap_width; rebuilt on a resize.
-        self._rows: list[tuple[float, list[Span]]] | None = None
+        # Wrap cache: a list of _Row. _row_tops[i] is the cumulative top of row i
+        # (in base units); _row_tops[-1] is the total content height. Valid only
+        # at _wrap_width; rebuilt on a resize.
+        self._rows: list[_Row] | None = None
+        self._row_tops: list[float] = [0.0]
         self._wrap_width: float = -1.0
+        # Image height is capped to the viewport, so the layout also depends on
+        # the view height; cache on both to re-contain images on a vertical resize.
+        self._wrap_view_h: float = -1.0
         self._view_h: float = 1.0
+
+        # Click targets from the last draw: (x0, y0, x1, y1, url) in widget-local
+        # base units, one per visible link span. The Panel is kept to open a URL.
+        self._link_hits: list[tuple[float, float, float, float, str]] = []
+        self._panel = None
 
     # --- construction ---------------------------------------------------------
 
@@ -399,99 +463,162 @@ class MarkdownView(Widget):
         style: Style = DEFAULT_STYLE,
         text_font: Font = DEFAULT_TEXT_FONT,
         code_font: Font = DEFAULT_CODE_FONT,
+        heading_sizes: dict[int, float] = DEFAULT_HEADING_SIZES,
     ) -> "MarkdownView":
         """Build a view from a ``*.md`` file (read as UTF-8)."""
         with open(path, encoding="utf-8") as f:
-            return cls(f.read(), style=style, text_font=text_font, code_font=code_font)
+            return cls(
+                f.read(),
+                style=style,
+                text_font=text_font,
+                code_font=code_font,
+                heading_sizes=heading_sizes,
+            )
 
     def set_source(self, source: str) -> None:
         self._sems = parse_markdown(source)
         self.offset = 0.0
         self._rows = None
         self._wrap_width = -1.0
+        self._wrap_view_h = -1.0
 
     # --- layout ---------------------------------------------------------------
 
-    def _layout(self, width: float, ctx: DrawContext) -> list[tuple[float, list[Span]]]:
+    def _layout(self, width: float, ctx: DrawContext) -> list[_Row]:
         """Wrap every semantic line to ``width`` base units, returning the flat
-        list of (x0, spans) display rows. Wrapping and the row pitch both go
-        through ``ctx`` so a proportional face measures and spaces correctly.
-        Rebuilt only when the width (or source) changes."""
-        if self._rows is not None and self._wrap_width == width:
+        list of ``_Row`` and rebuilding the cumulative ``_row_tops`` index.
+        Wrapping and every row height go through ``ctx`` so a proportional / sized
+        face measures and spaces correctly, and an image is sized to its aspect
+        ratio. Rebuilt only when the width, view height (image cap), or source
+        changes."""
+        if (
+            self._rows is not None
+            and self._wrap_width == width
+            and self._wrap_view_h == self._view_h
+        ):
             return self._rows
         theme = ctx.theme or DEFAULT_THEME
         measure = ctx.measure_text
-        # Uniform row pitch: the taller of the prose and code faces, so neither
-        # overlaps the next row. The grid font reports 1.0, so a terminal is
-        # unchanged.
-        self._pitch = max(
-            ctx.line_height(Style(font=self.text_font)),
-            ctx.line_height(Style(font=self.code_font)),
-        )
-        rows: list[tuple[float, list[Span]]] = []
+        # Row height is the line height of the row's font(s); cache per font so a
+        # long document does not re-resolve the same face per row. The grid font
+        # reports 1.0, so a terminal stays one unit per row.
+        lh_cache: dict[Font | None, float] = {}
+        lc = None  # LayoutContext, built lazily for image sizing
+
+        def line_height(style: Style) -> float:
+            font = style.font
+            if font not in lh_cache:
+                lh_cache[font] = ctx.line_height(style)
+            return lh_cache[font]
+
+        self._line_pitch = line_height(Style(font=self.text_font))
+        rows: list[_Row] = []
         for sem in self._sems:
             if sem.block == "blank":
-                rows.append((0.0, []))
+                rows.append(_Row(0.0, [], self._line_pitch))
                 continue
             if sem.block == "rule":
                 # A grid (font=None) rule spans the pane exactly: one ─ per unit.
-                rows.append((0.0, [("─" * max(1, int(width)), Style(fg=theme.muted_text))]))
+                style = Style(fg=theme.muted_text)
+                rows.append(_Row(0.0, [("─" * max(1, int(width)), style, None)], self._line_pitch))
+                continue
+            if sem.block == "image":
+                if lc is None:
+                    lc = ctx.layout_context()
+                size = lc.measure_image(sem.data) if sem.data else None
+                alt = sem.runs[0][0] if sem.runs else None
+                if size and size[0] > 0 and size[1] > 0:
+                    w = width
+                    h = aspect_extent(w, True, size[0], size[1], lc.base_w, lc.base_h)
+                    # An image taller than the viewport is contained to fit it
+                    # (aspect kept, width shrunk, centered), so it never reserves
+                    # more than one screenful of blank scroll.
+                    if self._view_h > 0 and h > self._view_h:
+                        w *= self._view_h / h
+                        h = self._view_h
+                    x0 = max(0.0, (width - w) / 2.0)
+                else:
+                    # Unknown / unreadable image: reserve one line and let the
+                    # backend draw the alt glyph (TUI) or its own missing-image.
+                    w, h, x0 = width, self._line_pitch, 0.0
+                rows.append(_Row(x0, [], h, image=(sem.data, alt, w, h)))
                 continue
             base = _block_style(
-                sem.block, sem.level, self.style, theme, self.text_font, self.code_font
+                sem.block, sem.level, self.style, theme,
+                self.text_font, self.code_font, self.heading_sizes,
             )
-            spans = [(text, _run_style(roles, base, theme, self.code_font)) for text, roles in sem.runs]
+            spans = [
+                (text, _run_style(roles, base, theme, self.code_font), href)
+                for text, roles, href in sem.runs
+            ]
             prefix_style = Style(fg=theme.muted_text) if sem.block == "quote" else base
             prefix_w = measure(sem.prefix, prefix_style) if sem.prefix else 0.0
             avail = max(1.0, width - prefix_w)
             wrapped = _wrap_spans(spans, avail, measure, word=sem.wrap)
             for k, row in enumerate(wrapped):
                 if k == 0 and sem.prefix:
-                    rows.append((0.0, [(sem.prefix, prefix_style)] + row))
+                    cells = [(sem.prefix, prefix_style, None)] + row
+                    x0 = 0.0
                 else:
                     # Continuation rows hang under the text, indented by the
                     # measured prefix width (exact on every backend).
-                    rows.append((prefix_w, row))
+                    cells = row
+                    x0 = prefix_w
+                height = max((line_height(st) for _, st, _ in cells), default=line_height(base))
+                rows.append(_Row(x0, cells, height))
         self._rows = rows
+        tops = [0.0]
+        for row in rows:
+            tops.append(tops[-1] + row.height)
+        self._row_tops = tops
         self._wrap_width = width
+        self._wrap_view_h = self._view_h
         return rows
 
     # --- drawing --------------------------------------------------------------
 
     def draw(self, ctx: DrawContext) -> None:
+        self._panel = ctx.panel
+        self._link_hits = []
         # Use the exact (fractional) width on pixel backends so proportional text
         # wraps to the real pane edge, not a column-snapped one.
         full_w, view_h = ctx.size_units
         self._view_h = view_h
 
-        # Whether the bar shows depends on the row count, which depends on the
-        # wrap width, which depends on whether the bar shows. Lay out once at the
-        # full width to learn if the content overflows, then (only if it does)
-        # re-lay-out one base unit narrower to make room for the bar.
+        # Whether the bar shows depends on the content height, which depends on
+        # the wrap width, which depends on whether the bar shows. Lay out once at
+        # the full width to learn if the content overflows, then (only if it
+        # does) re-lay-out one base unit narrower to make room for the bar.
         rows = self._layout(full_w, ctx)
-        content_h = len(rows) * self._pitch
+        content_h = self._row_tops[-1]
         show_bar = content_h > view_h
         if show_bar:
             rows = self._layout(full_w - 1.0, ctx)
-            content_h = len(rows) * self._pitch
+            content_h = self._row_tops[-1]
         self._clamp(content_h)
 
-        pitch = self._pitch
-        first = int(self.offset / pitch)
-        frac = self.offset - first * pitch
-        r = 0
-        while True:
-            index = first + r
-            y = r * pitch - frac
-            if y >= view_h or index >= len(rows):
+        # Binary-search the cumulative tops for the first row whose bottom is
+        # below the viewport top, then draw down until a row starts past the
+        # bottom edge (the clip trims the partial rows at either end).
+        first = max(0, bisect.bisect_right(self._row_tops, self.offset) - 1)
+        for index in range(first, len(rows)):
+            row = rows[index]
+            y = self._row_tops[index] - self.offset
+            if y >= view_h:
                 break
-            if index >= 0:
-                x, spans = rows[index]
-                for text, style in spans:
-                    if text:
-                        ctx.draw_text(x, y, text, style)
-                        x += ctx.measure_text(text, style)
-            r += 1
+            if row.image is not None:
+                path, alt, w, h = row.image
+                ctx.draw_image(row.x0, y, path, hints={"w": w, "h": h, "fit": "contain", "alt": alt})
+                continue
+            x = row.x0
+            for text, style, href in row.spans:
+                if not text:
+                    continue
+                ctx.draw_text(x, y, text, style)
+                w = ctx.measure_text(text, style)
+                if href:
+                    self._link_hits.append((x, y, x + w, y + row.height, href))
+                x += w
 
         if show_bar:
             ratio = view_h / content_h
@@ -502,7 +629,7 @@ class MarkdownView(Widget):
     # --- scrolling ------------------------------------------------------------
 
     def _content_h(self) -> float:
-        return len(self._rows) * self._pitch if self._rows is not None else 0.0
+        return self._row_tops[-1]
 
     def _clamp(self, content_h: float) -> None:
         self.offset = max(0.0, min(self.offset, max(0.0, content_h - self._view_h)))
@@ -520,15 +647,30 @@ class MarkdownView(Widget):
                 amount = float(event.scroll)
             self.scroll_by(-amount)
             return True
+        if event.type is EventType.MOUSE_CLICK:
+            return self._handle_click(event)
         if event.type is EventType.KEY:
             return self._handle_key(event.key)
         return False
 
+    def _handle_click(self, event: Event) -> bool:
+        """Open the link under the click, if any. The Panel resolves the open:
+        ``os_open`` backends launch the OS handler, others copy the URL to the
+        clipboard — the widget never branches."""
+        if event.x is None or event.y is None:
+            return False
+        for x0, y0, x1, y1, url in self._link_hits:
+            if x0 <= event.x < x1 and y0 <= event.y < y1:
+                if self._panel is not None:
+                    self._panel.open_url(url)
+                return True
+        return False
+
     def _handle_key(self, key: str | None) -> bool:
         if key == "up":
-            self.scroll_by(-1)
+            self.scroll_by(-self._line_pitch)
         elif key == "down":
-            self.scroll_by(1)
+            self.scroll_by(self._line_pitch)
         elif key == "pageup":
             self.scroll_by(-self._view_h)
         elif key == "pagedown":

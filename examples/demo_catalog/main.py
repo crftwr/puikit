@@ -370,18 +370,34 @@ def build_log_page(panel: Panel) -> VSplit:
     )
 
 
+# {scene} is filled in with a real asset path at build time so the image block
+# has something to render (GUI draws the picture; TUI shows the alt glyph).
 _MARKDOWN_SAMPLE = """\
 # MarkdownView
 
 A read-only **rich-text** viewer for *Markdown*, parsed once into semantic
 blocks whose inline roles (`bold`, `code`, links) are colored by the active
-`Theme` — so the same document follows each backend's palette.
+`Theme` — so the same document follows each backend's palette. Headings stand
+out by **weight and size** alone, in the body color.
 
 ## Inline runs
 
-Mix **bold**, *italic*, ***both***, inline `code`, and a [link](https://x)
-in one sentence. Prose uses a proportional font and `code` a monospace one on
-GUI; both fold to the one grid font (bold / italic kept) on a terminal.
+Mix **bold**, *italic*, ***both***, inline `code`, and a real
+[PuiKit link](https://github.com/crftwr/tfm) in one sentence. Prose uses a
+proportional font and `code` a monospace one on GUI; both fold to the one grid
+font (bold / italic kept) on a terminal.
+
+## Hyperlinks
+
+Click [the Anthropic site](https://www.anthropic.com) — on GUI it opens in the
+browser; on a terminal the URL is copied to the clipboard instead. One intent,
+resolved per backend.
+
+## Images
+
+![a small scene]({scene})
+
+GUI draws the picture, sized to its aspect ratio; TUI shows the alt glyph.
 
 ## Lists
 
@@ -412,10 +428,11 @@ Scroll with the arrow / page keys, Home / End, or the mouse wheel.
 def build_markdown_page(panel: Panel) -> VSplit:
     # One source string parsed to semantic blocks; the Theme colors the roles,
     # so headings/links/code read correctly on TUI and GUI from the same widget.
-    view = MarkdownView(_MARKDOWN_SAMPLE)
+    scene = os.path.join(os.path.dirname(__file__), "assets", "scene.png")
+    view = MarkdownView(_MARKDOWN_SAMPLE.replace("{scene}", scene))
     return VSplit(
         Item(view, weight=1, hints={"surface": "content"}),
-        Item(Label("↑↓/PgUp/PgDn/Home/End or wheel to scroll", DIM), size="content"),
+        Item(Label("↑↓/PgUp/PgDn/Home/End scroll · click a link to open it", DIM), size="content"),
         gap=1,
     )
 

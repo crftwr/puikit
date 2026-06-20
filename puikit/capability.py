@@ -35,6 +35,7 @@ PROFILE_TUI = CapabilityProfile(
                              # to Finder). Needs a native window/view, so a
                              # terminal app can never be one; the Panel falls
                              # back to copying paths to the clipboard.
+    os_open=False,           # no OS shell to open a URL; Panel copies it instead
     ime=False,
     clipboard_rich=False,
     native_file_dialog=False,
@@ -59,6 +60,7 @@ PROFILE_GUI_WEB = CapabilityProfile(
     animation=True,
     drag_and_drop=True,    # drop-IN, browser-limited
     os_drag_drop=False,    # drag-OUT: no OS file-drag source from the browser
+    os_open=True,          # open a clicked URL/file in the OS handler
     ime=True,
     clipboard_rich=False,  # security-limited
     native_file_dialog=False,

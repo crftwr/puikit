@@ -1,11 +1,47 @@
 """MarkdownView tests run identically against the TUI and GUI capability profiles."""
 
+import struct
+
 import pytest
 
-from puikit import Event, EventType, Panel, PROFILE_GUI_DESKTOP, PROFILE_TUI, TextAttribute
+from puikit import Event, EventType, Panel, PROFILE_GUI_DESKTOP, PROFILE_TUI, Style, TextAttribute
 from puikit.backends.memory_backend import MemoryBackend
 from puikit.widgets import MarkdownView
-from puikit.widgets.markdown_view import _parse_inline, parse_markdown
+from puikit.widgets.markdown_view import (
+    DEFAULT_CODE_FONT,
+    DEFAULT_HEADING_SIZES,
+    DEFAULT_TEXT_FONT,
+    _block_style,
+    _parse_inline,
+    parse_markdown,
+)
+from puikit.theme import DEFAULT_THEME
+
+
+class SizedBackend(MemoryBackend):
+    """A grid backend that, unlike the plain MemoryBackend, reports a font's
+    point size through its metrics (base = 14pt = one base unit), so tests can
+    exercise the sized-heading / variable-row-height path off-screen."""
+
+    def measure_line_height(self, style=Style()):
+        font = style.font
+        if font is None or font.size is None:
+            return 1.0
+        return font.size / 14.0
+
+    def measure_text(self, text, style=Style()):
+        font = style.font
+        scale = font.size / 14.0 if (font and font.size) else 1.0
+        return len(text) * scale
+
+
+def _png_bytes(w: int, h: int) -> bytes:
+    """A minimal PNG header (signature + IHDR width/height) — enough for
+    puikit.image.image_size to read the dimensions, no pixel data needed."""
+    return (
+        b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR"
+        + struct.pack(">II", w, h) + b"\x00\x00\x00\x00"
+    )
 
 
 @pytest.fixture(params=[PROFILE_TUI, PROFILE_GUI_DESKTOP], ids=["tui", "gui"])
@@ -18,7 +54,7 @@ def backend(request):
 
 def test_parse_inline_emphasis_and_code():
     runs = _parse_inline("a **b** and `c` and *d*")
-    flat = {text: roles for text, roles in runs}
+    flat = {text: roles for text, roles, _ in runs}
     assert "b" in flat and "bold" in flat["b"]
     assert "c" in flat and "code" in flat["c"]
     assert "d" in flat and "italic" in flat["d"]
@@ -26,21 +62,22 @@ def test_parse_inline_emphasis_and_code():
 
 def test_parse_inline_nested_emphasis():
     runs = _parse_inline("**bold _and italic_**")
-    bold_italic = [text for text, roles in runs if {"bold", "italic"} <= roles]
+    bold_italic = [text for text, roles, _ in runs if {"bold", "italic"} <= roles]
     assert "and italic" in bold_italic
 
 
-def test_parse_inline_link_keeps_text_drops_url():
+def test_parse_inline_link_keeps_text_and_href():
     runs = _parse_inline("see [the docs](http://x) now")
-    link = [text for text, roles in runs if "link" in roles]
-    assert link == ["the docs"]
-    assert all("http" not in text for text, _ in runs)
+    link = [(text, href) for text, roles, href in runs if "link" in roles]
+    assert link == [("the docs", "http://x")]
+    # The URL is the href, not part of the displayed text.
+    assert all("http" not in text for text, _, _ in runs)
 
 
 def test_parse_inline_escape():
     runs = _parse_inline(r"not \*bold\* here")
-    assert "".join(text for text, _ in runs) == "not *bold* here"
-    assert all("bold" not in roles for _, roles in runs)
+    assert "".join(text for text, _, _ in runs) == "not *bold* here"
+    assert all("bold" not in roles for _, roles, _ in runs)
 
 
 def test_parse_blocks():
@@ -58,7 +95,7 @@ def test_parse_fenced_code_is_literal():
     sems = parse_markdown("```\n**not bold**\n```\n")
     code = [s for s in sems if s.block == "code"]
     assert len(code) == 1
-    text, roles = code[0].runs[0]
+    text, roles, _ = code[0].runs[0]
     assert text == "**not bold**"
     assert "bold" not in roles  # fenced code is not inline-parsed
 
@@ -153,6 +190,46 @@ def test_fenced_code_block_is_mono():
     raise AssertionError("code block not rendered")
 
 
+def test_heading_levels_carry_descending_sizes():
+    sizes = [
+        _block_style(
+            "heading", lvl, Style(), DEFAULT_THEME,
+            DEFAULT_TEXT_FONT, DEFAULT_CODE_FONT, DEFAULT_HEADING_SIZES,
+        ).font.size
+        for lvl in range(1, 7)
+    ]
+    assert sizes == sorted(sizes, reverse=True)  # # bigger than ## bigger than …
+    assert sizes[0] > 14.0  # h1 is larger than the body
+
+
+def test_sized_heading_makes_a_taller_row():
+    # On a backend that honors point sizes, an h1 row is taller than a body row,
+    # and the cumulative tops reflect the varied heights (not a flat multiply).
+    backend = SizedBackend(width=40, height=30, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    view = MarkdownView("# Big\n\nbody")
+    panel.add(view, x=0, y=0, w=40, h=30)
+    panel.render()
+    heading_h = view._rows[0].height
+    body_h = view._rows[-1].height
+    assert heading_h > body_h == 1.0
+    assert heading_h == DEFAULT_HEADING_SIZES[1] / 14.0
+    # tops are the running sum of heights.
+    assert view._row_tops[1] == heading_h
+
+
+def test_rows_stay_uniform_height_on_terminal(backend):
+    # Without font metrics every row is one base unit tall, so the document
+    # paginates exactly as it did before sizes existed.
+    if backend.capabilities.supports("fonts"):
+        pytest.skip("covered by the sized GUI test")
+    panel = Panel(backend)
+    view = MarkdownView("# H1\n\n## H2\n\nbody")
+    panel.add(view, x=0, y=0, w=24, h=8)
+    panel.render()
+    assert all(r.height == 1.0 for r in view._rows)
+
+
 def test_fonts_fold_to_attrs_on_terminal(backend):
     # Under the TUI profile the Panel folds fonts away; the document still reads
     # (bold heading survives as an attribute) and stays column-aligned.
@@ -163,3 +240,104 @@ def test_fonts_fold_to_attrs_on_terminal(backend):
     panel.render()
     assert backend.style_at(0, 0).font is None
     assert backend.style_at(0, 0).attr & TextAttribute.BOLD
+
+
+# --- headings: no underline, body color --------------------------------------
+
+
+def test_heading_has_no_underline_and_body_color():
+    body = _block_style(
+        "para", 0, Style(), DEFAULT_THEME,
+        DEFAULT_TEXT_FONT, DEFAULT_CODE_FONT, DEFAULT_HEADING_SIZES,
+    )
+    head = _block_style(
+        "heading", 1, Style(), DEFAULT_THEME,
+        DEFAULT_TEXT_FONT, DEFAULT_CODE_FONT, DEFAULT_HEADING_SIZES,
+    )
+    assert not head.attr & TextAttribute.UNDERLINE
+    assert head.fg == body.fg  # same color as regular text
+    assert head.attr & TextAttribute.BOLD
+
+
+# --- images ------------------------------------------------------------------
+
+
+def test_image_block_parsed():
+    sems = parse_markdown("![a cat](cat.png)")
+    assert len(sems) == 1
+    assert sems[0].block == "image"
+    assert sems[0].data == "cat.png"
+    assert sems[0].runs[0][0] == "a cat"  # alt text
+
+
+def test_image_reserves_aspect_height(tmp_path):
+    # A 2:1 PNG sized to a 20-unit-wide pane (square base unit) reserves ~10 rows.
+    png = tmp_path / "wide.png"
+    png.write_bytes(_png_bytes(40, 20))
+    backend = MemoryBackend(width=20, height=40, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    view = MarkdownView(f"![w]({png})")
+    panel.add(view, x=0, y=0, w=20, h=40)
+    panel.render()
+    assert len(view._rows) == 1
+    row = view._rows[0]
+    assert row.image is not None
+    assert abs(row.height - 10.0) < 0.01
+
+
+def test_image_alt_glyph_on_terminal(tmp_path):
+    png = tmp_path / "img.png"
+    png.write_bytes(_png_bytes(10, 10))
+    backend = MemoryBackend(width=20, height=20, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+    panel.add(MarkdownView(f"![icon]({png})"), x=0, y=0, w=20, h=20)
+    panel.render()  # TUI has no images: the Panel draws the alt glyph, no raise
+
+
+# --- hyperlinks --------------------------------------------------------------
+
+
+def test_click_link_opens_url():
+    opened = []
+
+    class OpeningBackend(MemoryBackend):
+        def open_url(self, url):
+            opened.append(url)
+            return True
+
+    backend = OpeningBackend(width=40, height=8, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    view = MarkdownView("see [docs](http://x) here")
+    panel.add(view, x=0, y=0, w=40, h=8)
+    panel.render()
+    # Click on the word "docs" (starts at column 4).
+    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=5, y=0))
+    assert opened == ["http://x"]
+
+
+def test_click_outside_link_does_nothing():
+    opened = []
+
+    class OpeningBackend(MemoryBackend):
+        def open_url(self, url):
+            opened.append(url)
+            return True
+
+    backend = OpeningBackend(width=40, height=8, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    view = MarkdownView("see [docs](http://x) here")
+    panel.add(view, x=0, y=0, w=40, h=8)
+    panel.render()
+    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=0, y=0))  # on "see"
+    assert opened == []
+
+
+def test_link_falls_back_to_clipboard_without_os_open(backend):
+    if backend.capabilities.supports("os_open"):
+        pytest.skip("covered by the GUI open test")
+    panel = Panel(backend)
+    view = MarkdownView("[docs](http://x)")
+    panel.add(view, x=0, y=0, w=24, h=8)
+    panel.render()
+    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=1, y=0))
+    assert panel.get_clipboard() == "http://x"
