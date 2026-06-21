@@ -12,13 +12,14 @@ button directly. It pops itself and reports the chosen label through
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Sequence
 from typing import Any
 
 from ..backend import Style, TextAttribute
 from ..event import Event, EventType
+from ..font import Font
 from ..panel import DrawContext
-from ..text import display_width
 from ..theme import DEFAULT_THEME
 
 _BOLD = Style(attr=TextAttribute.BOLD)
@@ -66,12 +67,15 @@ class MessageBox:
         for i, line in enumerate(self._lines()):
             ctx.draw_text(2, 3 + i, line[: max(0, ctx.width - 4)])
 
-        # Button row along the bottom, centered as a group.
+        # Button row along the bottom, centered as a group. Widths are measured
+        # in base units (proportional on GUI, columns on a grid) and reserved at
+        # the bold size the focused button draws at, so the row stays centered and
+        # put as focus moves.
         labels = [f" {b} " for b in self.buttons]
-        widths = [max(1, display_width(lbl)) for lbl in labels]
+        widths = [max(1.0, ctx.measure_text(lbl, _BOLD)) for lbl in labels]
         gap = 1
         total = sum(widths) + gap * (len(labels) - 1)
-        bx = max(2, (ctx.width - total) // 2)
+        bx = max(2.0, (ctx.width - total) / 2.0)
         by = ctx.height - 2
         self._button_x = []
         for i, (lbl, w) in enumerate(zip(labels, widths)):
@@ -132,13 +136,21 @@ def show_message_box(
         default=default, cancel=cancel, on_result=on_result,
     )
     lines = message.split("\n")
-    label_w = sum(display_width(f" {b} ") for b in buttons) + (len(buttons) - 1)
+    # Size the box to the text as it will actually render: measure through the
+    # backend with the proportional UI font (the GUI default) — title and buttons
+    # bold, since they draw bold — so a proportional message is not boxed at the
+    # wider monospace column count. A whole-unit backend returns column counts, so
+    # the terminal box is unchanged.
+    mt = panel.backend.measure_text
+    prop = Style(font=Font())
+    prop_bold = Style(font=Font(), attr=TextAttribute.BOLD)
+    label_w = sum(mt(f" {b} ", prop_bold) for b in buttons) + (len(buttons) - 1)
     content_w = max(
-        display_width(title) + 5,
-        max((display_width(line) for line in lines), default=0) + 4,
+        mt(title, prop_bold) + 5,
+        max((mt(line, prop) for line in lines), default=0.0) + 4,
         label_w + 4,
     )
-    w = max(28, min(content_w + 4, panel.backend.size_units[0]))
+    w = max(28, min(math.ceil(content_w) + 4, panel.backend.size_units[0]))
     # title row at y=1, message from y=3, a blank gap, the button row at h-2,
     # and the bottom border at h-1.
     h = len(lines) + 6

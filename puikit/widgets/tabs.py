@@ -20,6 +20,10 @@ from ..panel import DrawContext
 from ..theme import DEFAULT_THEME
 from .base import CONTROL_HEIGHT, Widget
 
+# Tab labels are measured bold (the active label is bold) so widths stay stable
+# and never under-reserve as the selection moves.
+_MEASURE_BOLD = Style(attr=TextAttribute.BOLD)
+
 
 def _lighten(color: tuple[int, int, int], amount: float = 0.16) -> tuple[int, int, int]:
     """Nudge a color toward white, for the hover tint of a tab fill — a clearly
@@ -103,7 +107,12 @@ class Tabs(FocusContainer, Widget):
         x += border_w
         for i, (title, _content) in enumerate(self.tabs):
             label = f" {title} "
-            w = max(1, int(ctx.measure_text(label)))
+            # Reserve the *bold* measured width (the active tab's label is bold):
+            # truncating to int() floored the proportional width and clipped the
+            # title; measuring bold for every tab keeps positions stable as the
+            # selection moves and never under-reserves. On a grid measure_text
+            # returns the column count, so the width stays whole-column.
+            w = max(1.0, ctx.measure_text(label, _MEASURE_BOLD))
             active = i == self.selected
             hovered = i == hovered_idx
             # Fill channel: on a vector strip the active tab is marked solely by

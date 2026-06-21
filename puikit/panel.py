@@ -16,11 +16,21 @@ from .backend import Backend, DEFAULT_STYLE, Style, TextAttribute
 from .capability import CapabilityProfile
 from .event import Event, EventType
 from .focus import focus_on_click, move_focus
-from .font import FontSlant, FontWeight
+from .font import Font, FontSlant, FontWeight
 from .theme import Theme, theme_for
 
 # Caret blink half-period (seconds); only matters on animation-capable backends.
 _CARET_BLINK = 0.53
+
+# App-wide default for text that names no font, on backends that can render
+# variable-advance text: the proportional system UI font, so GUI widgets read
+# native instead of fixed-width by default (docs/font_system.md §5). It carries
+# no size/family, so it inherits the backend base size and is value-equal across
+# uses (one cache key). Widgets that need column alignment (log streams, code,
+# the font showcase) pin Font(monospace=True) to opt back into a fixed advance.
+# The base unit is unaffected — it is grounded in the backend's monospaced
+# base_font, which never reads a Style (docs/font_system.md §3).
+_DEFAULT_UI_FONT = Font()
 
 # Checkbox / radio mark box side as a fraction of min(line_height, 2*advance).
 # >1.0 makes the mark a touch larger than a single base-unit cell, so widgets
@@ -138,7 +148,13 @@ class DrawContext:
         fg = style.fg
         attr = style.attr
         font = style.font
-        if font is not None and not self._caps.supports("fonts"):
+        if font is None and self._caps.supports("proportional_text"):
+            # GUI default: text that names no font flows in the proportional UI
+            # font rather than the monospaced base grid font, so widgets read
+            # native by default. Widgets that need a fixed advance pin a
+            # monospace Font and never reach here (docs/font_system.md §5).
+            font = _DEFAULT_UI_FONT
+        elif font is not None and not self._caps.supports("fonts"):
             if font.weight >= FontWeight.SEMI_BOLD:
                 attr |= TextAttribute.BOLD
             if font.slant is FontSlant.ITALIC:

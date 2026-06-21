@@ -225,8 +225,10 @@ class MemoryBackend(Backend):
         """The current grid as a list of strings, one per row."""
         return ["".join(row) for row in self._grid]
 
-    def style_at(self, x: int, y: int) -> Style:
-        return self._styles[y][x]
+    def style_at(self, x: float, y: float) -> Style:
+        # Reads round to the grid like draw_text does, so a caller may pass the
+        # fractional base-unit coordinates a pixel-layout widget computes.
+        return self._styles[round(y)][round(x)]
 
     def feed_event(self, event: Event) -> None:
         self._events.append(event)

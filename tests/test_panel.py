@@ -303,12 +303,19 @@ def test_text_renders_in_fractional_height_pane():
     assert backend.snapshot()[9].startswith("status")
 
 
-def test_text_extends_into_partial_last_column():
-    # A pane 5.5 base units wide shows 6 columns of text (the last one partial,
-    # clipped at the pane edge by the backend).
-    from puikit import DrawContext, Rect
+def test_default_font_flows_proportionally_on_gui():
+    # With no explicit font, GUI text uses the proportional UI font, not the
+    # monospaced grid (docs/font_system.md §5). A proportional run is handed to
+    # the backend whole and trimmed by the pane clip rect, never column-sliced —
+    # so a width-5 pane still receives the full 10-glyph run. (Grid-font column
+    # slicing on whole-unit backends stays covered by
+    # test_text_is_clipped_to_widget_rect.)
+    class _Plain(Widget):
+        def draw(self, ctx):
+            ctx.draw_text(0, 0, "0123456789")  # no font -> GUI default proportional
 
-    backend = MemoryBackend(width=20, height=5, capabilities=PROFILE_GUI_DESKTOP)
-    ctx = DrawContext(backend, Rect(0, 0, 5.5, 1.0), PROFILE_GUI_DESKTOP)
-    ctx.draw_text(0, 0, "0123456789")
-    assert backend.snapshot()[0] == "012345" + " " * 14
+    backend = _ProportionalBackend(width=20, height=3)
+    panel = Panel(backend)
+    panel.add(_Plain(), x=0, y=0, w=5, h=1)
+    render(panel, backend)
+    assert "0123456789" in backend.calls

@@ -21,7 +21,7 @@ from ..backend import DEFAULT_STYLE, Style, TextAttribute
 from ..event import Event, EventType
 from ..layout import LayoutContext, SizeRequest
 from ..panel import DrawContext
-from ..text import char_width, display_width
+from ..text import display_width
 from ..theme import DEFAULT_THEME
 from ._input import typed_char
 from .base import CONTROL_HEIGHT, Widget
@@ -61,6 +61,10 @@ class TextEdit(Widget):
         self._field_w = float("inf")  # field width; set at draw (permissive until then)
         self._focused_now = False  # last-drawn focus state, read by the blink tick
         self._blinking = False     # whether a caret-blink tick is registered
+        # Text measurement bound at draw time (proportional on GUI, columns on a
+        # grid), so hit-testing between frames maps clicks the same way the glyphs
+        # were laid out. A column-count fallback covers events before the first draw.
+        self._measure = lambda t: float(display_width(t))
 
     # --- selection -----------------------------------------------------------
 
@@ -104,6 +108,7 @@ class TextEdit(Widget):
 
     def draw(self, ctx: DrawContext) -> None:
         self._panel = ctx.panel
+        self._measure = ctx.measure_text
         theme = ctx.theme or DEFAULT_THEME
         w = min(self.width, ctx.width)
         if w - self.right_pad < 3:
@@ -122,7 +127,7 @@ class TextEdit(Widget):
         # Selection indices address self.text directly, so they only line up
         # with the display string while no preedit is spliced in.
         sel = self._selection() if not self._preedit else None
-        self._scroll_into_view(caret, field_w, len(disp))
+        self._scroll_into_view(ctx, caret, field_w)
 
         field_full_w = min(float(self.width), ctx.size_units[0])
         self._field_w = field_full_w  # captured for hit-testing
@@ -134,29 +139,35 @@ class TextEdit(Widget):
         # so the text/caret backgrounds cannot paint over the border line.
         ctx.round_rect(0, 0, field_full_w, field_h, Style(bg=bg), radius=_FIELD_RADIUS, hints={"fill": True})
 
-        # Lay out characters left to right in display columns (wide CJK glyphs
-        # take two), stopping at the field edge. The caret column is tracked the
-        # same way so it lands between the right glyphs.
-        col = 0
+        # Place each glyph at its *measured* x offset (proportional on GUI, whole
+        # columns on a grid), so a proportional font neither overlaps nor gaps and
+        # a wide CJK glyph still reserves its full width. The offset is the
+        # measured width of the prefix drawn so far, so positions are cumulative
+        # and never drift. Per-glyph background keeps the selection highlight a
+        # property of the cells it covers (the grid stores one style per cell).
+        view = self._view
+        sel_bg = theme.text_selection_bg if ctx.focused else theme.text_selection_inactive_bg
+        col = 0.0          # measured offset of the prefix already drawn
         caret_col = None
-        for idx in range(self._view, len(disp)):
+        prefix = ""        # disp[view:idx], the run measured for the next offset
+        for idx in range(view, len(disp)):
             if idx == caret:
                 caret_col = col
             ch = disp[idx]
-            cw = char_width(ch)
-            if col + cw > field_w:
+            nxt = ctx.measure_text(prefix + ch)
+            if nxt > field_w:  # this glyph would cross the field edge
                 break
             marked = pre_start <= idx < pre_end
             selected = sel is not None and sel[0] <= idx < sel[1]
             attr = TextAttribute.UNDERLINE if marked else TextAttribute.NORMAL
-            fg = theme.accent if marked else theme.text
             # The selection reads as active only while the field holds focus: a
-            # visible blue when focused, a muted neutral when focus is elsewhere
+            # visible blue when focused, a muted neutral otherwise
             # (docs/interaction_states.md §5).
-            sel_bg = theme.text_selection_bg if ctx.focused else theme.text_selection_inactive_bg
+            fg = theme.accent if marked else theme.text
             cell_bg = sel_bg if selected else bg
             ctx.draw_text(1 + col, ty, ch, Style(fg=fg, bg=cell_bg, attr=attr))
-            col += cw
+            prefix += ch
+            col = nxt
         if caret_col is None:  # caret sits at/after the last visible glyph
             caret_col = col
 
@@ -208,15 +219,16 @@ class TextEdit(Widget):
         sx, sy, _sw, _sh = ctx.screen_rect
         ctx.panel.request_text_input(int(sx + 1 + caret_col), int(sy), {})
 
-    def _scroll_into_view(self, caret: int, field_w: int, length: int) -> None:
-        # Keep the start (a character index) such that the caret stays inside
-        # the field, measured in display columns (wide glyphs count as two).
+    def _scroll_into_view(self, ctx: DrawContext, caret: int, field_w: int) -> None:
+        # Keep the start (a character index) such that the caret stays inside the
+        # field, measured in base units (proportional on GUI, columns on a grid)
+        # so the visible window matches how the run is laid out in draw.
         disp = self.text[: self.cursor] + self._preedit + self.text[self.cursor :]
         if caret < self._view:
             self._view = caret
-        while self._view < caret and display_width(disp[self._view : caret]) > field_w - 1:
+        while self._view < caret and ctx.measure_text(disp[self._view : caret]) > field_w - 1:
             self._view += 1
-        self._view = max(0, min(self._view, max(0, length)))
+        self._view = max(0, min(self._view, len(disp)))
 
     # --- events --------------------------------------------------------------
 
@@ -242,7 +254,7 @@ class TextEdit(Widget):
             # Only the field is clickable, not the empty slot to its right.
             if event.x is not None and event.x >= self._field_w:
                 return False
-            idx = self._index_at_column(int(event.x or 0) - 1)
+            idx = self._index_at_column((event.x or 0) - 1)
             if "shift" in event.modifiers:
                 # Shift+click extends from the existing cursor (or selection).
                 if self._anchor is None:
@@ -256,7 +268,7 @@ class TextEdit(Widget):
         if event.type is EventType.MOUSE_DRAG:
             if self._anchor is None:
                 self._anchor = self.cursor
-            self.cursor = self._index_at_column(int(event.x or 0) - 1)
+            self.cursor = self._index_at_column((event.x or 0) - 1)
             return True
         if event.type is not EventType.KEY:
             return False
@@ -272,15 +284,21 @@ class TextEdit(Widget):
             return True
         return self._handle_key(event.key, "shift" in event.modifiers)
 
-    def _index_at_column(self, target: int) -> int:
-        """The buffer index under display column ``target`` (field-local, padding
-        already removed), walking visible characters by display width."""
-        target = max(0, target)
-        idx, col = self._view, 0
-        while idx < len(self.text) and col < target:
-            col += char_width(self.text[idx])
+    def _index_at_column(self, target_x: float) -> int:
+        """The buffer index nearest field-local x ``target_x`` (padding already
+        removed), measured in base units so a proportional font hit-tests where
+        its glyphs actually fall (columns on a grid)."""
+        target = max(0.0, target_x)
+        view = self._view
+        idx, prev = view, 0.0
+        while idx < len(self.text):
+            cur = self._measure(self.text[view : idx + 1])
+            if cur >= target:
+                # Snap to whichever glyph boundary (before / after) is nearer.
+                return idx + 1 if (target - prev) > (cur - target) else idx
+            prev = cur
             idx += 1
-        return max(0, min(len(self.text), idx))
+        return min(len(self.text), idx)
 
     def _handle_command(self, key: str | None) -> bool:
         if key == "a":  # select all

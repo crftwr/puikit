@@ -128,9 +128,14 @@ font that **defines** the base unit on GUI (§3); it is named with the same
 MacOSBackend(base_font=Font(family="SF Mono", size=14, monospace=True))
 ```
 
-It is what text gets when a Style carries **no** font at all (`font=None`).
-That distinction keeps every existing widget rendering exactly as today until
-it opts in.
+**The GUI default.** A Style that carries **no** font (`font=None`) does *not*
+render in the monospaced base font on GUI — the Panel substitutes the
+proportional UI font (`Font()`) for it on any `proportional_text` backend (§6),
+so widgets read native by default without naming a font. `font=None` still
+means "the base grid font" on whole-unit (TUI) backends, and the base font
+still grounds the base unit everywhere (§3) — the substitution touches only
+glyph rendering, never the base unit. A widget that needs a fixed advance
+(a log stream, code, a column-aligned table) pins `Font(monospace=True)`.
 
 ---
 
@@ -145,7 +150,7 @@ class Style:
     fg: Color | None = None
     bg: Color | None = None
     attr: TextAttribute = TextAttribute.NORMAL
-    font: Font | None = None     # None -> backend default (monospaced base)
+    font: Font | None = None     # None -> GUI: proportional UI font; TUI: base grid
 ```
 
 Widgets opt in locally:
@@ -154,7 +159,7 @@ Widgets opt in locally:
 Label("Welcome", Style(font=Font(size=28, weight=FontWeight.SEMI_BOLD)))
 Label("body text", Style(font=Font()))            # proportional UI font on GUI
 Label("code", Style(font=Font(monospace=True)))   # monospaced on GUI
-Label("plain")                                     # base font, unchanged
+Label("plain")                                     # GUI default (proportional)
 ```
 
 `TextAttribute.BOLD` / `ITALIC` continue to work and compose with a font (the
@@ -178,19 +183,26 @@ PROFILE_GUI_WEB:     fonts=True,  proportional_text=True   (→ desktop, mobile)
 PROFILE_GAME:        fonts=True,  proportional_text=True
 ```
 
-The fallback lives in **one place** — the Panel/DrawContext layer — so widgets
-and backends both stay simple. Before a Style reaches a backend that lacks
-`fonts`, the Panel folds the font down:
+The font policy lives in **one place** — the Panel/DrawContext layer
+(`_resolve`) — so widgets and backends both stay simple. That one seam does two
+symmetric things, depending on the backend's capabilities:
 
 ```
-if not caps.supports("fonts") and style.font is not None:
+if style.font is None and caps.supports("proportional_text"):
+    font = Font()        # GUI default: text without a named font reads native
+                         # (proportional), not the monospaced base grid font
+elif style.font is not None and not caps.supports("fonts"):
     if font.weight >= SEMI_BOLD:  attr |= BOLD
     if font.slant is ITALIC:      attr |= ITALIC
     drop font            # face/size/proportional simply do not exist here
 ```
 
-A `fonts`-capable backend instead receives the Style with its `font` intact
-and renders it natively. No widget ever asks "does this backend have fonts?".
+So a `proportional_text` backend sees `Font()` for unstyled text (and any
+explicit `font` intact), while a backend that lacks `fonts` sees `None` (its
+one terminal font, with weight/slant folded to attributes). No widget ever asks
+"does this backend have fonts?". The substitution changes only glyph rendering;
+the base unit is still grounded in the backend's monospaced `base_font` (§3),
+which never reads a Style.
 
 ---
 

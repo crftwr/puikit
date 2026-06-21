@@ -34,9 +34,11 @@ from __future__ import annotations
 
 import bisect
 from collections.abc import Iterable
+from dataclasses import replace
 
 from ..backend import DEFAULT_STYLE, Style, TextAttribute
 from ..event import Event, EventType
+from ..font import Font
 from ..panel import DrawContext
 from ..text import (
     attaches_to_base,
@@ -53,6 +55,27 @@ _ZWJ = "‍"  # zero-width joiner: glues emoji into one combined glyph
 
 # A line as stored: its text and the style it draws in.
 LogLine = tuple[str, Style]
+
+# The view's fixed-advance face. A log stream is column-aligned by nature, so it
+# pins a monospace font regardless of the app-wide GUI default (which is the
+# proportional UI font, docs/font_system.md §5). With no size/family it resolves
+# to the same system monospace face as the base grid font, so it still tiles the
+# base unit one glyph per column — keeping the O(n) column wrap fast path valid.
+_LOG_FONT = Font(monospace=True)
+
+
+def _grid_aligned(font: Font | None) -> bool:
+    """Whether ``font`` lays out one glyph per base-unit column, so a line can be
+    wrapped by counting display columns instead of measuring it natively. True
+    for the base grid font (``None``) and for an unsized, unnamed monospace
+    request — both resolve to the fixed-advance grid face."""
+    return font is None or (font.monospace and font.family is None and font.size is None)
+
+
+def _as_mono(style: Style) -> Style:
+    """A log line's style, with the view's monospace face filled in when it names
+    no font, so log content stays column-aligned under the proportional default."""
+    return style if style.font is not None else replace(style, font=_LOG_FONT)
 # A selection position: a global display-row index and a glyph index within it
 # (0..len, so a position past the last glyph is the row end).
 Pos = tuple[int, int]
@@ -218,8 +241,10 @@ class LogView(Widget):
         # Each stored line is (text, style); a bare string takes the view's
         # default style. The style is for color/attributes, not a taller font:
         # the row pitch is uniform (taken from the view's base style) so the
-        # virtualization math stays a simple multiply.
-        self.style = style
+        # virtualization math stays a simple multiply. The base style (and every
+        # stored line) pins the monospace face so the stream stays column-aligned
+        # even though GUI text defaults to a proportional font.
+        self.style = _as_mono(style)
         # False: one display row per logical line (overflow clips at the edge).
         # True / "word": fold long lines on word boundaries; "char": anywhere.
         self.wrap = wrap
@@ -267,14 +292,14 @@ class LogView(Widget):
         """Append one line. Cheap at any buffer size: the wrap cache extends
         incrementally and the viewport stays put unless it is following the
         tail."""
-        self.lines.append((text, style if style is not None else self.style))
+        self.lines.append((text, _as_mono(style) if style is not None else self.style))
         self._trim()
 
     def extend(self, lines: Iterable[str | LogLine]) -> None:
         for line in lines:
             if isinstance(line, tuple):
                 text, style = line
-                self.lines.append((text, style))
+                self.lines.append((text, _as_mono(style)))
             else:
                 self.lines.append((line, self.style))
         self._trim()
@@ -318,10 +343,11 @@ class LogView(Widget):
 
     def _wrap_line(self, text: str, style: Style, width: float, ctx: DrawContext) -> list[LogLine]:
         word = self.wrap != "char"
-        if style.font is None:
-            # Grid font: a base unit is one column, so wrap in integer columns
-            # without touching the backend. O(n) per line, the fast path that
-            # makes laying out a large wrapped buffer affordable.
+        if _grid_aligned(style.font):
+            # Grid font (or the view's unsized monospace face): a base unit is one
+            # column, so wrap in integer columns without touching the backend.
+            # O(n) per line, the fast path that makes laying out a large wrapped
+            # buffer affordable.
             segs = wrap_columns(text, int(width), word=word)
         else:
             # A real per-Style font is not column-aligned; measure it natively.

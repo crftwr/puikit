@@ -706,11 +706,12 @@ def build_fonts_page(panel: Panel) -> VSplit:
             Label("GUI renders faces, sizes, weights, slants; TUI folds them", DIM),
             size=1,
         ),
-        # font=None -> the base monospaced grid font (unchanged everywhere).
-        row("Base grid font (font=None) — monospaced, column-aligned"),
-        # Font() is the proportional system UI font on GUI; mono on TUI.
-        row("Proportional UI font — flows by natural advances", Style(font=Font())),
-        row("Monospaced UI font — fixed advance", Style(font=Font(monospace=True))),
+        # The app-wide GUI default for text that names no font is the
+        # proportional UI font; on TUI it folds to the one terminal font.
+        row("Default (font=None) — proportional UI font on GUI"),
+        # Pin the monospace face explicitly to still demonstrate the column-
+        # aligned base grid font the layout's base unit is derived from.
+        row("Base grid font — monospaced, column-aligned", Style(font=Font(monospace=True))),
         # Weights: only >= SEMI_BOLD survives on TUI (as bold).
         row("Light (300) — folds to plain on TUI", Style(font=Font(weight=FontWeight.LIGHT))),
         row("Semibold (600) — folds to bold on TUI", Style(font=Font(weight=FontWeight.SEMI_BOLD))),
@@ -750,18 +751,21 @@ def build_wrap_page(panel: Panel) -> VSplit:
         "ウィンドウの幅を変えると、同じ段落が新しい幅に合わせて流れ直します。"
     )
     PROP = Style(font=Font())  # proportional on GUI; folds to the grid font on TUI
+    # The GUI default is now proportional, so the grid-aligned rows pin the
+    # monospace face explicitly to keep the column-aligned vs. flowing contrast.
+    MONO = Style(font=Font(monospace=True))
 
     scroller = ScrollView(
         [
             (heading("Word wrap — base grid font (column-aligned)"), 1),
-            (TextBlock(en, wrap=True), "content"),
+            (TextBlock(en, style=MONO, wrap=True), "content"),
             (heading("Word wrap — proportional font (GUI flows by advances)"), 1),
             # Same text, same width: GUI wraps at different points than the
             # monospaced block above because the glyph advances differ; TUI
             # folds the font to the grid and wraps identically. One intent.
             (TextBlock(en, style=PROP, wrap=True), "content"),
             (heading("Japanese — wraps between glyphs (no spaces)"), 1),
-            (TextBlock(ja, wrap=True), "content"),
+            (TextBlock(ja, style=MONO, wrap=True), "content"),
             (heading("Japanese — proportional font"), 1),
             (TextBlock(ja, style=PROP, wrap=True), "content"),
             (heading("Character wrap (wrap=\"char\") — breaks anywhere"), 1),
