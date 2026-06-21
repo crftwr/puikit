@@ -18,9 +18,9 @@ from typing import Any
 from ..backend import DEFAULT_STYLE, Style
 from ..event import Event, EventType
 from ..panel import DrawContext
-from ..text import display_width, truncate_to_width
+from ..text import truncate_to_width
 from ._input import is_activate
-from .base import Widget, selected_row_style
+from .base import Widget, draw_list_row, selected_row_style
 
 _INDENT = 2  # columns per depth level
 _EXPANDED = "▾ "
@@ -106,13 +106,12 @@ class TreeView(Widget):
                 marker = _LEAF if node.is_leaf else (_EXPANDED if node.expanded else _COLLAPSED)
                 raw = " " * (depth * _INDENT) + marker + node.label
                 clipped = truncate_to_width(raw, text_w)
-                text = clipped + " " * (text_w - display_width(clipped))
                 style = self.style
                 if index == self.selected:
                     style = selected_row_style(
                         style, theme, ctx.focused, ctx.vector_shapes
                     )
-                ctx.draw_text(0, y, text, style)
+                draw_list_row(ctx, y, clipped, text_w, style)
             row += 1
 
         if show_bar:

@@ -12,6 +12,7 @@ from ..backend import Style, TextAttribute
 from ..event import Event
 from ..layout import LayoutContext, SizeRequest
 from ..panel import DrawContext
+from ..text import display_width
 
 # Height of a single-line control box (field, button) in base units on
 # pixel backends: one text line plus a little vertical padding above and below
@@ -52,6 +53,28 @@ def selected_row_style(
     if vector:
         return Style(base.fg, active, base.attr)
     return Style(base.fg, base.bg, base.attr | TextAttribute.REVERSE)
+
+
+def draw_list_row(
+    ctx: DrawContext, y: float, clipped: str, text_w: int, style: Style
+) -> None:
+    """Draw one full-width row of a list-like widget (ListView, TreeView).
+
+    A row background must span the whole pane width, but a proportional font (the
+    GUI default) is narrower than its column count, so the text's own background
+    would fall short of the right edge — the gap behind a selection highlight in
+    the screenshots. A solid-fill background is therefore painted as a full-width
+    rect first; a reverse-video highlight (a focused selection on a grid) instead
+    covers the row by padding the text to the column count, since a terminal has
+    no separate fill to stretch.
+
+    ``clipped`` is the row text already truncated to ``text_w`` columns."""
+    if style.bg is not None and not (style.attr & TextAttribute.REVERSE):
+        ctx.fill_rect(0, y, text_w, 1.0, Style(bg=style.bg))
+        ctx.draw_text(0, y, clipped, style)
+    else:
+        text = clipped + " " * (text_w - display_width(clipped))
+        ctx.draw_text(0, y, text, style)
 
 
 class Widget:

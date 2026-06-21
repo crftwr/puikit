@@ -18,9 +18,9 @@ from typing import Any
 from ..backend import DEFAULT_STYLE, Style
 from ..event import Event, EventType
 from ..panel import DrawContext
-from ..text import display_width, truncate_to_width
+from ..text import truncate_to_width
 from ._input import is_activate
-from .base import Widget, selected_row_style
+from .base import Widget, draw_list_row, selected_row_style
 
 
 class ListView(Widget):
@@ -129,18 +129,18 @@ class ListView(Widget):
             if y >= view_h or index >= content_h:
                 break
             if index >= 0:
-                # Truncate and pad by display width, not character count: an
-                # item with a wide glyph (CJK, emoji) is fewer characters than
-                # columns, so ljust by length would make the row — and its
-                # selection background — overflow the pane by a column.
+                # Truncate by display width, not character count: an item with a
+                # wide glyph (CJK, emoji) is fewer characters than columns, so a
+                # length-based clip would let the row overflow the pane by a
+                # column. draw_list_row then spans the highlight to the full pane
+                # width (a proportional row is narrower than its column count).
                 clipped = truncate_to_width(self.items[index], text_w)
-                text = clipped + " " * (text_w - display_width(clipped))
                 style = self.style
                 if index == self.selected:
                     style = selected_row_style(
                         style, ctx.theme, ctx.focused, ctx.vector_shapes
                     )
-                ctx.draw_text(0, y, text, style)
+                draw_list_row(ctx, y, clipped, text_w, style)
             row += 1
 
     def _draw_widget_rows(self, ctx: DrawContext, view_h: float, inner_w: int) -> None:
