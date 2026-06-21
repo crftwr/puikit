@@ -56,7 +56,13 @@ def selected_row_style(
 
 
 def draw_list_row(
-    ctx: DrawContext, y: float, clipped: str, text_w: int, style: Style, x: float = 0.0
+    ctx: DrawContext,
+    y: float,
+    clipped: str,
+    text_w: int,
+    style: Style,
+    x: float = 0.0,
+    fill_w: float | None = None,
 ) -> None:
     """Draw one full-width row of a list-like widget (ListView, TreeView).
 
@@ -73,9 +79,16 @@ def draw_list_row(
     here (on a vector strip) so the indent is a layout distance, not a count of
     proportional spaces whose width drifts with the font. The reverse-video grid
     path keeps ``x`` at zero and carries any indent as leading spaces, so the
-    inverse still covers the whole row."""
+    inverse still covers the whole row.
+
+    ``fill_w`` is the background width in base units, defaulting to ``text_w``.
+    Callers pass the *fractional* pane extent (up to a scrollbar's left edge) so
+    the fill reaches the real edge, not the whole-unit-truncated ``ctx.width`` —
+    otherwise the sub-unit remainder shows as a gap before the scrollbar."""
+    if fill_w is None:
+        fill_w = text_w
     if style.bg is not None and not (style.attr & TextAttribute.REVERSE):
-        ctx.fill_rect(0, y, text_w, 1.0, Style(bg=style.bg))
+        ctx.fill_rect(0, y, fill_w, 1.0, Style(bg=style.bg))
         ctx.draw_text(x, y, clipped, style)
     else:
         text = clipped + " " * (text_w - display_width(clipped))

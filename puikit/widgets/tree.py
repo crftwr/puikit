@@ -92,6 +92,10 @@ class TreeView(Widget):
 
         show_bar = len(rows) > view_h
         text_w = ctx.width - (1 if show_bar else 0)
+        # Exact (fractional) extent so a row background reaches the real pane edge
+        # — up to the scrollbar's left edge — instead of the whole-unit-truncated
+        # ctx.width, which would leave a sub-unit gap before the bar.
+        fill_w = ctx.size_units[0] - (1 if show_bar else 0)
         theme = ctx.theme
         first = int(self.offset)
         frac = self.offset - first
@@ -120,7 +124,7 @@ class TreeView(Widget):
                     style = selected_row_style(
                         style, theme, ctx.focused, ctx.vector_shapes
                     )
-                draw_list_row(ctx, y, clipped, text_w, style, text_x)
+                draw_list_row(ctx, y, clipped, text_w, style, text_x, fill_w)
             row += 1
 
         if show_bar:

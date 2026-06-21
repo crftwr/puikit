@@ -6,9 +6,10 @@ interactive form of a layout divider — where ``divider="strong"`` declares a
 *fixed* separation, the splitter lets the user move it — and the canonical
 dual-pane resize a file manager needs.
 
-The handle is one base unit thick on every backend: a grabbable target on a
-character grid (where a sub-unit line cannot be hit) and a clear grip on a
-vector backend. Drag is the interaction this widget exists to exercise: it
+The handle is a sharp hairline (a device pixel or two) on a vector backend and a
+single grabbable cell on a character grid, where a sub-unit line can neither be
+drawn nor hit. A wider invisible grab margin keeps the thin line easy to grab.
+Drag is the interaction this widget exists to exercise: it
 reads ``MOUSE_DRAG`` and updates the fraction, clamped so neither pane shrinks
 below its minimum. Children keep their own focus and events — Tab descends into
 them, clicks route to the pane under the pointer — so the splitter is a focus
@@ -26,9 +27,13 @@ from ..panel import DrawContext, Rect
 from ..theme import DEFAULT_THEME
 from .base import Widget
 
-# Handle thickness in base units. One whole unit so it is grabbable on a
-# character grid and reads as a grip on a vector backend.
-_HANDLE = 1.0
+# Handle thickness. A character grid cannot draw or hit a sub-unit line, so the
+# handle is a whole grabbable cell there; a vector backend draws a sharp hairline
+# (a device pixel or two) instead. _GRAB widens the invisible grab region on each
+# side, in base units, so the thin line stays easy to grab.
+_HANDLE_UNITS = 1.0   # grid: one whole cell
+_HANDLE_PX = 1.0      # vector: device pixels of visible line
+_GRAB = 1.0           # extra grab margin on each side, in base units
 
 
 def _clamp01(v: float) -> float:
@@ -62,6 +67,7 @@ class Splitter(FocusContainer, Widget):
         self._first_rect = Rect(0, 0, 0, 0)
         self._second_rect = Rect(0, 0, 0, 0)
         self._handle_rect = Rect(0, 0, 0, 0)
+        self._handle = _HANDLE_UNITS  # thickness in base units; set per draw
         self._dragging = False
 
     @staticmethod
@@ -78,24 +84,26 @@ class Splitter(FocusContainer, Widget):
         return max(0.0, min(max(extent, self.min_first), hi))
 
     def _layout(self, wu: float, hu: float) -> tuple[Rect, Rect, Rect]:
+        hw = self._handle
         if self._horizontal:
-            avail = max(0.0, wu - _HANDLE)
+            avail = max(0.0, wu - hw)
             fw = self._first_extent(avail)
             first = Rect(0, 0, fw, hu)
-            handle = Rect(fw, 0, _HANDLE, hu)
-            second = Rect(fw + _HANDLE, 0, max(0.0, wu - fw - _HANDLE), hu)
+            handle = Rect(fw, 0, hw, hu)
+            second = Rect(fw + hw, 0, max(0.0, wu - fw - hw), hu)
         else:
-            avail = max(0.0, hu - _HANDLE)
+            avail = max(0.0, hu - hw)
             fh = self._first_extent(avail)
             first = Rect(0, 0, wu, fh)
-            handle = Rect(0, fh, wu, _HANDLE)
-            second = Rect(0, fh + _HANDLE, wu, max(0.0, hu - fh - _HANDLE))
+            handle = Rect(0, fh, wu, hw)
+            second = Rect(0, fh + hw, wu, max(0.0, hu - fh - hw))
         return first, handle, second
 
     # --- drawing -------------------------------------------------------------
 
     def draw(self, ctx: DrawContext) -> None:
         self._size = ctx.size_units
+        self._handle = self._handle_thickness(ctx)
         wu, hu = ctx.size_units
         first, handle, second = self._layout(wu, hu)
         self._first_rect, self._handle_rect, self._second_rect = first, handle, second
@@ -109,17 +117,22 @@ class Splitter(FocusContainer, Widget):
         )
         self._draw_handle(ctx, handle)
 
+    def _handle_thickness(self, ctx: DrawContext) -> float:
+        """Handle thickness in base units: a whole cell on a character grid (a
+        sub-unit line can be neither drawn nor hit there), a sharp hairline of a
+        few device pixels on a vector backend."""
+        if not ctx.vector_shapes:
+            return _HANDLE_UNITS
+        px = ctx.base_size[0] if self._horizontal else ctx.base_size[1]
+        return _HANDLE_PX / max(1, px)
+
     def _draw_handle(self, ctx: DrawContext, handle: Rect) -> None:
+        # Just the divider line — a sharp hairline on a vector backend, a single
+        # cell on a grid. No grip mark: the line itself is the affordance, and the
+        # grab margin (see _near_handle) keeps it easy to grab.
         theme = ctx.theme or DEFAULT_THEME
         bar = theme.accent if self._dragging else theme.control_border
         ctx.fill_rect(handle.x, handle.y, handle.w, handle.h, Style(bg=bar))
-        # A grip mark centered on the handle so it reads as draggable on every
-        # backend (⋮ along a vertical handle, ⋯ across a horizontal one).
-        grip = Style(fg=theme.muted_text, bg=bar)
-        if self._horizontal:
-            ctx.draw_text(int(handle.x), int(handle.y + handle.h / 2), "⋮", grip)
-        else:
-            ctx.draw_text(int(handle.x + handle.w / 2), int(handle.y), "⋯", grip)
 
     # --- focus ---------------------------------------------------------------
 
@@ -168,20 +181,21 @@ class Splitter(FocusContainer, Widget):
         return False
 
     def _near_handle(self, x: float | None, y: float | None) -> bool:
-        # A one-unit grab margin around the handle so it is easy to grab even on
-        # a character grid where the handle is a single cell wide.
+        # A symmetric grab margin on each side of the handle so it is easy to grab
+        # even where the visible line is a hairline (vector) or a single cell.
         if x is None or y is None:
             return False
         h = self._handle_rect
         if self._horizontal:
-            return h.x - 1 <= x <= h.x + h.w
-        return h.y - 1 <= y <= h.y + h.h
+            return h.x - _GRAB <= x <= h.x + h.w + _GRAB
+        return h.y - _GRAB <= y <= h.y + h.h + _GRAB
 
     def _drag_to(self, x: float | None, y: float | None) -> None:
         wu, hu = self._size
+        hw = self._handle
         if self._horizontal and x is not None:
-            avail = max(1e-6, wu - _HANDLE)
-            self.fraction = _clamp01((x - _HANDLE / 2) / avail)
+            avail = max(1e-6, wu - hw)
+            self.fraction = _clamp01((x - hw / 2) / avail)
         elif not self._horizontal and y is not None:
-            avail = max(1e-6, hu - _HANDLE)
-            self.fraction = _clamp01((y - _HANDLE / 2) / avail)
+            avail = max(1e-6, hu - hw)
+            self.fraction = _clamp01((y - hw / 2) / avail)

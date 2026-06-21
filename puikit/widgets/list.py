@@ -97,9 +97,14 @@ class ListView(Widget):
         content_h = len(self.items) * self._row_h
         show_bar = content_h > view_h
         inner_w = ctx.width - (1 if show_bar else 0)
+        # Exact (fractional) text extent so a row background reaches the real pane
+        # edge — up to the scrollbar's left edge (size_units[0] - 1), which is
+        # where the bar is drawn below. ctx.width is truncated to whole base units
+        # and would leave a sub-unit gap before the bar.
+        fill_w = ctx.size_units[0] - (1 if show_bar else 0)
 
         if self.row_factory is None:
-            self._draw_text_rows(ctx, view_h, inner_w)
+            self._draw_text_rows(ctx, view_h, inner_w, fill_w)
         else:
             self._draw_widget_rows(ctx, view_h, inner_w)
 
@@ -115,7 +120,9 @@ class ListView(Widget):
                 ctx.size_units[0] - 1, 0, view_h, max(0.0, min(1.0, pos)), ratio, self.style
             )
 
-    def _draw_text_rows(self, ctx: DrawContext, view_h: float, text_w: int) -> None:
+    def _draw_text_rows(
+        self, ctx: DrawContext, view_h: float, text_w: int, fill_w: float
+    ) -> None:
         # offset is non-negative, so int() floors it: the first row is drawn at
         # y = -frac, sliding partially off the top edge (the pane clip trims it),
         # and one extra row is drawn at the bottom for the same reason.
@@ -140,7 +147,7 @@ class ListView(Widget):
                     style = selected_row_style(
                         style, ctx.theme, ctx.focused, ctx.vector_shapes
                     )
-                draw_list_row(ctx, y, clipped, text_w, style)
+                draw_list_row(ctx, y, clipped, text_w, style, fill_w=fill_w)
             row += 1
 
     def _draw_widget_rows(self, ctx: DrawContext, view_h: float, inner_w: int) -> None:
