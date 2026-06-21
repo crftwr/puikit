@@ -89,17 +89,30 @@ class Tabs(FocusContainer, Widget):
         hover = ctx.panel.pointer if ctx.panel is not None else None
         hovered_idx = self._hit_strip(ctx, hover) if hover is not None else None
 
+        # Every tab is a bounded region (CLAUDE.md §2 — region separation is
+        # intent, not geometry). A vector strip frames each tab on all four
+        # sides with device-pixel hairlines (zero base-unit cost); a character
+        # grid cannot afford top/bottom rows in a one-row strip, so it fences
+        # each tab with a box-drawing column on the left and right. Adjacent
+        # tabs share their inner border; the run is fenced at each end.
+        border_w = 0 if ctx.vector_shapes else 1
         self._tab_x = []
         x = 0
+        if not ctx.vector_shapes:
+            ctx.draw_text(x, ty, "│", Style(fg=theme.popup_border, bg=theme.popup_bg))
+        x += border_w
         for i, (title, _content) in enumerate(self.tabs):
             label = f" {title} "
             w = max(1, int(ctx.measure_text(label)))
             active = i == self.selected
             hovered = i == hovered_idx
-            # Fill channel: the active tab wears the loud selection fill (always,
-            # so you can see which page is shown regardless of focus); hover
-            # lightens whichever tab the pointer is over — the active one too.
-            base_bg = theme.selection_active_bg if active else theme.popup_bg
+            # Fill channel: on a vector strip the active tab is marked solely by
+            # its top accent line, so it keeps the plain strip background — no
+            # loud fill duplicating the cue. A character grid has no room for an
+            # edge line, so there the active tab still wears the selection fill
+            # (and reverses its label below). Hover lightens whichever tab the
+            # pointer is over, the active one included.
+            base_bg = theme.selection_active_bg if active and not ctx.vector_shapes else theme.popup_bg
             row_bg = _lighten(base_bg) if hovered else base_bg
             if row_bg != theme.popup_bg:
                 ctx.fill_rect(x, 0, w, strip_h, Style(bg=row_bg))
@@ -110,14 +123,20 @@ class Tabs(FocusContainer, Widget):
             if active and ctx.focused and not ctx.vector_shapes:
                 attr |= TextAttribute.REVERSE
             ctx.draw_text(x, ty, label, Style(fg=theme.text, bg=row_bg, attr=attr))
-            # Selection indicator: an accent line on the strip's OUTER edge — the
-            # top, away from the content below — always on for the active tab.
-            # Focus thickens it (its own channel; the text never carries focus).
-            if active and ctx.vector_shapes:
-                ph = (2.0 if ctx.focused else 1.0) / max(1, ctx.base_size[1])
-                ctx.fill_rect(x, 0, w, ph, Style(bg=theme.accent))
             self._tab_x.append((x, x + w))
             x += w
+            # Grid: a box-drawing column fences this tab from the next (and the
+            # run's end). It rides over no fill, so drawing it inline is safe.
+            if not ctx.vector_shapes:
+                ctx.draw_text(x, ty, "│", Style(fg=theme.popup_border, bg=theme.popup_bg))
+            x += border_w
+
+        # Vector: stroke the box frame *after* the fills, so the loud active /
+        # hover fill never paints over the border lines (which would leave the
+        # gaps an inline draw produced). Then re-lay the active tab's accent over
+        # the frame's top edge, since the accent is its own channel.
+        if ctx.vector_shapes and self._tab_x:
+            self._draw_vector_frame(ctx, strip_h, theme)
 
         content_h = hu - strip_h
         if self.tabs and content_h > 0:
@@ -125,6 +144,36 @@ class Tabs(FocusContainer, Widget):
             ctx.draw_child(
                 content, 0, strip_h, wu, content_h, hints={"focused": ctx.focused}
             )
+
+    def _draw_vector_frame(self, ctx: DrawContext, strip_h: float, theme: Any) -> None:
+        """Frame the tab run on a vector strip: a hairline top edge and tab
+        boundaries, a bottom edge that divides the whole strip from the content
+        below — broken open only under the active tab so it merges into the
+        content — and the active tab's accent re-laid on top."""
+        wu, _hu = ctx.size_units
+        pw = 1.0 / max(1, ctx.base_size[0])
+        ph = 1.0 / max(1, ctx.base_size[1])
+        left = self._tab_x[0][0]
+        right = self._tab_x[-1][1]
+        ax0, ax1 = self._tab_x[self.selected]
+        border = Style(bg=theme.popup_border)
+        by = strip_h - ph
+        # Top edge spans the tab run; the bottom edge divides the full strip
+        # width from the content pane, drawn in two segments that stop at the
+        # active tab's sides so its base stays open (the classic selected-tab
+        # look).
+        ctx.fill_rect(left, 0, right - left, ph, border)
+        if ax0 > 0:
+            ctx.fill_rect(0, by, ax0, ph, border)
+        if wu > ax1:
+            ctx.fill_rect(ax1, by, wu - ax1, ph, border)
+        # Vertical edges: each tab's left plus the final tab's right.
+        for x0, _x1 in self._tab_x:
+            ctx.fill_rect(x0, 0, pw, strip_h, border)
+        ctx.fill_rect(right - pw, 0, pw, strip_h, border)
+        # Active accent on top of the frame (thickened while focused).
+        aph = (2.0 if ctx.focused else 1.0) * ph
+        ctx.fill_rect(ax0, 0, ax1 - ax0, aph, Style(bg=theme.accent))
 
     def _hit_strip(self, ctx: DrawContext, point: tuple[float, float]) -> int | None:
         rx, ry, _rw, _rh = ctx.screen_rect
