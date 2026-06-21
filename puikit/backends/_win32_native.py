@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+from typing import Any
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -140,6 +141,9 @@ D2D1_DRAW_TEXT_OPTIONS_CLIP = 0x00000002
 DWRITE_MEASURING_MODE_NATURAL = 0
 DWRITE_WORD_WRAPPING_NO_WRAP = 1
 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE = 0
+D2D1_PRESENT_OPTIONS_NONE = 0
+D2D1_PRESENT_OPTIONS_RETAIN_CONTENTS = 1
+D2D1_PRESENT_OPTIONS_IMMEDIATELY = 2
 
 
 # --- generic COM vtable calling ----------------------------------------------
@@ -147,6 +151,10 @@ D2D1_ANTIALIAS_MODE_PER_PRIMITIVE = 0
 
 def _read_ptr(address: int) -> int:
     return ctypes.cast(ctypes.c_void_p(address), ctypes.POINTER(ctypes.c_void_p))[0] or 0
+
+
+# Keyed by (restype, *argtypes) — see ComPtr.call for why this exists.
+_functype_cache: dict[tuple, Any] = {}
 
 
 class ComPtr:
@@ -173,7 +181,18 @@ class ComPtr:
     def call(self, index: int, restype, argtypes: list, *args):
         vtbl = _read_ptr(self.addr)
         slot = _read_ptr(vtbl + index * PTR_SIZE)
-        functype = ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)
+        # ctypes.WINFUNCTYPE(...) builds a new ctypes type every time it's
+        # called — expensive (it's metaclass work), and this ran on every
+        # single D2D/DWrite call with no caching, which dominated render time
+        # for any frame with real text content (profiled: >65% of a list's
+        # render time was inside this one line). The (restype, argtypes)
+        # signature is the same on every call to a given D2D/DWrite method,
+        # so the constructed type is cached and reused; only the lightweight
+        # bind to this call's function pointer happens per call.
+        functype = _functype_cache.get((restype, *argtypes))
+        if functype is None:
+            functype = ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)
+            _functype_cache[(restype, *argtypes)] = functype
         return functype(slot)(self.addr, *args)
 
     def release(self) -> None:
@@ -334,7 +353,15 @@ def create_dwrite_factory() -> ComPtr:
 
 def create_hwnd_render_target(factory: ComPtr, hwnd: int, width: int, height: int) -> ComPtr:
     rt_props = D2D1_RENDER_TARGET_PROPERTIES()  # all-zero == D2D1::RenderTargetProperties() defaults
-    hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES(hwnd, D2D1_SIZE_U(max(width, 1), max(height, 1)), 0)
+    # IMMEDIATELY: present without waiting for the next vsync. The default
+    # (wait for vsync) measured ~16ms per EndDraw in a VMware guest — likely
+    # the virtual display's vsync timing being slow/unreliable to signal —
+    # vs. ~4ms with this flag; no observed downside (we already redraw only
+    # on demand via InvalidateRect, not continuously, so there's no tearing
+    # concern from racing ahead of the display).
+    hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES(
+        hwnd, D2D1_SIZE_U(max(width, 1), max(height, 1)), D2D1_PRESENT_OPTIONS_IMMEDIATELY
+    )
     out = ctypes.c_void_p()
     hr = factory.call(
         _IDX_FACTORY_CREATE_HWND_RT,
