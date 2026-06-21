@@ -29,11 +29,17 @@ from .base import Widget
 
 # Handle thickness. A character grid cannot draw or hit a sub-unit line, so the
 # handle is a whole grabbable cell there; a vector backend draws a sharp hairline
-# (a device pixel or two) instead. _GRAB widens the invisible grab region on each
-# side, in base units, so the thin line stays easy to grab.
+# (a device pixel or two) instead. The _GRAB_* margins widen the invisible grab
+# region on each side so the thin line stays easy to grab.
 _HANDLE_UNITS = 1.0   # grid: one whole cell
-_HANDLE_PX = 1.0      # vector: device pixels of visible line
-_GRAB = 1.0           # extra grab margin on each side, in base units
+_HANDLE_PX = 1.0      # vector: device pixels of visible line at rest
+_HANDLE_HOVER_PX = 3.0  # vector: thicker accent line while hovered / dragging
+# Extra grab/hover margin on each side of the handle. On a grid the cell itself
+# is the target, so a whole-unit margin keeps it easy to hit; on a vector backend
+# the margin is a few device pixels — close to the visible line, not a full base
+# unit (~8px) that would feel far too wide for a hairline.
+_GRAB_UNITS = 1.0     # grid: one cell each side
+_GRAB_PX = 2.0        # vector: device pixels each side (symmetric about the line)
 
 
 def _clamp01(v: float) -> float:
@@ -68,6 +74,7 @@ class Splitter(FocusContainer, Widget):
         self._second_rect = Rect(0, 0, 0, 0)
         self._handle_rect = Rect(0, 0, 0, 0)
         self._handle = _HANDLE_UNITS  # thickness in base units; set per draw
+        self._grab = _GRAB_UNITS      # grab margin in base units; set per draw
         self._dragging = False
 
     @staticmethod
@@ -104,6 +111,7 @@ class Splitter(FocusContainer, Widget):
     def draw(self, ctx: DrawContext) -> None:
         self._size = ctx.size_units
         self._handle = self._handle_thickness(ctx)
+        self._grab = self._grab_margin(ctx)
         wu, hu = ctx.size_units
         first, handle, second = self._layout(wu, hu)
         self._first_rect, self._handle_rect, self._second_rect = first, handle, second
@@ -115,7 +123,7 @@ class Splitter(FocusContainer, Widget):
             self.second, second.x, second.y, second.w, second.h,
             hints={"focused": self.second is self._focused},
         )
-        self._draw_handle(ctx, handle)
+        self._draw_handle(ctx, handle, self._is_hovered(ctx))
 
     def _handle_thickness(self, ctx: DrawContext) -> float:
         """Handle thickness in base units: a whole cell on a character grid (a
@@ -126,13 +134,46 @@ class Splitter(FocusContainer, Widget):
         px = ctx.base_size[0] if self._horizontal else ctx.base_size[1]
         return _HANDLE_PX / max(1, px)
 
-    def _draw_handle(self, ctx: DrawContext, handle: Rect) -> None:
-        # Just the divider line — a sharp hairline on a vector backend, a single
-        # cell on a grid. No grip mark: the line itself is the affordance, and the
-        # grab margin (see _near_handle) keeps it easy to grab.
+    def _grab_margin(self, ctx: DrawContext) -> float:
+        """Grab/hover margin per side in base units: a whole cell on a grid, a few
+        device pixels on a vector backend (so the hit zone hugs the hairline)."""
+        if not ctx.vector_shapes:
+            return _GRAB_UNITS
+        px = ctx.base_size[0] if self._horizontal else ctx.base_size[1]
+        return _GRAB_PX / max(1, px)
+
+    def _is_hovered(self, ctx: DrawContext) -> bool:
+        """True when the pointer is within the handle's grab zone, so the divider
+        can light up before the drag. Reads the Panel pointer (screen coords) and
+        tests it against the handle in widget-local space, the same zone a press
+        grabs."""
+        p = ctx.panel.pointer if ctx.panel is not None else None
+        if p is None:
+            return False
+        sx, sy, _sw, _sh = ctx.screen_rect
+        return self._near_handle(p[0] - sx, p[1] - sy)
+
+    def _draw_handle(self, ctx: DrawContext, handle: Rect, hovered: bool) -> None:
+        # The divider line is the whole affordance (no grip mark). At rest it is a
+        # hairline in the border color; hovered or dragging it thickens into an
+        # accent line so it reads as draggable. The thicker line is *centered* on
+        # the thin handle and overlays the panes, so the layout footprint — and
+        # the pane positions — never shift on hover. On a grid the thickness stays
+        # one cell (sub-cell lines do not exist); only the color changes.
         theme = ctx.theme or DEFAULT_THEME
-        bar = theme.accent if self._dragging else theme.control_border
-        ctx.fill_rect(handle.x, handle.y, handle.w, handle.h, Style(bg=bar))
+        active = self._dragging or hovered
+        color = theme.accent if active else theme.control_border
+        if ctx.vector_shapes and active:
+            px = ctx.base_size[0] if self._horizontal else ctx.base_size[1]
+            thick = _HANDLE_HOVER_PX / max(1, px)
+        else:
+            thick = handle.w if self._horizontal else handle.h
+        if self._horizontal:
+            cx = handle.x + handle.w / 2
+            ctx.fill_rect(cx - thick / 2, handle.y, thick, handle.h, Style(bg=color))
+        else:
+            cy = handle.y + handle.h / 2
+            ctx.fill_rect(handle.x, cy - thick / 2, handle.w, thick, Style(bg=color))
 
     # --- focus ---------------------------------------------------------------
 
@@ -186,9 +227,10 @@ class Splitter(FocusContainer, Widget):
         if x is None or y is None:
             return False
         h = self._handle_rect
+        g = self._grab
         if self._horizontal:
-            return h.x - _GRAB <= x <= h.x + h.w + _GRAB
-        return h.y - _GRAB <= y <= h.y + h.h + _GRAB
+            return h.x - g <= x <= h.x + h.w + g
+        return h.y - g <= y <= h.y + h.h + g
 
     def _drag_to(self, x: float | None, y: float | None) -> None:
         wu, hu = self._size
