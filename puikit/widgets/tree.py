@@ -104,14 +104,23 @@ class TreeView(Widget):
             if index >= 0:
                 node, depth = rows[index]
                 marker = _LEAF if node.is_leaf else (_EXPANDED if node.expanded else _COLLAPSED)
-                raw = " " * (depth * _INDENT) + marker + node.label
-                clipped = truncate_to_width(raw, text_w)
+                indent = depth * _INDENT
+                # Vector: indent is a fixed base-unit origin (a layout distance),
+                # so it no longer drifts with the proportional font's space width
+                # and lines up with the base-unit expander hit region (_hit_node).
+                # Grid: carry the indent as leading spaces from x=0 so a focused
+                # row's reverse-video highlight still covers the indent cells.
+                if ctx.vector_shapes:
+                    content, text_x = marker + node.label, indent
+                else:
+                    content, text_x = " " * indent + marker + node.label, 0
+                clipped = truncate_to_width(content, max(1, text_w - int(text_x)))
                 style = self.style
                 if index == self.selected:
                     style = selected_row_style(
                         style, theme, ctx.focused, ctx.vector_shapes
                     )
-                draw_list_row(ctx, y, clipped, text_w, style)
+                draw_list_row(ctx, y, clipped, text_w, style, text_x)
             row += 1
 
         if show_bar:

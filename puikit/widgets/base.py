@@ -56,7 +56,7 @@ def selected_row_style(
 
 
 def draw_list_row(
-    ctx: DrawContext, y: float, clipped: str, text_w: int, style: Style
+    ctx: DrawContext, y: float, clipped: str, text_w: int, style: Style, x: float = 0.0
 ) -> None:
     """Draw one full-width row of a list-like widget (ListView, TreeView).
 
@@ -68,13 +68,18 @@ def draw_list_row(
     covers the row by padding the text to the column count, since a terminal has
     no separate fill to stretch.
 
-    ``clipped`` is the row text already truncated to ``text_w`` columns."""
+    ``clipped`` is the row text already truncated to the columns it may occupy.
+    ``x`` is its origin in base units: a TreeView passes a fixed per-depth indent
+    here (on a vector strip) so the indent is a layout distance, not a count of
+    proportional spaces whose width drifts with the font. The reverse-video grid
+    path keeps ``x`` at zero and carries any indent as leading spaces, so the
+    inverse still covers the whole row."""
     if style.bg is not None and not (style.attr & TextAttribute.REVERSE):
         ctx.fill_rect(0, y, text_w, 1.0, Style(bg=style.bg))
-        ctx.draw_text(0, y, clipped, style)
+        ctx.draw_text(x, y, clipped, style)
     else:
         text = clipped + " " * (text_w - display_width(clipped))
-        ctx.draw_text(0, y, text, style)
+        ctx.draw_text(x, y, text, style)
 
 
 class Widget:

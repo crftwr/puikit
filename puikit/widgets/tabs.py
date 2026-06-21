@@ -24,6 +24,12 @@ from .base import CONTROL_HEIGHT, Widget
 # and never under-reserve as the selection moves.
 _MEASURE_BOLD = Style(attr=TextAttribute.BOLD)
 
+# Horizontal inset on each side of a tab label on a vector strip, in base units,
+# so proportional labels are not cramped against the tab borders. The grid pads
+# with literal spaces in the label instead (one column each side), since a glyph
+# cell is its own unit there.
+_TAB_PAD_VECTOR = 1.25
+
 
 def _lighten(color: tuple[int, int, int], amount: float = 0.16) -> tuple[int, int, int]:
     """Nudge a color toward white, for the hover tint of a tab fill — a clearly
@@ -106,13 +112,16 @@ class Tabs(FocusContainer, Widget):
             ctx.draw_text(x, ty, "│", Style(fg=theme.popup_border, bg=theme.popup_bg))
         x += border_w
         for i, (title, _content) in enumerate(self.tabs):
-            label = f" {title} "
-            # Reserve the *bold* measured width (the active tab's label is bold):
-            # truncating to int() floored the proportional width and clipped the
-            # title; measuring bold for every tab keeps positions stable as the
-            # selection moves and never under-reserves. On a grid measure_text
-            # returns the column count, so the width stays whole-column.
-            w = max(1.0, ctx.measure_text(label, _MEASURE_BOLD))
+            # Vector: bare label inset by a base-unit pad on each side. Grid: the
+            # pad is literal spaces in the label (a cell is its own unit), so the
+            # whole label — padding included — shares the active tab's highlight.
+            pad = _TAB_PAD_VECTOR if ctx.vector_shapes else 0.0
+            label = title if ctx.vector_shapes else f" {title} "
+            # Reserve the *bold* measured width (the active tab's label is bold) so
+            # widths stay stable as the selection moves and never under-reserve.
+            # On a grid measure_text returns the column count, so the width and the
+            # text origin stay whole-column.
+            w = max(1.0, ctx.measure_text(label, _MEASURE_BOLD) + 2 * pad)
             active = i == self.selected
             hovered = i == hovered_idx
             # Fill channel: on a vector strip the active tab is marked solely by
@@ -131,7 +140,7 @@ class Tabs(FocusContainer, Widget):
             attr = TextAttribute.BOLD if active else TextAttribute.NORMAL
             if active and ctx.focused and not ctx.vector_shapes:
                 attr |= TextAttribute.REVERSE
-            ctx.draw_text(x, ty, label, Style(fg=theme.text, bg=row_bg, attr=attr))
+            ctx.draw_text(x + pad, ty, label, Style(fg=theme.text, bg=row_bg, attr=attr))
             self._tab_x.append((x, x + w))
             x += w
             # Grid: a box-drawing column fences this tab from the next (and the
