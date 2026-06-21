@@ -421,7 +421,11 @@ class LogView(Widget):
             ratio = view_h / content_h
             denom = content_h - view_h
             pos = self.offset / denom if denom > 0 else 0.0
-            ctx.draw_scrollbar(ctx.width - 1, 0, view_h, max(0.0, min(1.0, pos)), ratio, self.style)
+            # Fractional width keeps the bar flush to the right edge at pixel
+            # granularity; ctx.width is truncated to whole base units.
+            ctx.draw_scrollbar(
+                ctx.size_units[0] - 1, 0, view_h, max(0.0, min(1.0, pos)), ratio, self.style
+            )
 
     def _draw_row(
         self, ctx: DrawContext, index: int, text: str, y: float, style: Style, width: int, theme

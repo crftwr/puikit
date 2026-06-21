@@ -107,7 +107,13 @@ class ListView(Widget):
             ratio = view_h / content_h
             denominator = content_h - view_h
             pos = self.offset / denominator if denominator > 0 else 0.0
-            ctx.draw_scrollbar(ctx.width - 1, 0, view_h, max(0.0, min(1.0, pos)), ratio, self.style)
+            # Position the bar from the exact (fractional) width so it stays
+            # flush to the pane's right edge at pixel granularity; ctx.width is
+            # truncated to whole base units and would snap the bar in character
+            # steps, leaving a variable gap against the edge.
+            ctx.draw_scrollbar(
+                ctx.size_units[0] - 1, 0, view_h, max(0.0, min(1.0, pos)), ratio, self.style
+            )
 
     def _draw_text_rows(self, ctx: DrawContext, view_h: float, text_w: int) -> None:
         # offset is non-negative, so int() floors it: the first row is drawn at

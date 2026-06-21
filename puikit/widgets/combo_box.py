@@ -55,7 +55,7 @@ class ComboBox(Widget):
         self.style = style
         # A real text field owns the editing — cursor, IME composition, the
         # horizontal scroll — so the combo never re-implements any of it.
-        self._field = TextEdit(text, width=max(1, width - _CHEVRON_W))
+        self._field = TextEdit(text, width=width, right_pad=_CHEVRON_W)
         self.open = False
         self.cursor = 0                  # index into the filtered list
         self._filtered = list(range(len(self.options)))
@@ -96,18 +96,23 @@ class ComboBox(Widget):
         self._pixel = ctx.vector_shapes
         theme = ctx.theme or DEFAULT_THEME
         wu, hu = ctx.size_units
-        fw = max(1.0, min(float(self.width), wu) - _CHEVRON_W)
-        self._field.width = int(fw)
-        self._content_w = fw + _CHEVRON_W  # the field + chevron occupy only this
+        w = min(self.width, ctx.width)             # grid columns, for chevron placement
+        field_units = min(float(self.width), wu)   # the field box spans the full control
+        self._field.width = int(w)
+        self._content_w = field_units              # the chevron lives inside the field
         # The field shows its caret while the combo holds focus or the popup is
         # open (the open popup is the modal layer, but the field is what the
         # typing flows into, so it reads as the active control).
         focused = ctx.focused or self.open
-        ctx.draw_child(self._field, 0, 0, fw, hu, hints={"focused": focused})
+        ctx.draw_child(self._field, 0, 0, field_units, hu, hints={"focused": focused})
         ty = (hu - 1.0) / 2.0
         arrow = "▴" if self.open else "▾"
         arrow_fg = theme.accent if focused else theme.text
-        ctx.draw_text(fw, ty, arrow, Style(fg=arrow_fg, bg=theme.control_bg))
+        # Drawn over the field box's own background so the chevron reads as part
+        # of the field, not a separate box hanging off its right edge. The field
+        # reserves these columns (right_pad), so it never collides with text.
+        field_bg = theme.hover_bg if (ctx.hovered_in(field_units) and not focused) else theme.control_bg
+        ctx.draw_text(w - 2, ty, arrow, Style(fg=arrow_fg, bg=field_bg))
 
     # --- filtering -----------------------------------------------------------
 

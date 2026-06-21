@@ -119,7 +119,11 @@ class TreeView(Widget):
             ratio = view_h / len(rows)
             denom = len(rows) - view_h
             pos = self.offset / denom if denom > 0 else 0.0
-            ctx.draw_scrollbar(ctx.width - 1, 0, view_h, max(0.0, min(1.0, pos)), ratio, self.style)
+            # Fractional width keeps the bar flush to the right edge at pixel
+            # granularity; ctx.width is truncated to whole base units.
+            ctx.draw_scrollbar(
+                ctx.size_units[0] - 1, 0, view_h, max(0.0, min(1.0, pos)), ratio, self.style
+            )
 
     def _clamp_offset(self, count: int, viewport_h: float) -> None:
         self.offset = max(0.0, min(self.offset, max(0.0, count - viewport_h)))

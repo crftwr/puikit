@@ -39,12 +39,18 @@ class TextEdit(Widget):
         on_change: Callable[[str], None] | None = None,
         on_submit: Callable[[str], None] | None = None,
         width: int = 24,
+        right_pad: int = 0,
         style: Style = DEFAULT_STYLE,
     ):
         self.text = text
         self.on_change = on_change
         self.on_submit = on_submit
         self.width = width
+        # Columns reserved at the field's right edge for an external adornment
+        # (e.g. a combo box chevron) that draws over the field box. The box still
+        # spans the full width; only the text/caret region shrinks, so the
+        # adornment never overlaps typed text.
+        self.right_pad = right_pad
         self.style = style
         self.cursor = len(text)
         self._anchor: int | None = None  # selection start; None = no selection
@@ -100,9 +106,11 @@ class TextEdit(Widget):
         self._panel = ctx.panel
         theme = ctx.theme or DEFAULT_THEME
         w = min(self.width, ctx.width)
-        if w < 3:
+        if w - self.right_pad < 3:
             return
-        field_w = w - 2  # one column of padding on each side
+        # One column of padding on each side, plus any right reserve for an
+        # external adornment drawn over the field box (the box still spans w).
+        field_w = w - 2 - self.right_pad
         self.cursor = max(0, min(self.cursor, len(self.text)))
         if self._anchor is not None:
             self._anchor = max(0, min(self._anchor, len(self.text)))
