@@ -9,7 +9,7 @@ from puikit.backends.memory_backend import MemoryBackend
 from puikit.widgets import MarkdownView
 from puikit.widgets.markdown_view import (
     DEFAULT_CODE_FONT,
-    DEFAULT_HEADING_SIZES,
+    DEFAULT_HEADING_SCALES,
     DEFAULT_TEXT_FONT,
     _block_style,
     _parse_inline,
@@ -191,15 +191,27 @@ def test_fenced_code_block_is_mono():
 
 
 def test_heading_levels_carry_descending_sizes():
+    # Sizes are body_size x the per-level scale; pass the body size (14) the
+    # backends resolve so the absolute points come out relative to it.
     sizes = [
         _block_style(
             "heading", lvl, Style(), DEFAULT_THEME,
-            DEFAULT_TEXT_FONT, DEFAULT_CODE_FONT, DEFAULT_HEADING_SIZES,
+            DEFAULT_TEXT_FONT, DEFAULT_CODE_FONT, DEFAULT_HEADING_SCALES, 14.0,
         ).font.size
         for lvl in range(1, 7)
     ]
     assert sizes == sorted(sizes, reverse=True)  # # bigger than ## bigger than …
     assert sizes[0] > 14.0  # h1 is larger than the body
+
+
+def test_headings_scale_with_a_larger_body_face():
+    # A document with a larger body face scales its headings with it: an h1 stays
+    # the level-1 multiple of whatever body size is passed.
+    head = _block_style(
+        "heading", 1, Style(), DEFAULT_THEME,
+        DEFAULT_TEXT_FONT, DEFAULT_CODE_FONT, DEFAULT_HEADING_SCALES, 20.0,
+    )
+    assert head.font.size == 20.0 * DEFAULT_HEADING_SCALES[1]
 
 
 def test_sized_heading_makes_a_taller_row():
@@ -213,7 +225,7 @@ def test_sized_heading_makes_a_taller_row():
     heading_h = view._rows[0].height
     body_h = view._rows[-1].height
     assert heading_h > body_h == 1.0
-    assert heading_h == DEFAULT_HEADING_SIZES[1] / 14.0
+    assert heading_h == DEFAULT_HEADING_SCALES[1]  # body 14pt x scale, over 14pt unit
     # tops are the running sum of heights.
     assert view._row_tops[1] == heading_h
 
@@ -248,11 +260,11 @@ def test_fonts_fold_to_attrs_on_terminal(backend):
 def test_heading_has_no_underline_and_body_color():
     body = _block_style(
         "para", 0, Style(), DEFAULT_THEME,
-        DEFAULT_TEXT_FONT, DEFAULT_CODE_FONT, DEFAULT_HEADING_SIZES,
+        DEFAULT_TEXT_FONT, DEFAULT_CODE_FONT, DEFAULT_HEADING_SCALES, 14.0,
     )
     head = _block_style(
         "heading", 1, Style(), DEFAULT_THEME,
-        DEFAULT_TEXT_FONT, DEFAULT_CODE_FONT, DEFAULT_HEADING_SIZES,
+        DEFAULT_TEXT_FONT, DEFAULT_CODE_FONT, DEFAULT_HEADING_SCALES, 14.0,
     )
     assert not head.attr & TextAttribute.UNDERLINE
     assert head.fg == body.fg  # same color as regular text

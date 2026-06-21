@@ -13,8 +13,9 @@ PuiKit seam intact while still drawing that:
   concrete ``Style``s, so the same document follows the backend's palette —
   accent links and headings on GUI, the nearest xterm-256 cell on TUI;
 - prose carries a **proportional** ``Font`` and code (fenced blocks and inline
-  spans) a **monospace** ``Font``; headings carry a larger point size per level
-  (``#`` biggest). On ``fonts``-capable backends these render as real
+  spans) a **monospace** ``Font``; headings carry a larger size per level
+  (``#`` biggest), set as a **multiple of the body size** so a larger or smaller
+  body face scales the headings with it. On ``fonts``-capable backends these render as real
   proportional / fixed-advance faces at their sizes, and on a terminal they all
   fold back to the one grid font (bold / italic preserved as attributes, size
   dropped) — one implementation, every backend, no per-row branch.
@@ -57,11 +58,14 @@ from .base import Widget
 DEFAULT_TEXT_FONT = Font()
 DEFAULT_CODE_FONT = Font(monospace=True)
 
-# Heading point sizes per level (## smaller than #, down to the ~14pt body).
+# Heading sizes per level, as MULTIPLES of the body font size (## smaller than
+# #, down to 1.0 = body size at level 6). Kept relative, not absolute points, so
+# a document with a larger or smaller body face scales its headings to match;
+# the absolute point size is body_size x scale, resolved per backend at layout.
 # Visual only — a font size never reshapes the layout, it just draws bigger and
 # reserves a taller row (docs/font_system.md §7). Dropped on a terminal, where
-# every heading is simply bold. Override via MarkdownView(heading_sizes=...).
-DEFAULT_HEADING_SIZES = {1: 28.0, 2: 22.0, 3: 18.0, 4: 16.0, 5: 15.0, 6: 14.0}
+# every heading is simply bold. Override via MarkdownView(heading_scales=...).
+DEFAULT_HEADING_SCALES = {1: 2.0, 2: 1.6, 3: 1.3, 4: 1.15, 5: 1.07, 6: 1.0}
 
 # A drawn fragment: text, the style it draws in, and an optional hyperlink
 # target (a clickable link span carries its URL; everything else is None).
@@ -294,19 +298,21 @@ def _block_style(
     theme: Theme,
     text_font: Font,
     code_font: Font,
-    heading_sizes: dict[int, float],
+    heading_scales: dict[int, float],
+    body_size: float,
 ) -> Style:
     """Base style for a whole semantic line, before inline roles are layered.
     Prose blocks carry the proportional ``text_font``; a heading carries it at
-    its per-level point size; a fenced code block carries the monospace
-    ``code_font``."""
+    its per-level point size (``body_size`` x the level's scale); a fenced code
+    block carries the monospace ``code_font``."""
     if block == "heading":
         # A heading reads as a heading by weight and size alone — same color as
         # the body, no underline. On a terminal the size folds away, leaving the
-        # bold that still distinguishes it.
+        # bold that still distinguishes it. The size is relative to the body, so
+        # a larger/smaller body face scales every heading with it.
         attr = base.attr | TextAttribute.BOLD
-        size = heading_sizes.get(level)
-        font = replace(text_font, size=size) if size is not None else text_font
+        scale = heading_scales.get(level)
+        font = replace(text_font, size=body_size * scale) if scale is not None else text_font
         return Style(fg=base.fg, bg=base.bg, attr=attr, font=font)
     if block == "quote":
         return Style(
@@ -421,15 +427,16 @@ class MarkdownView(Widget):
         style: Style = DEFAULT_STYLE,
         text_font: Font = DEFAULT_TEXT_FONT,
         code_font: Font = DEFAULT_CODE_FONT,
-        heading_sizes: dict[int, float] = DEFAULT_HEADING_SIZES,
+        heading_scales: dict[int, float] = DEFAULT_HEADING_SCALES,
     ):
         self.style = style
         # Prose face (proportional on GUI) and code face (monospace). Both fold
         # to the single grid font on a terminal; bold/italic survive as attrs.
         self.text_font = text_font
         self.code_font = code_font
-        # Heading point size per level (visual only; dropped on a terminal).
-        self.heading_sizes = heading_sizes
+        # Heading size per level, as a multiple of the body font size (visual
+        # only; dropped on a terminal). Resolved to absolute points at layout.
+        self.heading_scales = heading_scales
         self._sems: list[_SemLine] = parse_markdown(source)
 
         # Top of the viewport, in base units.
@@ -463,7 +470,7 @@ class MarkdownView(Widget):
         style: Style = DEFAULT_STYLE,
         text_font: Font = DEFAULT_TEXT_FONT,
         code_font: Font = DEFAULT_CODE_FONT,
-        heading_sizes: dict[int, float] = DEFAULT_HEADING_SIZES,
+        heading_scales: dict[int, float] = DEFAULT_HEADING_SCALES,
     ) -> "MarkdownView":
         """Build a view from a ``*.md`` file (read as UTF-8)."""
         with open(path, encoding="utf-8") as f:
@@ -472,7 +479,7 @@ class MarkdownView(Widget):
                 style=style,
                 text_font=text_font,
                 code_font=code_font,
-                heading_sizes=heading_sizes,
+                heading_scales=heading_scales,
             )
 
     def set_source(self, source: str) -> None:
@@ -512,6 +519,10 @@ class MarkdownView(Widget):
             return lh_cache[font]
 
         self._line_pitch = line_height(Style(font=self.text_font))
+        # Body face point size, the size headings scale off of. The backend owns
+        # the absolute value (the base size when text_font names none); the
+        # widget keeps only the per-level ratio (DEFAULT_HEADING_SCALES).
+        body_size = ctx.font_size(Style(font=self.text_font))
         rows: list[_Row] = []
         for sem in self._sems:
             if sem.block == "blank":
@@ -545,7 +556,7 @@ class MarkdownView(Widget):
                 continue
             base = _block_style(
                 sem.block, sem.level, self.style, theme,
-                self.text_font, self.code_font, self.heading_sizes,
+                self.text_font, self.code_font, self.heading_scales, body_size,
             )
             spans = [
                 (text, _run_style(roles, base, theme, self.code_font), href)

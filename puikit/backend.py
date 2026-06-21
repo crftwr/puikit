@@ -131,6 +131,23 @@ class Backend(ABC):
         the backend so the widget never reads a font."""
         return 1.0
 
+    # Nominal point size of the base grid font, the size a Font that names no
+    # size of its own resolves to. Backends with a differently sized base font
+    # override measure_font_size.
+    BASE_FONT_SIZE = 14.0
+
+    def measure_font_size(self, style: Style = DEFAULT_STYLE) -> float:
+        """Resolved point size of ``style``'s font, in points. A widget that
+        derives one size from another (a heading scaled off the body size) reads
+        the body's absolute size here and keeps only the ratio, so the absolute
+        size stays the backend's. Whole-unit backends fold the font away on
+        screen but still answer the nominal size, so the same relative math runs
+        on every backend."""
+        font = style.font
+        if font is not None and font.size is not None:
+            return float(font.size)
+        return self.BASE_FONT_SIZE
+
     # --- core drawing primitives (all backends implement) -------------------
 
     @abstractmethod

@@ -307,6 +307,14 @@ class DrawContext:
         The font is folded first, matching what draw_text will draw."""
         return self._backend.measure_line_height(self._resolve(style))
 
+    def font_size(self, style: Style = DEFAULT_STYLE) -> float:
+        """Resolved point size of ``style``'s font, in points. A widget derives a
+        size relative to it (a heading scaled off the body) and keeps only the
+        ratio — the absolute size stays the backend's. The font is folded first,
+        matching what draw_text will draw, so a whole-unit backend reports the
+        nominal base size and the same relative math runs everywhere."""
+        return self._backend.measure_font_size(self._resolve(style))
+
     def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
         """Displayed width of ``text`` in this pane's unit (base units;
         fractional on GUI), so a widget can center, right-align, or wrap

@@ -681,6 +681,11 @@ class MacOSBackend(Backend):
             self._view = None
             self._delegate = None
 
+    def _base_size_pt(self) -> float:
+        """Point size an unsized font inherits — the base font's size, the same
+        size the base grid unit is derived from."""
+        return float(self._base_font.size) if self._base_font.size is not None else 14.0
+
     def resolve_font(self, font: Font, bold: bool = False, italic: bool = False) -> Any:
         """Turn a Font descriptor into a native NSFont. Shared by the base font
         and per-Style widget fonts, so both name fonts the same way.
@@ -689,8 +694,13 @@ class MacOSBackend(Backend):
         chooses between the system monospaced face (the base grid font, which
         must stay fixed-advance to tile the grid) and the proportional system
         UI font (``Font()`` defaults). ``bold``/``italic`` force those traits
-        on top of the descriptor."""
-        size = float(font.size) if font.size is not None else 14.0
+        on top of the descriptor.
+
+        A font that names no size inherits the **base font's** size — the same
+        size the base grid unit is derived from — so an unsized ``Font()`` (the
+        markdown body, a default label) scales with ``base_font`` / --font-size
+        instead of pinning to a constant."""
+        size = float(font.size) if font.size is not None else self._base_size_pt()
         want_bold = bold or font.bold
         weight = NSFontWeightBold if want_bold else NSFontWeightRegular
         ns = None
@@ -791,6 +801,15 @@ class MacOSBackend(Backend):
         ns_font = self._resolve_style_font(style)
         line_px = ns_font.ascender() - ns_font.descender() + ns_font.leading()
         return math.ceil(line_px) / self._base_h
+
+    def measure_font_size(self, style: Style = DEFAULT_STYLE) -> float:
+        """Resolved point size in points. A Style that names no size folds to the
+        base grid font, so its size is the base font's — the size a relative
+        heading scales off of (docs/font_system.md §7)."""
+        font = style.font
+        if font is None or font.size is None:
+            return self._base_size_pt()
+        return float(font.size)
 
     # --- geometry ----------------------------------------------------------
 
