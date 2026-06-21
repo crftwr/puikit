@@ -88,6 +88,8 @@ _BUTTON_BY_MSG = {
 }
 
 MK_LBUTTON = 0x0001
+WHEEL_DELTA = 120  # one notch of a classic wheel; Precision Touchpad gestures
+# report finer fractions of this for sub-notch, pixel-smooth scrolling.
 
 _WIDTH_CACHE_MAX = 8192
 _TIMER_ID = 1
@@ -988,7 +990,16 @@ class WindowsBackend(Backend):
         native.user32.ScreenToClient(self._hwnd, ctypes.byref(pt))
         x, y = pt.x / self._base_w, pt.y / self._base_h
         scroll = 1 if delta > 0 else -1
-        self._dispatch(Event(type=EventType.MOUSE_SCROLL, x=x, y=y, scroll=scroll))
+        # A classic wheel always reports an exact multiple of WHEEL_DELTA, so
+        # scroll_units == scroll for it (no behavior change); a Precision
+        # Touchpad reports finer fractions of a notch for slow/gentle swipes,
+        # which is what makes scrolling feel smooth instead of jumping a
+        # whole row per message — same hint the macOS backend sends from
+        # hasPreciseScrollingDeltas (see MacOSBackend.scrollWheel_).
+        scroll_units = delta / WHEEL_DELTA
+        self._dispatch(
+            Event(type=EventType.MOUSE_SCROLL, x=x, y=y, scroll=scroll, hints={"scroll_units": scroll_units})
+        )
         return 0
 
     def _handle_message(self, hwnd: int, msg: int, wparam: int, lparam: int) -> int:
