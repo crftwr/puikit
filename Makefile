@@ -16,7 +16,14 @@ endif
 ifeq ($(IS_WINDOWS),1)
     # Windows: venv scripts live in Scripts/, executables end in .exe. Prefer
     # python3.14 if it's on PATH; otherwise fall back to the `py` launcher.
-    PY_ON_PATH := $(shell where python3.14 2>/dev/null)
+    # `where.exe` cannot be used for this check: it's a native Windows tool
+    # that reads PATH in Windows (semicolon) format, but the shell make spawns
+    # here exports a POSIX-style PATH — `where` always finds nothing and silently
+    # falls back to `py`, which (confirmed) auto-downloads a fresh Python install
+    # into the current directory (a stray `Python/` folder) instead of using the
+    # one already on PATH. `command -v` is a shell builtin, so it searches the
+    # shell's own PATH correctly instead of re-parsing it as a native Win32 tool.
+    PY_ON_PATH := $(shell command -v python3.14 2>/dev/null)
     ifneq ($(strip $(PY_ON_PATH)),)
         PYTHON := python3.14
     else
@@ -41,12 +48,21 @@ endif
 FONT_SIZE :=
 FONT_SIZE_ARG := $(if $(FONT_SIZE),--font-size $(FONT_SIZE))
 
+# A file-based stamp, not a phony target: every run/test target depends on
+# it, so `make demo-gui` (etc.) auto-creates the venv and installs puikit the
+# first time, but only re-installs when pyproject.toml actually changes —
+# unlike depending on the phony `install` target directly, which make would
+# always re-run (pip install -e on every single invocation). This closes the
+# footgun where `make venv` alone leaves puikit un-installed and any run
+# target fails with `ModuleNotFoundError: No module named 'puikit'`.
+VENV_STAMP := $(VENV)/.installed
+
 .PHONY: help venv install test hello demo layout hello-gui demo-gui layout-gui clean
 
 help:
 	@echo "PuiKit utility commands:"
-	@echo "  make venv      - create the virtualenv ($(VENV)/, $(PYTHON))"
-	@echo "  make install   - install puikit into the venv (editable, with dev deps; +macos on macOS)"
+	@echo "  make venv      - create the virtualenv and install puikit ($(VENV)/, $(PYTHON))"
+	@echo "  make install   - (re)install puikit into the venv (editable, with dev deps; +macos on macOS)"
 	@echo "  make test      - run the test suite"
 	@echo "  make hello     - run the hello_world example (TUI)"
 	@echo "  make demo      - run the demo_catalog example (TUI)"
@@ -56,33 +72,37 @@ help:
 	@echo "  make layout-gui - run the layout demo (native GUI, pixel layout)"
 	@echo "  make clean     - remove build artifacts and caches"
 	@echo ""
-	@echo "  GUI targets accept FONT_SIZE, e.g. make demo-gui FONT_SIZE=18"
+	@echo "  Run/test targets create the venv and install puikit automatically"
+	@echo "  if needed. GUI targets accept FONT_SIZE, e.g. make demo-gui FONT_SIZE=18"
 
-venv:
+$(VENV_STAMP): pyproject.toml
 	$(PYTHON) -m venv $(VENV)
-
-install:
 	$(VENV_PIP) install -e ".[$(EXTRAS)]"
+	@touch $(VENV_STAMP)
 
-test:
+venv: $(VENV_STAMP)
+
+install: $(VENV_STAMP)
+
+test: $(VENV_STAMP)
 	$(VENV_PYTHON) -m pytest
 
-hello:
+hello: $(VENV_STAMP)
 	$(VENV_PYTHON) examples/hello_world/main.py
 
-demo:
+demo: $(VENV_STAMP)
 	$(VENV_PYTHON) examples/demo_catalog/main.py
 
-hello-gui:
+hello-gui: $(VENV_STAMP)
 	$(VENV_PYTHON) examples/hello_world/main.py --backend gui $(FONT_SIZE_ARG)
 
-demo-gui:
+demo-gui: $(VENV_STAMP)
 	$(VENV_PYTHON) examples/demo_catalog/main.py --backend gui $(FONT_SIZE_ARG)
 
-layout:
+layout: $(VENV_STAMP)
 	$(VENV_PYTHON) examples/layout_demo/main.py
 
-layout-gui:
+layout-gui: $(VENV_STAMP)
 	$(VENV_PYTHON) examples/layout_demo/main.py --backend gui
 
 clean:

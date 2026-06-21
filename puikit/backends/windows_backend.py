@@ -215,7 +215,7 @@ class WindowsBackend(Backend):
         self._fonts: dict[TextAttribute, Any] = {}
         # Per-Style text formats cached by (Font, bold, italic).
         self._style_fonts: dict[tuple, Any] = {}
-        self._gdi_metrics_cache: dict[tuple, tuple[float, float]] = {}
+        self._line_height_cache: dict[int, float] = {}
         self._width_cache: dict[tuple, float] = {}
         self._animations: dict[int, Animation] = {}
         self._anim_timer_running = False
@@ -363,17 +363,19 @@ class WindowsBackend(Backend):
     def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
         if style.font is None:
             return float(display_width(text))
-        family, weight, italic, size = self._font_params(style.font)
-        if style.attr & TextAttribute.BOLD:
-            weight = max(weight, 700)
-        if style.attr & TextAttribute.ITALIC:
-            italic = True
-        key = (text, family, weight, italic, size)
+        # Measured through DirectWrite itself (the same system that renders
+        # it via DrawText), not GDI: GDI's metrics for the same font/text can
+        # disagree with DirectWrite's actual layout by a wide margin (verified
+        # ~40% wider for a proportional UI font), which invisibly widened a
+        # text background fill (e.g. a reverse-styled label) past the glyphs
+        # it was meant to sit behind.
+        text_format = self._resolve_style_font(style)
+        key = (text, id(text_format))
         width = self._width_cache.get(key)
         if width is None:
-            if self._metrics_hdc == 0:
-                self._metrics_hdc = native.user32.GetDC(None)
-            width, _ = native.measure_text_gdi(self._metrics_hdc, family, size, weight, italic, text)
+            if self._dwrite_factory is None:
+                self._dwrite_factory = native.create_dwrite_factory()
+            width, _ = native.measure_text_dwrite(self._dwrite_factory, text, text_format)
             if len(self._width_cache) >= _WIDTH_CACHE_MAX:
                 self._width_cache.clear()
             self._width_cache[key] = width
@@ -382,16 +384,18 @@ class WindowsBackend(Backend):
     def measure_line_height(self, style: Style = DEFAULT_STYLE) -> float:
         if style.font is None or not self._base_h:
             return 1.0
-        family, weight, italic, size = self._font_params(style.font)
-        key = (family, weight, italic, size)
-        metrics = self._gdi_metrics_cache.get(key)
-        if metrics is None:
-            if self._metrics_hdc == 0:
-                self._metrics_hdc = native.user32.GetDC(None)
-            metrics = native.font_line_metrics_gdi(self._metrics_hdc, family, size, weight, italic)
-            self._gdi_metrics_cache[key] = metrics
-        line_h, leading = metrics
-        return math.ceil(line_h + leading) / self._base_h
+        # Same DirectWrite-vs-GDI mismatch as measure_text (above): probe a
+        # representative string ("Mg", ascender+descender) through the actual
+        # renderer rather than GDI's (disagreeing) line metrics.
+        text_format = self._resolve_style_font(style)
+        key = id(text_format)
+        height = self._line_height_cache.get(key)
+        if height is None:
+            if self._dwrite_factory is None:
+                self._dwrite_factory = native.create_dwrite_factory()
+            _, height = native.measure_text_dwrite(self._dwrite_factory, "Mg", text_format)
+            self._line_height_cache[key] = height
+        return math.ceil(height) / self._base_h
 
     def measure_font_size(self, style: Style = DEFAULT_STYLE) -> float:
         font = style.font
@@ -431,6 +435,25 @@ class WindowsBackend(Backend):
         self._back = []
 
     def draw_text(self, x: int, y: int, text: str, style: Style = DEFAULT_STYLE) -> None:
+        # A widget that positions glyphs itself (TextEdit, ComboBox) measures
+        # each character's x with measure_text and issues one draw_text call
+        # per character. DirectWrite's DrawText is not perfectly additive
+        # across independent calls — each call carries its own hinting/side-
+        # bearing — so drawing each character separately visibly drifts
+        # (gaps/overlap) even though every call agrees on position. Merging
+        # contiguous same-style flow-text runs back into one command here
+        # restores a single DrawText call per logical run (self-consistent,
+        # like the macOS backend's one CoreText measurement system), without
+        # changing the widget-level per-character API at all. Grid text
+        # (style.font is None) never has this problem — each glyph already
+        # gets its own clipped cell — so only the flow-text path is merged.
+        if style.font is not None and self._back and self._back[-1][0] == "text":
+            _, px, py, ptext, pstyle = self._back[-1]
+            if pstyle == style and py == y:
+                prev_w = self.measure_text(ptext, pstyle)
+                if abs((px + prev_w) - x) < 0.01:
+                    self._back[-1] = ("text", px, py, ptext + text, pstyle)
+                    return
         self._back.append(("text", x, y, text, style))
 
     def draw_box(

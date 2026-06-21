@@ -254,10 +254,40 @@ _IDX_SOLID_BRUSH_SET_COLOR = 8
 
 _IDX_DWRITE_FACTORY_CREATE_TEXT_FORMAT = 15
 
+# --- IDWriteFactory.CreateTextLayout[18] (same vtable as above; ... after
+#     CreateTypography[16], GetGdiInterop[17]) -------------------------------
+
+_IDX_DWRITE_FACTORY_CREATE_TEXT_LAYOUT = 18
+
 # --- IDWriteTextFormat (vtable: IUnknown[0-2], SetTextAlignment[3],
 #     SetParagraphAlignment[4], SetWordWrapping[5], ...) ----------------------
 
 _IDX_TEXT_FORMAT_SET_WORD_WRAPPING = 5
+
+# --- IDWriteTextLayout : IDWriteTextFormat (the format's own 25 methods,
+#     indices 3-27, then layout-specific methods starting at 28: SetMaxWidth,
+#     SetMaxHeight, SetFontCollection/FamilyName/Weight/Style/Stretch/Size
+#     (range), SetUnderline, SetStrikethrough, SetDrawingEffect,
+#     SetInlineObject, SetTypography, SetLocaleName (28-41), GetMaxWidth[42],
+#     GetMaxHeight[43], the matching Get* range accessors (44-57), Draw[58],
+#     GetLineMetrics[59], GetMetrics[60], ...) — verified live against a real
+#     IDWriteTextLayout (see windows_backend measure_text/measure_line_height).
+
+_IDX_TEXT_LAYOUT_GET_METRICS = 60
+
+
+class DWRITE_TEXT_METRICS(ctypes.Structure):
+    _fields_ = [
+        ("left", ctypes.c_float),
+        ("top", ctypes.c_float),
+        ("width", ctypes.c_float),
+        ("widthIncludingTrailingWhitespace", ctypes.c_float),
+        ("height", ctypes.c_float),
+        ("layoutWidth", ctypes.c_float),
+        ("layoutHeight", ctypes.c_float),
+        ("maxBidiReorderingDepth", ctypes.c_uint32),
+        ("lineCount", ctypes.c_uint32),
+    ]
 
 
 def com_release(p: ComPtr | None) -> None:
@@ -435,6 +465,15 @@ def rt_draw_text(
     options: int = D2D1_DRAW_TEXT_OPTIONS_NONE,
 ) -> None:
     buf = ctypes.create_unicode_buffer(text)
+    # DrawText's stringLength is a UTF-16 *code-unit* count, not a Python
+    # character count: an astral codepoint (any emoji above U+FFFF, e.g.
+    # U+1F3F7) is one Python str character but encodes as a 2-unit surrogate
+    # pair in the WCHAR buffer ctypes just built. len(text) undercounts by
+    # one per such character, which silently drops the *last* UTF-16 unit of
+    # the buffer — invisible when it lands in trailing padding, but it cuts
+    # off the final real character of an unpadded string (e.g. a selected
+    # list row's icon-prefixed label losing its last letter).
+    length = len(text.encode("utf-16-le")) // 2
     rt.call(
         _IDX_RT_DRAW_TEXT,
         None,
@@ -448,7 +487,7 @@ def rt_draw_text(
             ctypes.c_uint32,
         ],
         buf,
-        len(text),
+        length,
         text_format.addr,
         ctypes.byref(rect),
         brush.addr,
@@ -505,7 +544,62 @@ def dwrite_create_text_format(
     return fmt
 
 
-# --- GDI text metrics (used only to measure; drawing stays on D2D/DWrite) ---
+def dwrite_create_text_layout(
+    factory: ComPtr, text: str, text_format: ComPtr, max_width: float = 1_000_000.0, max_height: float = 1_000_000.0
+) -> ComPtr:
+    buf = ctypes.create_unicode_buffer(text)
+    length = len(text.encode("utf-16-le")) // 2  # UTF-16 code units, not Python chars (see rt_draw_text)
+    out = ctypes.c_void_p()
+    hr = factory.call(
+        _IDX_DWRITE_FACTORY_CREATE_TEXT_LAYOUT,
+        ctypes.c_int32,
+        [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_float,
+            ctypes.c_float,
+            ctypes.POINTER(ctypes.c_void_p),
+        ],
+        buf,
+        length,
+        text_format.addr,
+        max_width,
+        max_height,
+        ctypes.byref(out),
+    )
+    if not hresult_ok(hr):
+        raise OSError(f"CreateTextLayout failed: 0x{hr & 0xFFFFFFFF:08x}")
+    return ComPtr(out.value or 0)
+
+
+def text_layout_get_metrics(layout: ComPtr) -> DWRITE_TEXT_METRICS:
+    metrics = DWRITE_TEXT_METRICS()
+    hr = layout.call(_IDX_TEXT_LAYOUT_GET_METRICS, ctypes.c_int32, [ctypes.POINTER(DWRITE_TEXT_METRICS)], ctypes.byref(metrics))
+    if not hresult_ok(hr):
+        raise OSError(f"GetMetrics failed: 0x{hr & 0xFFFFFFFF:08x}")
+    return metrics
+
+
+def measure_text_dwrite(factory: ComPtr, text: str, text_format: ComPtr) -> tuple[float, float]:
+    """Width/height of ``text`` (pixels) exactly as DirectWrite itself would
+    lay it out — unlike GDI, which can disagree with DirectWrite's rendering
+    by a wide margin for the same font/text (verified: ~40% off for a
+    proportional UI font), invisibly widening a text background fill past the
+    glyphs it's meant to sit behind. Always one line (the caller's text_format
+    has NO_WRAP set), so widthIncludingTrailingWhitespace is the right width
+    for layout purposes (trailing spaces still occupy their advance)."""
+    layout = dwrite_create_text_layout(factory, text or " ", text_format)
+    try:
+        metrics = text_layout_get_metrics(layout)
+        width = metrics.widthIncludingTrailingWhitespace if text else 0.0
+        return width, metrics.height
+    finally:
+        layout.release()
+
+
+# --- GDI text metrics (used only for the base/grid font's cell size, never
+# for proportional measurement — see measure_text_dwrite above) ------------
 
 
 class LOGFONTW(ctypes.Structure):
