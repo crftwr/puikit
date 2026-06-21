@@ -26,7 +26,7 @@ def main() -> None:
     args = parser.parse_args()
 
     kwargs = {}
-    if args.font_size is not None and args.backend in ("gui", "macos"):
+    if args.font_size is not None and args.backend in ("gui", "macos", "windows", "win32"):
         kwargs["base_font"] = Font(size=args.font_size, monospace=True)
     backend = create_backend(args.backend, **kwargs)
     with backend:

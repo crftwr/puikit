@@ -295,7 +295,7 @@ base-grid text is column-sliced.
 font into `attr`, so the backend keeps drawing as it does today. `fonts` and
 `proportional_text` are False; `measure_text` is the default column count.
 
-**GUI (macOS, future Canvas/Win32/GTK):**
+**GUI (macOS, Windows, future Canvas/GTK):**
 
 - Resolve a `Font` to a native font object (family, size, weight, slant,
   monospaced vs. proportional), with caching keyed by the resolved request.

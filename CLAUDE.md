@@ -328,10 +328,10 @@ class Panel:
 ### MVP (implement first)
 1. `CursesBackend` — TUI, all platforms
 2. `MacOSBackend` — macOS native GUI (PyObjC; AppKit, CoreGraphics, CoreText, and other frameworks as needed)
+3. `WindowsBackend` — Windows native GUI (raw `ctypes`, no `pywin32`/`comtypes` dependency; `user32`/`kernel32` for the window and message loop, Direct2D + DirectWrite for rendering — antialiased vector shapes and real proportional/sized fonts, called by walking each COM interface's vtable by hand rather than declaring full per-interface bindings; see `puikit/backends/_win32_native.py`). Text *metrics* go through GDI instead of DirectWrite's own font-enumeration surface; glyph rendering still goes through Direct2D/DirectWrite. `os_drag_drop`, `images` (needs WIC), and live IME preedit display (needs `WM_IME_*`/Imm32) are deferred — plain typed/IME-committed text still works via `WM_CHAR`.
 
 ### Future
-3. `CanvasBackend` — Web (browser Canvas)
-4. `Win32Backend` — Windows GUI
+4. `CanvasBackend` — Web (browser Canvas)
 5. `GTKBackend` — Linux GUI
 
 ### Further future
@@ -402,6 +402,7 @@ PuiKit is primarily Python, but backends may include compiled components in othe
 - Supported language mix per backend:
   - `CursesBackend`: pure Python
   - `MacOSBackend`: Python + C++ (PyObjC + compiled extension)
+  - `WindowsBackend`: pure Python (`ctypes` against `user32`/`kernel32`/Direct2D/DirectWrite — no compiled extension yet)
   - Future backends may add Swift, Rust, or JS as appropriate
 
 ---
