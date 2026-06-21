@@ -907,6 +907,13 @@ class Panel:
         h = hints.get("h", sh)
         x = hints.get("x", (sw - w) / 2)
         y = hints.get("y", (sh - h) / 2)
+        if not self.backend.capabilities.supports("pixel_layout"):
+            # Whole-unit backends snap the layer to the base unit grid. A
+            # fractional origin (e.g. centering an odd-height box) would otherwise
+            # land the layer on a half row, and a clipped child one base unit tall
+            # would see its clip round to a degenerate range and vanish. Pixel
+            # backends keep device-precise centering.
+            x, y, w, h = (round(v) for v in (x, y, w, h))
         return Rect(x, y, w, h)
 
     # --- focus ----------------------------------------------------------------

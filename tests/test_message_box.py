@@ -72,11 +72,11 @@ def test_message_box_click_activates_button(backend):
     )
     panel.render()
     rect = panel._layers[0].rect
-    x0, _x1 = box._button_x[1]          # box-local x span of the "Right" button
-    by = int(rect.h) - 2               # the button row, box-local
+    # box-local rect of the "Right" button, captured during draw
+    x0, _x1, y0, _y1 = box._button_x[1]
     # Click that button in screen coords; the modal layer gets it translated.
     panel.dispatch_event(
-        Event(type=EventType.MOUSE_CLICK, x=rect.x + x0, y=rect.y + by, button="left")
+        Event(type=EventType.MOUSE_CLICK, x=rect.x + x0, y=rect.y + y0, button="left")
     )
     assert results == ["Right"]
     assert panel._layers == []

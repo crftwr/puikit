@@ -19,10 +19,14 @@ from typing import Any
 from ..backend import Style, TextAttribute
 from ..event import Event, EventType
 from ..font import Font
+from ..layout import LayoutContext
 from ..panel import DrawContext
-from ..theme import DEFAULT_THEME
+from .button import Button
 
 _BOLD = Style(attr=TextAttribute.BOLD)
+
+# Horizontal gap between adjacent buttons in the row, in base units.
+_BUTTON_GAP = 1.0
 
 
 class MessageBox:
@@ -43,22 +47,48 @@ class MessageBox:
         self.title = title
         self.buttons = list(buttons)
         self.icon = icon
-        # The focused (default) button, and the one escape chooses (defaults to
-        # the last button, the conventional Cancel slot).
-        self.focused = max(0, min(default, len(self.buttons) - 1))
+        # The default button (initially focused, drawn as the prominent
+        # "primary" action) and the one escape chooses (defaults to the last
+        # button, the conventional Cancel slot).
+        self.default = max(0, min(default, len(self.buttons) - 1))
+        self.focused = self.default
         self.cancel = cancel if cancel is not None else len(self.buttons) - 1
         self.on_result = on_result
         self._panel: Any = None
-        self._button_x: list[tuple[int, int]] = []
+        # The row of buttons rendered as real Button widgets, so the message box
+        # shares the regular button's flat fill, focus ring, and hover/pressed
+        # cues on every backend instead of hand-painting its own. The default
+        # button wears the accent "primary" fill; the rest are neutral
+        # "secondary" actions, exactly as a screen with two buttons reads.
+        self._widgets = [
+            Button(
+                label,
+                variant="primary" if i == self.default else "secondary",
+                on_click=(lambda i=i: self._close(i)),
+            )
+            for i, label in enumerate(self.buttons)
+        ]
+        # Absolute-to-local button rects (x0, x1, y0, y1) captured during draw,
+        # so a click can be routed to the button it landed on.
+        self._button_x: list[tuple[float, float, float, float]] = []
 
     # --- drawing -------------------------------------------------------------
 
     def _lines(self) -> list[str]:
         return self.message.split("\n")
 
+    def _row_metrics(self, lc: LayoutContext) -> tuple[list[float], float]:
+        """Per-button widths and the shared row height, each button measuring
+        itself exactly as the layout would size a content button — so the box
+        reserves the same widths the buttons draw at."""
+        if not self._widgets:
+            return [], 0.0
+        height = self._widgets[0].measure(lc, "y", 0.0).preferred
+        widths = [w.measure(lc, "x", height).preferred for w in self._widgets]
+        return widths, height
+
     def draw(self, ctx: DrawContext) -> None:
         self._panel = ctx.panel
-        theme = ctx.theme or DEFAULT_THEME
         ctx.draw_box(0, 0, ctx.width, ctx.height, hints={"fill": True})
         if self.icon:
             ctx.draw_icon(2, 1, self.icon)
@@ -67,26 +97,22 @@ class MessageBox:
         for i, line in enumerate(self._lines()):
             ctx.draw_text(2, 3 + i, line[: max(0, ctx.width - 4)])
 
-        # Button row along the bottom, centered as a group. Widths are measured
-        # in base units (proportional on GUI, columns on a grid) and reserved at
-        # the bold size the focused button draws at, so the row stays centered and
-        # put as focus moves.
-        labels = [f" {b} " for b in self.buttons]
-        widths = [max(1.0, ctx.measure_text(lbl, _BOLD)) for lbl in labels]
-        gap = 1
-        total = sum(widths) + gap * (len(labels) - 1)
-        bx = max(2.0, (ctx.width - total) / 2.0)
-        by = ctx.height - 2
+        # Button row along the bottom, centered as a group and drawn as real
+        # Button widgets via draw_child — so each carries the flat fill, focus
+        # ring, and hover/pressed cues of the regular button. The focused button
+        # is marked through the "focused" hint (the layer holds the focus, so the
+        # ring lights on exactly one button), and moving focus only moves the
+        # ring; the accent "primary" fill stays on the default button.
+        widths, bh = self._row_metrics(ctx.layout_context())
+        total = sum(widths) + _BUTTON_GAP * (len(widths) - 1)
+        wu, hu = ctx.size_units
+        bx = max(2.0, (wu - total) / 2.0)
+        by = max(0.0, hu - bh - 1.0)
         self._button_x = []
-        for i, (lbl, w) in enumerate(zip(labels, widths)):
-            focused = i == self.focused
-            if focused:
-                style = Style(fg=theme.button_text, bg=theme.accent, attr=TextAttribute.BOLD)
-            else:
-                style = Style(fg=theme.text, bg=theme.control_bg)
-            ctx.draw_text(bx, by, lbl, style)
-            self._button_x.append((bx, bx + w))
-            bx += w + gap
+        for i, (widget, w) in enumerate(zip(self._widgets, widths)):
+            ctx.draw_child(widget, bx, by, w, bh, hints={"focused": i == self.focused})
+            self._button_x.append((bx, bx + w, by, by + bh))
+            bx += w + _BUTTON_GAP
 
     # --- events --------------------------------------------------------------
 
@@ -98,19 +124,23 @@ class MessageBox:
 
     def handle_event(self, event: Event) -> bool:
         if event.type is EventType.KEY:
+            n = len(self._widgets)
             if event.key in ("left", "up"):
-                self.focused = (self.focused - 1) % len(self.buttons)
+                self.focused = (self.focused - 1) % n
             elif event.key in ("right", "down", "tab"):
-                self.focused = (self.focused + 1) % len(self.buttons)
-            elif event.key in ("enter", "space") or event.char == " ":
-                self._close(self.focused)
+                self.focused = (self.focused + 1) % n
             elif event.key == "escape":
                 self._close(self.cancel)
+            else:
+                # enter / space activate the focused button — delegated so the
+                # same on_click path a mouse takes fires (one activation seam).
+                self._widgets[self.focused].handle_event(event)
             return True
         if event.type is EventType.MOUSE_CLICK and event.x is not None:
-            for i, (x0, x1) in enumerate(self._button_x):
-                if x0 <= event.x < x1 and (event.y or 0) >= 0:
-                    self._close(i)
+            ey = event.y or 0
+            for i, (x0, x1, y0, y1) in enumerate(self._button_x):
+                if x0 <= event.x < x1 and y0 <= ey < y1:
+                    self._widgets[i].handle_event(event)
                     return True
         return True  # modal: swallow everything else
 
@@ -137,22 +167,33 @@ def show_message_box(
     )
     lines = message.split("\n")
     # Size the box to the text as it will actually render: measure through the
-    # backend with the proportional UI font (the GUI default) — title and buttons
-    # bold, since they draw bold — so a proportional message is not boxed at the
-    # wider monospace column count. A whole-unit backend returns column counts, so
-    # the terminal box is unchanged.
+    # backend with the proportional UI font (the GUI default) — the title bold,
+    # since it draws bold — so a proportional message is not boxed at the wider
+    # monospace column count. A whole-unit backend returns column counts, so the
+    # terminal box is unchanged.
     mt = panel.backend.measure_text
     prop = Style(font=Font())
     prop_bold = Style(font=Font(), attr=TextAttribute.BOLD)
-    label_w = sum(mt(f" {b} ", prop_bold) for b in buttons) + (len(buttons) - 1)
+    # Reserve the buttons' own measured widths (the same intrinsic sizing the
+    # layout uses for a content button), so the box is exactly wide enough for
+    # the row it draws.
+    caps = panel.backend.capabilities
+    lc = LayoutContext(
+        *panel.backend.base_size,
+        snap=not caps.supports("pixel_layout"),
+        measure=panel.backend.measure_text,
+    )
+    btn_widths, _ = box._row_metrics(lc)
+    label_w = sum(btn_widths) + _BUTTON_GAP * (len(btn_widths) - 1)
     content_w = max(
         mt(title, prop_bold) + 5,
         max((mt(line, prop) for line in lines), default=0.0) + 4,
         label_w + 4,
     )
     w = max(28, min(math.ceil(content_w) + 4, panel.backend.size_units[0]))
-    # title row at y=1, message from y=3, a blank gap, the button row at h-2,
-    # and the bottom border at h-1.
+    # title row at y=1, message from y=3, a blank gap, the button row near the
+    # bottom (its own height, one unit above the border), and the bottom border
+    # at h-1.
     h = len(lines) + 6
     box._panel = panel
     panel.push_layer(
