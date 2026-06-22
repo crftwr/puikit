@@ -179,7 +179,7 @@ class TextEdit(Widget):
             if ctx.animated and not self._blinking and ctx.panel is not None:
                 self._blinking = ctx.panel.request_animation_ticks(self._blink_tick)
             self._draw_caret(ctx, theme, disp, caret, caret_col, field_w, bg, ty)
-            self._notify_input_position(ctx, caret_col)
+            self._notify_input_position(ctx, caret_col, field_h)
 
         # Border stroked last so the glyph/caret backgrounds above cannot paint
         # over it; accent while focused, a subtle outline otherwise.
@@ -213,11 +213,15 @@ class TextEdit(Widget):
         if self._panel is not None:
             self._panel.reset_caret_blink()
 
-    def _notify_input_position(self, ctx: DrawContext, caret_col: int) -> None:
+    def _notify_input_position(self, ctx: DrawContext, caret_col: int, field_h: float) -> None:
         if ctx.panel is None:
             return
         sx, sy, _sw, _sh = ctx.screen_rect
-        ctx.panel.request_text_input(int(sx + 1 + caret_col), int(sy), {})
+        # Anchor the IME UI (candidate list, input-mode indicator) at the field's
+        # bottom row, so the backend's caret rect bottom-edge lands on the field
+        # bottom and the UI opens just *under* the field — not on top of the
+        # composed text, which a tall (padded) field would otherwise overlap.
+        ctx.panel.request_text_input(int(sx + 1 + caret_col), int(sy + field_h - 1), {})
 
     def _scroll_into_view(self, ctx: DrawContext, caret: int, field_w: int) -> None:
         # Keep the start (a character index) such that the caret stays inside the
