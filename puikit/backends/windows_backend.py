@@ -184,7 +184,6 @@ class WindowsBackend(Backend):
             "native_file_dialog": False,
             "system_tray": False,
             "media_keys": False,
-            "images": False,  # needs WIC; draw_icon (emoji glyphs) works today
         }
     )
 
@@ -228,6 +227,11 @@ class WindowsBackend(Backend):
         self._menu_responder: Any = None
         self._menu_bar_hmenu = 0
         self._tracking_mouse = False
+        self._wic_factory: Any = None
+        # Decoded ID2D1Bitmaps keyed by path: (bitmap, natural_w, natural_h),
+        # or None for a path that failed to decode (so a missing/corrupt
+        # image doesn't retry-and-fail every single frame).
+        self._image_cache: dict[str, tuple[Any, int, int] | None] = {}
 
     # --- lifecycle -----------------------------------------------------------
 
@@ -283,6 +287,13 @@ class WindowsBackend(Backend):
 
             _win32_menu.destroy_menu_recursive(self._menu_bar_hmenu)
             self._menu_bar_hmenu = 0
+        for cached in self._image_cache.values():
+            if cached is not None:
+                cached[0].release()
+        self._image_cache.clear()
+        if self._wic_factory is not None:
+            self._wic_factory.release()
+            self._wic_factory = None
         if self._brush is not None:
             self._brush.release()
             self._brush = None
@@ -518,6 +529,9 @@ class WindowsBackend(Backend):
         glyph = _ICON_GLYPHS.get(icon_name, "❓")
         self._back.append(("text", x, y, glyph, style))
 
+    def draw_image(self, x: int, y: int, path: str, hints: dict[str, Any] | None = None) -> None:
+        self._back.append(("image", x, y, path, hints or {}))
+
     # --- animation -----------------------------------------------------------
 
     def animate(self, widget: Any, hints: dict[str, Any] | None = None) -> None:
@@ -609,6 +623,8 @@ class WindowsBackend(Backend):
                 self._render_check(*command[1:])
             elif kind == "scrollbar":
                 self._render_scrollbar(*command[1:])
+            elif kind == "image":
+                self._render_image(*command[1:])
             elif kind == "dim":
                 self._render_dim(*command[1:])
             elif kind == "shadow":
@@ -807,6 +823,61 @@ class WindowsBackend(Backend):
         native.rt_fill_rectangle(
             self._render_target, native.D2D1_RECT_F(track.left, thumb_y, track.right, thumb_y + thumb_h), self._brush
         )
+
+    def _get_image(self, path: str) -> tuple[Any, int, int] | None:
+        """The decoded (ID2D1Bitmap, natural_w, natural_h) for ``path``,
+        cached — including caching a failed decode as None, so a missing or
+        corrupt path is retried at most once rather than every frame."""
+        if path in self._image_cache:
+            return self._image_cache[path]
+        if self._wic_factory is None:
+            self._wic_factory = native.create_wic_factory()
+        source = native.wic_load_bitmap_source(self._wic_factory, path)
+        result = None
+        if source is not None:
+            try:
+                iw, ih = native.wic_bitmap_size(source)
+                bitmap = native.rt_create_bitmap_from_pixels(self._render_target, source, iw, ih)
+            finally:
+                source.release()
+            if bitmap is not None:
+                result = (bitmap, iw, ih)
+        self._image_cache[path] = result
+        return result
+
+    def _render_image(self, x: int, y: int, path: str, hints: dict[str, Any]) -> None:
+        cached = self._get_image(path)
+        if cached is None:
+            return
+        bitmap, iw, ih = cached
+        w_units = hints.get("w", max(1, round(iw / self._base_w)))
+        h_units = hints.get("h", max(1, round(ih / self._base_h)))
+        target = self._unit_rect(x, y, w_units, h_units)
+        dest, source_rect = self._fit_image_rects(hints.get("fit", "fill"), target, iw, ih)
+        opacity = float(hints.get("alpha", 1.0))
+        native.rt_draw_bitmap(self._render_target, bitmap, dest, opacity, source_rect)
+
+    def _fit_image_rects(
+        self, fit: str, target: Any, iw: int, ih: int
+    ) -> tuple[Any, Any | None]:
+        """Destination and source rects for an object-fit, mirroring
+        MacOSBackend._fit_rects: CONTAIN letterboxes the destination (source
+        is the whole image — None, D2D's "use it all" convention); COVER
+        crops the source to the target's aspect; FILL stretches the whole
+        image across the whole target (the source crop puikit.image computes
+        for the aspect-locked fits is already baked into ``target``, so they
+        draw the same as FILL here)."""
+        from ..image import CONTAIN, COVER, contain_box, cover_source
+
+        tw, th = target.right - target.left, target.bottom - target.top
+        if fit == CONTAIN:
+            ox, oy, bw, bh = contain_box(tw, th, iw, ih)
+            dest = native.D2D1_RECT_F(target.left + ox, target.top + oy, target.left + ox + bw, target.top + oy + bh)
+            return dest, None
+        if fit == COVER:
+            sx, sy, sw, sh = cover_source(iw, ih, tw, th)
+            return target, native.D2D1_RECT_F(sx, sy, sx + sw, sy + sh)
+        return target, None  # FILL
 
     # --- animation rendering (transform/opacity per group) ---------------------
 

@@ -1,3 +1,4 @@
-# Runtime dependencies: none (the core framework is pure Python).
+# Runtime dependencies:
+numpy
 # Development dependencies:
 pytest>=8

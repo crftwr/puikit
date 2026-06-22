@@ -16,7 +16,9 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Software Development :: User Interfaces",
 ]
-dependencies = []
+# numpy vectorizes WindowsBackend's WIC->D2D alpha premultiply (~12-14x
+# faster on large images; see _win32_native._premultiply_bgra).
+dependencies = ["numpy"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

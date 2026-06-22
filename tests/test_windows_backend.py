@@ -3,7 +3,9 @@ test_macos_backend.py's philosophy); a couple exercise a real window since,
 unlike PyObjC/AppKit, this backend's only dependency is ctypes/stdlib, so
 opening one is cheap and safe in CI on a Windows runner."""
 
+import struct
 import sys
+import zlib
 
 import pytest
 
@@ -14,6 +16,24 @@ from puikit import Rect  # noqa: E402
 from puikit.backend import Style, TextAttribute  # noqa: E402
 from puikit.font import Font, FontWeight  # noqa: E402
 from puikit.backends.windows_backend import Animation, WindowsBackend  # noqa: E402
+
+
+def _png(path, w, h):
+    """Write a minimal valid RGB PNG of the given pixel size (same helper as
+    tests/test_image_widgets.py, duplicated to keep this file standalone)."""
+    raw = bytearray()
+    for _ in range(h):
+        raw.append(0)  # filter type 0
+        raw += bytes((120, 120, 120) * w)
+
+    def chunk(tag, data):
+        body = tag + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+    data = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(bytes(raw))) + chunk(b"IEND", b"")
+    path.write_bytes(data)
+    return str(path)
 
 
 def test_base_font_drives_base_unit():
@@ -114,8 +134,8 @@ def test_profile_declares_gui_capabilities():
     assert profile.supports("animation")
     assert profile.supports("vector_shapes")
     assert profile.supports("native_menus")
+    assert profile.supports("images")  # WIC-decoded ID2D1Bitmap, see _render_image
     # Not implemented yet in the MVP:
-    assert not profile.supports("images")
     assert not profile.supports("ime")
     assert not profile.supports("os_drag_drop")
     assert not profile.supports("system_tray")
@@ -212,3 +232,65 @@ def test_clipboard_roundtrip():
         assert backend.get_clipboard() == "puikit windows backend clipboard test"
     finally:
         backend.close()
+
+
+# --- images (WIC decode -> ID2D1Bitmap) -------------------------------------
+
+
+def test_image_decodes_and_caches(tmp_path):
+    backend = WindowsBackend()
+    backend.open()
+    try:
+        path = _png(tmp_path / "test.png", 40, 20)
+        cached = backend._get_image(path)
+        assert cached is not None
+        bitmap, iw, ih = cached
+        assert (iw, ih) == (40, 20)
+        assert backend._get_image(path)[0] is bitmap  # cache hit, same bitmap
+    finally:
+        backend.close()
+
+
+def test_image_missing_path_caches_as_failure(tmp_path):
+    backend = WindowsBackend()
+    backend.open()
+    try:
+        missing = str(tmp_path / "does_not_exist.png")
+        assert backend._get_image(missing) is None
+        assert backend._image_cache.get(missing) is None
+        assert missing in backend._image_cache  # cached as a known failure
+    finally:
+        backend.close()
+
+
+def test_draw_image_renders_without_error(tmp_path):
+    backend = WindowsBackend(width=20, height=10)
+    backend.open()
+    try:
+        path = _png(tmp_path / "test.png", 40, 20)
+        backend.draw_image(1, 1, path, {"w": 10, "h": 5, "fit": "contain"})
+        backend.present()
+        backend._render()  # exercises CreateBitmapFromWicBitmap + DrawBitmap
+    finally:
+        backend.close()
+
+
+def test_profile_supports_images():
+    assert WindowsBackend.PROFILE.supports("images")
+
+
+def test_premultiply_bgra_matches_reference():
+    """Premultiplied output must equal channel*alpha//255 for every pixel."""
+    import random
+
+    from puikit.backends import _win32_native as native
+
+    random.seed(0)
+    raw = bytes(random.randrange(256) for _ in range(4 * 50))
+    result = native._premultiply_bgra(raw)
+    for i in range(0, len(raw), 4):
+        b, g, r, a = raw[i], raw[i + 1], raw[i + 2], raw[i + 3]
+        assert result[i] == (b * a) // 255
+        assert result[i + 1] == (g * a) // 255
+        assert result[i + 2] == (r * a) // 255
+        assert result[i + 3] == a
