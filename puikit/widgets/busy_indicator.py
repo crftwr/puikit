@@ -4,9 +4,11 @@ Where ``ProgressBar`` shows *how far*, a BusyIndicator shows only *that work is
 happening* — the indeterminate case. It is the framework's clean test of the
 ``animation`` capability and its fallback:
 
-- on ``animation`` backends (GUI) it registers a per-frame tick through the
-  Panel and drives its own re-renders, so the spinner turns on its own;
-- on a still backend (TUI) no tick is registered — the frame is derived from
+- on a backend that drives animation ticks (GUI via its display timer, TUI via
+  its timer-woken event loop — ``ctx.animated`` covers both) it registers a
+  per-frame tick through the Panel and drives its own re-renders, so the
+  spinner turns on its own;
+- on a truly still backend no tick is registered — the frame is derived from
   the wall clock, so the spinner advances whenever the app re-renders for any
   other reason (a key, a resize) and is otherwise a static glyph.
 

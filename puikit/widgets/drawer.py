@@ -233,24 +233,42 @@ def show_drawer(
         content, side=side, title=title, on_close=on_close, modal=modal,
         surface=surface, radius=radius,
     )
-    sw, sh = panel.backend.size_units
+    snap = not panel.backend.capabilities.supports("pixel_layout")
 
-    if side in ("left", "right"):
-        w = float(size) if size is not None else max(20.0, min(sw * 0.33, 44.0))
-        w = min(w, sw)
-        h = sh
-        x = 0.0 if side == "left" else sw - w
-        y = 0.0
-        from_dx = -w if side == "left" else w
-        from_dy = 0.0
-    else:
-        h = float(size) if size is not None else max(6.0, min(sh * 0.4, 16.0))
-        h = min(h, sh)
-        w = sw
-        x = 0.0
-        y = 0.0 if side == "top" else sh - h
-        from_dx = 0.0
-        from_dy = -h if side == "top" else h
+    def geometry(sw: float, sh: float) -> tuple[float, float, float, float, float, float]:
+        """Anchor rect (x, y, w, h) plus the slide's start offset (from_dx,
+        from_dy) for a window of (sw, sh) base units. Recomputed from the live
+        window size on every render (see ``reflow`` below) so the drawer keeps
+        filling its cross-axis and hugging its edge as the window resizes; a
+        default thickness tracks the window the same way."""
+        if side in ("left", "right"):
+            w = float(size) if size is not None else max(20.0, min(sw * 0.33, 44.0))
+            w = min(w, sw)
+            h = sh
+            x = 0.0 if side == "left" else sw - w
+            y = 0.0
+            from_dx = -w if side == "left" else w
+            from_dy = 0.0
+        else:
+            h = float(size) if size is not None else max(6.0, min(sh * 0.4, 16.0))
+            h = min(h, sh)
+            w = sw
+            x = 0.0
+            y = 0.0 if side == "top" else sh - h
+            from_dx = 0.0
+            from_dy = -h if side == "top" else h
+        return x, y, w, h, from_dx, from_dy
+
+    def reflow(sw: float, sh: float) -> Rect:
+        x, y, w, h, _, _ = geometry(sw, sh)
+        if snap:
+            # Whole-unit backends keep the layer on the base unit grid, exactly
+            # like Panel._layer_rect does for a freshly pushed layer.
+            x, y, w, h = (round(v) for v in (x, y, w, h))
+        return Rect(x, y, w, h)
+
+    sw, sh = panel.backend.size_units
+    x, y, w, h, from_dx, from_dy = geometry(sw, sh)
 
     # The drawer paints its own (rounded) face, so "self_paint" tells the Panel
     # to skip the square background fill while still passing the surface color
@@ -267,7 +285,7 @@ def show_drawer(
         hints["shadow"] = True
 
     drawer._panel = panel
-    panel.push_layer(drawer, z=z, hints=hints)
+    panel.push_layer(drawer, z=z, hints=hints, reflow=reflow)
     # GUI slides it in from the edge; TUI shows it immediately (no animation cap).
     panel.animate(
         drawer,

@@ -195,9 +195,10 @@ def test_click_top_edge_routes_to_widget_at_fractional_boundary(backend):
 
 
 def test_list_selection_is_a_strong_cue_only_while_focused(backend):
-    # A list's selected row reads as active (reverse video) while the list holds
-    # focus, and dims to the muted selection background when focus is elsewhere
-    # — the same focus-aware cue every control draws.
+    # A list's selected row reads as active (the bright accent selection fill)
+    # while the list holds focus, and dims to the muted selection background
+    # when focus is elsewhere — the same focus-aware cue every control draws,
+    # the same colored highlight on TUI and GUI.
     items = ListView(["alpha", "beta", "gamma"])
     other = Checkbox("other")
     panel = Panel(backend)
@@ -206,12 +207,12 @@ def test_list_selection_is_a_strong_cue_only_while_focused(backend):
 
     panel.focus(items)
     panel.render()
-    assert backend.style_at(0, 0).attr & TextAttribute.REVERSE   # active highlight
+    assert backend.style_at(0, 0).bg == panel.theme.selection_active_bg  # active highlight
 
     panel.focus(other)
     panel.render()
     sel = backend.style_at(0, 0)
-    assert not sel.attr & TextAttribute.REVERSE                  # dimmed, not active
+    assert sel.bg != panel.theme.selection_active_bg            # dimmed, not active
     assert sel.bg == panel.theme.selection_inactive_bg          # muted, focus elsewhere
 
 

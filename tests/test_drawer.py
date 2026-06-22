@@ -66,6 +66,30 @@ def test_drawer_fills_cross_axis(backend):
     assert rect.h == sh
 
 
+@pytest.mark.parametrize(
+    "side,check",
+    [
+        ("left", lambda r, sw, sh: r.x == 0 and r.h == sh),
+        ("right", lambda r, sw, sh: r.x + r.w == sw and r.h == sh),
+        ("top", lambda r, sw, sh: r.y == 0 and r.w == sw),
+        ("bottom", lambda r, sw, sh: r.y + r.h == sh and r.w == sw),
+    ],
+)
+def test_drawer_reflows_on_window_resize(backend, side, check):
+    # The drawer's geometry is derived from the window size, so a resize must
+    # re-anchor it to its edge and re-fill the cross-axis on the next render —
+    # not leave it frozen at the size it was opened with (issue #59).
+    panel = Panel(backend)
+    show_drawer(panel, Label("x"), side=side)
+    panel.render()
+    backend._width, backend._height = 84, 32
+    panel.render()
+    rect = panel._layers[0].rect
+    sw, sh = backend.size_units
+    assert (sw, sh) == (84, 32)
+    assert check(rect, sw, sh)
+
+
 def test_escape_closes_drawer(backend):
     closed = []
     panel = Panel(backend)

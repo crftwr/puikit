@@ -29,7 +29,12 @@ PROFILE_TUI = CapabilityProfile(
     layering=False,
     transparency=False,
     shadow=False,
-    animation=False,
+    animation=False,         # rich transitions (fade/slide/scale) — immediate on TUI
+    animation_ticks=True,    # timed re-render ticks: a terminal cannot composite a
+                             # transition, but the event loop can wake on a timer so
+                             # self-driven motion (a busy spinner, a blinking caret)
+                             # still advances. Distinct from "animation" so the Panel
+                             # keeps transitions immediate while letting ticks run.
     drag_and_drop=False,     # drop-IN: accept files/text dropped onto the app
     os_drag_drop=False,      # drag-OUT: be an OS drag *source* (e.g. drag a file
                              # to Finder). Needs a native window/view, so a
