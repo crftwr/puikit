@@ -36,9 +36,11 @@ def test_progressbar_fills_fraction_with_accent(backend):
     bar = ProgressBar(0.5)
     panel.add(bar, x=0, y=0, w=20, h=1)
     panel.render()
-    # The left half is the accent fill; the right half the track color.
-    assert backend.style_at(2, 0).bg == panel.theme.accent
-    assert backend.style_at(18, 0).bg == panel.theme.control_bg
+    # On the grid the bar is a thin centered rule, not a filled band: the left
+    # half is the heavy accent glyph, the right half the light track glyph.
+    row = backend.snapshot()[0]
+    assert row[2] == "━" and backend.style_at(2, 0).fg == panel.theme.accent
+    assert row[18] == "─" and backend.style_at(18, 0).fg == panel.theme.control_border
 
 
 def test_progressbar_clamps_value(backend):
@@ -46,11 +48,11 @@ def test_progressbar_clamps_value(backend):
     bar = ProgressBar(2.0)  # over-full
     panel.add(bar, x=0, y=0, w=20, h=1)
     panel.render()
-    # Fully filled: even the far end is accent.
-    assert backend.style_at(19, 0).bg == panel.theme.accent
+    # Fully filled: even the far end is the accent rule.
+    assert backend.style_at(19, 0).fg == panel.theme.accent
     bar.value = -1.0  # under-empty
     panel.render()
-    assert backend.style_at(0, 0).bg == panel.theme.control_bg
+    assert backend.style_at(0, 0).fg == panel.theme.control_border
 
 
 def test_progressbar_measures_one_line_high_and_fills_width(backend):
