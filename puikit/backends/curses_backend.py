@@ -162,6 +162,12 @@ class CursesBackend(Backend):
         # True while the left button is held, so a following motion report reads
         # as a drag (text selection) rather than a bare hover.
         self._mouse_down = False
+        # Self-driven animation ticks (capability "animation_ticks"). A terminal
+        # cannot composite a transition, but the event loop already wakes on a
+        # timer, so a registered callback (a busy spinner, a blinking caret) is
+        # invoked on each idle wake to advance its own re-render. A callback
+        # returning False unregisters itself, exactly as on the GUI backends.
+        self._tick_callbacks: list[Any] = []
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -550,6 +556,17 @@ class CursesBackend(Backend):
 
     # --- event loop ----------------------------------------------------------------
 
+    def request_animation_ticks(self, callback: Any) -> None:
+        if callback not in self._tick_callbacks:
+            self._tick_callbacks.append(callback)
+
+    def _run_ticks(self) -> None:
+        """Fire each registered animation tick once, dropping any that return
+        False. Called on every idle wake of the event loop (~the timeout
+        cadence), so a self-driven widget advances even with no input."""
+        if self._tick_callbacks:
+            self._tick_callbacks = [cb for cb in self._tick_callbacks if cb()]
+
     def run_event_loop(self, handler: EventHandler) -> None:
         self._quit_requested = False
         while self.run_event_loop_iteration(handler, timeout_ms=50):
@@ -567,6 +584,9 @@ class CursesBackend(Backend):
         try:
             ch = self._stdscr.get_wch()
         except curses.error:
+            # Idle wake (timed out with no input): advance any self-driven
+            # animation, which re-renders itself, then loop.
+            self._run_ticks()
             return not self._quit_requested
         # An ESC may begin an SGR mouse report (ESC [ < b ; x ; y M/m). Mouse
         # tracking is driven directly (see open()), so these arrive as raw bytes

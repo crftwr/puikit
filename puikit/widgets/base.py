@@ -30,18 +30,20 @@ def selected_row_style(
 
     A selection reads as *active* only while the widget holds focus, and the
     **louder** cue always marks the focused state — never the reverse
-    (interaction_states.md §4b/§6). That ordering is resolved per backend, not
-    ported as a fixed attribute:
+    (interaction_states.md §4b/§6). The emphasis ordering is carried by the
+    theme's two selection-fill colors, the same on every backend so a TUI list
+    and a GUI list highlight the selected row with the same color:
 
-    - focused, grid: a reverse-video highlight (the loudest cue a terminal has);
-    - focused, vector: the accent selection fill, with the row's own (light)
-      text kept legible on it — *not* reverse, whose white fill would read
-      louder than any unfocused color and invert the emphasis;
-    - unfocused, either: the muted inactive fill, so a list whose focus moved
-      away dims its selection like every other control dims its cue.
+    - focused, either: the accent selection fill (``selection_active_bg``),
+      with the row's own text kept legible on it;
+    - unfocused, either: the muted inactive fill (``selection_inactive_bg``),
+      so a list whose focus moved away dims its selection like every other
+      control dims its cue.
 
-    Without the theme tokens in reach the highlight is kept when focused and
-    dropped otherwise (better visible than lost)."""
+    Without the theme tokens in reach the highlight falls back to a reverse-video
+    cue when focused and is dropped otherwise (better visible than lost). The
+    ``vector`` argument is accepted for call-site compatibility but no longer
+    changes the result — the highlight is a solid fill on every backend."""
     active = getattr(theme, "selection_active_bg", None) if theme is not None else None
     inactive = getattr(theme, "selection_inactive_bg", None) if theme is not None else None
     if active is None or inactive is None:
@@ -50,9 +52,7 @@ def selected_row_style(
         return base
     if not focused:
         return Style(base.fg, inactive, base.attr)
-    if vector:
-        return Style(base.fg, active, base.attr)
-    return Style(base.fg, base.bg, base.attr | TextAttribute.REVERSE)
+    return Style(base.fg, active, base.attr)
 
 
 def draw_list_row(

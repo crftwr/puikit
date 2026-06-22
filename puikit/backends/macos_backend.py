@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 import time
+import warnings
 from dataclasses import dataclass, field, replace
 from collections.abc import Callable
 from typing import Any
@@ -127,6 +128,22 @@ _ATTR_CACHE_MAX = 8192
 # firstRectForCharacterRange: and mis-bridged insertText:'s range argument.
 _NS_TEXT_INPUT_CLIENT = objc.protocolNamed("NSTextInputClient")
 
+# The protocol declares the actualRange argument of firstRectForCharacterRange:
+# and attributedSubstringForProposedRange: as a bare NSRange* pointer, not an
+# OUT pointer — and PyObjC enforces that exact signature for protocol
+# conformance (it rejects an `o^{_NSRange}` override and ignores per-class
+# metadata for it). So when the IME passes a non-NULL pointer, PyObjC bridges it
+# into an opaque PyObjCPointer and emits an ObjCPointerWarning on every call
+# (issue #60). The pointer is an optional out-param both methods already handle
+# defensively, so the warning is pure noise. Silence just this NSRange pointer
+# warning (other opaque-pointer warnings still surface) while keeping the formal
+# conformance, which is what fixed the real firstRect/insertText bridging bugs.
+warnings.filterwarnings(
+    "ignore",
+    category=objc.ObjCPointerWarning,
+    message=r"PyObjCPointer created.*_NSRange",
+)
+
 # Cocoa function-key code points -> PuiKit symbolic key names.
 _FUNCTION_KEYS = {
     0xF700: "up",
@@ -228,6 +245,20 @@ def _ns_color(color: tuple[int, ...], alpha: float = 1.0):
     else:
         r, g, b = color
     return NSColor.colorWithSRGBRed_green_blue_alpha_(r / 255, g / 255, b / 255, alpha)
+
+
+def _is_grid_font(font: Any) -> bool:
+    """Whether ``font`` lays out one glyph per base-unit column, so it must be
+    drawn through the grid path (kerned to base_w) rather than flowed at its
+    natural advance. True for the base grid font (``None``) and for an unsized,
+    unnamed monospace request — both resolve to the same fixed-advance face the
+    base unit was derived from. This mirrors ``log_view._grid_aligned`` exactly:
+    LogView wraps such a font by counting columns (one column == base_w), so it
+    must also *render* at base_w, or the rendered line falls short of the wrap
+    width and wraps early (issue #62)."""
+    return font is None or (
+        font.monospace and font.family is None and font.size is None
+    )
 
 
 def _attr_string(text: str, attrs) -> Any:
@@ -776,10 +807,11 @@ class MacOSBackend(Backend):
         return s
 
     def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
-        """Displayed width in base units. Base-font (font=None) text tiles the
-        grid one column per glyph; a real per-Style font is measured natively
-        and divided by the base unit width, so the result stays in base units."""
-        if style.font is None:
+        """Displayed width in base units. A grid font (font=None or an unsized,
+        unnamed monospace face) tiles the grid one column per glyph; a real
+        per-Style font is measured natively and divided by the base unit width,
+        so the result stays in base units."""
+        if _is_grid_font(style.font):
             return float(display_width(text))
         ns_font = self._resolve_style_font(style)
         key = (text, id(ns_font))
@@ -792,11 +824,11 @@ class MacOSBackend(Backend):
         return width / self._base_w if self._base_w else float(len(text))
 
     def measure_line_height(self, style: Style = DEFAULT_STYLE) -> float:
-        """Row pitch in base units. The base grid font is exactly one base unit
-        (that is how the unit was derived in _init_fonts); a real per-Style font
+        """Row pitch in base units. A grid font is exactly one base unit (that
+        is how the unit was derived in _init_fonts); a real per-Style font
         reports its own line height, rounded up to whole pixels so successive
         rows land on the device-pixel grid, then expressed in base units."""
-        if style.font is None or not self._base_h:
+        if _is_grid_font(style.font) or not self._base_h:
             return 1.0
         ns_font = self._resolve_style_font(style)
         line_px = ns_font.ascender() - ns_font.descender() + ns_font.leading()
@@ -1076,16 +1108,31 @@ class MacOSBackend(Backend):
             fg, bg = (bg or _DEFAULT_BG), (style.fg or _DEFAULT_FG)
         alpha = 0.55 if style.attr & TextAttribute.DIM else 1.0
 
-        # A per-Style font flows by its natural advances (proportional, sized,
-        # or a named family); the base grid font (font=None) tiles the grid.
-        if style.font is not None:
+        # A per-Style font that names a family, size, or is non-monospace flows
+        # by its natural advances; the base grid font (font=None) AND an unsized,
+        # unnamed monospace request — the very face the base unit was derived
+        # from — tile the grid one glyph per base unit column. Routing the latter
+        # through the flow path (its natural advance is a hair under the
+        # rounded-up base unit) drifts it left of the grid and made LogView's
+        # column-counted wrap fall short of the pane, wrapping early (#62).
+        if not _is_grid_font(style.font):
             self._render_flow_text(x, y, text, style, fg, bg, alpha)
             return
 
-        weight = TextAttribute.BOLD if style.attr & TextAttribute.BOLD else TextAttribute.NORMAL
         underline = bool(style.attr & TextAttribute.UNDERLINE)
+        # font=None uses the prebuilt NORMAL/BOLD base faces; a grid-aligned
+        # per-Style monospace font resolves to the same face honoring its own
+        # weight/slant (a monospaced bold/italic keeps the base advance, so the
+        # column grid and the kern below stay exact).
+        if style.font is None:
+            weight = (
+                TextAttribute.BOLD if style.attr & TextAttribute.BOLD else TextAttribute.NORMAL
+            )
+            ns_font = self._fonts[weight]
+        else:
+            ns_font = self._resolve_style_font(style)
         attrs = {
-            NSFontAttributeName: self._fonts[weight],
+            NSFontAttributeName: ns_font,
             NSForegroundColorAttributeName: _ns_color(fg, alpha),
         }
         if underline:
@@ -1110,7 +1157,9 @@ class MacOSBackend(Backend):
             NSRectFill(self._unit_rect(x, y, total, 1))
         kerned = dict(attrs)
         kerned[NSKernAttributeName] = self._grid_kern
-        sig = (weight, fg, alpha, underline)
+        # id(ns_font) keys the cache by the exact resolved face, covering both
+        # the NORMAL/BOLD base faces and any grid-aligned per-Style monospace.
+        sig = (id(ns_font), fg, alpha, underline)
         col = 0
         i = 0
         n = len(runs)
@@ -1272,7 +1321,13 @@ class MacOSBackend(Backend):
             r = max(0.0, min(radius, rect.size.width / 2.0, rect.size.height / 2.0))
             self._rounded_path(rect, r, corners).fill()
         else:
-            NSRectFill(rect)
+            # Source-over, not bare NSRectFill: NSRectFill composites with COPY,
+            # which replaces pixels directly and so casts no shadow — the blurred
+            # edge composited against the empty (white) backing showed as a white
+            # halo instead of a soft dark shadow (#48). Source-over blends the
+            # silhouette and lets the active NSShadow render, matching the
+            # rounded path above.
+            NSRectFillUsingOperation(rect, NSCompositingOperationSourceOver)
         NSGraphicsContext.restoreGraphicsState()
 
     def _render_scrollbar(

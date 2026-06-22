@@ -27,9 +27,11 @@ def test_listview_renders_visible_slice_and_selection(backend):
     lines = backend.snapshot()
     assert lines[0].startswith("item0")
     assert lines[4].startswith("item4")
-    # Selected row is drawn reversed.
-    assert backend.style_at(0, 0).attr & TextAttribute.REVERSE
-    assert not backend.style_at(0, 1).attr & TextAttribute.REVERSE
+    # Selected row is drawn with the theme's active selection fill — the same
+    # colored highlight on TUI and GUI, not a reverse-video swap.
+    active = panel.theme.selection_active_bg
+    assert backend.style_at(0, 0).bg == active
+    assert backend.style_at(0, 1).bg != active
     # Long list shows a scrollbar in the last column, painted via base unit
     # background color (thumb or track) rather than a glyph.
     assert backend.style_at(9, 0).bg in {(150, 150, 150), (60, 60, 60)}

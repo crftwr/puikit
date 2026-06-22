@@ -80,9 +80,12 @@ def test_busyindicator_ticks_only_on_animation_backend(backend):
     spin = BusyIndicator()
     panel.add(spin, x=0, y=0, w=8, h=1)
     panel.render()
-    animated = backend.capabilities.supports("animation")
+    # A backend that drives ticks is one with rich animation (GUI) or just timed
+    # re-render ticks (TUI's timer-woken event loop, capability animation_ticks).
+    caps = backend.capabilities
+    animated = caps.supports("animation") or caps.supports("animation_ticks")
     assert bool(backend.tick_callbacks) is animated
-    # Stopping ends the tick on the next round (capable backends only).
+    # Stopping ends the tick on the next round (tick-driving backends only).
     if animated:
         spin.stop()
         backend.run_animation_ticks()
@@ -93,7 +96,8 @@ def test_busyindicator_unregisters_tick_when_detached(backend):
     # A spinner whose page is swapped out stops being drawn. Its tick must
     # self-unregister so it neither pins the detached widget alive nor keeps
     # driving off-screen re-renders forever (the demo-catalog memory leak).
-    if not backend.capabilities.supports("animation"):
+    caps = backend.capabilities
+    if not (caps.supports("animation") or caps.supports("animation_ticks")):
         pytest.skip("still backend never registers a tick")
     panel = Panel(backend)
     spin = BusyIndicator()

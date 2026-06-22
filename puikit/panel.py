@@ -201,13 +201,15 @@ class DrawContext:
 
     @property
     def animated(self) -> bool:
-        """True when the backend can render real transitions and per-frame
-        animation ticks. A widget that drives its own motion (a busy spinner)
-        reads it to decide whether to register ticks via
-        ``panel.request_animation_ticks``; on a still backend it just renders a
-        single frame whenever the panel re-renders. The capability is resolved
-        here, not by the widget."""
-        return self._caps.supports("animation")
+        """True when the backend drives per-frame animation ticks. A widget that
+        drives its own motion (a busy spinner, a blinking caret) reads it to
+        decide whether to register ticks via ``panel.request_animation_ticks``;
+        on a still backend it just renders a single frame whenever the panel
+        re-renders. This is broader than the ``animation`` capability (rich
+        transitions): a TUI cannot composite a transition but its event loop can
+        still wake on a timer, so ``animation_ticks`` alone is enough. The
+        capability is resolved here, not by the widget."""
+        return self._caps.supports("animation") or self._caps.supports("animation_ticks")
 
     @property
     def native_menus(self) -> bool:
@@ -713,6 +715,12 @@ class _Slot:
     # window edge: their fill bleeds across the window margin so the frame
     # never shows the backend's default background.
     fill: Rect | None = None
+    # Optional geometry recompute for a size-anchored layer. A layer whose rect
+    # is derived from the window size (an edge Drawer fills the cross-axis and
+    # hugs an edge) passes a callable (sw, sh) -> Rect so its rect is refreshed
+    # from the current backend size on every render, tracking window resizes;
+    # plain centered/positioned layers leave it None and keep their fixed rect.
+    reflow: Any | None = None
 
 
 def _bleed_to_window(
@@ -885,11 +893,15 @@ class Panel:
     # --- layer management ------------------------------------------------------
 
     def push_layer(
-        self, widget: Any, z: int = 0, hints: dict[str, Any] | None = None
+        self,
+        widget: Any,
+        z: int = 0,
+        hints: dict[str, Any] | None = None,
+        reflow: Any | None = None,
     ) -> None:
         hints = hints or {}
         rect = self._layer_rect(hints)
-        self._layers.append(_Slot(widget, rect, hints, z))
+        self._layers.append(_Slot(widget, rect, hints, z, reflow=reflow))
         self._layers.sort(key=lambda s: s.z)
 
     def pop_layer(self) -> Any | None:
@@ -962,10 +974,12 @@ class Panel:
     @property
     def caret_visible(self) -> bool:
         """Current blink phase shared by every text caret. Solid (always True)
-        on a still backend; a ~``_CARET_BLINK`` second square wave on an
-        animation-capable one, measured from the last blink reset so the caret
-        shows immediately after a move."""
-        if not self.backend.capabilities.supports("animation"):
+        on a still backend; a ~``_CARET_BLINK`` second square wave on a backend
+        that drives animation ticks (a terminal's timer-woken event loop counts,
+        the same one the caret registers its blink tick against), measured from
+        the last blink reset so the caret shows immediately after a move."""
+        caps = self.backend.capabilities
+        if not (caps.supports("animation") or caps.supports("animation_ticks")):
             return True
         return int((time.monotonic() - self._caret_phase0) / _CARET_BLINK) % 2 == 0
 
@@ -1042,6 +1056,12 @@ class Panel:
         self.backend.end_group(slot.widget)
 
     def _render_layer(self, slot: _Slot) -> None:
+        if slot.reflow is not None:
+            # A size-anchored layer (an edge Drawer) recomputes its rect from the
+            # current backend size, so it follows window resizes instead of
+            # staying frozen at the geometry it was pushed with.
+            sw, sh = self.backend.size_units
+            slot.rect = slot.reflow(sw, sh)
         if slot.hints.get("dim_below"):
             # Every backend implements dim_rect; TUI approximates with dim
             # attributes, GUI draws a translucent overlay. Dim the exact
@@ -1099,7 +1119,8 @@ class Panel:
         frame on each ordinary render — so the widget never branches on the
         backend. The callback returns False to unregister. Returns whether
         ticking started."""
-        if not self.backend.capabilities.supports("animation"):
+        caps = self.backend.capabilities
+        if not (caps.supports("animation") or caps.supports("animation_ticks")):
             return False
         self.backend.request_animation_ticks(callback)
         return True
