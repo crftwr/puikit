@@ -48,7 +48,6 @@ LRESULT = ctypes.c_ssize_t
 WPARAM = wintypes.WPARAM
 LPARAM = wintypes.LPARAM
 HWND = wintypes.HWND
-HDC = wintypes.HDC
 
 WNDPROC = ctypes.WINFUNCTYPE(LRESULT, HWND, ctypes.c_uint, WPARAM, LPARAM)
 
@@ -889,111 +888,6 @@ def rt_draw_bitmap(
         D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
         ctypes.byref(source_rect) if source_rect is not None else None,
     )
-
-
-# --- GDI text metrics (used only for the base/grid font's cell size, never
-# for proportional measurement — see measure_text_dwrite above) ------------
-
-
-class LOGFONTW(ctypes.Structure):
-    _fields_ = [
-        ("lfHeight", ctypes.c_long),
-        ("lfWidth", ctypes.c_long),
-        ("lfEscapement", ctypes.c_long),
-        ("lfOrientation", ctypes.c_long),
-        ("lfWeight", ctypes.c_long),
-        ("lfItalic", ctypes.c_byte),
-        ("lfUnderline", ctypes.c_byte),
-        ("lfStrikeOut", ctypes.c_byte),
-        ("lfCharSet", ctypes.c_byte),
-        ("lfOutPrecision", ctypes.c_byte),
-        ("lfClipPrecision", ctypes.c_byte),
-        ("lfQuality", ctypes.c_byte),
-        ("lfPitchAndFamily", ctypes.c_byte),
-        ("lfFaceName", ctypes.c_wchar * 32),
-    ]
-
-
-class TEXTMETRICW(ctypes.Structure):
-    _fields_ = [
-        ("tmHeight", ctypes.c_long),
-        ("tmAscent", ctypes.c_long),
-        ("tmDescent", ctypes.c_long),
-        ("tmInternalLeading", ctypes.c_long),
-        ("tmExternalLeading", ctypes.c_long),
-        ("tmAveCharWidth", ctypes.c_long),
-        ("tmMaxCharWidth", ctypes.c_long),
-        ("tmWeight", ctypes.c_long),
-        ("tmOverhang", ctypes.c_long),
-        ("tmDigitizedAspectX", ctypes.c_long),
-        ("tmDigitizedAspectY", ctypes.c_long),
-        ("tmFirstChar", ctypes.c_wchar),
-        ("tmLastChar", ctypes.c_wchar),
-        ("tmDefaultChar", ctypes.c_wchar),
-        ("tmBreakChar", ctypes.c_wchar),
-        ("tmItalic", ctypes.c_byte),
-        ("tmUnderlined", ctypes.c_byte),
-        ("tmStruckOut", ctypes.c_byte),
-        ("tmPitchAndFamily", ctypes.c_byte),
-        ("tmCharSet", ctypes.c_byte),
-    ]
-
-
-class SIZE(ctypes.Structure):
-    _fields_ = [("cx", ctypes.c_long), ("cy", ctypes.c_long)]
-
-
-gdi32.CreateFontIndirectW.restype = ctypes.c_void_p
-gdi32.CreateFontIndirectW.argtypes = [ctypes.POINTER(LOGFONTW)]
-gdi32.SelectObject.restype = ctypes.c_void_p
-gdi32.SelectObject.argtypes = [HDC, ctypes.c_void_p]
-gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
-gdi32.GetTextExtentPoint32W.restype = wintypes.BOOL
-gdi32.GetTextExtentPoint32W.argtypes = [HDC, ctypes.c_wchar_p, ctypes.c_int, ctypes.POINTER(SIZE)]
-gdi32.GetTextMetricsW.restype = wintypes.BOOL
-gdi32.GetTextMetricsW.argtypes = [HDC, ctypes.POINTER(TEXTMETRICW)]
-
-user32.GetDC.restype = HDC
-user32.GetDC.argtypes = [HWND]
-user32.ReleaseDC.argtypes = [HWND, HDC]
-
-
-FW_REGULAR = 400
-FW_BOLD = 700
-
-
-def measure_text_gdi(hdc: int, family: str, point_size: float, weight: int, italic: bool, text: str) -> tuple[float, float]:
-    """Width/height of ``text`` in pixels, via a temporary GDI font on ``hdc``."""
-    logfont = LOGFONTW()
-    logfont.lfHeight = -round(point_size * 96.0 / 72.0)  # points -> pixels at 96dpi, negative = char height
-    logfont.lfWeight = weight
-    logfont.lfItalic = 1 if italic else 0
-    logfont.lfCharSet = 1  # DEFAULT_CHARSET
-    logfont.lfFaceName = family[:31]
-    font = gdi32.CreateFontIndirectW(ctypes.byref(logfont))
-    old = gdi32.SelectObject(hdc, font)
-    size = SIZE()
-    gdi32.GetTextExtentPoint32W(hdc, text, len(text), ctypes.byref(size))
-    gdi32.SelectObject(hdc, old)
-    gdi32.DeleteObject(font)
-    return float(size.cx), float(size.cy)
-
-
-def font_line_metrics_gdi(hdc: int, family: str, point_size: float, weight: int, italic: bool) -> tuple[float, float]:
-    """(ascent+descent, external leading) in pixels for a GDI font matching the request."""
-    logfont = LOGFONTW()
-    logfont.lfHeight = -round(point_size * 96.0 / 72.0)
-    logfont.lfWeight = weight
-    logfont.lfItalic = 1 if italic else 0
-    logfont.lfCharSet = 1
-    logfont.lfFaceName = family[:31]
-    font = gdi32.CreateFontIndirectW(ctypes.byref(logfont))
-    old = gdi32.SelectObject(hdc, font)
-    tm = TEXTMETRICW()
-    gdi32.GetTextMetricsW(hdc, ctypes.byref(tm))
-    gdi32.SelectObject(hdc, old)
-    gdi32.DeleteObject(font)
-    return float(tm.tmHeight), float(tm.tmExternalLeading)
 
 
 # --- window class / message loop --------------------------------------------

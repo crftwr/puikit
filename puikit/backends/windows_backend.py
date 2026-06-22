@@ -207,7 +207,6 @@ class WindowsBackend(Backend):
         self._dwrite_factory: Any = None
         self._render_target: Any = None
         self._brush: Any = None
-        self._metrics_hdc = 0
         self._handler: EventHandler | None = None
         self._quit_requested = False
         # Display list double buffer: widgets fill `_back`, WM_PAINT reads `_front`.
@@ -306,9 +305,6 @@ class WindowsBackend(Backend):
         if self._d2d_factory is not None:
             self._d2d_factory.release()
             self._d2d_factory = None
-        if self._metrics_hdc:
-            native.user32.ReleaseDC(None, self._metrics_hdc)
-            self._metrics_hdc = 0
         if self._hwnd:
             _hwnd_backends.pop(self._hwnd, None)
             native.user32.DestroyWindow(self._hwnd)
@@ -321,9 +317,9 @@ class WindowsBackend(Backend):
 
     def _font_params(self, font: Font) -> tuple[str, int, bool, float]:
         """Map a Font descriptor to (family, weight, italic, size-in-points).
-        DirectWrite's DWRITE_FONT_WEIGHT and GDI's LOGFONT.lfWeight both use
-        the same 100..900 CSS-like scale as puikit.font.FontWeight, so the
-        same integer drives both the renderer and the GDI metrics font."""
+        DirectWrite's DWRITE_FONT_WEIGHT uses the same 100..900 CSS-like
+        scale as puikit.font.FontWeight, so the same integer drives it
+        directly with no remapping."""
         size = float(font.size) if font.size is not None else self._base_size_pt()
         weight = int(font.weight)
         italic = font.italic
@@ -348,19 +344,28 @@ class WindowsBackend(Backend):
         return native.dwrite_create_text_format(self._dwrite_factory, family, weight, style, size)
 
     def _init_fonts(self) -> None:
-        if self._metrics_hdc == 0:
-            self._metrics_hdc = native.user32.GetDC(None)
         if self._d2d_factory is None:
             self._d2d_factory = native.create_d2d_factory()
         self._fonts = {
             TextAttribute.NORMAL: self._create_text_format(self._base_font),
             TextAttribute.BOLD: self._create_text_format(self._base_font, bold=True),
         }
-        family, weight, italic, size = self._font_params(self._base_font)
-        adv_w, _ = native.measure_text_gdi(self._metrics_hdc, family, size, weight, italic, "M")
-        line_h, leading = native.font_line_metrics_gdi(self._metrics_hdc, family, size, weight, italic)
+        # Derived through DirectWrite (measure_text_dwrite), the same system
+        # that measures every other Font request (measure_text/
+        # measure_line_height) — using GDI here instead, as a first pass did,
+        # measured Consolas's "M" advance as 10px vs DirectWrite's 7.7px for
+        # the identical font/size. That mismatch is invisible for grid text
+        # (each glyph gets its own clipped cell, sized whatever base_w is),
+        # but it broke any *explicit* Font(monospace=True) request — like
+        # LogView's pinned grid font — whose width is measured through
+        # measure_text (DirectWrite) while wrap_columns assumed base_w (then
+        # GDI): the two disagreed enough to wrap lines well short of the
+        # actual pane width.
+        if self._dwrite_factory is None:
+            self._dwrite_factory = native.create_dwrite_factory()
+        adv_w, line_h = native.measure_text_dwrite(self._dwrite_factory, "M", self._fonts[TextAttribute.NORMAL])
         self._base_w = max(1.0, math.ceil(adv_w))
-        self._base_h = max(1.0, math.ceil(line_h + leading))
+        self._base_h = max(1.0, math.ceil(line_h))
 
     def _resolve_style_font(self, style: Style) -> Any:
         font = style.font
