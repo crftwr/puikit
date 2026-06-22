@@ -40,6 +40,7 @@ class MemoryBackend(Backend):
         self.round_rect_calls: list[tuple] = []
         self.check_calls: list[tuple] = []
         self.shadow_calls: list[tuple] = []
+        self.flash_calls: list[tuple] = []
         self.animate_calls: list[tuple[Any, dict[str, Any]]] = []
         self.tick_callbacks: list[Any] = []
         self.present_count = 0
@@ -172,6 +173,16 @@ class MemoryBackend(Backend):
             for col in range(max(0, x), min(self._width, x + w)):
                 old = self._styles[row][col]
                 self._styles[row][col] = Style(old.fg, old.bg, old.attr | TextAttribute.DIM)
+
+    def flash_rect(self, x: int, y: int, w: int, h: int, color: Any) -> None:
+        # Records the call (for assertions) and recolors the region's background,
+        # mirroring the curses one-frame highlight band.
+        self.flash_calls.append((round(x), round(y), round(w), round(h), tuple(color)))
+        x, y, w, h = round(x), round(y), round(w), round(h)
+        for row in range(max(0, y), min(self._height, y + h)):
+            for col in range(max(0, x), min(self._width, x + w)):
+                old = self._styles[row][col]
+                self._styles[row][col] = Style(old.fg, tuple(color), old.attr)
 
     def draw_shadow(
         self,

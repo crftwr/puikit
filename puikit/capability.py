@@ -29,12 +29,21 @@ PROFILE_TUI = CapabilityProfile(
     layering=False,
     transparency=False,
     shadow=False,
-    animation=False,         # rich transitions (fade/slide/scale) — immediate on TUI
+    animation=False,         # COMPOSITED transitions (fade/scale): real alpha and
+                             # sub-unit transforms a terminal cannot paint, so these
+                             # stay immediate on TUI. GEOMETRY transitions (slide,
+                             # size-grow) are NOT gated here — the Panel expresses
+                             # them by interpolating the widget's rect (see
+                             # animation_ticks), so they animate on TUI too.
     animation_ticks=True,    # timed re-render ticks: a terminal cannot composite a
-                             # transition, but the event loop can wake on a timer so
+                             # transition, but its event loop can wake on a timer, so
+                             # the Panel re-renders each frame to drive both
                              # self-driven motion (a busy spinner, a blinking caret)
-                             # still advances. Distinct from "animation" so the Panel
-                             # keeps transitions immediate while letting ticks run.
+                             # AND geometry transitions (a drawer sliding in, a panel
+                             # growing) at whole-base-unit granularity. Distinct from
+                             # "animation" so the Panel routes only composited
+                             # transitions to the backend while running geometry ones
+                             # (and ticks) itself.
     drag_and_drop=False,     # drop-IN: accept files/text dropped onto the app
     os_drag_drop=False,      # drag-OUT: be an OS drag *source* (e.g. drag a file
                              # to Finder). Needs a native window/view, so a

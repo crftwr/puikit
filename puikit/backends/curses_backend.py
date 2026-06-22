@@ -406,6 +406,28 @@ class CursesBackend(Backend):
             except curses.error:
                 pass
 
+    def flash_rect(self, x: int, y: int, w: int, h: int, color: Color) -> None:
+        # One-frame highlight stand-in (Panel's stepped "highlight" effect): set
+        # the region's already-drawn cells to use `color` as their background, so
+        # the whole group flashes that color for the single intermediate frame.
+        # A contrasting foreground keeps any text on top readable; colors snap to
+        # the curated palette like every other color the backend paints.
+        assert self._stdscr is not None
+        x, y, w, h = round(x), round(y), round(w), round(h)
+        sw, sh = self.size
+        x0 = max(0, x)
+        width = min(sw, x + w) - x0
+        if width <= 0:
+            return
+        r, g, b = color[:3]
+        fg = (0, 0, 0) if (r * 299 + g * 587 + b * 114) // 1000 > 140 else (255, 255, 255)
+        attr = curses.color_pair(self._color_pair(fg, color[:3])) if curses.has_colors() else curses.A_REVERSE
+        for row in range(max(0, y), min(sh, y + h)):
+            try:
+                self._stdscr.chgat(row, x0, width, attr)
+            except curses.error:
+                pass
+
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float, style: Style = DEFAULT_STYLE
     ) -> None:

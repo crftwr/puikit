@@ -175,6 +175,13 @@ class Backend(ABC):
         GUI: translucent dark overlay; TUI: approximated with dim/dark
         attributes."""
 
+    def flash_rect(self, x: int, y: int, w: int, h: int, color: Color) -> None:
+        """Tint already-drawn content in the region with ``color`` for one
+        frame — the stepped (terminal) stand-in for a composited highlight
+        overlay, used only by the Panel's 2-frame ``highlight`` effect. The
+        default is a no-op: compositing backends realize highlight through their
+        own alpha overlay (``animate``) and never reach this."""
+
     @abstractmethod
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float, style: Style = DEFAULT_STYLE

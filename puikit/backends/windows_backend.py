@@ -903,8 +903,11 @@ class WindowsBackend(Backend):
             self._group_alpha_stack[-1] *= eased
             return (animation, rect, False)
         if animation.kind == "slide" and rect is not None:
-            dx = animation.hints.get("from_dx", 0.0) * self._base_w * (1.0 - eased)
-            dy = animation.hints.get("from_dy", 2.0) * self._base_h * (1.0 - eased)
+            # Position: linear (constant velocity), matching the Panel's geometry
+            # transitions, so a slide reads the same on GUI and TUI.
+            lin = animation.progress(now)
+            dx = animation.hints.get("from_dx", 0.0) * self._base_w * (1.0 - lin)
+            dy = animation.hints.get("from_dy", 2.0) * self._base_h * (1.0 - lin)
             m = native.D2D1_MATRIX_3X2_F.translation(dx, dy)
             self._transform_stack[-1] = m
             native.rt_set_transform(self._render_target, m)

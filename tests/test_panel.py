@@ -1,11 +1,14 @@
 from puikit import (
+    CapabilityProfile,
     DEFAULT_STYLE,
     Event,
     EventType,
     Font,
     Panel,
     PROFILE_GUI_DESKTOP,
+    PROFILE_TUI,
     Style,
+    TextAttribute,
 )
 from puikit.backends.memory_backend import MemoryBackend
 from puikit.text import display_width
@@ -277,6 +280,224 @@ def test_size_animation_is_layout_level_not_backend():
     # Render-level transitions still go to the backend.
     panel.animate(probe, hints={"transition": "fade"})
     assert len(backend.animate_calls) == 1
+
+
+def test_slide_animation_runs_on_tui_via_rect_interpolation():
+    # A terminal cannot composite a transition, but it *can* slide a region by
+    # interpolating its rect — so a "slide" animates at the Panel level (not the
+    # backend) on the TUI profile, exactly the drawer's intent.
+    backend = MemoryBackend(width=40, height=20, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+
+    class RectProbe(Widget):
+        def __init__(self):
+            self.rect = None
+
+        def draw(self, ctx):
+            self.rect = (ctx._rect.x, ctx._rect.y)
+
+    probe = RectProbe()
+    panel.add(probe, x=10, y=4, w=12, h=3)
+    panel.animate(
+        probe,
+        hints={"transition": "slide", "duration_ms": 60_000, "from_dx": -12.0},
+    )
+    # The Panel drives it (a geometry transition), not the backend.
+    assert backend.animate_calls == []
+    assert backend.tick_callbacks
+    backend.run_animation_ticks()
+    # Freshly started (eased ~0): the rect sits ~12 units left of its anchor.
+    assert probe.rect[0] < 10
+
+    # Run it to completion: the rect settles at the anchored x and the tick
+    # unregisters.
+    panel._size_anims[probe].start -= 120.0
+    backend.run_animation_ticks()
+    assert probe.rect == (10, 4)
+    assert probe not in panel._size_anims
+    assert backend.tick_callbacks == []
+
+
+def test_slide_on_compositing_backend_goes_to_backend():
+    # A compositing backend slides via its own sub-unit transform, so a "slide"
+    # is handed to the backend there (and the Panel does not also interpolate).
+    backend = MemoryBackend(width=40, height=20, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    probe = SizeProbe()
+    panel.add(probe, x=0, y=0, w=20, h=10)
+    panel.animate(probe, hints={"transition": "slide", "from_dx": -8})
+    assert backend.animate_calls == [(probe, {"transition": "slide", "from_dx": -8})]
+    assert probe not in panel._size_anims
+
+
+class RectProbe(Widget):
+    def __init__(self):
+        self.rect = None
+
+    def draw(self, ctx):
+        self.rect = (ctx._rect.x, ctx._rect.y, ctx._rect.w, ctx._rect.h)
+
+
+def test_geometry_animation_is_two_frame_and_cell_snapped_on_tui():
+    # A terminal cannot draw smooth motion, so a slide plays as exactly two
+    # frames — one intermediate, then the target — snapped to whole cells.
+    backend = MemoryBackend(width=40, height=20, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+    probe = RectProbe()
+    panel.add(probe, x=10, y=4, w=12, h=3)
+    panel.animate(probe, hints={"transition": "slide", "from_dx": -12.0})
+    # Frame 1 = the single intermediate (progress 0.5): x = 10 + (-12)*0.5 = 4,
+    # every component snapped to a whole cell.
+    backend.run_animation_ticks()
+    x, y, w, h = probe.rect
+    assert x == 4
+    assert all(float(v).is_integer() for v in (x, y, w, h))
+    # Frame 2 = the target; the animation is then finished and dropped.
+    backend.run_animation_ticks()
+    assert probe.rect == (10, 4, 12, 3)
+    assert probe not in panel._size_anims
+    assert backend.tick_callbacks == []
+
+
+def test_scale_is_two_frame_rect_inset_on_tui():
+    # A grid cannot sub-scale glyphs, so "scale" is expressed as a real rect
+    # inset toward the center (then full) — still the 2-frame policy.
+    backend = MemoryBackend(width=40, height=20, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+    probe = RectProbe()
+    panel.add(probe, x=10, y=4, w=12, h=4)
+    panel.animate(probe, hints={"transition": "scale", "from_scale": 0.5})
+    backend.run_animation_ticks()  # intermediate: inset toward the center
+    x, y, w, h = probe.rect
+    assert w < 12 and h < 4 and x > 10
+    assert all(float(v).is_integer() for v in (x, y, w, h))
+    backend.run_animation_ticks()  # target: the full rect
+    assert probe.rect == (10, 4, 12, 4)
+    assert probe not in panel._size_anims
+
+
+def test_geometry_animation_is_subunit_on_pixel_backend():
+    # A pixel-layout backend keeps fractional positions (smooth sub-unit slide).
+    backend = MemoryBackend(width=40, height=20, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    probe = RectProbe()
+    panel.add(probe, x=0, y=0, w=10, h=5)
+    panel.animate(
+        probe, hints={"transition": "size", "duration_ms": 60_000, "from_w": 2.0}
+    )
+    panel._size_anims[probe].start -= 20.0  # p = 1/3
+    panel.render()
+    _, _, w, _ = probe.rect
+    # Linear at p=1/3: w = 2 + (10-2)/3 = 4.667 — kept fractional (no cell snap),
+    # which a character backend would instead round to a whole base unit.
+    assert abs(w - 4.667) < 0.1
+    assert not float(w).is_integer()
+
+
+class ColorProbe(Widget):
+    def __init__(self):
+        self.seen = None
+
+    def draw(self, ctx):
+        # Resting color is the tween's destination, so completion is seamless.
+        self.seen = ctx.animated_color(default=(30, 30, 30))
+
+
+def test_color_animation_is_two_frame_on_tui():
+    backend = MemoryBackend(width=20, height=10, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+    probe = ColorProbe()  # resting color (30, 30, 30) == the tween destination
+    panel.add(probe, x=0, y=0, w=10, h=5)
+    panel.animate(
+        probe,
+        hints={"transition": "color", "from": (200, 0, 0), "to": (30, 30, 30)},
+    )
+    # A Panel-level transition (no backend compositing), driven by ticks.
+    assert backend.animate_calls == []
+    assert backend.tick_callbacks
+    # Frame 1 = the intermediate (progress 0.5): linear midpoint ~ (115, 15, 15).
+    backend.run_animation_ticks()
+    r, g, b = probe.seen
+    assert 95 < r < 135 and 5 < g < 25
+
+    # Frame 2 = target: the finished tween is dropped, so the widget shows its
+    # resting color (== the destination, no visible jump) and ticking stops.
+    backend.run_animation_ticks()
+    assert probe.seen == (30, 30, 30)
+    assert (probe, None) not in panel._color_anims
+    assert backend.tick_callbacks == []
+
+
+def test_fade_is_two_frame_dim_effect_on_tui():
+    # A terminal cannot composite alpha, so a fade shows one dim intermediate
+    # frame over the whole group, then the clean target frame.
+    backend = MemoryBackend(width=20, height=10, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+    probe = Label("hello")
+    panel.add(probe, x=0, y=0, w=10, h=1)
+    panel.animate(probe, hints={"transition": "fade"})
+    # Played by the Panel, not handed to the backend's compositor.
+    assert backend.animate_calls == []
+    assert probe in panel._effect_anims
+    # Frame 1 (intermediate): the group is dimmed.
+    backend.run_animation_ticks()
+    assert backend.style_at(0, 0).attr & TextAttribute.DIM
+    # Frame 2 (target): clean, effect dropped, ticking stops.
+    backend.run_animation_ticks()
+    assert not (backend.style_at(0, 0).attr & TextAttribute.DIM)
+    assert probe not in panel._effect_anims
+    assert backend.tick_callbacks == []
+
+
+def test_highlight_is_two_frame_flash_on_tui():
+    # Highlight has no alpha on a terminal: a one-frame color flash over the
+    # group, then the clean target frame.
+    backend = MemoryBackend(width=20, height=10, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+    probe = Label("hi")
+    panel.add(probe, x=0, y=0, w=10, h=1)
+    panel.animate(probe, hints={"transition": "highlight", "color": (229, 229, 16)})
+    assert backend.animate_calls == []
+    # Frame 1 (intermediate): a flash in the requested color.
+    backend.run_animation_ticks()
+    assert backend.flash_calls and backend.flash_calls[-1][4] == (229, 229, 16)
+    # Frame 2 (target): no further flash, effect dropped.
+    before = len(backend.flash_calls)
+    backend.run_animation_ticks()
+    assert len(backend.flash_calls) == before
+    assert probe not in panel._effect_anims
+
+
+def test_optical_transitions_go_to_backend_on_gui():
+    # A compositing backend realizes fade/scale/highlight itself (real alpha /
+    # sub-unit transforms); the Panel does not play a stepped stand-in.
+    backend = MemoryBackend(width=40, height=20, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    probe = Label("x")
+    panel.add(probe, x=0, y=0, w=10, h=1)
+    for kind in ("fade", "scale", "highlight"):
+        panel.animate(probe, hints={"transition": kind})
+    assert [h["transition"] for _, h in backend.animate_calls] == ["fade", "scale", "highlight"]
+    assert panel._effect_anims == {}
+    assert probe not in panel._size_anims
+
+
+def test_color_animation_immediate_on_still_backend():
+    # No animation and no animation_ticks: the tween never registers and the
+    # widget simply renders its resting color.
+    still = CapabilityProfile({**PROFILE_TUI, "animation_ticks": False})
+    backend = MemoryBackend(width=20, height=10, capabilities=still)
+    panel = Panel(backend)
+    probe = ColorProbe()
+    panel.add(probe, x=0, y=0, w=10, h=5)
+    panel.animate(
+        probe,
+        hints={"transition": "color", "from": (200, 0, 0), "to": (30, 30, 30)},
+    )
+    assert panel._color_anims == {}
+    assert backend.tick_callbacks == []
+    panel.render()
+    assert probe.seen == (30, 30, 30)
 
 
 def test_pop_layer_restores_event_flow():

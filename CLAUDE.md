@@ -175,8 +175,53 @@ panel.push_layer(dialog, z=10, hints={"shadow": True, "dim_below": True})
 panel.animate(widget, hints={"transition": "fade", "duration_ms": 200})
 ```
 
-- TUI: immediate switch (no animation)
-- GUI: transition rendered
+The app states one intent — `panel.animate(widget, hints)` — and the Panel
+resolves *how* to play it from the backend's capability. There are **two
+playback models**, and **every transition kind works in both** — no kind is
+TUI-only or GUI-only:
+
+**Compositing backends** (`animation`: GUI) play transitions the smooth way,
+frame-by-frame over the requested `duration_ms`:
+- `fade` / `scale` / `highlight` — real alpha + sub-unit transforms on the
+  backend; `slide` — a sub-pixel GPU transform; `size` — a Panel re-measure;
+  `color` — a continuous tween. Geometry motion is **linear** (constant
+  velocity).
+
+**Stepped backends** (`animation_ticks` but not `animation`: a terminal) cannot
+draw smooth motion — multi-frame interpolation snapped to the character grid
+only reads as flicker. So the Panel plays **every** kind as exactly **two
+frames — one intermediate state, then the target** (the *2-frame policy*),
+using whole-cell stand-ins:
+
+| kind        | intermediate frame (whole-cell)              |
+|-------------|----------------------------------------------|
+| `slide`     | rect moved halfway in (snapped to cells)     |
+| `size`      | rect grown halfway (snapped)                 |
+| `scale`     | rect inset toward its center, then full      |
+| `color`     | the midpoint color (palette-snapped)         |
+| `fade`      | one **dim** pass over the group              |
+| `highlight` | one **color flash** over the group           |
+
+so the user sees a single clear "something changed" beat, never a janky crawl.
+
+A **still backend** (neither capability) applies the change immediately.
+
+Geometry interpolation (both models) is linear and, on a character grid, snapped
+to whole base units, so a region steps by an integer number of cells. The
+`color` value is read by the widget via `ctx.animated_color(default=…, key=…)`;
+`to` is normally the widget's resting color (the `default`), so completion is
+seamless:
+
+```python
+panel.animate(row, hints={"transition": "color",
+                          "from": theme.accent, "to": theme.text})
+# in the widget's draw():
+ctx.draw_text(0, 0, label, Style(fg=ctx.animated_color(default=theme.text)))
+```
+
+`fade` / `highlight` are group effects the Panel paints over the whole widget
+group on a stepped backend (`dim_rect` / `flash_rect`); a compositing backend
+renders them as real overlays instead. Either way the app never branches.
 
 ### 5. Events (Keyboard & Mouse)
 

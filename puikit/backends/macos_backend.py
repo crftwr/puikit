@@ -1055,8 +1055,11 @@ class MacOSBackend(Backend):
             return (animation, rect, True, True)
         if animation.kind == "slide":
             # Position: start offset (in base units) decaying to the final place.
-            dx = animation.hints.get("from_dx", 0.0) * self._base_w * (1.0 - eased)
-            dy = animation.hints.get("from_dy", 2.0) * self._base_h * (1.0 - eased)
+            # Linear (constant velocity), matching the Panel's geometry
+            # transitions, so a slide reads the same on GUI and TUI.
+            lin = animation.progress(now)
+            dx = animation.hints.get("from_dx", 0.0) * self._base_w * (1.0 - lin)
+            dy = animation.hints.get("from_dy", 2.0) * self._base_h * (1.0 - lin)
             CGContextSaveGState(cg)
             CGContextTranslateCTM(cg, dx, dy)
             return (animation, rect, True, False)

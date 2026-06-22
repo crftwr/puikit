@@ -117,6 +117,7 @@ class DrawContext:
         background: tuple[int, int, int] | None = None,
         focused: bool = False,
         hit_rect: Rect | None = None,
+        widget: Any = None,
     ):
         self._backend = backend
         self._rect = rect
@@ -124,6 +125,9 @@ class DrawContext:
         self._clip = clip if clip is not None else rect
         self._panel = panel
         self._background = background
+        # The widget this context draws, so it can look up its own animated
+        # state (a running color tween) without the app threading an identity.
+        self._widget = widget
         # The region pointer operations (hover, press) test against, so they
         # match exactly what the Panel routes clicks and focus to. By default it
         # is the visible rect clipped to the parent — but a top-level pane passes
@@ -210,6 +214,18 @@ class DrawContext:
         still wake on a timer, so ``animation_ticks`` alone is enough. The
         capability is resolved here, not by the widget."""
         return self._caps.supports("animation") or self._caps.supports("animation_ticks")
+
+    def animated_color(self, default: Any = None, key: Any = None) -> Any:
+        """Current value of a color transition started on this widget via
+        ``panel.animate(widget, hints={"transition": "color", ...})``, or
+        ``default`` if none is running. The Panel interpolates between the
+        ``from``/``to`` colors each frame and the widget draws with the result,
+        so a row can settle from a highlight to its resting color the same way
+        on TUI (palette-snapped per frame) and GUI — no branch on the backend.
+        Pass ``key`` to read one of several colors animating on the widget."""
+        if self._panel is None or self._widget is None:
+            return default
+        return self._panel.animated_color(self._widget, key=key, default=default)
 
     @property
     def native_menus(self) -> bool:
@@ -697,11 +713,13 @@ class DrawContext:
         child_ctx = DrawContext(
             self._backend, rect, self._caps,
             clip=clip, panel=self._panel, background=background,
-            focused=child_focused,
+            focused=child_focused, widget=widget,
         )
         widget.draw(child_ctx)
         child_ctx._close()
         self._backend.pop_clip()
+        if self._panel is not None:
+            self._panel._apply_group_effect(widget, rect)
         self._backend.end_group(widget)
 
 
@@ -739,26 +757,115 @@ def _bleed_to_window(
     return Rect(x0, y0, x1 - x0, y1 - y0)
 
 
+# A non-compositing backend (a terminal) cannot draw a smooth transition, so the
+# Panel plays every animation there as exactly TWO frames — one intermediate
+# state, then the target — instead of a multi-frame crawl that, once snapped to
+# the character grid, only ever reads as flicker (the "2-frame policy"). The
+# frame budget below is what ``stepped`` animations consume: ``step`` 1 lands on
+# 0.5 (intermediate), ``step`` 2 on 1.0 (target), after which the animation is
+# done. Compositing backends ignore this and interpolate continuously by time.
+_TUI_ANIM_STEPS = 2
+
+
+def _anim_progress(anim: Any, now: float) -> float:
+    """Progress 0..1 of an animation. A ``stepped`` (terminal) animation snaps
+    to the 2-frame schedule; otherwise progress is continuous in wall-clock
+    time. The animation channels share this so every kind steps in lockstep."""
+    if anim.stepped:
+        return min(1.0, anim.step / _TUI_ANIM_STEPS)
+    if anim.duration <= 0:
+        return 1.0
+    return min(1.0, max(0.0, (now - anim.start) / anim.duration))
+
+
 @dataclass
-class _SizeAnimation:
-    """Layout-level transition: the widget's rect grows from (from_w, from_h)
-    to its assigned size, and the widget re-draws at each intermediate size
-    (true size change, unlike the render-level "scale" zoom). A None
-    dimension stays at the assigned size."""
+class _GeometryAnimation:
+    """Layout-level (geometry) transition the Panel drives by interpolating the
+    widget's rect each frame, so it animates on *any* backend whose event loop
+    can wake on a timer. Three shapes, composable:
+
+    - size grow: the rect grows from (from_w, from_h) to its assigned size and
+      the widget re-draws at each intermediate size (a true size change).
+    - slide: the rect starts offset by (from_dx, from_dy) base units and moves
+      to its anchored position (a drawer sliding in from an edge).
+    - scale: the rect shrinks toward its center by ``from_scale`` and grows back
+      to full — the terminal's stand-in for the composited zoom, expressed as a
+      real (cell-snapped) rect inset since a grid cannot sub-scale glyphs.
+
+    The clip travels with the rect, so an off-edge / inset part is clipped
+    exactly as a composited backend's transform would clip it. Motion is linear;
+    a character grid snaps each frame to whole base units (see
+    ``_interpolate_rect``), so the region steps by an integer number of cells —
+    and on a terminal the whole thing is just two such steps (see the 2-frame
+    policy above)."""
 
     start: float
     duration: float
     from_w: float | None
     from_h: float | None
+    from_dx: float = 0.0
+    from_dy: float = 0.0
+    from_scale: float | None = None
+    stepped: bool = False
+    step: int = 0
 
     def progress(self, now: float) -> float:
-        if self.duration <= 0:
-            return 1.0
-        return min(1.0, max(0.0, (now - self.start) / self.duration))
+        return _anim_progress(self, now)
 
-    def eased(self, now: float) -> float:
+
+@dataclass
+class _ColorAnimation:
+    """A color tween the Panel drives by interpolating between two RGB(A) colors;
+    the animating widget reads the current value through
+    ``DrawContext.animated_color`` and draws with it (a row settling from a
+    highlight back to its resting color, a value pulsing on change).
+
+    Needs no compositing — a terminal renders a different (palette-snapped) color
+    per frame exactly like a GUI renders a different RGB — so it runs on any
+    backend with ``animation_ticks``, as a 2-frame step on a terminal and a
+    continuous tween on a compositing backend."""
+
+    start: float
+    duration: float
+    from_color: tuple
+    to_color: tuple
+    stepped: bool = False
+    step: int = 0
+
+    def progress(self, now: float) -> float:
+        return _anim_progress(self, now)
+
+    def value_at(self, now: float) -> tuple:
         p = self.progress(now)
-        return 1.0 - (1.0 - p) ** 2  # ease-out
+        return tuple(round(a + (b - a) * p) for a, b in zip(self.from_color, self.to_color))
+
+
+@dataclass
+class _EffectAnimation:
+    """A group-level optical effect — ``fade`` or ``highlight`` — played on a
+    non-compositing backend as part of the 2-frame policy. A terminal cannot
+    composite alpha, so instead of interpolating opacity it shows ONE
+    intermediate frame with a whole-cell stand-in over the widget's group (a
+    fade reads as a dim pass, a highlight as a one-frame color flash) and then
+    the clean target frame. Compositing backends never use this — there
+    ``fade``/``highlight`` go to the backend's real alpha overlay.
+
+    ``active`` is the binary the Panel needs: the effect is shown while the
+    animation is on its intermediate frame (progress < 1) and gone on the target
+    frame (progress == 1), after which the Panel drops it."""
+
+    kind: str  # "fade" | "highlight"
+    start: float
+    duration: float
+    hints: dict
+    stepped: bool = False
+    step: int = 0
+
+    def progress(self, now: float) -> float:
+        return _anim_progress(self, now)
+
+    def active(self, now: float) -> bool:
+        return self.progress(now) < 1.0
 
 
 class Panel:
@@ -777,7 +884,14 @@ class Panel:
         self._layout: Any | None = None
         self._margin_px = 0.0
         self._margin_units = 0.0
-        self._size_anims: dict[Any, _SizeAnimation] = {}
+        self._size_anims: dict[Any, _GeometryAnimation] = {}
+        # Running color tweens keyed by (widget, key); the widget reads the
+        # current value via DrawContext.animated_color (see _ColorAnimation).
+        self._color_anims: dict[tuple[Any, Any], _ColorAnimation] = {}
+        # Running group optical effects (fade/highlight) keyed by widget, played
+        # as a one-frame stand-in on non-compositing backends (see
+        # _EffectAnimation and _apply_group_effect).
+        self._effect_anims: dict[Any, _EffectAnimation] = {}
         # The app menu bar model (puikit.menu.Menu), if one was installed.
         self._menu_bar: Any | None = None
         # Last known pointer position in screen base units, fed by every mouse
@@ -1049,10 +1163,14 @@ class Panel:
             # Hover/press use the same region clicks and focus route to: the
             # bled fill, so the window margin belongs to the pane consistently.
             hit_rect=slot.fill if slot.fill is not None else rect,
+            widget=slot.widget,
         )
         slot.widget.draw(slot_ctx)
         slot_ctx._close()
         self.backend.pop_clip()
+        # A stepped fade/highlight paints its one-frame stand-in over the whole
+        # group, after its content (and children) are down.
+        self._apply_group_effect(slot.widget, rect)
         self.backend.end_group(slot.widget)
 
     def _render_layer(self, slot: _Slot) -> None:
@@ -1091,25 +1209,65 @@ class Panel:
             panel=self, background=background,
             # The top-most layer is the active modal, so it holds the focus.
             focused=bool(self._layers) and slot is self._layers[-1],
+            widget=slot.widget,
         )
         slot.widget.draw(layer_ctx)
         layer_ctx._close()
         self.backend.pop_clip()
+        self._apply_group_effect(slot.widget, rect)
         self.backend.end_group(slot.widget)
 
     # --- animation ----------------------------------------------------------------
 
     def animate(self, widget: Any, hints: dict[str, Any] | None = None) -> None:
-        # Without animation capability the change is applied immediately on
-        # the next render; capable backends render a real transition.
+        # The transition's *kind* and the backend's capability together decide
+        # who realizes it — resolution lives here in the Panel, never in the app.
+        #
+        # A COMPOSITING backend ("animation": GUI) renders every transition the
+        # smooth way: it owns the optical ones (fade/scale/highlight, real alpha
+        # and sub-unit transforms) and the slide transform; the Panel owns size
+        # (a true re-measure) and the color tween.
+        #
+        # A STEPPED backend ("animation_ticks" but not "animation": a terminal)
+        # cannot draw a smooth transition, so the Panel plays EVERY kind itself
+        # as exactly two frames — an intermediate state then the target (the
+        # 2-frame policy) — using whole-cell stand-ins:
+        #   - slide / size    -> rect interpolation (a 2-step move / grow)
+        #   - scale           -> rect inset (shrink-to-center, then full)
+        #   - color           -> color interpolation (read via animated_color)
+        #   - fade / highlight -> a one-frame group effect (a dim / color flash)
+        # so no animation type is left out and none crawls.
+        #
+        # A STILL backend (neither capability) applies the change immediately.
         hints = hints or {}
-        if not self.backend.capabilities.supports("animation"):
-            return
-        if hints.get("transition") == "size":
-            # Layout-level: the Panel animates the rect itself, the widget
-            # re-draws at each intermediate size.
-            self._start_size_animation(widget, hints)
-        else:
+        caps = self.backend.capabilities
+        transition = hints.get("transition")
+        smooth = caps.supports("animation")
+        stepped = caps.supports("animation_ticks") and not smooth
+        if not (smooth or stepped):
+            return  # still backend: the target state simply shows on next render
+
+        if transition == "color":
+            self._start_color_animation(widget, hints, stepped)
+        elif transition == "size":
+            # Always a Panel-owned re-measure (the widget redraws at each size).
+            self._start_geometry_animation(widget, hints, stepped)
+        elif transition == "slide":
+            if smooth:
+                self.backend.animate(widget, hints)  # GPU sub-unit transform
+            else:
+                self._start_geometry_animation(widget, hints, stepped)
+        elif transition == "scale":
+            if smooth:
+                self.backend.animate(widget, hints)  # composited zoom
+            else:
+                self._start_geometry_animation(widget, hints, stepped)  # rect inset
+        elif transition in ("fade", "highlight"):
+            if smooth:
+                self.backend.animate(widget, hints)  # real alpha overlay
+            else:
+                self._start_effect_animation(widget, hints, stepped)
+        elif smooth:
             self.backend.animate(widget, hints)
 
     def request_animation_ticks(self, callback: Any) -> bool:
@@ -1125,43 +1283,135 @@ class Panel:
         self.backend.request_animation_ticks(callback)
         return True
 
-    def _start_size_animation(self, widget: Any, hints: dict[str, Any]) -> None:
-        # Works for any widget in the tree: the target size is whatever rect
-        # the widget is given at draw time (Panel slot or Container child).
-        self._size_anims[widget] = _SizeAnimation(
+    def _start_geometry_animation(
+        self, widget: Any, hints: dict[str, Any], stepped: bool
+    ) -> None:
+        # Works for any widget in the tree: the target rect is whatever the
+        # widget is given at draw time (Panel slot, layer, or Container child).
+        # A given call carries one shape — slide offset, size, or scale — and
+        # the unused fields stay no-ops, so one mechanism covers all three.
+        self._size_anims[widget] = _GeometryAnimation(
             start=time.monotonic(),
             duration=hints.get("duration_ms", 200) / 1000.0,
             from_w=float(hints["from_w"]) if "from_w" in hints else None,
             from_h=float(hints["from_h"]) if "from_h" in hints else None,
+            from_dx=float(hints.get("from_dx", 0.0)),
+            from_dy=float(hints.get("from_dy", 0.0)),
+            from_scale=float(hints["from_scale"]) if "from_scale" in hints else None,
+            stepped=stepped,
         )
         self.backend.request_animation_ticks(self._animation_tick)
 
+    def _start_color_animation(
+        self, widget: Any, hints: dict[str, Any], stepped: bool
+    ) -> None:
+        # Keyed by (widget, key) so one widget can tween several colors at once
+        # (e.g. its foreground and background independently).
+        key = (widget, hints.get("key"))
+        self._color_anims[key] = _ColorAnimation(
+            start=time.monotonic(),
+            duration=hints.get("duration_ms", 200) / 1000.0,
+            from_color=tuple(hints["from"]),
+            to_color=tuple(hints["to"]),
+            stepped=stepped,
+        )
+        self.backend.request_animation_ticks(self._animation_tick)
+
+    def _start_effect_animation(
+        self, widget: Any, hints: dict[str, Any], stepped: bool
+    ) -> None:
+        # A group optical effect (fade/highlight) the Panel paints as a one-frame
+        # stand-in over the widget's whole group; only reached on a stepped
+        # backend (a compositing backend renders these itself).
+        self._effect_anims[widget] = _EffectAnimation(
+            kind=hints["transition"],
+            start=time.monotonic(),
+            duration=hints.get("duration_ms", 200) / 1000.0,
+            hints=hints,
+            stepped=stepped,
+        )
+        self.backend.request_animation_ticks(self._animation_tick)
+
+    def animated_color(
+        self, widget: Any, key: Any = None, default: Any = None
+    ) -> Any:
+        """Current value of a color transition started on ``widget`` (see
+        ``DrawContext.animated_color``), or ``default`` when none is running."""
+        anim = self._color_anims.get((widget, key))
+        if anim is None:
+            return default
+        return anim.value_at(time.monotonic())
+
+    def _apply_group_effect(self, widget: Any, rect: Rect) -> None:
+        """Paint a running fade/highlight effect over a freshly-drawn group as a
+        single intermediate frame (the 2-frame policy's stand-in for a composited
+        overlay). On the target frame the effect is inactive, so nothing is drawn
+        and the group reads clean; then the tick drops it."""
+        eff = self._effect_anims.get(widget)
+        if eff is None or not eff.active(time.monotonic()):
+            return
+        if eff.kind == "fade":
+            # No alpha on a terminal: a fade reads as one dim pass over the group.
+            self.backend.dim_rect(rect.x, rect.y, rect.w, rect.h)
+        else:  # highlight
+            color = eff.hints.get("color") or self.theme.accent
+            self.backend.flash_rect(rect.x, rect.y, rect.w, rect.h, color)
+
     def _animation_tick(self) -> bool:
         now = time.monotonic()
-        finished = [
-            widget
-            for widget, anim in self._size_anims.items()
-            if anim.progress(now) >= 1.0
-        ]
-        for widget in finished:
-            del self._size_anims[widget]
-        self.render()  # the final tick renders at the assigned rect
-        return bool(self._size_anims)
+        # Advance the stepped (terminal) animations one frame; compositing
+        # animations are time-driven and ignore the step counter.
+        for anim in (
+            *self._size_anims.values(),
+            *self._color_anims.values(),
+            *self._effect_anims.values(),
+        ):
+            if anim.stepped:
+                anim.step += 1
+        self.render()  # renders the new frame (intermediate, then target)
+        # Drop the finished ones AFTER they have rendered their target frame, so
+        # the steady state (assigned rect, resting color, no effect) persists.
+        for w in [w for w, a in self._size_anims.items() if a.progress(now) >= 1.0]:
+            del self._size_anims[w]
+        for k in [k for k, a in self._color_anims.items() if a.progress(now) >= 1.0]:
+            del self._color_anims[k]
+        for w in [w for w, a in self._effect_anims.items() if a.progress(now) >= 1.0]:
+            del self._effect_anims[w]
+        return bool(self._size_anims or self._color_anims or self._effect_anims)
 
     def _interpolate_rect(self, widget: Any, rect: Rect) -> Rect:
-        """The widget's rect with any running size animation applied."""
+        """The widget's rect with any running geometry transition applied: a
+        slide offset that decays to zero, a size that grows to its final extent,
+        and/or a scale inset that opens to full. The interpolated rect drives
+        both the content draw and its clip, so an off-edge / inset part is
+        clipped to the screen exactly as a transform would clip it.
+
+        Motion is linear. On a character grid (no ``pixel_layout``) the result
+        is snapped to whole base units, so each frame advances by an integer
+        number of cells — and on a terminal there are only two such frames."""
         anim = self._size_anims.get(widget)
         if anim is None:
             return rect
-        eased = anim.eased(time.monotonic())
+        p = anim.progress(time.monotonic())
+        x, y = rect.x, rect.y
         from_w = anim.from_w if anim.from_w is not None else rect.w
         from_h = anim.from_h if anim.from_h is not None else rect.h
-        return Rect(
-            rect.x,
-            rect.y,
-            from_w + (rect.w - from_w) * eased,
-            from_h + (rect.h - from_h) * eased,
-        )
+        w = from_w + (rect.w - from_w) * p
+        h = from_h + (rect.h - from_h) * p
+        if anim.from_scale is not None:
+            # Scale toward the rect center: shrink to from_scale, grow to full.
+            s = anim.from_scale + (1.0 - anim.from_scale) * p
+            w, h = rect.w * s, rect.h * s
+            x += (rect.w - w) / 2.0
+            y += (rect.h - h) / 2.0
+        x += anim.from_dx * (1.0 - p)
+        y += anim.from_dy * (1.0 - p)
+        result = Rect(x, y, w, h)
+        if not self.backend.capabilities.supports("pixel_layout"):
+            result = Rect(
+                round(result.x), round(result.y), round(result.w), round(result.h)
+            )
+        return result
 
     # --- text input -----------------------------------------------------------------
 

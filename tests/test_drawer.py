@@ -30,11 +30,24 @@ def _click(x, y):
     return Event(type=EventType.MOUSE_CLICK, x=x, y=y, button="left")
 
 
+def _settle_animations(panel):
+    """Drive the drawer's slide to its end so the layer sits at its anchored
+    rect — the steady state a single render would otherwise catch mid-flight now
+    that the slide animates on TUI too. On a terminal the slide is a fixed
+    2-frame step, so a few ticks always settle it; on GUI there is no
+    Panel-level anim and this is a no-op."""
+    for _ in range(4):
+        if not (panel._size_anims or panel._color_anims or panel._effect_anims):
+            break
+        panel.backend.run_animation_ticks()
+
+
 def test_show_drawer_pushes_layer_and_renders_title(backend):
     panel = Panel(backend)
     show_drawer(panel, Label("Drawer body"), side="left", title="Filters")
     assert len(panel._layers) == 1
     panel.render()
+    _settle_animations(panel)
     rows = backend.snapshot()
     assert any("Filters" in row for row in rows)
     assert any("Drawer body" in row for row in rows)

@@ -4,9 +4,11 @@
 edges — ``left`` / ``right`` / ``top`` / ``bottom``. The drawer hosts an
 arbitrary content widget, slides in from the edge it is anchored to, and
 (when modal) dims the rest of the screen. It is the *same* ``push_layer``
-intent the dialogs use, plus a ``slide`` transition: GUI animates the slide
-over a dimmed page with a drop shadow, TUI shows it immediately and leans on
-the surface-background contrast for separation — one intent, every backend.
+intent the dialogs use, plus a ``slide`` transition: GUI composites the slide
+(a sub-pixel transform) over a dimmed page with a drop shadow; TUI plays the
+same slide as a 2-frame whole-cell move (the terminal's "2-frame policy") and
+leans on the surface-background contrast for separation — one intent, every
+backend.
 
 Escape closes the drawer; when modal, a click on the dimmed area outside it
 closes it too. Tab / Shift+Tab cycle the focusable widgets inside the content
@@ -286,7 +288,8 @@ def show_drawer(
 
     drawer._panel = panel
     panel.push_layer(drawer, z=z, hints=hints, reflow=reflow)
-    # GUI slides it in from the edge; TUI shows it immediately (no animation cap).
+    # Same slide intent on every backend: GUI composites a sub-pixel transform,
+    # TUI plays a 2-frame whole-cell move (the Panel resolves which).
     panel.animate(
         drawer,
         hints={
