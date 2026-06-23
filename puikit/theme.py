@@ -86,6 +86,14 @@ THEME_TUI = Theme(
         "status": (72, 72, 92),
     },
     divider_color=(128, 128, 144),
+    # A menu/popup floats over content with no hairline frame on a character
+    # grid — only the background contrast bounds it. The default dark popup
+    # (37,37,38) sits too close to the content surface (30,30,38) to read, so
+    # raise it to a clear mid gray; the in-popup separators/fences then need a
+    # darker line (the default border is light, for a dark GUI popup) to show
+    # against it.
+    popup_bg=(64, 64, 64),
+    popup_border=(44, 44, 44),
 )
 
 
