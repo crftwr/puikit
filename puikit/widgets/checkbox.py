@@ -67,7 +67,10 @@ class Checkbox(Widget):
         # hover and clicks are limited to that width — not the empty space to
         # the right (interaction_states.md hit-region consistency).
         self._content_w = label_x + ctx.measure_text(self.label, self.style)
-        row_bg = theme.hover_bg if ctx.hovered_in(self._content_w, hu) else None
+        hovering = ctx.hovered_in(self._content_w, hu)
+        if hovering:
+            ctx.set_cursor("pointer")  # the mark + label reads as clickable
+        row_bg = theme.hover_bg if hovering else None
         if row_bg is not None:
             ctx.fill_rect(0, 0, self._content_w, hu, Style(bg=row_bg))
 

@@ -94,7 +94,10 @@ class DropDown(Widget):
             return
         field_w = min(float(self.width), ctx.size_units[0])
         self._field_w = field_w  # captured for hit-testing
-        bg = theme.hover_bg if ctx.hovered_in(field_w) else theme.control_bg
+        hovering = ctx.hovered_in(field_w)
+        if hovering:
+            ctx.set_cursor("pointer")  # the trigger reads as clickable
+        bg = theme.hover_bg if hovering else theme.control_bg
         field_h = ctx.size_units[1]
         ty = (field_h - 1.0) / 2.0  # center the text line within the field box
         # A flat, rounded field on vector backends, a plain fill on a character
@@ -211,6 +214,8 @@ class _DropDownPopup(Widget):
         text_dy = (row_h - 1.0) / 2.0  # center the text line within the taller row
         ctx.fill_rect(0, 0, wu, hu, Style(bg=theme.popup_bg))
         hover_row = self._hover_row(ctx)
+        if hover_row is not None:
+            ctx.set_cursor("pointer")  # rows select on click
         avail = max(0, ctx.width - _POPUP_TEXT_X - 1)
         for i, option in enumerate(self.options):
             top = i * row_h

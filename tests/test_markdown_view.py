@@ -4,7 +4,7 @@ import struct
 
 import pytest
 
-from puikit import Event, EventType, Panel, PROFILE_GUI_DESKTOP, PROFILE_TUI, Style, TextAttribute
+from puikit import CapabilityProfile, Event, EventType, Panel, PROFILE_GUI_DESKTOP, PROFILE_TUI, Style, TextAttribute
 from puikit.backends.memory_backend import MemoryBackend
 from puikit.widgets import MarkdownView
 from puikit.widgets.markdown_view import (
@@ -325,6 +325,31 @@ def test_click_link_opens_url():
     # Click on the word "docs" (starts at column 4).
     panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=5, y=0))
     assert opened == ["http://x"]
+
+
+def test_link_hover_requests_pointer_cursor():
+    shapes = []
+
+    class CursorBackend(MemoryBackend):
+        def set_pointer_shape(self, shape):
+            shapes.append(shape)
+
+    caps = CapabilityProfile({**PROFILE_GUI_DESKTOP, "pointer_shape": True})
+    backend = CursorBackend(width=40, height=8, capabilities=caps)
+    panel = Panel(backend)
+    view = MarkdownView("see [docs](http://x) here")
+    panel.add(view, x=0, y=0, w=40, h=8)
+    panel.render()
+
+    # Over plain text ("see"): no link cursor this frame.
+    panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=0.0, y=0.0))
+    panel.render()
+    assert shapes[-1] is None
+
+    # Over the link word "docs" (starts at column 4): a pointing hand.
+    panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=5.0, y=0.0))
+    panel.render()
+    assert shapes[-1] == "pointer"
 
 
 def test_click_outside_link_does_nothing():

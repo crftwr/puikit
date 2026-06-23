@@ -12,7 +12,7 @@ import sys
 from typing import Any
 
 from ..backend import Backend, Color, DEFAULT_STYLE, EventHandler, Style, TextAttribute
-from ..capability import PROFILE_TUI
+from ..capability import CapabilityProfile, PROFILE_TUI
 from ..event import Event, EventType
 from ..text import display_width as _display_width
 from ..text import glyph_runs as _glyph_runs
@@ -144,7 +144,21 @@ _SCROLLBAR_TRACK = (60, 60, 60)
 class CursesBackend(Backend):
     PROFILE = PROFILE_TUI
 
-    def __init__(self):
+    def __init__(self, pointer_shape: bool = False):
+        # Opt-in OSC 22 pointer shapes. Off by default: a terminal does not own
+        # its window's mouse cursor, so this only asks the emulator, and there
+        # is no way to probe whether the emulator honors it. When enabled, the
+        # backend advertises the "pointer_shape" capability, switches mouse
+        # tracking to all-motion (mode 1003) so bare hover is reported, and
+        # emits OSC 22 on the hovered region's "cursor" hint. The all-motion
+        # report is an input flood the input loop coalesces per frame, so it is
+        # only paid when the caller asks for it.
+        self._pointer_shape_enabled = bool(pointer_shape)
+        if self._pointer_shape_enabled:
+            self.PROFILE = CapabilityProfile({**PROFILE_TUI, "pointer_shape": True})
+        # Last shape requested, so set_pointer_shape only emits on a change
+        # rather than once per frame.
+        self._pointer_shape: str | None = None
         self._stdscr: "curses.window | None" = None
         self._quit_requested = False
         self._color_pairs: dict[tuple[int, int], int] = {}
@@ -226,6 +240,8 @@ class CursesBackend(Backend):
     def close(self) -> None:
         if self._stdscr is None:
             return
+        # Reset any requested pointer shape so the shell inherits the default.
+        self.set_pointer_shape(None)
         self._set_mouse_tracking(False)
         self._stdscr.keypad(False)
         curses.noraw()
@@ -233,14 +249,19 @@ class CursesBackend(Backend):
         curses.endwin()
         self._stdscr = None
 
-    @staticmethod
-    def _set_mouse_tracking(on: bool) -> None:
+    def _set_mouse_tracking(self, on: bool) -> None:
         """Enable/disable xterm SGR mouse tracking by writing the DECSET/DECRST
-        sequences straight to the terminal (1000 click, 1002 button-drag motion,
-        1006 SGR encoding)."""
+        sequences straight to the terminal (1000 click, button/any motion, 1006
+        SGR encoding).
+
+        Motion mode is 1002 (report motion only while a button is held, so no
+        hover flood) by default; with pointer shapes enabled it is 1003 (report
+        all motion), so bare hover is delivered as MOUSE_MOVE and the Panel can
+        resolve a per-region cursor shape."""
         verb = "h" if on else "l"
+        motion = 1003 if self._pointer_shape_enabled else 1002
         try:
-            sys.stdout.write(f"\x1b[?1000{verb}\x1b[?1002{verb}\x1b[?1006{verb}")
+            sys.stdout.write(f"\x1b[?1000{verb}\x1b[?{motion}{verb}\x1b[?1006{verb}")
             sys.stdout.flush()
         except (OSError, ValueError):
             pass
@@ -290,6 +311,34 @@ class CursesBackend(Backend):
             # Inside tmux the sequence must be wrapped in a passthrough envelope
             # (and its own ESCs doubled) or tmux swallows it instead of relaying
             # it to the outer terminal.
+            if os.environ.get("TMUX"):
+                seq = "\x1bPtmux;" + seq.replace("\x1b", "\x1b\x1b") + "\x1b\\"
+            sys.stdout.write(seq)
+            sys.stdout.flush()
+        except (OSError, ValueError):
+            pass
+
+    # --- pointer shape -------------------------------------------------------
+
+    def set_pointer_shape(self, shape: str | None) -> None:
+        """Ask the terminal emulator for a named pointer shape via OSC 22. Only
+        active when the backend was constructed with ``pointer_shape=True``;
+        otherwise (and on emulators that ignore OSC 22) this is a silent no-op,
+        matching the capability the Panel gates on. ``shape`` is a CSS/X cursor
+        name (``"text"``, ``"pointer"``, ``"not-allowed"``, ...); ``None`` resets
+        to the default arrow."""
+        if not self._pointer_shape_enabled or shape == self._pointer_shape:
+            return
+        self._pointer_shape = shape
+        self._emit_osc22(shape)
+
+    @staticmethod
+    def _emit_osc22(shape: str | None) -> None:
+        try:
+            # Empty payload resets the emulator to its default pointer.
+            seq = f"\x1b]22;{shape or ''}\x07"
+            # As with OSC 52, tmux only relays the sequence to the outer terminal
+            # inside a passthrough envelope with its own ESCs doubled.
             if os.environ.get("TMUX"):
                 seq = "\x1bPtmux;" + seq.replace("\x1b", "\x1b\x1b") + "\x1b\\"
             sys.stdout.write(seq)
@@ -728,10 +777,15 @@ class CursesBackend(Backend):
                 return Event(type=EventType.MOUSE_UP, x=x, y=y, button="left", modifiers=mods)
             return None
         if b & self._SGR_MOTION:
-            # Motion is only reported while a button is held (mode 1002); a left
-            # drag selects, anything else is ignored.
+            # A held-button motion is a drag; a left drag selects.
             if self._mouse_down:
                 return Event(type=EventType.MOUSE_DRAG, x=x, y=y, button="left", modifiers=mods)
+            # Bare motion (no button) is only requested under all-motion
+            # tracking (mode 1003), enabled alongside pointer shapes; deliver it
+            # as MOUSE_MOVE so the Panel can update hover and the cursor shape.
+            # Under mode 1002 the terminal never sends this, so ignore a stray.
+            if self._pointer_shape_enabled:
+                return Event(type=EventType.MOUSE_MOVE, x=x, y=y, modifiers=mods)
             return None
         # A fresh button press. The left button arms drag tracking and reports a
         # press the Panel will pair with the release; other buttons act on press.

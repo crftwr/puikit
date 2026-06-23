@@ -111,7 +111,13 @@ class ComboBox(Widget):
         # Drawn over the field box's own background so the chevron reads as part
         # of the field, not a separate box hanging off its right edge. The field
         # reserves these columns (right_pad), so it never collides with text.
-        field_bg = theme.hover_bg if (ctx.hovered_in(field_units) and not focused) else theme.control_bg
+        hovering = ctx.hovered_in(field_units)
+        # The combo reads as a clickable control; the pointer request comes after
+        # the inner field child draws, so it takes precedence over the field's
+        # I-beam over the whole trigger.
+        if hovering:
+            ctx.set_cursor("pointer")
+        field_bg = theme.hover_bg if (hovering and not focused) else theme.control_bg
         ctx.draw_text(w - 2, ty, arrow, Style(fg=arrow_fg, bg=field_bg))
 
     # --- filtering -----------------------------------------------------------
@@ -235,6 +241,8 @@ class _ComboPopup(Widget):
                 Style(fg=theme.muted_text, bg=theme.popup_bg),
             )
         hover_row = self._hover_row(ctx, len(filtered))
+        if hover_row is not None:
+            ctx.set_cursor("pointer")  # rows select on click
         for i, option_index in enumerate(filtered):
             top = i * row_h
             if top >= hu:

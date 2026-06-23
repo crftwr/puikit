@@ -31,6 +31,7 @@ from AppKit import (
     NSBackingStoreBuffered,
     NSBezierPath,
     NSColor,
+    NSCursor,
     NSDate,
     NSDefaultRunLoopMode,
     NSDragOperationCopy,
@@ -67,6 +68,7 @@ from AppKit import (
     NSTextInputContext,
     NSTrackingActiveInKeyWindow,
     NSTrackingArea,
+    NSTrackingCursorUpdate,
     NSTrackingInVisibleRect,
     NSTrackingMouseEnteredAndExited,
     NSTrackingMouseMoved,
@@ -495,6 +497,9 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
             | NSTrackingMouseEnteredAndExited
             | NSTrackingActiveInKeyWindow
             | NSTrackingInVisibleRect
+            # Let AppKit ask us (cursorUpdate_) what pointer to show over the
+            # view, so our per-region shape survives AppKit's own cursor passes.
+            | NSTrackingCursorUpdate
         )
         area = NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
             self.bounds(), options, self, None
@@ -505,6 +510,17 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
     def mouseMoved_(self, ns_event):
         x, y = self._mouse_unit(ns_event)
         self.backend._dispatch(Event(type=EventType.MOUSE_MOVE, x=x, y=y))
+
+    def cursorUpdate_(self, ns_event):
+        # AppKit's chance to set the pointer as it enters/moves over the view.
+        # Re-assert the shape the Panel last requested (set_pointer_shape) so it
+        # is not reset to the default arrow between renders; None falls through
+        # to the default.
+        cursor = self.backend._pointer_cursor
+        if cursor is not None:
+            cursor.set()
+        else:
+            objc.super(_PuiKitView, self).cursorUpdate_(ns_event)
 
     def mouseExited_(self, ns_event):
         # Move the pointer off-canvas so nothing reads as hovered.
@@ -632,6 +648,11 @@ class MacOSBackend(Backend):
         self._delegate = None
         self._handler: EventHandler | None = None
         self._quit_requested = False
+        # Pointer shape requested by the Panel (set_pointer_shape): the resolved
+        # NSCursor (None = default arrow) and the name it was resolved from, so a
+        # repeat request is a no-op. The view's cursorUpdate_ re-asserts it.
+        self._pointer_cursor: Any | None = None
+        self._pointer_shape: str | None = None
         # Display list double buffer: widgets fill `_back`, drawRect reads `_front`.
         self._back: list[tuple] = []
         self._front: list[tuple] = []
@@ -1411,6 +1432,44 @@ class MacOSBackend(Backend):
         pb = NSPasteboard.generalPasteboard()
         pb.clearContents()
         pb.setString_forType_(text, NSPasteboardTypeString)
+
+    # --- pointer shape -------------------------------------------------------
+
+    # CSS/X cursor name -> NSCursor factory selector. Names AppKit has no cursor
+    # for (e.g. "wait") fall through to the default arrow rather than guess.
+    _CURSORS = {
+        "text": "IBeamCursor",
+        "vertical-text": "IBeamCursorForVerticalLayout",
+        "pointer": "pointingHandCursor",
+        "crosshair": "crosshairCursor",
+        "not-allowed": "operationNotAllowedCursor",
+        "no-drop": "operationNotAllowedCursor",
+        "grab": "openHandCursor",
+        "grabbing": "closedHandCursor",
+        "context-menu": "contextualMenuCursor",
+        "col-resize": "resizeLeftRightCursor",
+        "ew-resize": "resizeLeftRightCursor",
+        "row-resize": "resizeUpDownCursor",
+        "ns-resize": "resizeUpDownCursor",
+    }
+
+    def set_pointer_shape(self, shape: str | None) -> None:
+        """Set the real OS pointer (NSCursor) under the mouse. ``shape`` is a
+        CSS/X cursor name resolved via ``_CURSORS``; ``None`` (or an unknown
+        name) resets to the default arrow. The resolved cursor is applied now
+        and re-asserted from the view's ``cursorUpdate_`` so AppKit's own cursor
+        passes keep it. The Panel gates this on the ``pointer_shape``
+        capability."""
+        if shape == self._pointer_shape:
+            return
+        self._pointer_shape = shape
+        selector = self._CURSORS.get(shape) if shape else None
+        self._pointer_cursor = getattr(NSCursor, selector)() if selector else None
+        # The named cursors are only available once NSApplication is up; guard
+        # so a missing one resets to the arrow (or no-ops) rather than raising.
+        cursor = self._pointer_cursor or NSCursor.arrowCursor()
+        if cursor is not None:
+            cursor.set()
 
     def open_url(self, url: str) -> bool:
         """Open ``url`` via the workspace: an http(s) URL in the default browser,

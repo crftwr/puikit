@@ -146,6 +146,10 @@ class Button(Widget):
     def draw(self, ctx: DrawContext) -> None:
         bg, fg, theme, ring = self._colors(ctx)
         wu, hu = ctx.size_units
+        # A pointing hand signals the button is clickable; one intent, resolved
+        # per backend (a real NSCursor on GUI, OSC 22 on a capable terminal).
+        if ctx.hovered:
+            ctx.set_cursor("pointer")
         # A rounded fill on vector backends, a plain fill on a character grid.
         ctx.round_rect(0, 0, wu, hu, Style(bg=bg), radius=_RADIUS, hints={"fill": True})
 

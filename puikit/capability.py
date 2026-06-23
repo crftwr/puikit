@@ -57,6 +57,13 @@ PROFILE_TUI = CapabilityProfile(
     native_menus=False,      # OS menu bar / context menus (NSMenu, HMENU, ...);
                              # the Panel falls back to a widget-rendered menu
     hover=False,
+    pointer_shape=False,     # request a NAMED pointer shape (CSS/X cursor name)
+                             # under the pointer. A terminal app does not own its
+                             # window's mouse cursor; at most it can ASK the
+                             # emulator via OSC 22, which is emulator-gated and
+                             # unprobeable, so this stays off by default. Never a
+                             # custom-drawn cursor. The Panel issues one intent
+                             # (a region's "cursor" hint) and no-ops where absent.
     media_keys=False,
     icons=False,
     images=False,
@@ -81,6 +88,7 @@ PROFILE_GUI_WEB = CapabilityProfile(
     system_tray=False,
     native_menus=False,    # no OS-level app menu bar in the browser
     hover=True,
+    pointer_shape=True,    # native cursor: CSS `cursor` / NSCursor / SetCursor
     media_keys=False,
     icons=True,
     images=True,
@@ -127,6 +135,7 @@ PROFILE_GAME = CapabilityProfile(
     native_file_dialog=False,
     system_tray=False,
     hover=True,
+    pointer_shape=True,
     media_keys=False,
     touch=True,            # platform-dependent
     gamepad=True,

@@ -96,6 +96,14 @@ class TreeView(Widget):
         # — up to the scrollbar's left edge — instead of the whole-unit-truncated
         # ctx.width, which would leave a sub-unit gap before the bar.
         fill_w = ctx.size_units[0] - (1 if show_bar else 0)
+        # A pointing hand over a row (within the content, not the scrollbar
+        # column), matching the click hit-test. One intent; resolved per backend.
+        if ctx.panel is not None and ctx.panel.pointer is not None and rows:
+            sx, sy, _sw, _sh = ctx.screen_rect
+            lx, ly = ctx.panel.pointer[0] - sx, ctx.panel.pointer[1] - sy
+            row_index = int(self.offset + ly)
+            if 0 <= lx < fill_w and 0 <= ly < view_h and 0 <= row_index < len(rows):
+                ctx.set_cursor("pointer")
         theme = ctx.theme
         first = int(self.offset)
         frac = self.offset - first

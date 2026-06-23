@@ -134,6 +134,12 @@ class MenuPopup(Widget):
         text_dy = (row_h - 1.0) / 2.0
         ctx.fill_rect(0, 0, wu, hu, Style(bg=theme.popup_bg))
         hover = self._hover_row(ctx)
+        # A pointing hand over an actionable row (an enabled item, not a
+        # separator or disabled row); one intent, resolved per backend.
+        if hover is not None:
+            entry = self.menu.items[hover]
+            if isinstance(entry, MenuItem) and entry.is_enabled():
+                ctx.set_cursor("pointer")
 
         for i, entry in enumerate(self.menu.items):
             top = i * row_h
@@ -324,6 +330,17 @@ class MenuBar(Widget):
             ctx.draw_text(x, ty, label, Style(fg=fg, bg=bg))
             self._entry_x.append((x, x + w, item))
             x += w
+
+        # A pointing hand over an enabled top-level title, so the bar reads as
+        # clickable. Pointer taken in widget-local coords (screen pointer minus
+        # this widget's origin), tested against the title spans built above.
+        if ctx.panel is not None and ctx.panel.pointer is not None:
+            rx, ry, _rw, rh = self._abs
+            lx, ly = ctx.panel.pointer[0] - rx, ctx.panel.pointer[1] - ry
+            if 0 <= ly < rh and any(
+                x0 <= lx < x1 and item.is_enabled() for x0, x1, item in self._entry_x
+            ):
+                ctx.set_cursor("pointer")
 
     # --- opening --------------------------------------------------------------
 

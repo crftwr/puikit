@@ -540,3 +540,52 @@ def test_default_font_flows_proportionally_on_gui():
     panel.add(_Plain(), x=0, y=0, w=5, h=1)
     render(panel, backend)
     assert "0123456789" in backend.calls
+
+
+class _CursorBackend(MemoryBackend):
+    """A pointer_shape-capable backend that records each set_pointer_shape."""
+
+    def __init__(self, **kw):
+        caps = CapabilityProfile({**PROFILE_TUI, "pointer_shape": True})
+        super().__init__(capabilities=caps, **kw)
+        self.shapes: list[str | None] = []
+
+    def set_pointer_shape(self, shape):
+        self.shapes.append(shape)
+
+
+class _CursorWidget(Widget):
+    """Requests a cursor only while the pointer is over it."""
+
+    def draw(self, ctx):
+        if ctx.hovered:
+            ctx.set_cursor("text")
+
+
+def test_cursor_intent_reaches_capable_backend_on_hover():
+    backend = _CursorBackend(width=20, height=5)
+    panel = Panel(backend)
+    panel.add(_CursorWidget(), x=0, y=0, w=10, h=3)
+
+    # Pointer outside the widget: the frame resolves to no shape (default).
+    panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=15.0, y=0.0))
+    panel.render()
+    assert backend.shapes[-1] is None
+
+    # Pointer over the widget: the requested shape is pushed once per frame.
+    panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=2.0, y=1.0))
+    panel.render()
+    assert backend.shapes[-1] == "text"
+
+
+def test_cursor_intent_is_not_pushed_without_capability():
+    # A TUI-profile backend (pointer_shape False) never gets the call, even
+    # though the widget issues the intent — the Panel gates it.
+    backend = MemoryBackend(width=20, height=5)
+    calls = []
+    backend.set_pointer_shape = lambda shape: calls.append(shape)  # type: ignore[method-assign]
+    panel = Panel(backend)
+    panel.add(_CursorWidget(), x=0, y=0, w=10, h=3)
+    panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=2.0, y=1.0))
+    panel.render()
+    assert calls == []

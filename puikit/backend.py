@@ -332,6 +332,21 @@ class Backend(ABC):
         """Replace the plain-text clipboard contents. See ``get_clipboard``."""
         self._clipboard = text
 
+    # --- pointer shape (capability "pointer_shape"; Panel gates the calls) ----
+
+    def set_pointer_shape(self, shape: str | None) -> None:
+        """Request the pointer shape under the mouse, named with a CSS/X cursor
+        name (``"text"``, ``"pointer"``, ``"crosshair"``, ``"not-allowed"``,
+        ``"grabbing"``, ...); ``None`` resets to the default arrow.
+
+        Only backends with the ``pointer_shape`` capability act on this. A GUI
+        backend sets a real OS cursor (``NSCursor`` / ``SetCursor`` / CSS
+        ``cursor``); a terminal backend can at most *ask* its emulator (OSC 22),
+        which is emulator-gated and silently ignored where unsupported. The
+        Panel resolves the hovered region's ``cursor`` hint into one intent and
+        never branches; the default no-ops, so backends without the capability
+        need no override."""
+
     # --- open a URL / file (capability "os_open"; Panel falls back) ----------
 
     def open_url(self, url: str) -> bool:

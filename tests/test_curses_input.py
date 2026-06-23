@@ -112,3 +112,33 @@ def test_set_clipboard_wraps_for_tmux(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert out.startswith("\x1bPtmux;") and out.endswith("\x1b\\")
     assert "aGk=" in out
+
+
+def test_pointer_shape_capability_is_opt_in():
+    # A terminal cannot reliably honor OSC 22 and the support is unprobeable, so
+    # the capability is off unless the backend is constructed with it.
+    assert CursesBackend().capabilities.supports("pointer_shape") is False
+    assert CursesBackend(pointer_shape=True).capabilities.supports("pointer_shape") is True
+
+
+def test_set_pointer_shape_emits_osc22_only_on_change(capsys):
+    be = CursesBackend(pointer_shape=True)
+    be.set_pointer_shape("text")
+    be.set_pointer_shape("text")  # unchanged: no second emit
+    be.set_pointer_shape(None)    # reset to default arrow
+    out = capsys.readouterr().out
+    assert out == "\x1b]22;text\x07\x1b]22;\x07"
+
+
+def test_set_pointer_shape_noop_when_disabled(capsys):
+    be = CursesBackend()  # capability off
+    be.set_pointer_shape("text")
+    assert capsys.readouterr().out == ""
+
+
+def test_bare_motion_is_mouse_move_only_under_all_motion_tracking():
+    # Mode 1002 (default) never reports button-less motion, so a stray is ignored.
+    assert CursesBackend()._parse_sgr_mouse("[<32;9;3M") is None
+    # Mode 1003 (with pointer shapes) reports hover as MOUSE_MOVE.
+    ev = CursesBackend(pointer_shape=True)._parse_sgr_mouse("[<32;9;3M")
+    assert ev.type is EventType.MOUSE_MOVE and (ev.x, ev.y) == (8, 2)

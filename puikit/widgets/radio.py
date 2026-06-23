@@ -88,6 +88,8 @@ class RadioGroup(Widget):
         label_dy = (pitch - 1.0) / 2.0  # center the 1-unit-tall label in the band
 
         hover_row = self._hover_row(ctx)
+        if hover_row is not None:
+            ctx.set_cursor("pointer")  # the options read as clickable
         for i, option in enumerate(self.options):
             ry = pad_y + i * pitch
             if ry + pitch > hu + 1e-6:

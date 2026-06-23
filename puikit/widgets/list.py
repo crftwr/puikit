@@ -103,6 +103,16 @@ class ListView(Widget):
         # and would leave a sub-unit gap before the bar.
         fill_w = ctx.size_units[0] - (1 if show_bar else 0)
 
+        # A pointing hand over a selectable row (within the content, not the
+        # scrollbar column), matching the click hit-test below. One intent;
+        # resolved per backend.
+        if ctx.panel is not None and ctx.panel.pointer is not None and self.items:
+            sx, sy, _sw, _sh = ctx.screen_rect
+            lx, ly = ctx.panel.pointer[0] - sx, ctx.panel.pointer[1] - sy
+            row_index = int((self.offset + ly) / self._row_h)
+            if 0 <= lx < fill_w and 0 <= ly < view_h and 0 <= row_index < len(self.items):
+                ctx.set_cursor("pointer")
+
         if self.row_factory is None:
             self._draw_text_rows(ctx, view_h, inner_w, fill_w)
         else:

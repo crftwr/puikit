@@ -1788,6 +1788,14 @@ class _DragWell(Widget):
         return SizeRequest(min=0.0, preferred=0.0, max=0.0)
 
     def draw(self, ctx):
+        # An open/closed hand signals the well is something to drag from: a grab
+        # hand while hovering, a closed (grabbing) hand once armed by a press.
+        # Gate BOTH on hover: a cursor request only applies while the pointer is
+        # over this widget (the topmost hovered widget wins). Requesting it
+        # unconditionally while armed would pin "grabbing" over the whole window,
+        # so it would never reset when the pointer moved off the well.
+        if ctx.hovered:
+            ctx.set_cursor("grabbing" if self._armed else "grab")
         ctx.draw_box(0, 0, ctx.width, ctx.height, hints={"fill": True})
         inner = max(0, ctx.width - 4)
         ctx.draw_text(2, 1, self.title[:inner], BOLD)
@@ -1797,8 +1805,15 @@ class _DragWell(Widget):
             ctx.draw_text(2, 4 + i, ("• " + os.path.basename(path))[:inner])
 
     def handle_event(self, event):
-        if event.type is EventType.MOUSE_CLICK and event.button == "left":
+        # A press arms; the first drag while held fires the OS drag once; a
+        # release without dragging disarms. Arming on the press (not a completed
+        # click) is what lets a single, natural press-and-drag start the drag —
+        # arming on click required an extra click first.
+        if event.type is EventType.MOUSE_DOWN and event.button == "left":
             self._armed = True
+            return True
+        if event.type is EventType.MOUSE_UP and event.button == "left":
+            self._armed = False
             return True
         if event.type is EventType.MOUSE_DRAG and event.button == "left" and self._armed:
             self._armed = False

@@ -3,7 +3,7 @@ the TUI and GUI profiles alike."""
 
 import pytest
 
-from puikit import Event, EventType, Panel, PROFILE_GUI_DESKTOP, PROFILE_TUI
+from puikit import CapabilityProfile, Event, EventType, Panel, PROFILE_GUI_DESKTOP, PROFILE_TUI
 from puikit.backends.memory_backend import MemoryBackend
 from puikit.widgets import (
     BusyIndicator,
@@ -178,6 +178,54 @@ def test_splitter_tab_enters_first_child(backend):
     panel.add(split, x=0, y=0, w=30, h=6)
     # The splitter is the only focusable; focus resolves onto its first child.
     assert split._focused is left
+
+
+def test_splitter_requests_resize_cursor_over_handle():
+    # A pointer_shape-capable backend that records each request.
+    caps = CapabilityProfile({**PROFILE_GUI_DESKTOP, "pointer_shape": True})
+    backend = MemoryBackend(width=40, height=16, capabilities=caps)
+    shapes = []
+    backend.set_pointer_shape = lambda shape: shapes.append(shape)
+    panel = Panel(backend)
+    split, _, _ = _splitter()  # horizontal: side-by-side panes, vertical handle
+    panel.add(split, x=0, y=0, w=30, h=6)
+    panel.render()  # lays out the handle rect
+
+    # Pointer away from the handle (over a pane): not the resize cursor.
+    panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=1.0, y=1.0))
+    panel.render()
+    assert shapes[-1] != "col-resize"
+
+    # Pointer over the handle's grab zone: a left/right resize cursor.
+    h = split._handle_rect
+    panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=h.x + h.w / 2, y=2.0))
+    panel.render()
+    assert shapes[-1] == "col-resize"
+
+
+def _cursor_backend():
+    caps = CapabilityProfile({**PROFILE_GUI_DESKTOP, "pointer_shape": True})
+    backend = MemoryBackend(width=40, height=16, capabilities=caps)
+    shapes = []
+    backend.set_pointer_shape = lambda shape: shapes.append(shape)
+    return backend, shapes
+
+
+def test_checkbox_requests_pointer_over_content():
+    backend, shapes = _cursor_backend()
+    panel = Panel(backend)
+    panel.add(Checkbox("toggle me"), x=0, y=0, w=30, h=1)
+    panel.render()
+
+    # Over the mark + label: a pointing hand.
+    panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=1.0, y=0.0))
+    panel.render()
+    assert shapes[-1] == "pointer"
+
+    # Past the content, in the empty slot to the right: no cursor.
+    panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=29.0, y=0.0))
+    panel.render()
+    assert shapes[-1] is None
 
 
 # --- ComboBox ----------------------------------------------------------------

@@ -123,7 +123,16 @@ class Splitter(FocusContainer, Widget):
             self.second, second.x, second.y, second.w, second.h,
             hints={"focused": self.second is self._focused},
         )
-        self._draw_handle(ctx, handle, self._is_hovered(ctx))
+        hovered = self._is_hovered(ctx)
+        # Resize affordance: a horizontal splitter (side-by-side panes, vertical
+        # handle) drags left/right; a vertical one drags up/down. Requested
+        # while hovering the grab zone or mid-drag (so the cursor holds even if
+        # the pointer slips off the thin line). Issued after the panes draw, so
+        # it wins over a child's cursor only inside the grab zone. One intent,
+        # resolved per backend.
+        if hovered or self._dragging:
+            ctx.set_cursor("col-resize" if self._horizontal else "row-resize")
+        self._draw_handle(ctx, handle, hovered)
 
     def _handle_thickness(self, ctx: DrawContext) -> float:
         """Handle thickness in base units: a whole cell on a character grid (a

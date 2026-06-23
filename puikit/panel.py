@@ -268,6 +268,16 @@ class DrawContext:
         )
         return within and self._clip.contains(px, py)
 
+    def set_cursor(self, shape: str | None) -> None:
+        """Ask for the mouse pointer shape over this widget, named with a CSS/X
+        cursor name (``"text"``, ``"pointer"``, ``"not-allowed"``, ...). Call it
+        during draw, usually gated on ``hovered`` (a text field requests
+        ``"text"`` only while the pointer is over its editable area). One intent,
+        resolved by the Panel: a capable backend sets a real OS cursor, others
+        no-op. See ``Panel.request_pointer_shape``."""
+        if self._panel is not None:
+            self._panel.request_pointer_shape(shape)
+
     @property
     def pressed(self) -> bool:
         """True while the active press both *began* inside this widget and the
@@ -897,6 +907,11 @@ class Panel:
         # Last known pointer position in screen base units, fed by every mouse
         # event. DrawContext.hovered reads it to resolve hover styling.
         self._pointer: tuple[float, float] | None = None
+        # Pointer shape a widget requested during this frame's draw (the topmost
+        # hovered widget wins, since it draws last). Collected each render and
+        # pushed to the backend once at the end of the frame; None resets to the
+        # default arrow. Only does anything on a "pointer_shape" backend.
+        self._pointer_shape: str | None = None
         # Active left-button press, captured between MOUSE_DOWN and MOUSE_UP so
         # action controls can show a held pressed cue (DrawContext.pressed) and
         # so a release only fires a click over the widget the press began on.
@@ -1109,12 +1124,19 @@ class Panel:
         if self._layout is not None:
             self._apply_layout()
         self.backend.clear()
+        # Reset the per-frame cursor request; widgets re-declare it via
+        # request_pointer_shape while drawing, topmost (last) wins.
+        self._pointer_shape = None
         for slot in self._children:
             self._draw_slot(slot)
         for divider in self._dividers:
             self._draw_divider(divider)
         for slot in self._layers:
             self._render_layer(slot)
+        # Push the resolved shape to the backend once per frame. Gated on the
+        # capability so the intent is a silent no-op everywhere else.
+        if self.backend.capabilities.supports("pointer_shape"):
+            self.backend.set_pointer_shape(self._pointer_shape)
         self.backend.present()
 
     def _pane_background(self, hints: dict[str, Any]) -> tuple[int, int, int] | None:
@@ -1419,6 +1441,19 @@ class Panel:
         request = getattr(self.backend, "request_text_input", None)
         if request is not None:
             request(x, y, hints or {})
+
+    # --- pointer shape --------------------------------------------------------
+
+    def request_pointer_shape(self, shape: str | None) -> None:
+        """A widget asks for the mouse pointer shape over it, named with a CSS/X
+        cursor name (``"text"``, ``"pointer"``, ``"not-allowed"``, ...). Called
+        during draw, typically gated on ``ctx.hovered``; the last (topmost) call
+        in a frame wins and is applied to the backend at the end of render().
+
+        One intent, every backend: a ``pointer_shape`` backend sets a real OS
+        cursor (or asks the terminal via OSC 22); others no-op. The widget never
+        branches on the capability."""
+        self._pointer_shape = shape
 
     # --- clipboard ------------------------------------------------------------
 
