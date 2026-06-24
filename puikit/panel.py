@@ -677,12 +677,24 @@ class DrawContext:
         if self._caps.supports("hairline"):
             self.fill_rect(rect.x, rect.y, rect.w, rect.h, Style(bg=color))
             return
+        # Box-drawing glyphs (│ / ─) must be drawn on the DEFAULT terminal
+        # background (bg=None), so we go straight to the backend and skip the
+        # pane-background inheritance that DrawContext.draw_text/_resolve would
+        # apply. Terminals such as macOS Terminal.app render box-drawing
+        # characters as seamless connected lines ONLY on the default background;
+        # a custom cell background color forces the per-cell font glyph instead,
+        # which leaves inter-line gaps where the terminal's line spacing shows
+        # through. (Same character and attributes either way — only the cell
+        # background decides whether the line connects.) This also matches the
+        # Panel's top-level _draw_divider, which already draws on the default
+        # background, so layout dividers and widget dividers render identically.
         style = Style(fg=color)
+        ox, oy = self._rect.x, self._rect.y
         if divider.vertical:
             for row in range(int(rect.h)):
-                self.draw_text(int(rect.x), int(rect.y) + row, "│", style)
+                self._backend.draw_text(int(ox + rect.x), int(oy + rect.y) + row, "│", style)
         else:
-            self.draw_text(int(rect.x), int(rect.y), "─" * int(rect.w), style)
+            self._backend.draw_text(int(ox + rect.x), int(oy + rect.y), "─" * int(rect.w), style)
 
     def draw_child(
         self,

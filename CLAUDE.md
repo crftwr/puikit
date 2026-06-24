@@ -77,6 +77,17 @@ TUI examples:
 - `draw_box` → rendered with `┌─┐└─┘`
 - `draw_scrollbar` → thumb/track painted with base unit background colors (a
   space glyph), so the bar fills the full row height with no inter-line gaps
+- **Box-drawing lines need the default background.** Terminals such as macOS
+  Terminal.app render box-drawing glyphs (`│ ─ ┌ ┐ └ ┘`) as *seamless connected
+  lines* only when the cell uses the **default** terminal background. Set a
+  custom cell `bg` and the terminal falls back to the per-cell **font glyph**,
+  which leaves **inter-line gaps** where the line spacing shows through — same
+  character, same attributes, only the background differs. So divider/frame
+  lines (`draw_divider`, `draw_box`) are drawn with `bg=None`; a line that
+  *must* sit on a colored surface should be a background-painted column/row
+  (the `draw_scrollbar` technique) or replaced by another separator (e.g. the
+  Drawer draws no TUI edge line at all — its surface-role background contrast
+  alone separates it from the page).
 
 GUI examples:
 - `draw_box` → rendered as rectangle lines

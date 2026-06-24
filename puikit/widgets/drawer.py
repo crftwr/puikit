@@ -24,7 +24,6 @@ from typing import Any
 from ..backend import Style, TextAttribute
 from ..event import Event, EventType
 from ..focus import FocusContainer, focus_on_click, move_focus
-from ..layout import Divider
 from ..panel import DrawContext, Rect
 from ..theme import DEFAULT_THEME
 from .base import Widget
@@ -99,24 +98,6 @@ class Drawer(FocusContainer, Widget):
 
     # --- drawing -------------------------------------------------------------
 
-    def _inner_divider(self, ctx: DrawContext) -> Divider:
-        """The boundary line on the drawer's *inner* edge (the one facing the
-        page): a vertical column for left/right drawers, a horizontal row for
-        top/bottom. Kept one device pixel thin on hairline backends and one
-        box-drawing line on whole-unit backends — ``ctx.draw_divider`` picks
-        which, so the drawer never branches on the capability."""
-        w, h = ctx.size_units
-        bw, bh = ctx.base_size
-        tx = 1.0 / bw if bw else 1.0
-        ty = 1.0 / bh if bh else 1.0
-        if self.side == "left":
-            return Divider(Rect(w - tx, 0.0, tx, h), vertical=True, level="subtle")
-        if self.side == "right":
-            return Divider(Rect(0.0, 0.0, tx, h), vertical=True, level="subtle")
-        if self.side == "top":
-            return Divider(Rect(0.0, h - ty, w, ty), vertical=False, level="subtle")
-        return Divider(Rect(0.0, 0.0, w, ty), vertical=False, level="subtle")
-
     def draw(self, ctx: DrawContext) -> None:
         self._panel = ctx.panel
         self._size = ctx.size_units
@@ -124,10 +105,12 @@ class Drawer(FocusContainer, Widget):
         w, h = ctx.width, ctx.height
 
         # Paint the drawer's own face. On vector backends it is a rounded
-        # rectangle whose *inner* corners are rounded (a shadow, set up by the
-        # Panel with the same radius/corners, separates it from the page); on a
-        # grid the round_rect fallback fills the whole rect flat and a
-        # box-drawing line on the inner edge carries the separation instead.
+        # rectangle whose *inner* corners are rounded, separated from the page
+        # by the drop shadow the Panel casts (radius/corners match the rounding).
+        # On a grid the round_rect fallback fills the whole rect flat and the
+        # drawer draws no edge line — the surface-role background contrast alone
+        # separates it from the page (a box-drawing line cannot sit on a colored
+        # surface without inter-line gaps; see CLAUDE.md → Rendering).
         theme = ctx.theme or DEFAULT_THEME
         bg = theme.surface_bg(self.surface)
         if bg is not None:
@@ -136,12 +119,9 @@ class Drawer(FocusContainer, Widget):
                 radius=self.radius,
                 hints={"fill": True, "corners": ROUNDED_CORNERS[self.side]},
             )
-        if not ctx.vector_shapes:
-            ctx.draw_divider(self._inner_divider(ctx))
 
-        # One base unit of padding inside the drawer, with the divider edge kept
-        # clear (its line is already drawn at the very edge). A title, when
-        # given, takes the first padded row and the content starts below it.
+        # One base unit of padding inside the drawer. A title, when given, takes
+        # the first padded row and the content starts below it.
         pad = 1
         cx, cy = pad, pad
         cw, ch = max(0, w - 2 * pad), max(0, h - 2 * pad)
