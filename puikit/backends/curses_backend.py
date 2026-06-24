@@ -97,6 +97,15 @@ def _build_tui_palette() -> list[Color]:
 
 _TUI_PALETTE: list[Color] = _build_tui_palette()
 
+# "dim below" scrim: a single muted foreground over a single dark background,
+# applied uniformly to every cell under a modal layer (see dim_rect). The
+# background is a soft, slightly blue-tinted slate rather than near-black, so an
+# empty (text-free) row reads as a calm dimmed veil instead of a harsh black
+# bar; the foreground sits only modestly above it so rows with text do not pop
+# as lighter bands against the empty ones.
+_DIM_FG: Color = (88, 90, 102)
+_DIM_BG: Color = (21, 22, 30)
+
 _KEY_NAMES = {
     curses.KEY_UP: "up",
     curses.KEY_DOWN: "down",
@@ -439,19 +448,47 @@ class CursesBackend(Backend):
             self.draw_text(x, y + row, " " * w, style)
 
     def dim_rect(self, x: int, y: int, w: int, h: int) -> None:
-        # TUI approximation of "dim below": restyle already-drawn base units with
-        # A_DIM. Colors are reset to the default pair, which is acceptable
-        # for content sitting under a modal layer.
+        # TUI "dim below": recolor every cell in the region to a single muted
+        # foreground over a single dark background (the scrim), keeping each
+        # glyph in place, so the page recedes evenly behind a modal layer.
+        #
+        # The scrim uses ONE fixed color pair for the whole region, not a
+        # darkened pair computed per cell. A per-cell tint preserves every
+        # difference between the page's surfaces (and leaves any cell still on
+        # the terminal default untouched), so the "dimmed" page reads as a
+        # blotchy patchwork of darks instead of a uniform veil. Non-color
+        # attributes are dropped too (A_REVERSE would swap the scrim's fg/bg on
+        # some cells and break the uniformity). A_DIM is no substitute: macOS
+        # Terminal.app barely renders it, and it never touches the background.
         assert self._stdscr is not None
         x, y, w, h = round(x), round(y), round(w), round(h)
         sw, sh = self.size
         x0 = max(0, x)
-        width = min(sw, x + w) - x0
-        if width <= 0:
+        x1 = min(sw, x + w)
+        if x1 <= x0:
             return
+        if curses.has_colors():
+            attr = curses.color_pair(self._color_pair(_DIM_FG, _DIM_BG))
+        else:
+            attr = curses.A_DIM
         for row in range(max(0, y), min(sh, y + h)):
+            for col in range(x0, x1):
+                try:
+                    self._stdscr.chgat(row, col, 1, attr)
+                except curses.error:
+                    pass
+        # ``chgat`` rewrites only a cell's attributes, and curses' diff-based
+        # refresh does not reliably treat an attribute-only change as "damage"
+        # to flush — so the scrim is computed correctly in the buffer but never
+        # sent to the terminal until a full repaint (e.g. a window resize) forces
+        # it, which is why the dim appeared not to apply (and why resizing the
+        # window made it snap in). Force the dimmed rows to be re-sent on the next
+        # refresh, exactly the way present() does with redrawwin for the IME case.
+        top = max(0, y)
+        count = min(sh, y + h) - top
+        if count > 0:
             try:
-                self._stdscr.chgat(row, x0, width, curses.A_DIM)
+                self._stdscr.redrawln(top, count)
             except curses.error:
                 pass
 
