@@ -214,6 +214,21 @@ def build_widgets_page(panel: Panel) -> VSplit:
         Item(Label(""), weight=1),
         gap=2,
     ))
+    # The one Button class, two image faces: an image-only tile, and an
+    # icon+label action button sized to its content. GUI draws the picture;
+    # TUI shows the alt glyph — the page never branches.
+    play = os.path.join(ASSETS, "play.png")
+    image_tile = LayoutView(HSplit(
+        Item(Button(image=play, alt="▶",
+                    on_click=lambda: set_status("Image button clicked")), size=8),
+        Item(Label(""), weight=1),
+    ))
+    image_text = LayoutView(HSplit(
+        Item(Button("Play", image=play, alt="▶",
+                    on_click=lambda: set_status("Image+text button clicked")),
+             size="content"),
+        Item(Label(""), weight=1),
+    ))
 
     heading = lambda text: Label(text, BOLD)  # noqa: E731 - tiny local helper
     scroller = ScrollView(
@@ -229,6 +244,9 @@ def build_widgets_page(panel: Panel) -> VSplit:
             (name, "content"),
             (heading("Button (primary / secondary variants)"), 1),
             (buttons, "content"),
+            (heading("Button — image face / image+text"), 1),
+            (image_tile, 4),
+            (image_text, 3),
             (heading("Static text — single line (Label, selectable)"), 1),
             (Label("The quick brown fox jumps over the lazy dog.", selectable=True), 1),
             (heading("Static text — multi line (TextBlock, selectable)"), 1),
@@ -982,17 +1000,11 @@ def build_images_page(panel: Panel) -> VSplit:
     # the layout, never by the page. GUI renders the real picture (scaled,
     # letterboxed, or cropped per fit); TUI has no `images` capability, so the
     # Panel layer stamps each image's alt emoji in its place. The page never
-    # branches on the backend. The image-faced Button clicks like any button.
+    # branches on the backend.
     # The asset is a 16:9 scene, so the fits read distinctly on GUI.
     status = Label("Resize the window to watch each fit re-resolve", DIM)
-    plays = {"n": 0}
-
-    def on_play() -> None:
-        plays["n"] += 1
-        status.text = f"Button clicked ×{plays['n']}"
 
     scene = os.path.join(ASSETS, "scene.png")
-    play = os.path.join(ASSETS, "play.png")
 
     def fit_cell(title: str, fit: str) -> Item:
         # Each cell hands the image the same square-ish pane; the fit decides
@@ -1038,27 +1050,6 @@ def build_images_page(panel: Panel) -> VSplit:
                     weight=1,
                 ),
                 gap=0,
-            ),
-            weight=1,
-        ),
-        # The one Button class, three faces: an image-only tile, and an
-        # icon+label action button sized to its content.
-        Item(
-            VSplit(
-                Item(Label("Button: image / image+text", BOLD), size=1),
-                Item(
-                    HSplit(Item(Button(image=play, on_click=on_play, alt="▶"), size=8), Item(Label(""), weight=1)),
-                    size=4,
-                ),
-                Item(
-                    HSplit(
-                        Item(Button("Play", image=play, on_click=on_play, alt="▶"), size="content"),
-                        Item(Label(""), weight=1),
-                    ),
-                    size=3,
-                ),
-                Item(Label(""), weight=1),
-                gap=1,
             ),
             weight=1,
         ),
