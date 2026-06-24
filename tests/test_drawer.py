@@ -33,13 +33,18 @@ def _click(x, y):
 def _settle_animations(panel):
     """Drive the drawer's slide to its end so the layer sits at its anchored
     rect — the steady state a single render would otherwise catch mid-flight now
-    that the slide animates on TUI too. On a terminal the slide is a fixed
-    2-frame step, so a few ticks always settle it; on GUI there is no
-    Panel-level anim and this is a no-op."""
+    that the slide animates on TUI too — and fire any backend-driven completion
+    hooks (a composited slide-out closing the drawer). On a terminal the slide is
+    a fixed 2-frame step, so a few ticks always settle it; on GUI the open slide
+    has no Panel-level anim, and only a close queues a backend completion."""
+    backend = panel.backend
     for _ in range(4):
-        if not (panel._size_anims or panel._color_anims or panel._effect_anims):
+        if not (
+            panel._size_anims or panel._color_anims or panel._effect_anims
+            or backend._pending_completes
+        ):
             break
-        panel.backend.run_animation_ticks()
+        backend.run_animation_ticks()
 
 
 def test_show_drawer_pushes_layer_and_renders_title(backend):
@@ -109,8 +114,56 @@ def test_escape_closes_drawer(backend):
     show_drawer(panel, Label("x"), side="right", on_close=lambda: closed.append(True))
     panel.render()
     panel.dispatch_event(_key("escape"))
+    # Closing slides the drawer back off its edge first; the layer pops once the
+    # slide-out finishes (and at once on a still backend).
+    _settle_animations(panel)
     assert panel._layers == []
     assert closed == [True]
+
+
+def test_close_slides_out_before_popping(backend):
+    # The drawer must not pop instantly: it slides back off its edge first, so the
+    # layer is still present right after close() and only goes once the slide-out
+    # has settled. (A still backend has neither capability and pops at once, but
+    # both fixtures here animate.)
+    panel = Panel(backend)
+    drawer = show_drawer(panel, Label("x"), side="right", size=20)
+    panel.render()
+    drawer.close()
+    assert len(panel._layers) == 1  # still sliding out
+    _settle_animations(panel)
+    assert panel._layers == []
+
+
+@pytest.mark.parametrize(
+    "side,offset",
+    [
+        ("left", (-20.0, 0.0)),
+        ("right", (20.0, 0.0)),
+        ("top", (0.0, -8.0)),
+        ("bottom", (0.0, 8.0)),
+    ],
+)
+def test_close_slide_out_offset_matches_edge(backend, side, offset):
+    # The slide-out offset mirrors the opening slide: off the anchored edge,
+    # derived from the drawer's current size.
+    panel = Panel(backend)
+    axis = 20 if side in ("left", "right") else 8
+    drawer = show_drawer(panel, Label("x"), side=side, size=axis)
+    panel.render()
+    assert drawer._slide_offset() == offset
+
+
+def test_double_close_pops_once(backend):
+    closed = []
+    panel = Panel(backend)
+    drawer = show_drawer(panel, Label("x"), side="left", on_close=lambda: closed.append(1))
+    panel.render()
+    drawer.close()
+    drawer.close()  # a second close while sliding out must be ignored
+    _settle_animations(panel)
+    assert panel._layers == []
+    assert closed == [1]
 
 
 def test_scrim_click_closes_modal_drawer(backend):
@@ -119,6 +172,7 @@ def test_scrim_click_closes_modal_drawer(backend):
     panel.render()
     # Click well to the right of a 20-wide left drawer: on the dimmed scrim.
     panel.dispatch_event(_click(50, 10))
+    _settle_animations(panel)
     assert panel._layers == []
 
 

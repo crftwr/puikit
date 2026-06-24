@@ -11,7 +11,10 @@ leans on the surface-background contrast for separation — one intent, every
 backend.
 
 Escape closes the drawer; when modal, a click on the dimmed area outside it
-closes it too. Tab / Shift+Tab cycle the focusable widgets inside the content
+closes it too. Closing plays the opening slide in reverse — the drawer slides
+back off its edge, then the layer pops (GUI composites the slide-out, TUI plays
+the 2-frame whole-cell move, a still backend pops at once). Tab / Shift+Tab
+cycle the focusable widgets inside the content
 (the drawer is the modal focus root, exactly like the Panel is for the page),
 so the content is fully usable without the app branching on the backend.
 """
@@ -70,6 +73,7 @@ class Drawer(FocusContainer, Widget):
         modal: bool = True,
         surface: str = "sidebar",
         radius: float = DEFAULT_RADIUS,
+        duration_ms: int = 200,
     ):
         if side not in SIDES:
             raise ValueError(f"side must be one of {SIDES}, got {side!r}")
@@ -78,6 +82,11 @@ class Drawer(FocusContainer, Widget):
         self.title = title
         self.on_close = on_close
         self.modal = modal
+        # Slide duration (ms) reused by the closing animation so it mirrors the
+        # opening one. ``_closing`` guards against a second close (e.g. a repeated
+        # escape) firing while the slide-out is already playing.
+        self.duration_ms = duration_ms
+        self._closing = False
         # Surface role resolved to a fill color by the theme, and the inner-edge
         # corner radius (device pixels) for the rounded face on GUI.
         self.surface = surface
@@ -136,15 +145,58 @@ class Drawer(FocusContainer, Widget):
 
     # --- events --------------------------------------------------------------
 
+    def _slide_offset(self) -> tuple[float, float]:
+        """The off-edge offset (base units) the drawer slides *to* when closing —
+        the mirror of the opening slide, derived from the drawer's current size so
+        it stays correct after a window resize."""
+        wu, hu = self._size
+        if self.side == "left":
+            return (-wu, 0.0)
+        if self.side == "right":
+            return (wu, 0.0)
+        if self.side == "top":
+            return (0.0, -hu)
+        return (0.0, hu)  # bottom
+
     def close(self) -> None:
-        """Pop the drawer layer and notify ``on_close``. Pops unconditionally
-        (the drawer is the top layer while open), mirroring ``MessageBox``."""
+        """Slide the drawer back off its edge, then pop the layer and notify
+        ``on_close``. On a compositing backend the slide-out is composited; on a
+        terminal it plays as the 2-frame whole-cell move; on a still backend the
+        layer pops at once — one intent, the Panel resolves it (mirroring the
+        opening slide in ``show_drawer``). The drawer is the top layer while open,
+        so it pops unconditionally, like ``MessageBox``."""
+        if self._closing:
+            return
+        self._closing = True
+        from_dx, from_dy = self._slide_offset()
+        started = False
+        if self._panel is not None and (from_dx or from_dy):
+            started = self._panel.animate(
+                self,
+                hints={
+                    "transition": "slide",
+                    "out": True,
+                    "duration_ms": self.duration_ms,
+                    "from_dx": from_dx,
+                    "from_dy": from_dy,
+                    "on_complete": self._finish_close,
+                },
+            )
+        if not started:
+            self._finish_close()
+
+    def _finish_close(self) -> None:
+        """Pop the drawer layer once the slide-out has played and repaint the page
+        without it, then notify ``on_close``."""
         if self._panel is not None:
             self._panel.pop_layer()
+            self._panel.render()
         if self.on_close is not None:
             self.on_close()
 
     def handle_event(self, event: Event) -> bool:
+        if self._closing:
+            return True  # sliding out: swallow input, the layer is leaving
         if event.type is EventType.KEY:
             if event.key == "escape":
                 self.close()
@@ -213,7 +265,7 @@ def show_drawer(
         raise ValueError(f"side must be one of {SIDES}, got {side!r}")
     drawer = Drawer(
         content, side=side, title=title, on_close=on_close, modal=modal,
-        surface=surface, radius=radius,
+        surface=surface, radius=radius, duration_ms=duration_ms,
     )
     snap = not panel.backend.capabilities.supports("pixel_layout")
 

@@ -828,6 +828,12 @@ class _GeometryAnimation:
     from_dx: float = 0.0
     from_dy: float = 0.0
     from_scale: float | None = None
+    # A slide normally moves an off-edge offset *to* the rest position (slide in);
+    # ``out`` reverses it — the rect starts at rest and travels *to* the offset
+    # (a drawer sliding back off its edge to close). on_complete fires once, after
+    # the target frame, so a close can pop its layer when the slide finishes.
+    out: bool = False
+    on_complete: Any | None = None
     stepped: bool = False
     step: int = 0
 
@@ -1253,7 +1259,7 @@ class Panel:
 
     # --- animation ----------------------------------------------------------------
 
-    def animate(self, widget: Any, hints: dict[str, Any] | None = None) -> None:
+    def animate(self, widget: Any, hints: dict[str, Any] | None = None) -> bool:
         # The transition's *kind* and the backend's capability together decide
         # who realizes it — resolution lives here in the Panel, never in the app.
         #
@@ -1273,13 +1279,18 @@ class Panel:
         # so no animation type is left out and none crawls.
         #
         # A STILL backend (neither capability) applies the change immediately.
+        #
+        # Returns whether a transition was scheduled: False on a still backend, so
+        # a caller that must act *after* a transition (a drawer popping its layer
+        # once it has slid out, via an ``on_complete`` hint) can fall back to doing
+        # it at once when nothing will animate.
         hints = hints or {}
         caps = self.backend.capabilities
         transition = hints.get("transition")
         smooth = caps.supports("animation")
         stepped = caps.supports("animation_ticks") and not smooth
         if not (smooth or stepped):
-            return  # still backend: the target state simply shows on next render
+            return False  # still backend: the target state shows on next render
 
         if transition == "color":
             self._start_color_animation(widget, hints, stepped)
@@ -1303,6 +1314,7 @@ class Panel:
                 self._start_effect_animation(widget, hints, stepped)
         elif smooth:
             self.backend.animate(widget, hints)
+        return True
 
     def request_animation_ticks(self, callback: Any) -> bool:
         """Register a per-frame tick ``callback`` for a widget that animates
@@ -1332,6 +1344,8 @@ class Panel:
             from_dx=float(hints.get("from_dx", 0.0)),
             from_dy=float(hints.get("from_dy", 0.0)),
             from_scale=float(hints["from_scale"]) if "from_scale" in hints else None,
+            out=bool(hints.get("out", False)),
+            on_complete=hints.get("on_complete"),
             stepped=stepped,
         )
         self.backend.request_animation_ticks(self._animation_tick)
@@ -1405,8 +1419,17 @@ class Panel:
         self.render()  # renders the new frame (intermediate, then target)
         # Drop the finished ones AFTER they have rendered their target frame, so
         # the steady state (assigned rect, resting color, no effect) persists.
-        for w in [w for w, a in self._size_anims.items() if a.progress(now) >= 1.0]:
+        finished = [
+            (w, a) for w, a in self._size_anims.items() if a.progress(now) >= 1.0
+        ]
+        for w, _a in finished:
             del self._size_anims[w]
+        # Fire each geometry animation's completion hook last — a slide-out close
+        # pops its layer here, having already rendered its final (off-edge) frame,
+        # then re-renders the page without it.
+        for _w, a in finished:
+            if a.on_complete is not None:
+                a.on_complete()
         for k in [k for k, a in self._color_anims.items() if a.progress(now) >= 1.0]:
             del self._color_anims[k]
         for w in [w for w, a in self._effect_anims.items() if a.progress(now) >= 1.0]:
@@ -1438,8 +1461,10 @@ class Panel:
             w, h = rect.w * s, rect.h * s
             x += (rect.w - w) / 2.0
             y += (rect.h - h) / 2.0
-        x += anim.from_dx * (1.0 - p)
-        y += anim.from_dy * (1.0 - p)
+        # Slide in decays the offset to zero (1 - p); slide out grows it (p).
+        slide_p = p if anim.out else (1.0 - p)
+        x += anim.from_dx * slide_p
+        y += anim.from_dy * slide_p
         result = Rect(x, y, w, h)
         if not self.backend.capabilities.supports("pixel_layout"):
             result = Rect(

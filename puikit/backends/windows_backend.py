@@ -562,8 +562,16 @@ class WindowsBackend(Backend):
 
     def _on_animation_tick(self) -> None:
         now = time.monotonic()
+        finished = [a for a in self._animations.values() if a.done(now)]
         self._animations = {k: a for k, a in self._animations.items() if not a.done(now)}
         self._tick_callbacks = [cb for cb in self._tick_callbacks if cb()]
+        # Fire each finished transition's completion hook (a drawer slide-out pops
+        # its layer) before the redraw, so the hook's re-render rebuilds the
+        # display list without the popped layer — no one-frame flash back at rest.
+        for anim in finished:
+            on_complete = anim.hints.get("on_complete")
+            if on_complete is not None:
+                on_complete()
         if self._hwnd:
             native.user32.InvalidateRect(self._hwnd, None, False)
         if not self._animations and not self._tick_callbacks and self._hwnd:
@@ -904,10 +912,13 @@ class WindowsBackend(Backend):
             return (animation, rect, False)
         if animation.kind == "slide" and rect is not None:
             # Position: linear (constant velocity), matching the Panel's geometry
-            # transitions, so a slide reads the same on GUI and TUI.
+            # transitions, so a slide reads the same on GUI and TUI. Slide in
+            # decays the offset to zero (1 - p); slide out ("out") grows it from
+            # zero (a drawer sliding back off its edge to close).
             lin = animation.progress(now)
-            dx = animation.hints.get("from_dx", 0.0) * self._base_w * (1.0 - lin)
-            dy = animation.hints.get("from_dy", 2.0) * self._base_h * (1.0 - lin)
+            slide_p = lin if animation.hints.get("out") else (1.0 - lin)
+            dx = animation.hints.get("from_dx", 0.0) * self._base_w * slide_p
+            dy = animation.hints.get("from_dy", 2.0) * self._base_h * slide_p
             m = native.D2D1_MATRIX_3X2_F.translation(dx, dy)
             self._transform_stack[-1] = m
             native.rt_set_transform(self._render_target, m)

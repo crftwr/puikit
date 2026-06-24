@@ -981,12 +981,21 @@ class MacOSBackend(Backend):
 
     def _on_animation_tick(self, timer) -> None:
         now = time.monotonic()
+        finished = [anim for anim in self._animations.values() if anim.done(now)]
         self._animations = {
             key: anim for key, anim in self._animations.items() if not anim.done(now)
         }
         # Layout-level animations (Panel "size" transitions) re-render the
         # display list themselves; a callback returning False is done.
         self._tick_callbacks = [cb for cb in self._tick_callbacks if cb()]
+        # Fire each finished transition's completion hook (a drawer slide-out pops
+        # its layer here) BEFORE the redraw below, so the hook's re-render rebuilds
+        # the display list without the popped layer — otherwise the now-untransformed
+        # group would flash back at its rest position for one frame.
+        for anim in finished:
+            on_complete = anim.hints.get("on_complete")
+            if on_complete is not None:
+                on_complete()
         if self._view is not None:
             self._view.setNeedsDisplay_(True)
         if not self._animations and not self._tick_callbacks:
@@ -1075,12 +1084,15 @@ class MacOSBackend(Backend):
             CGContextBeginTransparencyLayer(cg, None)
             return (animation, rect, True, True)
         if animation.kind == "slide":
-            # Position: start offset (in base units) decaying to the final place.
-            # Linear (constant velocity), matching the Panel's geometry
-            # transitions, so a slide reads the same on GUI and TUI.
+            # Position: an offset (in base units) interpolated against the rest
+            # place. Slide in decays it to zero (1 - p); slide out ("out") grows it
+            # from zero (a drawer sliding back off its edge). Linear (constant
+            # velocity), matching the Panel's geometry transitions, so a slide
+            # reads the same on GUI and TUI.
             lin = animation.progress(now)
-            dx = animation.hints.get("from_dx", 0.0) * self._base_w * (1.0 - lin)
-            dy = animation.hints.get("from_dy", 2.0) * self._base_h * (1.0 - lin)
+            slide_p = lin if animation.hints.get("out") else (1.0 - lin)
+            dx = animation.hints.get("from_dx", 0.0) * self._base_w * slide_p
+            dy = animation.hints.get("from_dy", 2.0) * self._base_h * slide_p
             CGContextSaveGState(cg)
             CGContextTranslateCTM(cg, dx, dy)
             return (animation, rect, True, False)

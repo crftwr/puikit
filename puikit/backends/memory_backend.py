@@ -43,6 +43,10 @@ class MemoryBackend(Backend):
         self.flash_calls: list[tuple] = []
         self.animate_calls: list[tuple[Any, dict[str, Any]]] = []
         self.tick_callbacks: list[Any] = []
+        # Completion hooks from backend-driven (compositing-path) transitions,
+        # fired on the next tick — the headless stand-in for a real backend's
+        # animation timer calling back when a composited slide ends.
+        self._pending_completes: list[Any] = []
         self.present_count = 0
         self._clip_stack: list[tuple[int, int, int, int]] = []  # x0, y0, x1, y1
         self.clear()
@@ -196,15 +200,24 @@ class MemoryBackend(Backend):
         self.shadow_calls.append((x, y, w, h, radius, corners))
 
     def animate(self, widget: Any, hints: dict[str, Any] | None = None) -> None:
-        self.animate_calls.append((widget, hints or {}))
+        hints = hints or {}
+        self.animate_calls.append((widget, hints))
+        on_complete = hints.get("on_complete")
+        if on_complete is not None:
+            self._pending_completes.append(on_complete)
 
     def request_animation_ticks(self, callback) -> None:
         if callback not in self.tick_callbacks:
             self.tick_callbacks.append(callback)
 
     def run_animation_ticks(self) -> None:
-        """Test helper: run one tick round, dropping finished callbacks."""
+        """Test helper: run one tick round, dropping finished callbacks, then fire
+        any backend-driven transitions' completion hooks (a composited slide-out
+        end), mirroring the real backend's timer."""
         self.tick_callbacks = [cb for cb in self.tick_callbacks if cb()]
+        pending, self._pending_completes = self._pending_completes, []
+        for on_complete in pending:
+            on_complete()
 
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float, style: Style = DEFAULT_STYLE
