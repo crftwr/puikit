@@ -143,6 +143,19 @@ class DrawContext:
         # interior clip); the Panel pops them when the widget's draw returns.
         self._pushed_clips = 0
 
+    def _text_style(self, style: Style) -> Style:
+        """Resolve a Style for drawing/measuring *text*: the shared `_resolve`
+        seam, plus a theme-driven default foreground. A text run that names no
+        color inherits the theme's text color, the same way it inherits the
+        pane background — so a light theme (dark text on a light surface) reads
+        instead of falling through to the backend's hardcoded near-white. Only
+        the text path defaults the foreground: primitives whose `fg` carries a
+        different meaning (a scrollbar thumb / box-line color, where `None`
+        selects the backend's own default) keep using `_resolve` directly."""
+        if style.fg is None and self._panel is not None and self._panel.theme is not None:
+            style = Style(self._panel.theme.text, style.bg, style.attr, style.font)
+        return self._resolve(style)
+
     def _resolve(self, style: Style) -> Style:
         """The single seam every Style crosses before the backend sees it:
         styles without an explicit background inherit the pane's, and a font
@@ -388,7 +401,7 @@ class DrawContext:
         # the slice math is taken in whole cells so truncation stays grid-safe.
         if not -1 < y < self._rect.h:
             return
-        resolved = self._resolve(style)
+        resolved = self._text_style(style)
         if resolved.font is not None:
             # Proportional / sized flow text: a character is not one base unit
             # wide, so slicing by ceil(width) columns would chop trailing glyphs

@@ -37,6 +37,7 @@ from puikit import (
     Panel,
     Style,
     TextAttribute,
+    Theme,
     VSplit,
 )
 from puikit.backends import create_backend
@@ -84,6 +85,221 @@ STATUS_BG = (0, 122, 204)    # status bar      #007ACC (accent)
 STATUS_FG = Style(fg=(255, 255, 255), bg=STATUS_BG)
 # Button face: a lighter fill so buttons read as raised against a footer bar.
 BUTTON_FACE = Style(fg=(232, 234, 240), bg=(74, 88, 124))
+
+
+# --- theme palettes --------------------------------------------------------------
+#
+# Theme switching is pure intent: the shell tags its panes with semantic surface
+# roles (header / sidebar / content / status) instead of hardcoded colors, and
+# every widget reads its accent / selection / control colors from `panel.theme`
+# at draw time. So cycling the active `Theme` (the `t` key) recolors the whole
+# catalog — chrome and page widgets alike — with no per-widget repaint logic and
+# no backend branch; the surface backgrounds re-resolve from the new theme on the
+# next render. Each palette keeps light text on dark surfaces so every backend
+# (TUI included, where colors snap to xterm-256) stays legible.
+#
+# The `status` surface is the accent color so the footer bar reads as the
+# theme's signature hue; the status/title label foregrounds are refreshed in
+# `apply_theme` because a Label carries a fixed Style (its own glyph background).
+
+
+def _luminance(color: tuple[int, int, int]) -> float:
+    r, g, b = color
+    return 0.299 * r + 0.587 * g + 0.114 * b
+
+
+def _on_accent_fg(accent: tuple[int, int, int]) -> tuple[int, int, int]:
+    """Black or white, whichever reads on the accent (used for the status bar)."""
+    return (28, 28, 28) if _luminance(accent) > 150 else (255, 255, 255)
+
+
+DEMO_THEMES: list[tuple[str, Theme]] = [
+    (
+        "Dark+",
+        Theme(
+            surfaces={
+                "content": (30, 30, 30),
+                "sidebar": (37, 37, 38),
+                "header": (60, 60, 60),
+                "status": (0, 122, 204),
+            },
+            divider_color=(90, 90, 104),
+            accent=(0, 122, 204),
+            text=(212, 212, 212),
+            muted_text=(157, 157, 157),
+            control_bg=(60, 60, 60),
+            control_border=(69, 69, 69),
+            button_bg=(14, 99, 156),
+            button_hover_bg=(17, 119, 187),
+            selection_active_bg=(9, 71, 113),
+            selection_inactive_bg=(55, 55, 61),
+        ),
+    ),
+    (
+        "Monokai",
+        Theme(
+            surfaces={
+                "content": (39, 40, 34),
+                "sidebar": (46, 47, 40),
+                "header": (62, 61, 52),
+                "status": (166, 226, 46),
+            },
+            divider_color=(90, 89, 77),
+            accent=(166, 226, 46),
+            text=(248, 248, 242),
+            muted_text=(140, 140, 130),
+            control_bg=(46, 47, 40),
+            control_border=(73, 72, 62),
+            button_bg=(73, 72, 62),
+            button_hover_bg=(90, 89, 77),
+            button_text=(248, 248, 242),
+            selection_active_bg=(73, 72, 62),
+            selection_inactive_bg=(49, 50, 44),
+            hover_bg=(49, 50, 44),
+            popup_bg=(46, 47, 40),
+            popup_border=(73, 72, 62),
+        ),
+    ),
+    (
+        "Dracula",
+        Theme(
+            surfaces={
+                "content": (40, 42, 54),
+                "sidebar": (46, 48, 62),
+                "header": (68, 71, 90),
+                "status": (189, 147, 249),
+            },
+            divider_color=(98, 114, 164),
+            accent=(189, 147, 249),
+            text=(248, 248, 242),
+            muted_text=(98, 114, 164),
+            control_bg=(46, 48, 62),
+            control_border=(68, 71, 90),
+            button_bg=(68, 71, 90),
+            button_hover_bg=(86, 90, 116),
+            button_text=(248, 248, 242),
+            selection_active_bg=(68, 71, 90),
+            selection_inactive_bg=(52, 54, 70),
+            hover_bg=(52, 54, 70),
+            popup_bg=(46, 48, 62),
+            popup_border=(68, 71, 90),
+        ),
+    ),
+    (
+        "Solarized",
+        Theme(
+            surfaces={
+                "content": (0, 43, 54),
+                "sidebar": (7, 54, 66),
+                "header": (0, 54, 68),
+                "status": (38, 139, 210),
+            },
+            divider_color=(88, 110, 117),
+            accent=(38, 139, 210),
+            text=(147, 161, 161),
+            muted_text=(88, 110, 117),
+            control_bg=(7, 54, 66),
+            control_border=(88, 110, 117),
+            button_bg=(7, 54, 66),
+            button_hover_bg=(20, 70, 84),
+            button_text=(238, 232, 213),
+            selection_active_bg=(0, 80, 110),
+            selection_inactive_bg=(7, 54, 66),
+            hover_bg=(7, 54, 66),
+            popup_bg=(7, 54, 66),
+            popup_border=(88, 110, 117),
+        ),
+    ),
+    (
+        "Nord",
+        Theme(
+            surfaces={
+                "content": (46, 52, 64),
+                "sidebar": (59, 66, 82),
+                "header": (67, 76, 94),
+                "status": (136, 192, 208),
+            },
+            divider_color=(76, 86, 106),
+            accent=(136, 192, 208),
+            text=(216, 222, 233),
+            muted_text=(76, 86, 106),
+            control_bg=(59, 66, 82),
+            control_border=(76, 86, 106),
+            button_bg=(59, 66, 82),
+            button_hover_bg=(76, 86, 106),
+            button_text=(236, 239, 244),
+            selection_active_bg=(76, 86, 106),
+            selection_inactive_bg=(59, 66, 82),
+            hover_bg=(59, 66, 82),
+            popup_bg=(59, 66, 82),
+            popup_border=(76, 86, 106),
+        ),
+    ),
+    # --- light variants ---------------------------------------------------------
+    # Light themes are the reason `DrawContext` defaults an uncolored text run to
+    # `theme.text`: with dark text on a light surface, a widget that names no
+    # color (the nav, plain labels) must come out dark, not the backend's
+    # near-white default. Selections therefore use a light-blue fill so the dark
+    # row text stays legible on top.
+    (
+        "Light+",
+        Theme(
+            surfaces={
+                "content": (255, 255, 255),
+                "sidebar": (243, 243, 243),
+                "header": (221, 221, 221),
+                "status": (0, 122, 204),
+            },
+            divider_color=(200, 200, 200),
+            accent=(0, 122, 204),
+            text=(30, 30, 30),
+            muted_text=(110, 110, 110),
+            control_bg=(255, 255, 255),
+            control_border=(200, 200, 200),
+            button_bg=(0, 122, 204),
+            button_hover_bg=(0, 102, 184),
+            button_text=(255, 255, 255),
+            button_secondary_bg=(228, 228, 228),
+            button_secondary_hover_bg=(214, 214, 214),
+            selection_active_bg=(173, 214, 255),
+            selection_inactive_bg=(228, 228, 228),
+            text_selection_bg=(173, 214, 255),
+            text_selection_inactive_bg=(228, 228, 228),
+            hover_bg=(232, 232, 232),
+            popup_bg=(255, 255, 255),
+            popup_border=(200, 200, 200),
+        ),
+    ),
+    (
+        "Solarized Light",
+        Theme(
+            surfaces={
+                "content": (253, 246, 227),
+                "sidebar": (238, 232, 213),
+                "header": (225, 219, 200),
+                "status": (38, 139, 210),
+            },
+            divider_color=(147, 161, 161),
+            accent=(38, 139, 210),
+            text=(88, 110, 117),
+            muted_text=(147, 161, 161),
+            control_bg=(253, 246, 227),
+            control_border=(147, 161, 161),
+            button_bg=(38, 139, 210),
+            button_hover_bg=(38, 120, 190),
+            button_text=(253, 246, 227),
+            button_secondary_bg=(238, 232, 213),
+            button_secondary_hover_bg=(223, 217, 198),
+            selection_active_bg=(200, 224, 242),
+            selection_inactive_bg=(238, 232, 213),
+            text_selection_bg=(200, 224, 242),
+            text_selection_inactive_bg=(238, 232, 213),
+            hover_bg=(238, 232, 213),
+            popup_bg=(253, 246, 227),
+            popup_border=(147, 161, 161),
+        ),
+    ),
+]
 
 
 class DemoDialog(Widget):
@@ -1952,34 +2168,63 @@ def main() -> None:
         content = LayoutView(VSplit(), margin_px=8, margin_units=1)
         # A few device pixels of breathing room around the bar text on GUI (the
         # bar grows to fit via size="content"); collapses to nothing on TUI.
-        status = Label("", STATUS_FG, padding_px=4)
+        # The title/status label styles are (re)set by apply_theme below.
+        title = Label(" PuiKit Demo Catalog", BOLD, padding_px=4)
+        status = Label("", padding_px=4)
+
+        # Mutable shell state shared by the page/theme switchers.
+        page_index = 0
+        theme_index = 0
+
+        def update_status() -> None:
+            name = PAGES[page_index][0]
+            theme_name = DEMO_THEMES[theme_index][0]
+            status.text = (
+                f" {name} — tab: focus · d: dialog · "
+                f"t: theme ({theme_name}) · q: quit"
+            )
 
         def show_page(index: int, name: str) -> None:
+            nonlocal page_index
+            page_index = index
             content.set_layout(PAGES[index][1](panel))
-            status.text = f" {name} — tab: move focus, d: dialog, q: quit"
+            update_status()
+
+        def apply_theme(index: int) -> None:
+            nonlocal theme_index
+            theme_index = index % len(DEMO_THEMES)
+            theme = DEMO_THEMES[theme_index][1]
+            # One assignment recolors every widget: controls read the active
+            # theme at draw time, and the chrome panes' surface roles re-resolve
+            # to the new backgrounds on the next render.
+            panel.theme = theme
+            # A Label carries a fixed Style (it paints its own glyph cells), so
+            # the two chrome labels are refreshed to track the theme: the title
+            # in the theme text color, the status bar in the accent's contrast
+            # color over the accent surface.
+            title.style = Style(fg=theme.text, attr=TextAttribute.BOLD)
+            status.style = Style(fg=_on_accent_fg(theme.accent), bg=theme.surfaces["status"])
+            update_status()
 
         nav = ListView([name for name, _ in PAGES], on_change=show_page)
 
         panel.set_layout(
             VSplit(
-                Item(
-                    Label(" PuiKit Demo Catalog", BOLD, padding_px=4),
-                    size="content",
-                    hints={"bg": TITLE_BG},
-                ),
+                Item(title, size="content", hints={"surface": "header"}),
                 Item(
                     HSplit(
-                        Item(nav, size=18, hints={"min": 12, "bg": NAV_BG}),
-                        Item(content, weight=1, hints={"min_px": 300, "bg": CONTENT_BG}),
+                        Item(nav, size=18, hints={"min": 12, "surface": "sidebar"}),
+                        Item(content, weight=1, hints={"min_px": 300, "surface": "content"}),
                     )
                 ),
-                Item(status, size="content", hints={"bg": STATUS_BG}),
+                Item(status, size="content", hints={"surface": "status"}),
             ),
             # GUI: inset the whole layout 4px from the window frame. Edge panes
             # bleed their backgrounds across the margin, so it reads as padding,
             # not a bare frame. Ignored on TUI (a px margin would cost base units).
             margin_px=4,
         )
+        apply_theme(0)
 
         def close_dialog() -> None:
             panel.pop_layer()
@@ -2014,6 +2259,12 @@ def main() -> None:
                     return
                 if event.key == "d":
                     open_dialog()
+                    panel.render()
+                    return
+                if event.key == "t":
+                    # Cycle the active theme; one re-render recolors the whole
+                    # catalog (chrome + every page widget) from the new palette.
+                    apply_theme(theme_index + 1)
                     panel.render()
                     return
                 if event.key and event.key.isdigit():
