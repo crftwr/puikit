@@ -18,6 +18,7 @@ container like ``Container``, not a leaf that swallows input.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from ..backend import Style
@@ -92,7 +93,13 @@ class Splitter(FocusContainer, Widget):
         row drawn doubled), so a character grid must keep boundaries integral."""
         extent = avail * self.fraction
         if self._snap:
-            extent = round(extent)
+            # Round half *up*, not Python's banker's round(): a drag derives the
+            # fraction from the pointer cell as (pos - handle/2)/avail, so the
+            # extent lands on a half-integer (pos - 0.5) for every integer cell.
+            # round() would then snap successive cells to 4, 6, 6, 8 — stepping
+            # by two and stalling; floor(x + 0.5) tracks the pointer one cell at
+            # a time.
+            extent = math.floor(extent + 0.5)
         hi = max(0.0, avail - self.min_second)
         return max(0.0, min(max(extent, self.min_first), hi))
 
