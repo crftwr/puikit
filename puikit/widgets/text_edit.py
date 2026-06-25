@@ -189,6 +189,11 @@ class TextEdit(Widget):
         # over it; accent while focused, a subtle outline otherwise.
         border = theme.accent if ctx.focused else theme.control_border
         ctx.round_rect(0, 0, field_full_w, field_h, Style(fg=border), radius=_FIELD_RADIUS)
+        # Grid backends get no box frame on a one-row field, so the accent focus
+        # ring resolves to bracket markers in the padding columns instead. The
+        # right_pad reserve (e.g. a combo chevron) keeps the ``]`` clear of it.
+        if ctx.focused:
+            ctx.draw_focus_brackets(field_full_w, field_h, theme, bg=bg)
 
     def _draw_caret(self, ctx, theme, disp, caret, caret_col, field_w, bg, ty) -> None:
         if 0 <= caret_col < field_w:

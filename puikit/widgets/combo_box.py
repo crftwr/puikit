@@ -107,7 +107,9 @@ class ComboBox(Widget):
         ctx.draw_child(self._field, 0, 0, field_units, hu, hints={"focused": focused})
         ty = (hu - 1.0) / 2.0
         arrow = "▴" if self.open else "▾"
-        arrow_fg = theme.accent if focused else theme.text
+        # The chevron is a fixed affordance, not a focus cue: it stays the neutral
+        # text color in every state (the field's border / brackets carry focus).
+        arrow_fg = theme.text
         # Drawn over the field box's own background so the chevron reads as part
         # of the field, not a separate box hanging off its right edge. The field
         # reserves these columns (right_pad), so it never collides with text.

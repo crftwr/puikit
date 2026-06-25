@@ -109,14 +109,18 @@ class DropDown(Widget):
         label = self.options[self.selected] if self.options else ""
         field = label[: w - 4].ljust(w - 4)
         ctx.draw_text(1, ty, field, Style(fg=theme.text, bg=bg))
-        # The accent-colored chevron is the focus cue that reads on every
-        # backend (the vector border below adds to it on capable ones).
+        # The chevron is a fixed affordance, not a focus cue: it stays the
+        # neutral text color in every state. Focus is carried by the vector
+        # border (below) and the grid bracket markers (end of draw).
         arrow = "▴" if self.open else "▾"
-        arrow_fg = theme.accent if ctx.focused else theme.text
-        ctx.draw_text(w - 2, ty, arrow, Style(fg=arrow_fg, bg=bg))
+        ctx.draw_text(w - 2, ty, arrow, Style(fg=theme.text, bg=bg))
 
         border = theme.accent if ctx.focused else theme.control_border
         ctx.round_rect(0, 0, field_w, field_h, Style(fg=border), radius=_FIELD_RADIUS)
+        # Grid backends get no box frame on a one-row field, so the accent focus
+        # ring resolves to bracket markers in the padding columns instead.
+        if ctx.focused:
+            ctx.draw_focus_brackets(field_w, field_h, theme, bg=bg)
 
     # --- events --------------------------------------------------------------
 

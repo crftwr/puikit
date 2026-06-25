@@ -541,6 +541,41 @@ class DrawContext:
                     self._rect.x + x, self._rect.y + y, iw, ih, style, hints
                 )
 
+    def draw_focus_brackets(
+        self,
+        w: float,
+        h: float,
+        theme: "Theme",
+        *,
+        bg: tuple[int, int, int] | None = None,
+        fg: tuple[int, int, int] | None = None,
+    ) -> None:
+        """Grid-only Outline-focus cue for a short whole-widget control
+        (DropDown, ComboBox, TextEdit, a short text Button). The control reserves
+        a padding column on each side, so a **bold** ``[`` and ``]`` are stamped
+        there to frame the active field — the character-grid resolution of the
+        accent focus ring vector backends draw (docs/interaction_states.md §6).
+
+        A no-op on ``vector_shapes`` backends (they draw the real ring). The
+        brackets sit on the control's vertically centered row; callers only
+        invoke this where ``round_rect`` does *not* draw a box frame (a one-row
+        field, or a text button under three rows), so the two cues never both
+        fire. ``w`` is the *field* width in base units (not the whole slot), and
+        ``bg`` is the field background so the brackets sit on the field, not a
+        bare cell. ``fg`` is the bracket color and must **contrast that bg** — it
+        defaults to the accent, but a control whose fill is *already* the accent
+        (a primary button) passes a light color so the brackets never vanish
+        accent-on-accent."""
+        if self._caps.supports("vector_shapes"):
+            return
+        iw, ih = round(w), round(h)
+        if iw < 2 or ih < 1:
+            return
+        ty = (ih - 1) // 2
+        style = Style(fg=fg or theme.accent, bg=bg, attr=TextAttribute.BOLD)
+        self.draw_text(0, ty, "[", style)
+        self.draw_text(iw - 1, ty, "]", style)
+
     def draw_check_mark(
         self, x: float, y: float, *, checked: bool, focused: bool, theme: "Theme",
         row_bg: tuple[int, int, int] | None = None, row_h: float = 1.0,

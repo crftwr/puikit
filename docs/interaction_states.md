@@ -201,7 +201,7 @@ All of the above is **intent resolved in the Panel / DrawContext**, exactly like
 | Channel | vector / GUI | grid / TUI |
 |---|---|---|
 | Fill (hover/press/selection) | lighten/darken the fill, sub-unit insets | swap to a tinted cell bg; selection via REVERSE or a contrasting bg |
-| Outline (focus) | a 1–2px ring/border in a contrasting color | REVERSE of the control / active row, or a box-drawing frame on a multi-row widget |
+| Outline (focus) | a 1–2px ring/border in a contrasting color | a box-drawing frame on a multi-row widget; **bold `[ ]` bracket markers** in the padding columns of a single-row control (DropDown, ComboBox, TextEdit, a short text Button) — `DrawContext.draw_focus_brackets`, colored to contrast the fill (accent on a field, the light ring on a primary button); REVERSE of an active list row |
 | Mark (value) | rounded box, dot, hairline indicator, I-beam | `[x]` / `(•)` text marks, accent-fg, box-drawing line, reverse block caret |
 | Motion (blink) | timed blink via `request_animation_ticks` | static, or the terminal's own cursor blink |
 
@@ -216,7 +216,7 @@ resolves to white on GUI, which inverts the emphasis. The Panel re-resolves
 
 | Widget | Correction | Status |
 |---|---|---|
-| **Button** | **Press** darkens the fill (hover lightens — opposite directions, so rest/hover/press read distinctly). Focus = full-perimeter ring whose color **contrasts the fill** (near-white on the accent fill, accent on a neutral fill), at any size — no faint underline on vector backends; a grid box only at ≥3 rows (below that it would eat the label), else an underline. Adds `variant="primary"` / `"secondary"` for the accent / no-accent faces. | ✅ done |
+| **Button** | **Press** darkens the fill (hover lightens — opposite directions, so rest/hover/press read distinctly). Focus = full-perimeter ring whose color **contrasts the fill** (near-white on the accent fill, accent on a neutral fill), at any size — no faint underline on vector backends; a grid box only at ≥3 rows (below that it would eat the label), else accent `[ ]` brackets — the same single-row grid cue as DropDown/ComboBox/TextEdit. Adds `variant="primary"` / `"secondary"` for the accent / no-accent faces. | ✅ done |
 | **TextEdit** | Caret = fg-colored **blinking I-beam** via the Panel `draw_caret` intent (Motion channel), reset to visible on every caret move/edit; focus stays on the border only (removed the duplicate accent caret); selection is focus-dependent — `text_selection_bg` while focused, `text_selection_inactive_bg` when blurred. | ✅ done |
 | **Checkbox** | Focus → the mark box's **own border is recolored to the accent** (one box, no separate halo). The checked state is a **neutral** mark: a neutral check glyph on the `control_bg` box, with a neutral text-colored border emphasis only when unfocused — so the accent means focus and nothing else. The mark box is a pixel-square that can exceed one base-unit cell, so the widget reserves a taller content row on vector backends and centers the mark/label in it; a cap in `_mark_box` also shrinks the box to fit any tighter row so its rounded top/bottom never clip. | ✅ done |
 | **Radio** | Focus → the **selected circle's border is recolored to the accent** (no box around the group), the reversed selected mark on a grid. The selected dot stays **neutral**. A per-row pitch taller than one cell (the mark box is a pixel-square that can exceed a base-unit cell) keeps the enlarged circles from overlapping, and rows are inset on vector backends; hit-testing backs the inset and pitch out. | ✅ done |

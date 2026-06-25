@@ -167,8 +167,8 @@ class Button(Widget):
         #   (docs/interaction_states.md §5). Drawn at any size, so even a
         #   one-row text button gets a real ring instead of a faint underline.
         # - Character grid: a box-drawing frame when there is room (an image or
-        #   a 2+ row button); a one-row text button has no room for a box, so
-        #   _draw_label underlines instead.
+        #   a 3+ row button); a short text button has no room for a box, so it
+        #   gets the same accent bracket markers as the other single-row controls.
         if ctx.focused:
             if ctx.vector_shapes and wu >= 1 and hu >= 1:
                 inset = min(0.12, wu / 2, hu / 2)
@@ -178,18 +178,20 @@ class Button(Widget):
                 )
             elif not ctx.vector_shapes and (self.image is not None or ctx.height >= 3):
                 # A grid box needs three rows — top border, label, bottom border;
-                # at two rows the borders would eat the label, so a short text
-                # button underlines instead (handled in _draw_label).
+                # at two rows the borders would eat the label.
                 ctx.round_rect(0, 0, wu, hu, Style(fg=ring, bg=bg), radius=_RADIUS)
+            elif not ctx.vector_shapes:
+                # A short (1–2 row) text button: bracket the label. The bracket
+                # color is the same fill-contrasting ring the vector face uses —
+                # light on the accent fill, accent on a neutral fill — so it never
+                # vanishes accent-on-accent on a primary button.
+                ctx.draw_focus_brackets(wu, hu, theme, bg=bg, fg=ring)
 
     def _draw_label(self, ctx: DrawContext, bg, fg) -> None:
-        attr = TextAttribute.BOLD
-        # Underline is the grid-only cue for a short text button (under three
-        # rows, where a box would overwrite the label); vector backends draw a
-        # perimeter ring, taller grids draw a box.
-        if ctx.focused and not ctx.vector_shapes and ctx.height < 3:
-            attr |= TextAttribute.UNDERLINE
-        style = Style(fg=fg, bg=bg, attr=attr)
+        # The focus cue is drawn by draw() — a perimeter ring (vector), a box
+        # frame (tall grid), or accent brackets (short grid text button) — so the
+        # label itself carries no focus attribute.
+        style = Style(fg=fg, bg=bg, attr=TextAttribute.BOLD)
         # Center against the exact (fractional) pane width and measured label
         # width, so the label tracks the pane pixel by pixel on pixel-layout
         # backends instead of snapping to whole base units.

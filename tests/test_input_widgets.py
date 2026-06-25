@@ -4,9 +4,11 @@ import pytest
 
 from puikit import Event, EventType, Panel, PROFILE_GUI_DESKTOP, PROFILE_TUI, TextAttribute
 from puikit.backends.memory_backend import MemoryBackend
+from puikit.widgets.button import _FOCUS_RING
 from puikit.widgets import (
     Button,
     Checkbox,
+    ComboBox,
     DropDown,
     Label,
     RadioGroup,
@@ -446,8 +448,17 @@ def test_button_focus_ring_and_hover(backend):
     btn = Button("OK")
     panel.add(btn, x=0, y=0, w=10, h=1)
     panel.render()
-    # Focused single-row button: accent fill, label underlined.
+    # Focused single-row button: accent fill. On a grid the focus ring resolves
+    # to bold bracket markers in the padding columns. A primary button's fill is
+    # *already* the accent, so the brackets take the light fill-contrasting ring
+    # (not accent-on-accent) and are drawn bold.
     assert backend.style_at(0, 0).bg == panel.theme.button_bg
+    if not panel.backend.capabilities.supports("vector_shapes"):
+        cell = backend.style_at(0, 0)
+        assert backend.snapshot()[0].startswith("[")
+        assert cell.fg == _FOCUS_RING
+        assert cell.fg != panel.theme.button_bg   # contrasts the accent fill
+        assert cell.attr & TextAttribute.BOLD
     # Hover lightens the fill.
     panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=3, y=0))
     panel.render()
@@ -456,8 +467,8 @@ def test_button_focus_ring_and_hover(backend):
 
 def test_focused_short_text_button_keeps_label_on_grid(backend):
     # A two-row focused text button must not draw a box-drawing frame on a grid
-    # (its top/bottom borders would overwrite the single label row); it uses an
-    # underline instead, so the label stays visible.
+    # (its top/bottom borders would overwrite the single label row); it gets the
+    # accent bracket markers instead, so the label stays visible.
     panel = Panel(backend)
     btn = Button("Apply")
     panel.add(btn, x=0, y=0, w=10, h=2)
@@ -466,6 +477,7 @@ def test_focused_short_text_button_keeps_label_on_grid(backend):
     assert "Apply" in snap
     if not panel.backend.capabilities.supports("vector_shapes"):
         assert "┌" not in snap and "─" not in snap  # no box frame ate the label
+        assert "[" in snap and "]" in snap          # bracket focus cue instead
 
 
 def test_button_variants_use_accent_and_neutral_fills(backend):
@@ -624,3 +636,35 @@ def test_scrollview_focused_child_shows_focus_cue(backend):
     # accent ring. cb1 is at content/screen y=2.
     assert backend.style_at(0, 2).bg == panel.theme.accent
     assert backend.style_at(0, 4).bg != panel.theme.accent  # cb2 not focused
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda: DropDown(["Red", "Green", "Blue"]),
+        lambda: TextEdit("edit me"),
+        lambda: ComboBox(["Alpha", "Beta"], text="Al"),
+    ],
+    ids=["dropdown", "textedit", "combobox"],
+)
+def test_single_row_control_focus_brackets_on_grid(backend, make):
+    # On a grid the accent focus ring resolves to bold bracket markers in the
+    # field's padding columns. (MemoryBackend renders the grid path under both
+    # palettes; the real vector path returns early in draw_focus_brackets — see
+    # test_vector_widgets.)
+    panel = Panel(backend)
+    spacer = Button("x")  # a second focusable widget to hold focus away
+    control = make()
+    panel.add(spacer, x=0, y=0, w=20, h=1)
+    panel.add(control, x=0, y=1, w=24, h=1)
+    panel.focus(control)
+    panel.render()
+    line = backend.snapshot()[1]
+    cell = backend.style_at(0, 1)
+    assert line.startswith("[") and line.rstrip().endswith("]")
+    assert cell.fg == panel.theme.accent
+    assert cell.attr & TextAttribute.BOLD
+    # Blurred: no brackets.
+    panel.focus(spacer)
+    panel.render()
+    assert not backend.snapshot()[1].startswith("[")
