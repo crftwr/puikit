@@ -103,11 +103,19 @@ class MessageBox:
         # is marked through the "focused" hint (the layer holds the focus, so the
         # ring lights on exactly one button), and moving focus only moves the
         # ring; the accent "primary" fill stays on the default button.
-        widths, bh = self._row_metrics(ctx.layout_context())
+        lc = ctx.layout_context()
+        widths, bh = self._row_metrics(lc)
         total = sum(widths) + _BUTTON_GAP * (len(widths) - 1)
         wu, hu = ctx.size_units
         bx = max(2.0, (wu - total) / 2.0)
         by = max(0.0, hu - bh - 1.0)
+        if lc.snap:
+            # Whole-unit backends round each draw coordinate independently, so a
+            # half-unit row origin (an odd-width box centering an even-width row)
+            # would desync the button's bracket focus cue from its centered label
+            # — the closing "]" lands one column short. Snap the origin to the
+            # base unit grid so brackets and label round in step.
+            bx, by = round(bx), round(by)
         self._button_x = []
         for i, (widget, w) in enumerate(zip(self._widgets, widths)):
             ctx.draw_child(widget, bx, by, w, bh, hints={"focused": i == self.focused})

@@ -2,10 +2,14 @@
 
 Each tab pairs a title with a content widget; the active tab's content fills
 the area below the strip (drawn through ``draw_child``, so it is clipped and
-gets its own focus/animation group). The strip highlights the active tab and,
-when the Tabs widget holds focus, marks it with the theme accent — an accent
-underline on vector backends, accent title text on a character grid. Left/right
-switch tabs; other keys and mouse climbs through to the active content.
+gets its own focus/animation group). The active tab is always marked (a bold
+title plus, on a vector strip, the accent indicator line), and that mark follows
+the focus ordering (interaction_states.md §4b/§5): a vector strip thickens its
+accent line while focused; a character grid — which has no room for the line —
+fills the active tab with the loud accent selection fill while focused and the
+muted inactive fill when focus is elsewhere, so an unfocused strip never shows
+the loud accent. Left/right switch tabs; other keys and mouse climbs through to
+the active content.
 """
 
 from __future__ import annotations
@@ -130,19 +134,24 @@ class Tabs(FocusContainer, Widget):
             # Fill channel: on a vector strip the active tab is marked solely by
             # its top accent line, so it keeps the plain strip background — no
             # loud fill duplicating the cue. A character grid has no room for an
-            # edge line, so there the active tab still wears the selection fill
-            # (and reverses its label below). Hover lightens whichever tab the
-            # pointer is over, the active one included.
-            base_bg = theme.selection_active_bg if active and not ctx.vector_shapes else theme.popup_bg
+            # edge line, so there the active tab wears the selection fill — and
+            # that fill follows the §4b focus ordering: the loud accent fill only
+            # while the Tabs widget holds focus, the muted inactive fill when
+            # focus is elsewhere (the same active/inactive pair ListView rows use),
+            # so an unfocused strip never shows the loud blue. Hover lightens
+            # whichever tab the pointer is over, the active one included.
+            if active and not ctx.vector_shapes:
+                base_bg = theme.selection_active_bg if ctx.focused else theme.selection_inactive_bg
+            else:
+                base_bg = theme.popup_bg
             row_bg = _lighten(base_bg) if hovered else base_bg
             if row_bg != theme.popup_bg:
                 ctx.fill_rect(x, 0, w, strip_h, Style(bg=row_bg))
             # Text stays high-contrast on the fill — never recolored into the
-            # fill's hue (interaction_states.md §5). On a grid the focused strip
-            # reverses its active label, since it has no room for an edge line.
+            # fill's hue (interaction_states.md §5). The active label is bold (an
+            # always-visible selection hint); focus is carried by the fill
+            # ordering above, matching ListView, so the label is not also reversed.
             attr = TextAttribute.BOLD if active else TextAttribute.NORMAL
-            if active and ctx.focused and not ctx.vector_shapes:
-                attr |= TextAttribute.REVERSE
             ctx.draw_text(x + pad, ty, label, Style(fg=theme.text, bg=row_bg, attr=attr))
             self._tab_x.append((x, x + w))
             x += w
