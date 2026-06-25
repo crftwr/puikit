@@ -16,6 +16,7 @@ from ..capability import CapabilityProfile, PROFILE_TUI
 from ..event import Event, EventType
 from ..text import display_width as _display_width
 from ..text import glyph_runs as _glyph_runs
+from ..text import is_emoji_glyph as _is_emoji_glyph
 from ..text import truncate_to_width as _truncate_to_width
 from ..theme import DEFAULT_THEME, THEME_TUI
 
@@ -182,6 +183,14 @@ class CursesBackend(Backend):
         # terminal's own IME composition). Reset each frame; set via
         # request_text_input during draw; applied in present().
         self._input_pos: tuple[int, int] | None = None
+        # Emoji glyphs (y, x, glyph, attr) draw_text deferred this frame. A
+        # terminal advances a color emoji by its own width-table's idea of the
+        # cell count, which disagrees with ours for emoji newer than that table
+        # (see text.is_emoji_glyph). Rendered inline, that mismatch drifts every
+        # following glyph; so present() overlays them in a *separate* refresh
+        # pass where each is the only changed cell in its run — the terminal has
+        # nothing after it to push. Reset each frame in clear().
+        self._deferred_emoji: list[tuple[int, int, str, int]] = []
         # True while the left button is held, so a following motion report reads
         # as a drag (text selection) rather than a bare hover.
         self._mouse_down = False
@@ -290,6 +299,7 @@ class CursesBackend(Backend):
         self._stdscr.erase()
         # No text field has claimed the cursor yet this frame.
         self._input_pos = None
+        self._deferred_emoji.clear()
 
     def request_text_input(self, x: int, y: int, hints: dict[str, Any] | None = None) -> None:
         """The focused text widget's caret position (screen base units). In a
@@ -406,13 +416,22 @@ class CursesBackend(Backend):
             self._stdscr.addstr(y, x, " " * total, attr)
         except curses.error:
             pass
-        # Then place each glyph at the column puikit assigns it rather than
-        # streaming the whole run: the terminal advances emoji/selector
-        # sequences by its own width rules, which disagree with display_width
-        # and would drift every following glyph out of column. Explicit
-        # per-glyph placement keeps columns authoritative.
+        # Then place each glyph. Non-emoji glyphs go down now at the column
+        # puikit assigns. Color emoji are *deferred* to present()'s overlay pass
+        # instead: a terminal advances them by its own width-table's cell count,
+        # which disagrees with display_width for emoji that table doesn't know
+        # (e.g. U+1FAF3). Drawn inline, that mismatch would drift every following
+        # glyph out of column even though we addstr each one absolutely — curses
+        # collapses a contiguous run back into one positioned stream at refresh,
+        # so the terminal's emoji advance still propagates. Leaving the emoji's
+        # cells as the background space painted above and overlaying the glyph in
+        # a separate refresh (where nothing follows it) keeps the text aligned.
         col = 0
         for glyph, gw in zip(runs, widths):
+            if _is_emoji_glyph(glyph):
+                self._deferred_emoji.append((y, x + col, glyph, attr))
+                col += gw
+                continue
             try:
                 self._stdscr.addstr(y, x + col, glyph, attr)
             except curses.error:
@@ -532,8 +551,33 @@ class CursesBackend(Backend):
 
     def present(self) -> None:
         assert self._stdscr is not None
+        # Phase 1 — commit all text and boxes. Color emoji were deferred by
+        # draw_text, so their cells hold the background space painted under them
+        # and their text neighbours are placed by pure-width writes the terminal
+        # cannot drift (see draw_text / text.is_emoji_glyph).
+        #
+        # Some terminals (Terminal.app) realize IME composition by *inserting*
+        # the preedit at the cursor, shifting the rest of the row right and
+        # pushing trailing cells (e.g. the scroll bar) off the grid — and never
+        # restore them. curses' diff-based refresh can't see that damage, so
+        # while a text field is focused we force a full repaint to repair it.
+        if self._input_pos is not None:
+            self._stdscr.redrawwin()
+        self._stdscr.refresh()
+        # Phase 2 — overlay each deferred emoji as an isolated write. Because its
+        # cell was committed as background in phase 1, the emoji is now the only
+        # changed cell in its run: curses addresses the cursor to it, draws it,
+        # and there is nothing after it for the terminal's (possibly stale) emoji
+        # advance to push. This separate refresh is what makes the glyph render
+        # independently of the row instead of dragging it out of column.
+        for ey, ex, glyph, attr in self._deferred_emoji:
+            try:
+                self._stdscr.addstr(ey, ex, glyph, attr)
+            except curses.error:
+                pass
         # Place (and show) the hardware cursor at the focused field's caret so
-        # terminal IME composition lands there; hide it otherwise.
+        # terminal IME composition lands there — after the overlay, so the caret
+        # is not left trailing the last emoji; hide it otherwise.
         show = False
         if self._input_pos is not None:
             x, y = self._input_pos
@@ -545,14 +589,8 @@ class CursesBackend(Backend):
             curses.curs_set(1 if show else 0)
         except curses.error:
             pass
-        # Some terminals (Terminal.app) realize IME composition by *inserting*
-        # the preedit at the cursor, shifting the rest of the row right and
-        # pushing trailing cells (e.g. the scroll bar) off the grid — and never
-        # restore them. curses' diff-based refresh can't see that damage, so
-        # while a text field is focused we force a full repaint to repair it.
-        if self._input_pos is not None:
-            self._stdscr.redrawwin()
-        self._stdscr.refresh()
+        if self._deferred_emoji or self._input_pos is not None:
+            self._stdscr.refresh()
 
     # --- colors / attributes ----------------------------------------------------
 

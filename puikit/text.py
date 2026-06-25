@@ -43,6 +43,34 @@ def char_width(ch: str) -> int:
     return 2 if unicodedata.east_asian_width(ch) in ("F", "W") else 1
 
 
+def is_emoji_glyph(glyph: str) -> bool:
+    """True for a glyph run a terminal renders as a *color emoji* whose cell
+    advance it decides from its own width table — not from ours.
+
+    This is the one case where ``display_width`` cannot be authoritative on a
+    terminal backend: we count an emoji as two columns (per Unicode), but a
+    terminal whose width table predates the emoji advances it by **one** (this is
+    exactly why ``U+1FAF3`` "palm down hand", a Unicode 14.0 emoji, drifts its
+    label one column left in xterm.js / VS Code's terminal while Terminal.app —
+    with a newer table — agrees with us). The disagreement is between the
+    terminal and *us*; no width count of ours can reconcile it, so a backend
+    renders these glyphs **independently** of their neighbours instead (see the
+    curses backend's deferred-overlay pass) and the mismatch can no longer push
+    the surrounding text.
+
+    A run qualifies if it carries an emoji-presentation selector (``U+FE0F``) or
+    a ZWJ, or if its base code point lies in the emoji planes
+    (``U+1F000``–``U+1FAFF``). East Asian Wide *text* (CJK) is deliberately
+    excluded: every terminal counts it as two columns, so it never drifts — and
+    so are CJK Extension ideographs at ``U+20000``+, which sit above the emoji
+    range."""
+    if not glyph:
+        return False
+    if _VS_EMOJI in glyph or _ZWJ in glyph:
+        return True
+    return 0x1F000 <= ord(glyph[0]) <= 0x1FAFF
+
+
 def _context_width(ch: str, nxt: str) -> int:
     """Columns for ``ch`` given the following character. An emoji-presentation
     selector promotes the base to two columns; a text-presentation selector
