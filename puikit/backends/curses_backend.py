@@ -183,14 +183,17 @@ class CursesBackend(Backend):
         # terminal's own IME composition). Reset each frame; set via
         # request_text_input during draw; applied in present().
         self._input_pos: tuple[int, int] | None = None
-        # Emoji glyphs (y, x, glyph, attr) draw_text deferred this frame. A
-        # terminal advances a color emoji by its own width-table's idea of the
-        # cell count, which disagrees with ours for emoji newer than that table
-        # (see text.is_emoji_glyph). Rendered inline, that mismatch drifts every
-        # following glyph; so present() overlays them in a *separate* refresh
-        # pass where each is the only changed cell in its run — the terminal has
-        # nothing after it to push. Reset each frame in clear().
-        self._deferred_emoji: list[tuple[int, int, str, int]] = []
+        # Color emoji draw_text deferred this frame, keyed by their (y, x) cell
+        # → (glyph, attr). A terminal advances a color emoji by its own
+        # width-table's idea of the cell count, which disagrees with ours for
+        # emoji newer than that table (see text.is_emoji_glyph). Rendered inline,
+        # that mismatch drifts every following glyph; so present() overlays them
+        # in a *separate* refresh pass where each is the only changed cell in its
+        # run — the terminal has nothing after it to push. Keying by cell lets a
+        # later draw over that cell (an opaque layer above, e.g. a Drawer) evict
+        # the emoji, so it does not bleed back on top in the overlay pass. Reset
+        # each frame in clear().
+        self._deferred_emoji: dict[tuple[int, int], tuple[str, int]] = {}
         # True while the left button is held, so a following motion report reads
         # as a drag (text selection) rather than a bare hover.
         self._mouse_down = False
@@ -378,6 +381,17 @@ class CursesBackend(Backend):
         if self._clip_stack:
             self._clip_stack.pop()
 
+    def _evict_deferred_emoji(self, x: int, y: int, w: int, h: int) -> None:
+        """Drop any deferred emoji whose cell falls in the rect [x, x+w) ×
+        [y, y+h): a later draw covering it (an opaque layer above) must occlude
+        it, or present()'s overlay pass would paint it back on top. Cheap — the
+        deferred set is tiny — so each drawing primitive can call it freely."""
+        if not self._deferred_emoji:
+            return
+        for ey, ex in list(self._deferred_emoji):
+            if y <= ey < y + h and x <= ex < x + w:
+                del self._deferred_emoji[(ey, ex)]
+
     def draw_text(self, x: int, y: int, text: str, style: Style = DEFAULT_STYLE) -> None:
         assert self._stdscr is not None
         # Defensive: widgets or layouts may hand us whole-valued floats.
@@ -405,6 +419,11 @@ class CursesBackend(Backend):
         runs = _glyph_runs(text)
         widths = [_display_width(g) for g in runs]
         total = sum(widths)
+        # This run paints over [x, x+total) on row y: evict any emoji a lower
+        # draw deferred there so it cannot resurface above this one in present()
+        # (an opaque layer — a Drawer fill, a dialog — covering the nav must hide
+        # its emoji). fill_rect / draw_box route through here, so they inherit it.
+        self._evict_deferred_emoji(x, y, total, 1)
         # Pre-paint the run's full display width with the style's background
         # first. An emoji + variation selector (e.g. "🏷️" = base + U+FE0F) is one
         # display column wide to wcwidth but two to us, so curses writes it into
@@ -429,7 +448,7 @@ class CursesBackend(Backend):
         col = 0
         for glyph, gw in zip(runs, widths):
             if _is_emoji_glyph(glyph):
-                self._deferred_emoji.append((y, x + col, glyph, attr))
+                self._deferred_emoji[(y, x + col)] = (glyph, attr)
                 col += gw
                 continue
             try:
@@ -486,6 +505,9 @@ class CursesBackend(Backend):
         x1 = min(sw, x + w)
         if x1 <= x0:
             return
+        # A deferred emoji under the scrim would resurface at full color over the
+        # dim in present(); drop it so the dimmed page reads uniform.
+        self._evict_deferred_emoji(x0, max(0, y), x1 - x0, min(sh, y + h) - max(0, y))
         if curses.has_colors():
             attr = curses.color_pair(self._color_pair(_DIM_FG, _DIM_BG))
         else:
@@ -524,6 +546,7 @@ class CursesBackend(Backend):
         width = min(sw, x + w) - x0
         if width <= 0:
             return
+        self._evict_deferred_emoji(x0, max(0, y), width, min(sh, y + h) - max(0, y))
         r, g, b = color[:3]
         fg = (0, 0, 0) if (r * 299 + g * 587 + b * 114) // 1000 > 140 else (255, 255, 255)
         attr = curses.color_pair(self._color_pair(fg, color[:3])) if curses.has_colors() else curses.A_REVERSE
@@ -570,7 +593,7 @@ class CursesBackend(Backend):
         # and there is nothing after it for the terminal's (possibly stale) emoji
         # advance to push. This separate refresh is what makes the glyph render
         # independently of the row instead of dragging it out of column.
-        for ey, ex, glyph, attr in self._deferred_emoji:
+        for (ey, ex), (glyph, attr) in self._deferred_emoji.items():
             try:
                 self._stdscr.addstr(ey, ex, glyph, attr)
             except curses.error:

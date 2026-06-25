@@ -61,16 +61,19 @@ class SelectableText:
         self._sel_pitch = pitch or 1.0
         self._panel = panel
 
-    def _draw_selected_row(self, ctx, row_index: int, text: str, y: float, style: Style, theme) -> None:
+    def _draw_selected_row(
+        self, ctx, row_index: int, text: str, y: float, style: Style, theme, x0: float = 0.0
+    ) -> None:
         """Draw one displayed row, repainting its selected span (if any) over the
-        top with the theme's selection background."""
-        ctx.draw_text(0, y, text, style)
+        top with the theme's selection background. ``x0`` insets the row (a
+        padded label)."""
+        ctx.draw_text(x0, y, text, style)
         span = self._row_highlight_span(row_index)
         if span is None:
             return
         glyphs = self._sel_glyphs[row_index]
         start, end = span
-        x = ctx.measure_text("".join(glyphs[:start]), style)
+        x = x0 + ctx.measure_text("".join(glyphs[:start]), style)
         seg = "".join(glyphs[start:end])
         sel_style = Style(fg=style.fg, bg=theme.selection_bg, attr=style.attr, font=style.font)
         ctx.draw_text(x, y, seg, sel_style)

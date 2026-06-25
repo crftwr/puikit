@@ -61,7 +61,7 @@ def test_emoji_deferred_not_drawn_inline():
     # ...but the text after it still goes down (each glyph placed individually).
     assert {"D", "r", "a", "g"} <= set(texts)
     # The emoji is queued for the overlay pass at the column puikit assigned it.
-    assert backend._deferred_emoji == [(0, 0, "\U0001FAF3", 0)]
+    assert backend._deferred_emoji == {(0, 0): ("\U0001FAF3", 0)}
 
 
 def test_present_overlays_emoji_in_a_second_refresh():
@@ -93,7 +93,7 @@ def test_no_emoji_means_single_refresh():
 
     refreshes = [c for c in backend._stdscr.calls if c[0] == "refresh"]
     assert len(refreshes) == 1
-    assert backend._deferred_emoji == []
+    assert backend._deferred_emoji == {}
 
 
 def test_clear_resets_deferred_emoji():
@@ -102,7 +102,34 @@ def test_clear_resets_deferred_emoji():
     backend.draw_text(0, 0, "\U0001FAF3")
     assert backend._deferred_emoji
     backend.clear()
-    assert backend._deferred_emoji == []
+    assert backend._deferred_emoji == {}
+
+
+def test_later_draw_over_emoji_evicts_it():
+    # An opaque layer above (a Drawer fill, a dialog) covers the cell a lower
+    # layer deferred an emoji to. The covering draw must evict it, or present()'s
+    # overlay pass would paint the emoji back on top of the layer.
+    backend = _make_backend()
+    backend.clear()
+    backend.draw_text(0, 0, "\U0001FAF3 Drag")        # nav row, emoji at (0, 0)
+    assert (0, 0) in backend._deferred_emoji
+    backend.fill_rect(0, 0, 10, 1)                     # a layer fills over it
+    assert (0, 0) not in backend._deferred_emoji
+
+    backend.present()
+    overlaid = [c for c in backend._stdscr.calls
+                if c[0] == "addstr" and c[3] == "\U0001FAF3"]
+    assert not overlaid, "an occluded emoji must not be overlaid in present()"
+
+
+def test_emoji_outside_the_covering_rect_survives():
+    backend = _make_backend()
+    backend.clear()
+    backend.draw_text(0, 0, "\U0001FAF3 A")            # emoji at (0, 0)
+    backend.draw_text(0, 1, "\U0001F6AA B")            # emoji at (1, 0)
+    backend.fill_rect(0, 0, 10, 1)                     # covers row 0 only
+    assert (0, 0) not in backend._deferred_emoji
+    assert (1, 0) in backend._deferred_emoji           # row 1 untouched
 
 
 def test_classifier_excludes_cjk_text():

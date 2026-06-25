@@ -58,6 +58,18 @@ def test_show_drawer_pushes_layer_and_renders_title(backend):
     assert any("Drawer body" in row for row in rows)
 
 
+def test_drawer_title_is_inset_from_the_top_edge(backend):
+    # The title used to sit flush on the drawer's first row; it now sits inside
+    # the top padding, giving the drawer a margin in both TUI and GUI.
+    panel = Panel(backend)
+    show_drawer(panel, Label("body"), side="left", title="Filters")
+    panel.render()
+    _settle_animations(panel)
+    rows = backend.snapshot()
+    assert "Filters" not in rows[0]
+    assert "Filters" in rows[1]
+
+
 @pytest.mark.parametrize(
     "side,check",
     [

@@ -39,6 +39,11 @@ SIDES = ("left", "right", "top", "bottom")
 #: Default corner radius (device pixels) on the drawer's inner edge.
 DEFAULT_RADIUS = 12.0
 
+#: Extra interior padding (device pixels) added on a vector backend, on top of
+#: the one base unit the drawer always insets its content by. Gives GUI a softer
+#: margin that also clears the rounded corners; collapses on a character grid.
+DEFAULT_PADDING_PX = 8.0
+
 #: Which corners each side rounds — the inner ones (the edge facing the page);
 #: the corners flush to the screen edge stay square. Corner names are
 #: screen-oriented: "tl"/"tr"/"br"/"bl".
@@ -74,6 +79,7 @@ class Drawer(FocusContainer, Widget):
         surface: str = "sidebar",
         radius: float = DEFAULT_RADIUS,
         duration_ms: int = 200,
+        padding_px: float = DEFAULT_PADDING_PX,
     ):
         if side not in SIDES:
             raise ValueError(f"side must be one of {SIDES}, got {side!r}")
@@ -82,6 +88,8 @@ class Drawer(FocusContainer, Widget):
         self.title = title
         self.on_close = on_close
         self.modal = modal
+        # Extra device-pixel interior padding on a vector backend (see draw).
+        self.padding_px = padding_px
         # Slide duration (ms) reused by the closing animation so it mirrors the
         # opening one. ``_closing`` guards against a second close (e.g. a repeated
         # escape) firing while the slide-out is already playing.
@@ -129,15 +137,26 @@ class Drawer(FocusContainer, Widget):
                 hints={"fill": True, "corners": ROUNDED_CORNERS[self.side]},
             )
 
-        # One base unit of padding inside the drawer. A title, when given, takes
-        # the first padded row and the content starts below it.
-        pad = 1
-        cx, cy = pad, pad
-        cw, ch = max(0, w - 2 * pad), max(0, h - 2 * pad)
+        # Interior padding so neither the title nor the content touches the
+        # drawer edge: one base unit everywhere (a margin on every backend),
+        # plus a few device pixels of breathing room on a vector backend that
+        # also clear the rounded corners (a px inset would cost whole cells on a
+        # grid, so it collapses there). The title sits inside the top padding —
+        # it used to be flush to the top edge — then the content starts a line
+        # below it.
+        bw, bh = ctx.base_size
+        pad_x = pad_y = 1.0
+        if ctx.vector_shapes:
+            pad_x += self.padding_px / bw
+            pad_y += self.padding_px / bh
+        cx, cy = pad_x, pad_y
+        cw = max(0.0, wu - 2 * pad_x)
+        ch = max(0.0, hu - 2 * pad_y)
         if self.title:
-            ctx.draw_text(pad, 0, self.title[: max(0, w - 2 * pad)], _BOLD)
-            cy += 1
-            ch = max(0, ch - 1)
+            ctx.draw_text(pad_x, pad_y, self.title[: max(0, int(cw))], _BOLD)
+            title_h = ctx.line_height(_BOLD)
+            cy += title_h
+            ch = max(0.0, ch - title_h)
 
         self._content_rect = Rect(cx, cy, cw, ch)
         focused = self._focused is self.content
@@ -249,6 +268,7 @@ def show_drawer(
     radius: float = DEFAULT_RADIUS,
     z: int = 80,
     duration_ms: int = 200,
+    padding_px: float = DEFAULT_PADDING_PX,
 ) -> Drawer:
     """Push a ``Drawer`` anchored to ``side`` over ``panel`` and return it.
 
@@ -265,7 +285,7 @@ def show_drawer(
         raise ValueError(f"side must be one of {SIDES}, got {side!r}")
     drawer = Drawer(
         content, side=side, title=title, on_close=on_close, modal=modal,
-        surface=surface, radius=radius, duration_ms=duration_ms,
+        surface=surface, radius=radius, duration_ms=duration_ms, padding_px=padding_px,
     )
     snap = not panel.backend.capabilities.supports("pixel_layout")
 

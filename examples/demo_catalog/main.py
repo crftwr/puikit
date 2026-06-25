@@ -1539,7 +1539,7 @@ def build_drawer_page(panel: Panel) -> VSplit:
             panel,
             controls,
             side=side,
-            title=f"  {side.capitalize()} drawer",
+            title=f"{side.capitalize()} drawer",
             on_close=lambda: setattr(status, "text", f"{side.capitalize()} drawer closed"),
         )
         status.text = f"{side.capitalize()} drawer open — tab to move, esc to close"
@@ -1950,7 +1950,9 @@ def main() -> None:
         # gives every page symmetric padding inside the content pane — declared,
         # not hand-placed (8px on GUI, 1 base unit on TUI).
         content = LayoutView(VSplit(), margin_px=8, margin_units=1)
-        status = Label("", STATUS_FG)
+        # A few device pixels of breathing room around the bar text on GUI (the
+        # bar grows to fit via size="content"); collapses to nothing on TUI.
+        status = Label("", STATUS_FG, padding_px=4)
 
         def show_page(index: int, name: str) -> None:
             content.set_layout(PAGES[index][1](panel))
@@ -1960,14 +1962,18 @@ def main() -> None:
 
         panel.set_layout(
             VSplit(
-                Item(Label(" PuiKit Demo Catalog", BOLD), size=1, hints={"bg": TITLE_BG}),
+                Item(
+                    Label(" PuiKit Demo Catalog", BOLD, padding_px=4),
+                    size="content",
+                    hints={"bg": TITLE_BG},
+                ),
                 Item(
                     HSplit(
                         Item(nav, size=18, hints={"min": 12, "bg": NAV_BG}),
                         Item(content, weight=1, hints={"min_px": 300, "bg": CONTENT_BG}),
                     )
                 ),
-                Item(status, size=1, hints={"bg": STATUS_BG}),
+                Item(status, size="content", hints={"bg": STATUS_BG}),
             ),
             # GUI: inset the whole layout 4px from the window frame. Edge panes
             # bleed their backgrounds across the margin, so it reads as padding,
