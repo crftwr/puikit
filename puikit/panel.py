@@ -656,21 +656,22 @@ class DrawContext:
     ) -> None:
         """Draw a text caret whose top-left sits at (x, y), ``height`` base units
         tall. Vector backends get a thin vertical I-beam in the foreground color
-        between glyphs; grid backends fall back to a reverse-video block over the
-        ``glyph`` cell (a terminal cannot draw a sub-cell bar). The bar is the
-        regular ``theme.text`` color, not the accent — focus is carried by the
-        field border, so the caret only marks the insertion point
-        (docs/interaction_states.md §3). ``visible`` is the blink phase: when
-        False the caret is not drawn this frame."""
+        between glyphs (the ``theme.text`` color, not the accent — focus is
+        carried by the field border, so the caret only marks the insertion point,
+        docs/interaction_states.md §3). ``visible`` is the blink phase: when False
+        the caret is not drawn this frame.
+
+        Grid backends draw **nothing**: the backend already places the terminal's
+        own hardware cursor at the focused field's caret (``request_text_input``,
+        applied in ``present()``), so the native cursor — in the user's configured
+        shape and blink — *is* the caret. Painting a reverse-video block over it
+        would only fight the real cursor and ignore the user's terminal settings."""
         if not visible:
             return
         if self._caps.supports("vector_shapes"):
             bw = self.base_size[0]
             w = 1.0 / bw if bw else 0.1  # ~one device pixel wide
             self.fill_rect(x, y, w, height, Style(bg=theme.text))
-        else:
-            # No sub-cell drawing: a reverse block in the foreground color.
-            self.draw_text(int(x), int(y), glyph or " ", Style(fg=theme.control_bg, bg=theme.text))
 
     def _mark_box(
         self, x: float, y: float, row_h: float = 1.0

@@ -179,8 +179,11 @@ class TextEdit(Widget):
         if ctx.focused:
             # Drive the blink: register one tick the first time we draw focused;
             # it re-renders each frame so caret_visible toggles, and unregisters
-            # itself once focus leaves (the tick reads _focused_now).
-            if ctx.animated and not self._blinking and ctx.panel is not None:
+            # itself once focus leaves (the tick reads _focused_now). Only the
+            # vector caret is ours to blink — on a grid the terminal blinks its
+            # own hardware cursor, so re-rendering for a blink we don't draw would
+            # be wasted work.
+            if ctx.vector_shapes and ctx.animated and not self._blinking and ctx.panel is not None:
                 self._blinking = ctx.panel.request_animation_ticks(self._blink_tick)
             self._draw_caret(ctx, theme, disp, caret, caret_col, field_w, bg, ty)
             self._notify_input_position(ctx, caret_col, field_h)
