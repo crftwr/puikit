@@ -1528,7 +1528,7 @@ def build_drawer_page(panel: Panel) -> VSplit:
                 (Checkbox("Show hidden files", checked=True), 1),
                 (Checkbox("Follow symlinks"), 1),
                 (Label("Sort by", BOLD), 1),
-                (RadioGroup(["Name", "Size", "Modified"], selected=0), 3),
+                (RadioGroup(["Name", "Size", "Modified"], selected=0), "content"),
                 (Label("Search", BOLD), 1),
                 (TextEdit("", on_submit=lambda s: setattr(status, "text", f"Search → {s!r}")), "content"),
                 (Button("Close drawer", on_click=lambda: drawer.close()), "content"),
