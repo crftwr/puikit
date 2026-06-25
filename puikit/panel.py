@@ -194,6 +194,17 @@ class DrawContext:
         return self._backend.base_size
 
     @property
+    def pixel_layout(self) -> bool:
+        """True when the backend resolves layout at pixel granularity, so a
+        widget that subdivides its own pane (a Splitter, a nested layout) may
+        keep fractional base unit boundaries. False on a whole-unit backend
+        (a character grid), where every boundary must snap to a whole base unit
+        — a fractional pane origin/extent would round adjacent rows onto the
+        same cell. Mirrors the Panel's own ``snap = not supports("pixel_layout")``
+        rule so widgets resolve sub-layouts exactly as the top level does."""
+        return self._caps.supports("pixel_layout")
+
+    @property
     def vector_shapes(self) -> bool:
         """True when the backend renders true device pixels (rounded rects,
         hairlines, sub-unit insets). False on a character grid — including a grid

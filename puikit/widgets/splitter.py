@@ -75,6 +75,7 @@ class Splitter(FocusContainer, Widget):
         self._handle_rect = Rect(0, 0, 0, 0)
         self._handle = _HANDLE_UNITS  # thickness in base units; set per draw
         self._grab = _GRAB_UNITS      # grab margin in base units; set per draw
+        self._snap = False            # whole-unit backend? set per draw
         self._dragging = False
 
     @staticmethod
@@ -85,8 +86,13 @@ class Splitter(FocusContainer, Widget):
 
     def _first_extent(self, avail: float) -> float:
         """First-pane length (excluding the handle) for the current fraction,
-        clamped so neither pane drops below its minimum."""
+        clamped so neither pane drops below its minimum. On a whole-unit backend
+        the extent is snapped to a whole base unit: a fractional pane origin or
+        height would make the child's rows round onto the same cell (every other
+        row drawn doubled), so a character grid must keep boundaries integral."""
         extent = avail * self.fraction
+        if self._snap:
+            extent = round(extent)
         hi = max(0.0, avail - self.min_second)
         return max(0.0, min(max(extent, self.min_first), hi))
 
@@ -110,6 +116,7 @@ class Splitter(FocusContainer, Widget):
 
     def draw(self, ctx: DrawContext) -> None:
         self._size = ctx.size_units
+        self._snap = not ctx.pixel_layout
         self._handle = self._handle_thickness(ctx)
         self._grab = self._grab_margin(ctx)
         wu, hu = ctx.size_units
