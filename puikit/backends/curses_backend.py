@@ -49,15 +49,32 @@ _BASIC_COLORS = [
 # theme.py). Colors from a *custom* theme that aren't represented here snap to
 # the nearest entry.
 
-# Grayscale stops, denser below mid: UI surfaces are dark near-grays and must
-# stay distinguishable from one another.
-_PALETTE_GRAYS = (0, 16, 24, 32, 40, 48, 56, 64, 72, 80, 92, 110, 140, 170, 200, 230, 255)
+# Grayscale stops. Dense below mid (dark UI surfaces must stay distinguishable),
+# and also dense near white so *light*-theme surfaces — a near-white sidebar
+# (243) sitting next to a white content pane (255), a light header (221) — snap
+# to distinct stops instead of all collapsing onto pure white, which merged
+# adjacent panes and made the chrome read inconsistently on a light terminal.
+_PALETTE_GRAYS = (
+    0, 16, 24, 32, 40, 48, 56, 64, 72, 80, 92, 110, 140, 170,
+    200, 212, 224, 236, 246, 255,
+)
 
 # Chromatic body: a bipyramid in HLS. The most hues sit at mid lightness, where
 # the eye separates them best; the count halves at each step toward black and
 # white (where hue barely registers), tapering to a single point at each end.
 # With a base of 64 that is 64 + 2*(32+16+8+4+2+1) = 190 colors.
 _PALETTE_HUE_BASE = 64
+
+# Light, low-saturation pastels. The bipyramid above is fully saturated at every
+# lightness, so near white it only offers a few *vivid* tints — but light-theme
+# selection fills (a soft #C8E0F2 blue) and accents are *desaturated* pastels.
+# Without a pastel here they snap to the nearest gray, which then collides with
+# the equally light surface gray and the highlight vanishes. A spread of hues at
+# high lightness / moderate saturation gives every light theme a distinct, soft
+# selection color. (Lightness/saturation, then hue count below.)
+_PALETTE_TINT_LIGHTNESS = 0.84
+_PALETTE_TINT_SATURATION = 0.42
+_PALETTE_TINT_HUES = 10
 
 
 def _theme_colors(theme: Any) -> list[Color]:
@@ -84,6 +101,13 @@ def _build_tui_palette() -> list[Color]:
         for k in range(hues):
             r, g, b = colorsys.hls_to_rgb(k / hues, lightness, 1.0)
             palette.append((round(r * 255), round(g * 255), round(b * 255)))
+    # Light desaturated pastels (one tier), so soft light-theme selections/accents
+    # land on a tint instead of a gray.
+    for k in range(_PALETTE_TINT_HUES):
+        r, g, b = colorsys.hls_to_rgb(
+            k / _PALETTE_TINT_HUES, _PALETTE_TINT_LIGHTNESS, _PALETTE_TINT_SATURATION
+        )
+        palette.append((round(r * 255), round(g * 255), round(b * 255)))
     for theme in (THEME_TUI, DEFAULT_THEME):
         palette.extend(_theme_colors(theme))
     # Dedupe, preserving order (later theme colors that already appear are dropped).
@@ -247,6 +271,7 @@ class CursesBackend(Backend):
             curses.start_color()
             curses.use_default_colors()
             self._bind_palette()
+            self._disable_back_color_erase()
         # Drive mouse tracking directly rather than through curses.mousemask /
         # getmouse(). On macOS, Python's curses loads the system
         # libncurses.5.x at runtime, which does not decode xterm motion/drag
@@ -642,6 +667,54 @@ class CursesBackend(Backend):
             curses.init_pair(pair, fg_idx, bg_idx)
             self._color_pairs[key] = pair
         return pair
+
+    def _disable_back_color_erase(self) -> None:
+        """Force ncurses to fill pane backgrounds with explicit space cells
+        instead of erase-to-end-of-line.
+
+        With ``back_color_erase`` (the terminfo ``bce`` flag) ncurses paints a
+        uniform-colored line tail as "set background + clr_eol" (``ESC[K``),
+        trusting the terminal to erase the cleared cells with the SGR
+        background. macOS Terminal advertises ``bce`` but does NOT honor it for
+        ``clr_eol``: the erased run reveals the terminal *profile* background
+        (a custom gray, or fully transparent on a profile with transparency),
+        not the color we set. The visible result is that text — written as real
+        (non-space) cells — carries the theme surface, while the empty area
+        around it shows the profile/transparent background. Clearing the flag
+        makes ncurses emit real space characters for those tails, which every
+        terminal renders opaquely in the requested background. The only cost is
+        a few extra bytes per row.
+
+        ncurses exposes no API for this, so the boolean is cleared directly on
+        the ``cur_term`` structure. It is best-effort: any failure leaves the
+        flag as-is (the worst case is the pre-existing behavior, not a crash)."""
+        try:
+            import ctypes
+
+            lib = None
+            for name in (
+                "libncursesw.dylib", "libncurses.dylib",
+                "libncursesw.so.6", "libncurses.so.6", "libncurses.so",
+            ):
+                try:
+                    lib = ctypes.CDLL(name)
+                    break
+                except OSError:
+                    continue
+            if lib is None:
+                lib = ctypes.CDLL(None)
+            cur_term = ctypes.c_void_p.in_dll(lib, "cur_term")
+            if not cur_term.value:
+                return
+            ptr = ctypes.sizeof(ctypes.c_void_p)
+            # TERMINAL starts with TERMTYPE { char *term_names; char *str_table;
+            # NCURSES_SBOOL *Booleans; ... }; the Booleans pointer is the third
+            # field, and back_color_erase is boolean capability index 28.
+            booleans = ctypes.c_void_p.from_address(cur_term.value + 2 * ptr).value
+            if booleans:
+                ctypes.c_byte.from_address(booleans + 28).value = 0
+        except Exception:
+            pass
 
     def _bind_palette(self) -> None:
         """Bind the curated palette to terminal color slots, once, at open().
