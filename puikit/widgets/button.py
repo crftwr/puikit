@@ -120,15 +120,20 @@ class Button(Widget):
             hover = _lighten(bg)
             ring = _FOCUS_RING
         elif self.variant == "secondary":
-            # A non-primary action: a neutral fill, no accent.
+            # A non-primary action: a neutral fill, no accent. Its face is a
+            # neutral surface (light under a light theme), so the label takes
+            # the theme's default text color — not button_text, which is tuned
+            # to read on the accent (primary) fill and would vanish on a light
+            # neutral face.
             bg = theme.button_secondary_bg
-            fg, hover, ring = theme.button_text, theme.button_secondary_hover_bg, theme.accent
+            fg, hover, ring = theme.text, theme.button_secondary_hover_bg, theme.accent
         elif self.label:
             # A primary labeled action: the accent button fill.
             bg, fg, hover, ring = theme.button_bg, theme.button_text, theme.button_hover_bg, _FOCUS_RING
         else:
-            # A bare icon is a neutral tile, not a primary action.
-            bg, fg = theme.control_bg, theme.button_text
+            # A bare icon is a neutral tile, not a primary action; its glyph
+            # takes the default text color so it reads on the neutral face.
+            bg, fg = theme.control_bg, theme.text
             hover, ring = _lighten(theme.control_bg), theme.accent
         # Press wins over hover (the pointer is over the button while pressed),
         # and moves the fill the opposite way — darker — so the three states

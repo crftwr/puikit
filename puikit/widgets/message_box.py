@@ -16,7 +16,7 @@ import math
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from ..backend import Style, TextAttribute
+from ..backend import DEFAULT_STYLE, Style, TextAttribute
 from ..event import Event, EventType
 from ..font import Font
 from ..layout import LayoutContext
@@ -89,7 +89,15 @@ class MessageBox:
 
     def draw(self, ctx: DrawContext) -> None:
         self._panel = ctx.panel
-        ctx.draw_box(0, 0, ctx.width, ctx.height, hints={"fill": True})
+        # The dialog surface follows the theme's popup role, not the backend's
+        # hardcoded default fill — otherwise a light theme would draw a dark box
+        # (and, with text defaulting to the theme's dark foreground, invisible
+        # text). Frame it in the popup border color the same way.
+        theme = ctx.theme
+        box_style = (
+            Style(bg=theme.popup_bg, fg=theme.popup_border) if theme is not None else DEFAULT_STYLE
+        )
+        ctx.draw_box(0, 0, ctx.width, ctx.height, box_style, hints={"fill": True})
         if self.icon:
             ctx.draw_icon(2, 1, self.icon)
         if self.title:

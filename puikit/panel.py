@@ -349,6 +349,16 @@ class DrawContext:
     def theme(self) -> "Theme | None":
         return self._panel.theme if self._panel is not None else None
 
+    @property
+    def background(self) -> tuple[int, int, int] | None:
+        """The pane background this context inherits (the resolved "bg" hint or
+        surface-role color of the slot, else the parent's). A widget that paints
+        its own colored fill reads it to pick a foreground that contrasts with
+        whatever surface it landed on — so text stays legible under any theme,
+        light or dark. ``None`` means no pane background was set (the backend
+        default shows through)."""
+        return self._background
+
     def layout_context(self) -> "Any":
         """Build a LayoutContext matching this backend's capabilities, so a
         widget can resolve a nested puikit.layout Split against its own rect

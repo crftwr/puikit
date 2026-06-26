@@ -80,7 +80,6 @@ BOLD = Style(attr=TextAttribute.BOLD)
 TITLE_BG = (60, 60, 60)      # title bar      #3C3C3C
 NAV_BG = (37, 37, 38)        # sidebar        #252526
 CONTENT_BG = (30, 30, 30)    # editor body    #1E1E1E
-CARD_BG = (45, 45, 45)
 STATUS_BG = (0, 122, 204)    # status bar      #007ACC (accent)
 STATUS_FG = Style(fg=(255, 255, 255), bg=STATUS_BG)
 # Button face: a lighter fill so buttons read as raised against a footer bar.
@@ -113,6 +112,24 @@ def _on_accent_fg(accent: tuple[int, int, int]) -> tuple[int, int, int]:
     return (28, 28, 28) if _luminance(accent) > 150 else (255, 255, 255)
 
 
+def _readable_fg(bg: tuple[int, int, int]) -> tuple[int, int, int]:
+    """A near-black or near-white foreground that reads on ``bg``. Demo widgets
+    that paint a custom fill (the layout Regions over a vivid block or a themed
+    surface) use this so their text stays legible whether the theme is light or
+    dark — instead of assuming a dark background the way a fixed light color
+    would."""
+    return (28, 28, 28) if _luminance(bg) > 140 else (235, 235, 235)
+
+
+def _contrast(a: tuple[int, int, int], b: tuple[int, int, int]) -> float:
+    """Rough luminance-contrast ratio between two colors (>=1). Used to decide
+    whether a region's signature hue is legible on its background or should fall
+    back to a plain readable foreground."""
+    la, lb = _luminance(a), _luminance(b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 12.5) / (lo + 12.5)
+
+
 DEMO_THEMES: list[tuple[str, Theme]] = [
     (
         "Dark+",
@@ -131,8 +148,14 @@ DEMO_THEMES: list[tuple[str, Theme]] = [
             control_border=(69, 69, 69),
             button_bg=(14, 99, 156),
             button_hover_bg=(17, 119, 187),
+            # selection_bg drives the *active* highlight on popups (dropdown,
+            # combo, menu) and text selection; keep it equal to the list's
+            # active selection fill so every "current row" cue matches.
+            selection_bg=(9, 71, 113),
             selection_active_bg=(9, 71, 113),
-            selection_inactive_bg=(55, 55, 61),
+            # The inactive (focus-elsewhere) fill must still read against the
+            # sidebar/content surfaces, not melt into them.
+            selection_inactive_bg=(58, 58, 64),
         ),
     ),
     (
@@ -150,11 +173,15 @@ DEMO_THEMES: list[tuple[str, Theme]] = [
             muted_text=(140, 140, 130),
             control_bg=(46, 47, 40),
             control_border=(73, 72, 62),
-            button_bg=(73, 72, 62),
-            button_hover_bg=(90, 89, 77),
-            button_text=(248, 248, 242),
-            selection_active_bg=(73, 72, 62),
-            selection_inactive_bg=(49, 50, 44),
+            # Primary action wears the accent (a bright green here); its label /
+            # the checkbox check glyph (drawn on the accent) take a dark color so
+            # they read on that light fill.
+            button_bg=(166, 226, 46),
+            button_hover_bg=(180, 236, 80),
+            button_text=(33, 34, 28),
+            selection_bg=(90, 89, 77),
+            selection_active_bg=(90, 89, 77),
+            selection_inactive_bg=(66, 66, 54),
             hover_bg=(49, 50, 44),
             popup_bg=(46, 47, 40),
             popup_border=(73, 72, 62),
@@ -175,11 +202,12 @@ DEMO_THEMES: list[tuple[str, Theme]] = [
             muted_text=(98, 114, 164),
             control_bg=(46, 48, 62),
             control_border=(68, 71, 90),
-            button_bg=(68, 71, 90),
-            button_hover_bg=(86, 90, 116),
-            button_text=(248, 248, 242),
-            selection_active_bg=(68, 71, 90),
-            selection_inactive_bg=(52, 54, 70),
+            button_bg=(189, 147, 249),
+            button_hover_bg=(202, 165, 255),
+            button_text=(40, 42, 54),
+            selection_bg=(98, 80, 130),
+            selection_active_bg=(98, 80, 130),
+            selection_inactive_bg=(62, 65, 84),
             hover_bg=(52, 54, 70),
             popup_bg=(46, 48, 62),
             popup_border=(68, 71, 90),
@@ -200,11 +228,12 @@ DEMO_THEMES: list[tuple[str, Theme]] = [
             muted_text=(88, 110, 117),
             control_bg=(7, 54, 66),
             control_border=(88, 110, 117),
-            button_bg=(7, 54, 66),
-            button_hover_bg=(20, 70, 84),
-            button_text=(238, 232, 213),
-            selection_active_bg=(0, 80, 110),
-            selection_inactive_bg=(7, 54, 66),
+            button_bg=(38, 139, 210),
+            button_hover_bg=(58, 160, 228),
+            button_text=(253, 246, 227),
+            selection_bg=(0, 95, 125),
+            selection_active_bg=(0, 95, 125),
+            selection_inactive_bg=(20, 72, 87),
             hover_bg=(7, 54, 66),
             popup_bg=(7, 54, 66),
             popup_border=(88, 110, 117),
@@ -225,11 +254,12 @@ DEMO_THEMES: list[tuple[str, Theme]] = [
             muted_text=(76, 86, 106),
             control_bg=(59, 66, 82),
             control_border=(76, 86, 106),
-            button_bg=(59, 66, 82),
-            button_hover_bg=(76, 86, 106),
-            button_text=(236, 239, 244),
-            selection_active_bg=(76, 86, 106),
-            selection_inactive_bg=(59, 66, 82),
+            button_bg=(136, 192, 208),
+            button_hover_bg=(150, 205, 220),
+            button_text=(46, 52, 64),
+            selection_bg=(94, 109, 140),
+            selection_active_bg=(94, 109, 140),
+            selection_inactive_bg=(78, 86, 104),
             hover_bg=(59, 66, 82),
             popup_bg=(59, 66, 82),
             popup_border=(76, 86, 106),
@@ -250,7 +280,7 @@ DEMO_THEMES: list[tuple[str, Theme]] = [
                 "header": (221, 221, 221),
                 "status": (0, 122, 204),
             },
-            divider_color=(200, 200, 200),
+            divider_color=(168, 168, 168),
             accent=(0, 122, 204),
             text=(30, 30, 30),
             muted_text=(110, 110, 110),
@@ -261,10 +291,11 @@ DEMO_THEMES: list[tuple[str, Theme]] = [
             button_text=(255, 255, 255),
             button_secondary_bg=(228, 228, 228),
             button_secondary_hover_bg=(214, 214, 214),
+            selection_bg=(173, 214, 255),
             selection_active_bg=(173, 214, 255),
-            selection_inactive_bg=(228, 228, 228),
+            selection_inactive_bg=(208, 215, 224),
             text_selection_bg=(173, 214, 255),
-            text_selection_inactive_bg=(228, 228, 228),
+            text_selection_inactive_bg=(216, 222, 230),
             hover_bg=(232, 232, 232),
             popup_bg=(255, 255, 255),
             popup_border=(200, 200, 200),
@@ -290,16 +321,28 @@ DEMO_THEMES: list[tuple[str, Theme]] = [
             button_text=(253, 246, 227),
             button_secondary_bg=(238, 232, 213),
             button_secondary_hover_bg=(223, 217, 198),
+            selection_bg=(200, 224, 242),
             selection_active_bg=(200, 224, 242),
-            selection_inactive_bg=(238, 232, 213),
+            selection_inactive_bg=(214, 206, 184),
             text_selection_bg=(200, 224, 242),
-            text_selection_inactive_bg=(238, 232, 213),
+            text_selection_inactive_bg=(221, 214, 194),
             hover_bg=(238, 232, 213),
             popup_bg=(253, 246, 227),
             popup_border=(147, 161, 161),
         ),
     ),
 ]
+
+
+def _popup_box_style(ctx) -> Style:
+    """Fill + frame style for an overlay box, taken from the theme's popup role.
+    Without this the box falls back to the backend's hardcoded dark default
+    fill, which (with text now defaulting to the theme's foreground) is
+    invisible dark-on-dark under a light theme."""
+    theme = ctx.theme
+    if theme is None:
+        return Style()
+    return Style(bg=theme.popup_bg, fg=theme.popup_border)
 
 
 class DemoDialog(Widget):
@@ -311,7 +354,7 @@ class DemoDialog(Widget):
         self.on_close = on_close
 
     def draw(self, ctx):
-        ctx.draw_box(0, 0, ctx.width, ctx.height, hints={"fill": True})
+        ctx.draw_box(0, 0, ctx.width, ctx.height, _popup_box_style(ctx), hints={"fill": True})
         ctx.draw_icon(2, 1, "info")
         ctx.draw_text(5, 1, "A layered dialog", BOLD)
         ctx.draw_text(2, 3, "The content below is dimmed.")
@@ -340,7 +383,7 @@ class LayerCard(Widget):
         self.on_open = on_open
 
     def draw(self, ctx):
-        ctx.draw_box(0, 0, ctx.width, ctx.height, hints={"fill": True})
+        ctx.draw_box(0, 0, ctx.width, ctx.height, _popup_box_style(ctx), hints={"fill": True})
         # Content sits at x=2; keep every line inside the right border (at
         # column width-1) with a one-column pad, so text never overwrites the
         # frame. The Panel clips to the full rect — the border included — so
@@ -723,9 +766,18 @@ class AnimTarget(Container):
         )
 
     def draw(self, ctx) -> None:
-        # The card's pane background comes from its slot's "bg" hint, which
-        # children inherit; the border just frames it.
-        ctx.draw_border(Style(fg=(36, 114, 200)))
+        # The card's pane background comes from its slot's surface role, which
+        # children inherit (so their default text reads on it under any theme);
+        # the border just frames it in the theme's accent.
+        theme = ctx.theme
+        border = theme.accent if theme is not None else (36, 114, 200)
+        # The accent label tracks the card background: a bright green reads on a
+        # dark card, a deeper green on a light one.
+        bg = ctx.background
+        self.last_label.style = Style(
+            fg=(21, 128, 61) if bg is not None and _luminance(bg) > 140 else (13, 188, 121)
+        )
+        ctx.draw_border(Style(fg=border))
         ctx.draw_icon(2, 1, "check")
         super().draw(ctx)  # children, each clipped to the card
 
@@ -759,7 +811,7 @@ def build_animation_page(panel: Panel) -> VSplit:
                 # only positions it. Capped to a 40x12 card via a nested split.
                 Item(
                     VSplit(
-                        Item(target, size=12, hints={"bg": CARD_BG}),
+                        Item(target, size=12, hints={"surface": "sidebar"}),
                         Item(Label(""), weight=1),
                     ),
                     size=40,
@@ -789,17 +841,24 @@ class Region(Widget):
         cw, ch = ctx.base_size
         units_line = f"{w_units:.2f} x {h_units:.2f} base units"
         px_line = f"= {w_units * cw:.0f} x {h_units * ch:.0f} px"
+        # The region's background is whatever its slot resolved (a themed surface
+        # role or a fixed vivid block). Pick a body color that reads on it, and
+        # keep the signature hue for the title only while it stays legible there
+        # — otherwise (a bright hue on a light surface) fall back to plain text.
+        bg = ctx.background
+        body_fg = _readable_fg(bg) if bg is not None else None
+        title_fg = self.color if (bg is None or _contrast(self.color, bg) >= 2.2) else body_fg
         if ctx.height >= 5:
-            ctx.draw_text(1, 0, self.name, Style(fg=self.color, attr=TextAttribute.BOLD))
-            ctx.draw_text(1, 2, units_line)
-            ctx.draw_text(1, 3, px_line)
+            ctx.draw_text(1, 0, self.name, Style(fg=title_fg, attr=TextAttribute.BOLD))
+            ctx.draw_text(1, 2, units_line, Style(fg=body_fg))
+            ctx.draw_text(1, 3, px_line, Style(fg=body_fg))
             if self.note:
-                ctx.draw_text(1, 4, self.note, Style(attr=TextAttribute.DIM))
+                ctx.draw_text(1, 4, self.note, Style(fg=body_fg, attr=TextAttribute.DIM))
         else:
             line = f"{self.name}  {units_line} {px_line}" + (
                 f"  ({self.note})" if self.note else ""
             )
-            ctx.draw_text(1, 0, line, Style(fg=self.color))
+            ctx.draw_text(1, 0, line, Style(fg=title_fg))
 
 
 def build_layout_page(panel: Panel) -> VSplit:
