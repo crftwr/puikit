@@ -36,6 +36,12 @@ def _to_gray(c):
     return (y, y, y)
 
 
+# Thin down-right drop shadow, mirroring CursesBackend: ▀ half-block bottom edge,
+# whole-cell darken right edge (matched thickness; no vertical ▌).
+_SHADOW_STRENGTH = 0.8
+_SHADOW_BOTTOM = "▀"   # U+2580 upper half block (shadow on top half)
+
+
 class MemoryBackend(Backend):
     PROFILE = PROFILE_TUI
 
@@ -56,7 +62,8 @@ class MemoryBackend(Backend):
         self.image_calls: list[tuple[float, float, str, dict[str, Any]]] = []
         self.round_rect_calls: list[tuple] = []
         self.check_calls: list[tuple] = []
-        self.shadow_calls: list[tuple] = []
+        self.shadow_calls: list[tuple] = []       # draw_shadow (GUI compositing)
+        self.shadow_rect_calls: list[tuple] = []  # shadow_rect (TUI stand-in)
         self.flash_calls: list[tuple] = []
         self.animate_calls: list[tuple[Any, dict[str, Any]]] = []
         self.tick_callbacks: list[Any] = []
@@ -212,6 +219,35 @@ class MemoryBackend(Backend):
                     self._styles[row][col] = Style(fg, bg, old.attr | TextAttribute.DIM)
                 else:
                     self._styles[row][col] = Style(old.fg, old.bg, old.attr | TextAttribute.DIM)
+
+    def shadow_rect(
+        self, x: int, y: int, w: int, h: int, base_bg: Any = None
+    ) -> None:
+        # TUI drop-shadow stand-in: a thin down-right shadow hugging the layer's
+        # right (whole-cell darken) and bottom (▀ half-block on blank cells) edges;
+        # a text cell keeps its glyph and darkens whole — mirrors CursesBackend.
+        self.shadow_rect_calls.append((round(x), round(y), round(w), round(h)))
+        x, y, w, h = round(x), round(y), round(w), round(h)
+        if w <= 0 or h <= 0:
+            return
+        base = base_bg
+        cells = [(row, x + w, None) for row in range(y + 1, y + h)]
+        cells += [(y + h, col, _SHADOW_BOTTOM) for col in range(x + 1, x + w + 1)]
+        for row, col, glyph in cells:
+            if not (0 <= row < self._height and 0 <= col < self._width):
+                continue
+            old = self._styles[row][col]
+            under_fg = old.fg if old.fg else base
+            under_bg = old.bg if old.bg else base
+            shade = _to_gray(_blend(under_bg, (0, 0, 0), 1.0 - _SHADOW_STRENGTH)) if under_bg else None
+            if glyph is not None and self._grid[row][col] == " ":
+                # Blank bottom cell: ▀ paints the shadowed top half over the page.
+                self._grid[row][col] = glyph
+                self._styles[row][col] = Style(shade, under_bg, old.attr)
+            else:
+                # Right column, or a text cell: keep the glyph, darken the whole cell.
+                nfg = _to_gray(_blend(under_fg, (0, 0, 0), 1.0 - _SHADOW_STRENGTH)) if under_fg else None
+                self._styles[row][col] = Style(nfg, shade, old.attr)
 
     def flash_rect(self, x: int, y: int, w: int, h: int, color: Any) -> None:
         # Records the call (for assertions) and recolors the region's background,

@@ -129,6 +129,21 @@ _TUI_PALETTE: list[Color] = _build_tui_palette()
 # lower → more of the page bleeds through (and, past a point, the old patchwork).
 _DIM_BLEND: float = 0.6
 
+# Per-cell "drop shadow" (see shadow_rect): a thin down-right drop shadow hugging
+# the layer's right and bottom edges. The two edges are rendered differently so
+# they read at a *matching* visual thickness on a grid whose cells are ~twice as
+# tall as wide:
+#   * bottom edge -> the ▀ UPPER HALF BLOCK on blank cells, so the shadow is only
+#     the top half of the row below the layer (~half a cell tall).
+#   * right edge  -> a whole-cell darken (one full column). A full cell *wide* ≈ a
+#     half cell *tall*, so the right band matches the bottom band's thickness.
+# Only ▀ is used (no vertical half-block ▌, which can show inter-line seams). A
+# half-block consumes the cell's glyph slot, so a bottom cell that already holds
+# TEXT can't use it — it falls back to a whole-cell darken that keeps the glyph.
+# _SHADOW_STRENGTH is the fraction of brightness KEPT (0.8 = weak).
+_SHADOW_STRENGTH: float = 0.8
+_SHADOW_BOTTOM: str = "▀"   # U+2580 upper half block
+
 
 def _blend(a: Color, b: Color, t: float) -> Color:
     """Linear a→b by t in [0, 1]; the TUI stand-in for alpha compositing a
@@ -241,6 +256,10 @@ class CursesBackend(Backend):
         # via inch() — which returns an unreliable color-pair number for wide /
         # non-ASCII cells (em-dashes, box lines, CJK), recoloring them wrong.
         self._cell_color: dict[tuple[int, int], tuple[Color | None, Color | None]] = {}
+        # Cells that hold a non-blank glyph this frame, so the drop shadow knows
+        # which cells it must NOT overwrite with a half-block (it would erase the
+        # text) and darkens whole-cell instead.
+        self._cell_text: set[tuple[int, int]] = set()
         self._clip_stack: list[tuple[int, int, int, int]] = []  # x0, y0, x1, y1
         # Where the focused text widget wants the terminal cursor (and thus the
         # terminal's own IME composition). Reset each frame; set via
@@ -368,6 +387,7 @@ class CursesBackend(Backend):
         self._input_pos = None
         self._deferred_emoji.clear()
         self._cell_color.clear()
+        self._cell_text.clear()
 
     def request_text_input(self, x: int, y: int, hints: dict[str, Any] | None = None) -> None:
         """The focused text widget's caret position (screen base units). In a
@@ -512,6 +532,15 @@ class CursesBackend(Backend):
         # a separate refresh (where nothing follows it) keeps the text aligned.
         col = 0
         for glyph, gw in zip(runs, widths):
+            # Track which cells carry a real glyph vs. a blank, so the drop
+            # shadow can pick half-block (blank) vs. whole-cell darken (text).
+            cell = (y, x + col)
+            if glyph == " ":
+                self._cell_text.discard(cell)
+            else:
+                self._cell_text.add(cell)
+                if gw == 2:
+                    self._cell_text.add((y, x + col + 1))
             if _is_emoji_glyph(glyph):
                 self._deferred_emoji[(y, x + col)] = (glyph, attr)
                 col += gw
@@ -617,17 +646,22 @@ class CursesBackend(Backend):
             # (an untouched default-bg cell) reads as the veil. Cache the result
             # per source (fg, bg): the page uses only a handful of distinct
             # colors, so the blend runs a few times, not once per cell.
-            attr_by_src: dict[tuple[Color | None, Color | None], int] = {}
+            by_src: dict[tuple[Color | None, Color | None], tuple[Color, Color, int]] = {}
             for row in range(y0, y1):
                 for col in range(x0, x1):
                     src = self._cell_color.get((row, col), (None, None))
-                    attr = attr_by_src.get(src)
-                    if attr is None:
+                    out = by_src.get(src)
+                    if out is None:
                         fg, bg = src
                         nfg = _to_gray(_blend(fg if fg else veil, veil, _DIM_BLEND))
                         nbg = _to_gray(_blend(bg if bg else veil, veil, _DIM_BLEND))
-                        attr = curses.color_pair(self._color_pair(nfg, nbg))
-                        attr_by_src[src] = attr
+                        out = (nfg, nbg, curses.color_pair(self._color_pair(nfg, nbg)))
+                        by_src[src] = out
+                    nfg, nbg, attr = out
+                    # Record the dimmed color so a later effect on these cells (a
+                    # modal's drop shadow over the dimmed page) composites from what
+                    # is now shown, not the original page color.
+                    self._cell_color[(row, col)] = (nfg, nbg)
                     try:
                         self._stdscr.chgat(row, col, 1, attr)
                     except curses.error:
@@ -651,6 +685,79 @@ class CursesBackend(Backend):
         if y1 > y0:
             try:
                 self._stdscr.redrawln(y0, y1 - y0)
+            except curses.error:
+                pass
+
+    def shadow_rect(
+        self, x: int, y: int, w: int, h: int, base_bg: Color | None = None
+    ) -> None:
+        # TUI drop-shadow stand-in (Panel calls this for a layer with a "shadow"
+        # hint on a backend without real compositing). A real GUI shadow is a soft
+        # blurred overlay; on a character grid the stepped equivalent is a thin
+        # down-right shadow hugging the layer's right and bottom edges, shifted one
+        # cell diagonally (light from the upper-left). Each shadow cell is darkened
+        # toward black at one weak strength (_SHADOW_STRENGTH).
+        #
+        # The bottom edge uses the ▀ half-block on *blank* cells (a half-cell-tall
+        # band); the right edge is a whole-cell darken (a full column) so it reads
+        # at a matching thickness. A bottom cell holding TEXT can't take a
+        # half-block (it would erase the glyph), so it darkens whole-cell instead.
+        # Source colors come from self._cell_color (reliable for wide glyphs); a
+        # cell with no recorded color falls back to ``base_bg`` (the page
+        # background the Panel passes).
+        assert self._stdscr is not None
+        x, y, w, h = round(x), round(y), round(w), round(h)
+        if w <= 0 or h <= 0:
+            return
+        base = base_bg if base_bg is not None else _DIM_BG
+        # Right column (whole-cell, top skipped so the layer's top-right is clear),
+        # then the bottom row incl. the corner (▀ half-block). glyph None == darken
+        # the whole cell.
+        cells: list[tuple[int, int, str | None]] = []
+        for row in range(y + 1, y + h):
+            cells.append((row, x + w, None))
+        for col in range(x + 1, x + w + 1):
+            cells.append((y + h, col, _SHADOW_BOTTOM))
+
+        sw, sh = self.size
+        has_color = curses.has_colors()
+        rows_touched: list[int] = []
+        for row, col, glyph in cells:
+            if not (0 <= row < sh and 0 <= col < sw):
+                continue
+            # A deferred emoji here would resurface at full color over the shadow.
+            self._evict_deferred_emoji(col, row, 1, 1)
+            src = self._cell_color.get((row, col), (None, None))
+            under_fg = src[0] if src[0] else base
+            under_bg = src[1] if src[1] else base
+            # Multiply toward black (drop brightness), then snap to the gray ramp:
+            # a neutral shadow, drift-free, like the dim.
+            shade = _to_gray(_blend(under_bg, (0, 0, 0), 1.0 - _SHADOW_STRENGTH))
+            try:
+                if not has_color:
+                    self._stdscr.chgat(row, col, 1, curses.A_DIM)
+                elif glyph is None or (row, col) in self._cell_text:
+                    # Whole-cell darken: the right column, or a bottom cell that
+                    # holds text (which keeps its glyph).
+                    nfg = _to_gray(_blend(under_fg, (0, 0, 0), 1.0 - _SHADOW_STRENGTH))
+                    self._stdscr.chgat(
+                        row, col, 1, curses.color_pair(self._color_pair(nfg, shade))
+                    )
+                else:
+                    # Blank bottom cell: ▀ paints the shadowed top half (shade) over
+                    # the page color (under_bg) — a sub-cell shadow edge.
+                    attr = curses.color_pair(self._color_pair(shade, under_bg))
+                    self._stdscr.addstr(row, col, glyph, attr)
+                rows_touched.append(row)
+            except curses.error:
+                pass
+        # Force the touched rows to flush (attribute-only chgat is not reliably
+        # treated as damage — same fix as dim_rect).
+        if rows_touched:
+            top = min(rows_touched)
+            count = max(rows_touched) - top + 1
+            try:
+                self._stdscr.redrawln(top, count)
             except curses.error:
                 pass
 

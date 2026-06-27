@@ -1157,7 +1157,8 @@ def build_layer_page(panel: Panel) -> VSplit:
         "One push_layer intent composites differently per backend:\n"
         "GUI does real layer compositing — translucent dim, drop\n"
         "shadows, z-ordered overlap; TUI falls back to draw order,\n"
-        "approximates dim with attributes, and skips shadows.\n"
+        "approximates dim by graying cells and the shadow with a\n"
+        "thin half-block edge down-right of the layer.\n"
         "The page never branches on the capability.",
     )
     return VSplit(

@@ -244,6 +244,16 @@ class Backend(ABC):
         means a square rect / all four corners."""
         raise CapabilityNotSupported("shadow")
 
+    def shadow_rect(
+        self, x: int, y: int, w: int, h: int, base_bg: "Color | None" = None
+    ) -> None:
+        """Stepped drop-shadow stand-in: darken the page cells in a one-cell halo
+        around the layer rect (the TUI equivalent of a soft GUI shadow), reading
+        the underlying colors so text stays rendered. The Panel calls this for a
+        ``shadow`` hint on backends without real ``shadow`` compositing; a backend
+        that can't darken in place ignores it. ``base_bg`` is the page background
+        behind the layer, used where a cell has no recorded color."""
+
     def draw_round_rect(
         self,
         x: float,

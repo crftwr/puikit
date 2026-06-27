@@ -1322,11 +1322,20 @@ class Panel:
         # The shadow blurs beyond the rect, so it is drawn before clipping. A
         # layer that paints a rounded face (e.g. a Drawer) passes "radius" /
         # "corners" hints so the shadow silhouette matches the rounding.
-        if slot.hints.get("shadow") and self.backend.capabilities.supports("shadow"):
-            self.backend.draw_shadow(
-                rect.x, rect.y, rect.w, rect.h,
-                slot.hints.get("radius"), slot.hints.get("corners"),
-            )
+        if slot.hints.get("shadow"):
+            if self.backend.capabilities.supports("shadow"):
+                self.backend.draw_shadow(
+                    rect.x, rect.y, rect.w, rect.h,
+                    slot.hints.get("radius"), slot.hints.get("corners"),
+                )
+            else:
+                # No real compositing: the backend darkens a one-cell halo around
+                # the layer instead (TUI stand-in). Pass the page background so the
+                # halo stays continuous over any unpainted cell.
+                self.backend.shadow_rect(
+                    rect.x, rect.y, rect.w, rect.h,
+                    self.theme.surface_bg("content"),
+                )
         self.backend.push_clip(rect.x, rect.y, rect.w, rect.h)
         background = self._pane_background(slot.hints)
         # A "self_paint" layer (e.g. a Drawer with a rounded face) paints its
