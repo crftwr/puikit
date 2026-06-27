@@ -1347,9 +1347,13 @@ class MacOSBackend(Backend):
         # and a corner subset so the shadow follows the rounded outline.
         NSGraphicsContext.saveGraphicsState()
         shadow = NSShadow.alloc().init()
-        shadow.setShadowOffset_(NSMakeSize(4.0, 6.0))
-        shadow.setShadowBlurRadius_(12.0)
-        shadow.setShadowColor_(_ns_color((0, 0, 0), 0.7))
+        # The view is flipped (top-left origin), so a positive Y offset casts the
+        # shadow upward. macOS panels/menus drop their shadow straight down with no
+        # horizontal bias, so use a negative Y offset and zero X. Mimic the native
+        # look: a wide, soft blur at low opacity rather than a tight dark edge.
+        shadow.setShadowOffset_(NSMakeSize(0.0, -8.0))
+        shadow.setShadowBlurRadius_(24.0)
+        shadow.setShadowColor_(_ns_color((0, 0, 0), 0.33))
         shadow.set()
         _ns_color(_DEFAULT_BG).setFill()
         rect = self._unit_rect(x, y, w, h)
