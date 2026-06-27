@@ -122,12 +122,15 @@ def _build_tui_palette() -> list[Color]:
 
 _TUI_PALETTE: list[Color] = _build_tui_palette()
 
-# "dim below" scrim: a single muted foreground over a single dark background,
-# applied uniformly to every cell under a modal layer (see dim_rect). The
-# background is a soft, slightly blue-tinted slate rather than near-black, so an
-# empty (text-free) row reads as a calm dimmed veil instead of a harsh black
-# bar; the foreground sits only modestly above it so rows with text do not pop
-# as lighter bands against the empty ones.
+# Fallback "dim below" scrim for callers that pass no explicit ``scrim``: a
+# single muted foreground over a single dark slate background, applied uniformly
+# to every cell. The Panel now hands dim_rect a theme-derived, polarity-correct
+# scrim (Theme.dim_scrim) for the modal veil — a light theme dims to a gray veil
+# with dark text rather than this dark default — so these constants only apply
+# if dim_rect is called bare. The background is a soft, slightly blue-tinted
+# slate rather than near-black, so an empty (text-free) row reads as a calm
+# dimmed veil; the foreground sits only modestly above it so rows with text do
+# not pop as lighter bands against the empty ones.
 _DIM_FG: Color = (88, 90, 102)
 _DIM_BG: Color = (21, 22, 30)
 
@@ -510,10 +513,17 @@ class CursesBackend(Backend):
         for row in range(h):
             self.draw_text(x, y + row, " " * w, style)
 
-    def dim_rect(self, x: int, y: int, w: int, h: int) -> None:
+    def dim_rect(
+        self, x: int, y: int, w: int, h: int, scrim: tuple[Color, Color] | None = None
+    ) -> None:
         # TUI "dim below": recolor every cell in the region to a single muted
         # foreground over a single dark background (the scrim), keeping each
         # glyph in place, so the page recedes evenly behind a modal layer.
+        #
+        # The Panel passes an explicit ``scrim`` (fg, bg) for the 2-frame
+        # ``fade`` stand-in, where the group must wash toward its own (possibly
+        # light) background instead of the fixed dark modal veil — otherwise a
+        # fade on a light theme flashes near-black.
         #
         # The scrim uses ONE fixed color pair for the whole region, not a
         # darkened pair computed per cell. A per-cell tint preserves every
@@ -534,7 +544,8 @@ class CursesBackend(Backend):
         # dim in present(); drop it so the dimmed page reads uniform.
         self._evict_deferred_emoji(x0, max(0, y), x1 - x0, min(sh, y + h) - max(0, y))
         if curses.has_colors():
-            attr = curses.color_pair(self._color_pair(_DIM_FG, _DIM_BG))
+            fg, bg = scrim if scrim is not None else (_DIM_FG, _DIM_BG)
+            attr = curses.color_pair(self._color_pair(fg, bg))
         else:
             attr = curses.A_DIM
         for row in range(max(0, y), min(sh, y + h)):

@@ -439,14 +439,45 @@ def test_fade_is_two_frame_dim_effect_on_tui():
     # Played by the Panel, not handed to the backend's compositor.
     assert backend.animate_calls == []
     assert probe in panel._effect_anims
-    # Frame 1 (intermediate): the group is dimmed.
+    # Frame 1 (intermediate): the group is dimmed. A fade washes the group
+    # toward its own background (not the fixed dark modal scrim), so the
+    # intermediate cell carries the theme's fade scrim, not near-black — this is
+    # what keeps a fade on a light theme from flashing black.
     backend.run_animation_ticks()
     assert backend.style_at(0, 0).attr & TextAttribute.DIM
+    fade_fg, fade_bg = panel.theme.fade_scrim()
+    assert backend.style_at(0, 0).bg == fade_bg
+    assert backend.style_at(0, 0).fg == fade_fg
     # Frame 2 (target): clean, effect dropped, ticking stops.
     backend.run_animation_ticks()
     assert not (backend.style_at(0, 0).attr & TextAttribute.DIM)
     assert probe not in panel._effect_anims
     assert backend.tick_callbacks == []
+
+
+def test_fade_scrim_follows_theme_polarity_not_fixed_dark():
+    # Regression: a fade on a light theme used to flash near-black because the
+    # TUI stand-in reused the fixed dark modal scrim. The fade scrim now tracks
+    # the theme background, so a light theme washes toward near-white.
+    from puikit import derive_theme
+
+    light = derive_theme(
+        background=(240, 240, 240),
+        foreground=(30, 30, 30),
+        muted=(120, 120, 120),
+        accent=(0, 122, 204),
+        surface=(225, 225, 228),
+        selection=(180, 205, 240),
+    )
+    backend = MemoryBackend(width=20, height=10, capabilities=PROFILE_TUI)
+    panel = Panel(backend, theme=light)
+    probe = Label("hello")
+    panel.add(probe, x=0, y=0, w=10, h=1)
+    panel.animate(probe, hints={"transition": "fade"})
+    backend.run_animation_ticks()
+    bg = backend.style_at(0, 0).bg
+    # Bright background, emphatically not the (21, 22, 30) dark modal scrim.
+    assert sum(bg) > 600
 
 
 def test_highlight_is_two_frame_flash_on_tui():

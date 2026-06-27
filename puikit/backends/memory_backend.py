@@ -171,12 +171,19 @@ class MemoryBackend(Backend):
     ) -> None:
         self.check_calls.append((x, y, w, h, style))
 
-    def dim_rect(self, x: int, y: int, w: int, h: int) -> None:
+    def dim_rect(self, x: int, y: int, w: int, h: int, scrim: Any = None) -> None:
         x, y, w, h = round(x), round(y), round(w), round(h)
         for row in range(max(0, y), min(self._height, y + h)):
             for col in range(max(0, x), min(self._width, x + w)):
                 old = self._styles[row][col]
-                self._styles[row][col] = Style(old.fg, old.bg, old.attr | TextAttribute.DIM)
+                if scrim is not None:
+                    # Record both the explicit scrim recolor (so a fade's wash
+                    # toward the group background is observable) and the DIM
+                    # marker that signals a dim pass happened.
+                    fg, bg = scrim
+                    self._styles[row][col] = Style(fg, bg, old.attr | TextAttribute.DIM)
+                else:
+                    self._styles[row][col] = Style(old.fg, old.bg, old.attr | TextAttribute.DIM)
 
     def flash_rect(self, x: int, y: int, w: int, h: int, color: Any) -> None:
         # Records the call (for assertions) and recolors the region's background,

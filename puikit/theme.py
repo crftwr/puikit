@@ -88,6 +88,36 @@ class Theme:
     def surface_bg(self, role: str) -> Color | None:
         return self.surfaces.get(role)
 
+    def fade_scrim(self) -> tuple[Color, Color]:
+        """The (fg, bg) pair a whole-cell backend paints over a group for the
+        2-frame ``fade`` stand-in. A fade is opacity: the group's content blends
+        *into its own background*, so the scrim background stays at the page
+        color and the foreground sinks halfway toward it — the text reads faint,
+        not gone. This is polarity-correct by construction (a light theme washes
+        toward near-white, a dark one toward near-black), so a fade never flashes
+        a fixed dark scrim over a light surface. Distinct from the modal
+        ``dim_below`` scrim, which deliberately darkens to make the page recede.
+        """
+        bg = self.surfaces.get("content", (30, 30, 38))
+        return _mix(bg, self.text, 0.4), bg
+
+    def dim_scrim(self) -> tuple[Color, Color]:
+        """The (fg, bg) pair a whole-cell backend paints uniformly over the page
+        under a modal layer (``dim_below``). Unlike :meth:`fade_scrim` — which
+        washes a group toward its *own* background to read as opacity — the modal
+        dim deliberately pushes the page toward shadow so it recedes behind the
+        layer, but it must stay **polarity-correct**: a dark theme darkens toward
+        near-black while a light theme settles on a mid gray, never a near-black
+        bar. So the veil background steps the content surface toward black (light
+        → gray, dark → darker), and the veil foreground leans back toward the
+        theme's own text — muted light-gray text on a dark veil, muted dark text
+        on a gray veil — so the dimmed page keeps the theme's contrast direction
+        instead of inverting it (gray bg + dark text on a light theme, not black
+        bg + gray text)."""
+        bg = self.surfaces.get("content", (30, 30, 38))
+        veil_bg = _mix(bg, _BLACK, 0.30)
+        return _mix(veil_bg, self.text, 0.55), veil_bg
+
 
 # --- derivation ---------------------------------------------------------------
 # A full Theme names ~24 colors. Most are not independent decisions: a hover is a

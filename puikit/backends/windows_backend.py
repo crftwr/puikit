@@ -499,7 +499,9 @@ class WindowsBackend(Backend):
     ) -> None:
         self._back.append(("check", x, y, w, h, style))
 
-    def dim_rect(self, x: int, y: int, w: int, h: int) -> None:
+    def dim_rect(self, x: int, y: int, w: int, h: int, scrim: Any = None) -> None:
+        # Compositing backend: a real translucent overlay; the whole-cell
+        # ``scrim`` hint (for the TUI fade stand-in) does not apply.
         self._back.append(("dim", x, y, w, h))
 
     def draw_shadow(

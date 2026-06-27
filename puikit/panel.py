@@ -1310,7 +1310,11 @@ class Panel:
             # attributes, GUI draws a translucent overlay. Dim the exact
             # (fractional) extent so the last partial base unit is covered too.
             sw, sh = self.backend.size_units
-            self.backend.dim_rect(0, 0, sw, sh)
+            # The whole-cell scrim must follow the theme polarity: a light theme
+            # dims to a gray veil with dark text, not a fixed near-black bar with
+            # gray text. GUI backends ignore the scrim (they composite a real
+            # translucent overlay) and read it as a no-op hint.
+            self.backend.dim_rect(0, 0, sw, sh, scrim=self.theme.dim_scrim())
         rect = self._interpolate_rect(slot.widget, slot.rect)
         self.backend.begin_group(slot.widget, rect)
         # The shadow blurs beyond the rect, so it is drawn before clipping. A
@@ -1484,8 +1488,14 @@ class Panel:
         if eff is None or not eff.active(time.monotonic()):
             return
         if eff.kind == "fade":
-            # No alpha on a terminal: a fade reads as one dim pass over the group.
-            self.backend.dim_rect(rect.x, rect.y, rect.w, rect.h)
+            # No alpha on a terminal: a fade reads as one dim pass over the
+            # group. Unlike the modal dim_below veil (a fixed dark scrim), a fade
+            # washes the group toward its own background, so on a light theme it
+            # never flashes near-black — the theme supplies the polarity-correct
+            # (fg, bg) scrim.
+            self.backend.dim_rect(
+                rect.x, rect.y, rect.w, rect.h, scrim=self.theme.fade_scrim()
+            )
         else:  # highlight
             color = eff.hints.get("color") or self.theme.accent
             self.backend.flash_rect(rect.x, rect.y, rect.w, rect.h, color)

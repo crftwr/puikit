@@ -929,7 +929,9 @@ class MacOSBackend(Backend):
     ) -> None:
         self._back.append(("check", x, y, w, h, style))
 
-    def dim_rect(self, x: int, y: int, w: int, h: int) -> None:
+    def dim_rect(self, x: int, y: int, w: int, h: int, scrim: Any = None) -> None:
+        # Compositing backend: the dim is a real translucent overlay, correct on
+        # any theme, so the whole-cell ``scrim`` hint is ignored.
         self._back.append(("dim", x, y, w, h))
 
     def draw_shadow(
