@@ -31,6 +31,11 @@ def _blend(a, b, t):
     )
 
 
+def _to_gray(c):
+    y = round(0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2])
+    return (y, y, y)
+
+
 class MemoryBackend(Backend):
     PROFILE = PROFILE_TUI
 
@@ -192,11 +197,12 @@ class MemoryBackend(Backend):
             for col in range(max(0, x), min(self._width, x + w)):
                 old = self._styles[row][col]
                 if per_cell and veil is not None:
-                    # Composite the veil over each cell's own colors (the TUI
-                    # per-cell translucent overlay), so surfaces stay faintly
-                    # distinct instead of collapsing to one pair.
-                    fg = _blend(old.fg, veil, _DIM_BLEND) if old.fg else veil
-                    bg = _blend(old.bg, veil, _DIM_BLEND) if old.bg else veil
+                    # Composite the veil over each cell's own colors then gray it
+                    # (the TUI per-cell translucent overlay), so surfaces stay
+                    # faintly distinct by brightness instead of collapsing to one
+                    # pair.
+                    fg = _to_gray(_blend(old.fg, veil, _DIM_BLEND)) if old.fg else _to_gray(veil)
+                    bg = _to_gray(_blend(old.bg, veil, _DIM_BLEND)) if old.bg else _to_gray(veil)
                     self._styles[row][col] = Style(fg, bg, old.attr | TextAttribute.DIM)
                 elif scrim is not None:
                     # Record both the explicit scrim recolor (so a fade's wash

@@ -171,10 +171,13 @@ def test_per_cell_dim_keeps_surfaces_distinct():
     red = backend.style_at(0, 0)
     blue = backend.style_at(2, 0)
     assert red.attr & TextAttribute.DIM and blue.attr & TextAttribute.DIM
-    # Each background moved toward the veil but the two stay distinguishable.
+    # The dim is grayscale: each composited color is a neutral gray (r==g==b).
+    assert red.bg[0] == red.bg[1] == red.bg[2]
+    assert blue.bg[0] == blue.bg[1] == blue.bg[2]
+    # The two surfaces still differ (by brightness) and both moved off their
+    # original color toward the veil.
     assert red.bg != blue.bg
-    assert red.bg != (200, 30, 30) and red.bg[0] > red.bg[2]  # still reddish
-    assert blue.bg != (30, 30, 200) and blue.bg[2] > blue.bg[0]  # still bluish
+    assert red.bg != (200, 30, 30) and blue.bg != (30, 30, 200)
 
 
 def test_uniform_dim_collapses_surfaces():
