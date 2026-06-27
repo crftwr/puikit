@@ -825,7 +825,7 @@ class WindowsBackend(Backend):
 
     def _render_scrollbar(self, x: int, y: int, h: int, pos: float, ratio: float, style: Style) -> None:
         track = self._unit_rect(x, y, 1, h)
-        self._set_brush((60, 60, 60))
+        self._set_brush(style.bg or (60, 60, 60))
         native.rt_fill_rectangle(self._render_target, track, self._brush)
         # Pixel-level thumb: exact device-pixel size/position (not snapped to
         # whole base units), so the scroll position is exact.

@@ -76,6 +76,14 @@ class Theme:
     hover_bg: Color = (42, 45, 46)         # row hover                   #2A2D2E
     popup_bg: Color = (37, 37, 38)         # menu / popup surface        #252526
     popup_border: Color = (84, 84, 92)     # menu / popup frame line     #54545C
+    # Scrollbar split by brightness: the track sits close to the background (a
+    # faint groove), the knob lands on the opposite brightness side so it reads
+    # clearly against both the track and the pane. The base defaults are neutral
+    # grays that already exist as curated TUI-palette stops, so folding them in
+    # (theme colors seed that palette) costs no extra slot; a derived theme
+    # (derive_theme) tints them along its own background→foreground axis.
+    scrollbar_track: Color = (48, 48, 48)   # track (near background)
+    scrollbar_thumb: Color = (140, 140, 140)  # knob (opposite brightness)
 
     def surface_bg(self, role: str) -> Color | None:
         return self.surfaces.get(role)
@@ -178,6 +186,11 @@ def derive_theme(
         hover_bg=lift(background, 0.07),
         popup_bg=surface,
         popup_border=lift(surface, 0.18),
+        # Scrollbar along the background→foreground axis: the track stays near
+        # the background (a faint groove), the knob crosses past the midpoint to
+        # the foreground (opposite-brightness) side so it reads on both.
+        scrollbar_track=_mix(background, foreground, 0.10),
+        scrollbar_thumb=_mix(background, foreground, 0.55),
     )
     if "surfaces" in overrides:
         derived["surfaces"] = {**derived["surfaces"], **overrides.pop("surfaces")}

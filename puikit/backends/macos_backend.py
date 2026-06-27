@@ -1370,7 +1370,7 @@ class MacOSBackend(Backend):
         self, x: int, y: int, h: int, pos: float, ratio: float, style: Style
     ) -> None:
         track = self._unit_rect(x, y, 1, h)
-        _ns_color((60, 60, 60)).setFill()
+        _ns_color(style.bg or (60, 60, 60)).setFill()
         NSRectFill(track)
         # Pixel-level thumb: size and position are computed in device pixels
         # (not snapped to whole base units), so the scroll position is exact.

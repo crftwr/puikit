@@ -229,7 +229,7 @@ class MemoryBackend(Backend):
         # colors (a space glyph), not block characters, so the thumb fills the
         # full row height with no inter-line gaps. Tests inspect style_at().
         thumb_style = Style(bg=style.fg or _SCROLLBAR_THUMB)
-        track_style = Style(bg=_SCROLLBAR_TRACK)
+        track_style = Style(bg=style.bg or _SCROLLBAR_TRACK)
         for row in range(h):
             in_thumb = thumb_y <= row < thumb_y + thumb_h
             self.draw_text(x, y + row, " ", thumb_style if in_thumb else track_style)

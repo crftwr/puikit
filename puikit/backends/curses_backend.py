@@ -592,7 +592,7 @@ class CursesBackend(Backend):
         # terminal's line spacing), so the thumb reads as one continuous bar
         # with no gaps, whereas a stacked `█` glyph leaves inter-line gaps.
         thumb_style = Style(bg=style.fg or _SCROLLBAR_THUMB)
-        track_style = Style(bg=_SCROLLBAR_TRACK)
+        track_style = Style(bg=style.bg or _SCROLLBAR_TRACK)
         for row in range(h):
             in_thumb = thumb_y <= row < thumb_y + thumb_h
             self.draw_text(x, y + row, " ", thumb_style if in_thumb else track_style)

@@ -33,8 +33,11 @@ def test_listview_renders_visible_slice_and_selection(backend):
     assert backend.style_at(0, 0).bg == active
     assert backend.style_at(0, 1).bg != active
     # Long list shows a scrollbar in the last column, painted via base unit
-    # background color (thumb or track) rather than a glyph.
-    assert backend.style_at(9, 0).bg in {(150, 150, 150), (60, 60, 60)}
+    # background color (the theme's thumb or track) rather than a glyph.
+    assert backend.style_at(9, 0).bg in {
+        panel.theme.scrollbar_thumb,
+        panel.theme.scrollbar_track,
+    }
 
 
 def test_listview_pads_rows_by_display_width(backend):
@@ -272,9 +275,9 @@ def test_scrollbar_thumb_position(backend):
     panel = Panel(backend)
     panel.add(ScrollBar(pos=1.0, ratio=0.3), x=0, y=0, w=1, h=10)
     panel.render()
-    # The bar is painted with base unit background colors; the thumb is the lighter
-    # background, the track the darker one.
-    thumb, track = (150, 150, 150), (60, 60, 60)
+    # The bar is painted with base unit background colors from the theme: the
+    # thumb on the opposite-brightness side, the track close to the background.
+    thumb, track = panel.theme.scrollbar_thumb, panel.theme.scrollbar_track
     column = [backend.style_at(0, row).bg for row in range(10)]
     assert column[0] == track
     assert column[9] == thumb  # thumb at the bottom for pos=1.0
