@@ -38,8 +38,18 @@ class Theme:
     accent: Color = (0, 122, 204)          # focus ring / primary accent #007ACC
     text: Color = (212, 212, 212)          # default control foreground  #D4D4D4
     muted_text: Color = (157, 157, 157)    # secondary text              #9D9D9D
-    control_bg: Color = (60, 60, 60)       # text field / dropdown face  #3C3C3C
-    control_border: Color = (69, 69, 69)   # control outline             #454545
+    # Text field / dropdown / combo face. Lifted well above the base content
+    # surface (~#1E1E26) so an input reads as a distinct inset region, not a
+    # bare patch of background. On TUI the gap matters most: the base surface
+    # and the old #3C3C3C face quantized to neighbouring gray stops and the
+    # field nearly vanished, so the face is raised to a clearly separated stop.
+    control_bg: Color = (78, 78, 86)       # text field / dropdown face  #4E4E56
+    # Hover face for an input/dropdown: a lift *above* control_bg. The generic
+    # row hover_bg below is a subtle tint over the dark content surface and is
+    # darker than the lighter field face, so a field must hover toward lighter,
+    # not toward the row tint, or it would counterintuitively darken on hover.
+    control_hover_bg: Color = (96, 96, 105)  # input hover face           #606069
+    control_border: Color = (104, 104, 114)  # control outline (above face) #686872
     button_bg: Color = (14, 99, 156)       # primary button face         #0E639C
     button_hover_bg: Color = (17, 119, 187)  # button hover              #1177BB
     button_text: Color = (255, 255, 255)
@@ -47,11 +57,15 @@ class Theme:
     # action, so a screen with two buttons reads one as the prominent choice.
     button_secondary_bg: Color = (58, 61, 65)         # secondary face   #3A3D41
     button_secondary_hover_bg: Color = (69, 73, 78)   # secondary hover  #45494E
-    selection_bg: Color = (9, 71, 113)     # active selection            #094771
+    selection_bg: Color = (10, 105, 178)   # active selection            #0A69B2
     # List/row selection split by focus (interaction_states.md §4b/§5): the loud
     # accent fill goes to the *focused* widget, the muted neutral to a list whose
     # focus has moved away — the louder cue always marks focus, never the reverse.
-    selection_active_bg: Color = (9, 71, 113)         # focused  #094771
+    # The focused fill sits close to the accent (#007ACC) rather than the dim
+    # VS Code #094771, so the active row clearly reads as "selected + focused"
+    # and never blends into the dark content background — on TUI especially,
+    # where the old fill quantized to within a stop of the surrounding panes.
+    selection_active_bg: Color = (10, 105, 178)       # focused  #0A69B2
     selection_inactive_bg: Color = (55, 55, 61)       # blurred  #37373D
     # Text-field selection, split by focus: a clearly legible blue while the
     # field is focused, a muted neutral when focus is elsewhere (the editor

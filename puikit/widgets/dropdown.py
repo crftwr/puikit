@@ -97,7 +97,7 @@ class DropDown(Widget):
         hovering = ctx.hovered_in(field_w)
         if hovering:
             ctx.set_cursor("pointer")  # the trigger reads as clickable
-        bg = theme.hover_bg if hovering else theme.control_bg
+        bg = theme.control_hover_bg if hovering else theme.control_bg
         field_h = ctx.size_units[1]
         ty = (field_h - 1.0) / 2.0  # center the text line within the field box
         # A flat, rounded field on vector backends, a plain fill on a character

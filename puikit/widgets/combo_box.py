@@ -119,7 +119,7 @@ class ComboBox(Widget):
         # I-beam over the whole trigger.
         if hovering:
             ctx.set_cursor("pointer")
-        field_bg = theme.hover_bg if (hovering and not focused) else theme.control_bg
+        field_bg = theme.control_hover_bg if (hovering and not focused) else theme.control_bg
         ctx.draw_text(w - 2, ty, arrow, Style(fg=arrow_fg, bg=field_bg))
 
     # --- filtering -----------------------------------------------------------

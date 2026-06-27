@@ -135,7 +135,7 @@ class TextEdit(Widget):
         if hovering:
             # An I-beam over the editable area; one intent, resolved per backend.
             ctx.set_cursor("text")
-        bg = theme.hover_bg if (hovering and not ctx.focused) else theme.control_bg
+        bg = theme.control_hover_bg if (hovering and not ctx.focused) else theme.control_bg
         field_h = ctx.size_units[1]
         ty = (field_h - 1.0) / 2.0  # center the text line within the field box
         # A flat, rounded field on vector backends, a plain fill on a character

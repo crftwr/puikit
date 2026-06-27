@@ -23,8 +23,6 @@ from ..layout import LayoutContext
 from ..panel import DrawContext
 from .button import Button
 
-_BOLD = Style(attr=TextAttribute.BOLD)
-
 # Horizontal gap between adjacent buttons in the row, in base units.
 _BUTTON_GAP = 1.0
 
@@ -98,12 +96,21 @@ class MessageBox:
             Style(bg=theme.popup_bg, fg=theme.popup_border) if theme is not None else DEFAULT_STYLE
         )
         ctx.draw_box(0, 0, ctx.width, ctx.height, box_style, hints={"fill": True})
+        # The icon, title, and message must sit on the dialog *surface*, so pin
+        # their background to the box fill (popup_bg). A bg-less run instead
+        # inherits the layer's default background — the backend's dark fill —
+        # which paints a dark band behind the text and a dark square behind the
+        # icon, invisible on a light theme's white dialog. The foreground falls
+        # through to the theme text color (resolved by the Panel's text seam).
+        surface_bg = theme.popup_bg if theme is not None else None
+        title_style = Style(bg=surface_bg, attr=TextAttribute.BOLD)
+        msg_style = Style(bg=surface_bg)
         if self.icon:
-            ctx.draw_icon(2, 1, self.icon)
+            ctx.draw_icon(2, 1, self.icon, msg_style)
         if self.title:
-            ctx.draw_text(5, 1, self.title, _BOLD)
+            ctx.draw_text(5, 1, self.title, title_style)
         for i, line in enumerate(self._lines()):
-            ctx.draw_text(2, 3 + i, line[: max(0, ctx.width - 4)])
+            ctx.draw_text(2, 3 + i, line[: max(0, ctx.width - 4)], msg_style)
 
         # Button row along the bottom, centered as a group and drawn as real
         # Button widgets via draw_child — so each carries the flat fill, focus

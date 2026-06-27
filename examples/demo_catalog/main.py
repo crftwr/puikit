@@ -136,7 +136,7 @@ DEMO_THEMES: list[tuple[str, Theme]] = [
         Theme(
             surfaces={
                 "content": (30, 30, 30),
-                "sidebar": (37, 37, 38),
+                "sidebar": (48, 48, 52),
                 "header": (60, 60, 60),
                 "status": (0, 122, 204),
             },
@@ -144,15 +144,22 @@ DEMO_THEMES: list[tuple[str, Theme]] = [
             accent=(0, 122, 204),
             text=(212, 212, 212),
             muted_text=(157, 157, 157),
-            control_bg=(60, 60, 60),
-            control_border=(69, 69, 69),
+            # The input face is lifted clearly above the content surface
+            # (#1E1E1E) so a text field / dropdown reads as a distinct inset,
+            # not a bare patch of page. The hover face lifts further (a field
+            # brightens, never darkens, toward the row tint on hover).
+            control_bg=(70, 70, 74),
+            control_hover_bg=(88, 88, 92),
+            control_border=(100, 100, 106),
             button_bg=(14, 99, 156),
             button_hover_bg=(17, 119, 187),
             # selection_bg drives the *active* highlight on popups (dropdown,
             # combo, menu) and text selection; keep it equal to the list's
-            # active selection fill so every "current row" cue matches.
-            selection_bg=(9, 71, 113),
-            selection_active_bg=(9, 71, 113),
+            # active selection fill so every "current row" cue matches. It sits
+            # close to the accent (#007ACC) so the focused row clearly reads as
+            # selected and never blends into the dark content background.
+            selection_bg=(10, 105, 178),
+            selection_active_bg=(10, 105, 178),
             # The inactive (focus-elsewhere) fill must still read against the
             # sidebar/content surfaces, not melt into them.
             selection_inactive_bg=(58, 58, 64),
@@ -163,7 +170,7 @@ DEMO_THEMES: list[tuple[str, Theme]] = [
         Theme(
             surfaces={
                 "content": (39, 40, 34),
-                "sidebar": (46, 47, 40),
+                "sidebar": (56, 57, 48),
                 "header": (62, 61, 52),
                 "status": (166, 226, 46),
             },
@@ -171,16 +178,20 @@ DEMO_THEMES: list[tuple[str, Theme]] = [
             accent=(166, 226, 46),
             text=(248, 248, 242),
             muted_text=(140, 140, 130),
-            control_bg=(46, 47, 40),
-            control_border=(73, 72, 62),
+            control_bg=(58, 59, 50),
+            control_hover_bg=(72, 73, 62),
+            control_border=(88, 88, 74),
             # Primary action wears the accent (a bright green here); its label /
             # the checkbox check glyph (drawn on the accent) take a dark color so
             # they read on that light fill.
             button_bg=(166, 226, 46),
             button_hover_bg=(180, 236, 80),
             button_text=(33, 34, 28),
-            selection_bg=(90, 89, 77),
-            selection_active_bg=(90, 89, 77),
+            # A clearly saturated green-leaning fill (toward the accent) so the
+            # focused row pops from the olive content surface; the light row text
+            # stays legible on it.
+            selection_bg=(86, 122, 38),
+            selection_active_bg=(86, 122, 38),
             selection_inactive_bg=(66, 66, 54),
             hover_bg=(49, 50, 44),
             popup_bg=(46, 47, 40),
@@ -192,7 +203,7 @@ DEMO_THEMES: list[tuple[str, Theme]] = [
         Theme(
             surfaces={
                 "content": (40, 42, 54),
-                "sidebar": (46, 48, 62),
+                "sidebar": (56, 59, 76),
                 "header": (68, 71, 90),
                 "status": (189, 147, 249),
             },
@@ -200,13 +211,16 @@ DEMO_THEMES: list[tuple[str, Theme]] = [
             accent=(189, 147, 249),
             text=(248, 248, 242),
             muted_text=(98, 114, 164),
-            control_bg=(46, 48, 62),
-            control_border=(68, 71, 90),
+            control_bg=(58, 60, 76),
+            control_hover_bg=(72, 75, 94),
+            control_border=(88, 92, 114),
             button_bg=(189, 147, 249),
             button_hover_bg=(202, 165, 255),
             button_text=(40, 42, 54),
-            selection_bg=(98, 80, 130),
-            selection_active_bg=(98, 80, 130),
+            # A clearer purple (toward the accent) so the focused row reads as
+            # selected against the blue-gray content surface.
+            selection_bg=(120, 86, 175),
+            selection_active_bg=(120, 86, 175),
             selection_inactive_bg=(62, 65, 84),
             hover_bg=(52, 54, 70),
             popup_bg=(46, 48, 62),
@@ -218,7 +232,7 @@ DEMO_THEMES: list[tuple[str, Theme]] = [
         Theme(
             surfaces={
                 "content": (0, 43, 54),
-                "sidebar": (7, 54, 66),
+                "sidebar": (10, 62, 78),
                 "header": (0, 54, 68),
                 "status": (38, 139, 210),
             },
@@ -226,13 +240,16 @@ DEMO_THEMES: list[tuple[str, Theme]] = [
             accent=(38, 139, 210),
             text=(147, 161, 161),
             muted_text=(88, 110, 117),
-            control_bg=(7, 54, 66),
+            control_bg=(16, 66, 80),
+            control_hover_bg=(28, 82, 98),
             control_border=(88, 110, 117),
             button_bg=(38, 139, 210),
             button_hover_bg=(58, 160, 228),
             button_text=(253, 246, 227),
-            selection_bg=(0, 95, 125),
-            selection_active_bg=(0, 95, 125),
+            # A clearer blue (toward the accent) so the focused row stands out
+            # from the very dark teal content surface.
+            selection_bg=(26, 102, 150),
+            selection_active_bg=(26, 102, 150),
             selection_inactive_bg=(20, 72, 87),
             hover_bg=(7, 54, 66),
             popup_bg=(7, 54, 66),
@@ -244,7 +261,7 @@ DEMO_THEMES: list[tuple[str, Theme]] = [
         Theme(
             surfaces={
                 "content": (46, 52, 64),
-                "sidebar": (59, 66, 82),
+                "sidebar": (62, 70, 88),
                 "header": (67, 76, 94),
                 "status": (136, 192, 208),
             },
@@ -252,13 +269,16 @@ DEMO_THEMES: list[tuple[str, Theme]] = [
             accent=(136, 192, 208),
             text=(216, 222, 233),
             muted_text=(76, 86, 106),
-            control_bg=(59, 66, 82),
-            control_border=(76, 86, 106),
+            control_bg=(66, 74, 92),
+            control_hover_bg=(80, 90, 110),
+            control_border=(96, 106, 128),
             button_bg=(136, 192, 208),
             button_hover_bg=(150, 205, 220),
             button_text=(46, 52, 64),
-            selection_bg=(94, 109, 140),
-            selection_active_bg=(94, 109, 140),
+            # A clearer cyan-blue (toward the accent) so the focused row reads
+            # as selected against the slate content surface.
+            selection_bg=(76, 128, 158),
+            selection_active_bg=(76, 128, 158),
             selection_inactive_bg=(78, 86, 104),
             hover_bg=(59, 66, 82),
             popup_bg=(59, 66, 82),
@@ -276,7 +296,7 @@ DEMO_THEMES: list[tuple[str, Theme]] = [
         Theme(
             surfaces={
                 "content": (255, 255, 255),
-                "sidebar": (243, 243, 243),
+                "sidebar": (235, 235, 238),
                 "header": (221, 221, 221),
                 "status": (0, 122, 204),
             },
@@ -284,15 +304,22 @@ DEMO_THEMES: list[tuple[str, Theme]] = [
             accent=(0, 122, 204),
             text=(30, 30, 30),
             muted_text=(110, 110, 110),
-            control_bg=(255, 255, 255),
+            # On a pure-white page a white field is invisible; sink the input
+            # face to a light gray so it reads as a distinct inset region. The
+            # field is darker than the page (a sunken control), so its hover
+            # darkens further, the same direction as the row hover_bg.
+            control_bg=(236, 236, 240),
+            control_hover_bg=(226, 226, 232),
             control_border=(200, 200, 200),
             button_bg=(0, 122, 204),
             button_hover_bg=(0, 102, 184),
             button_text=(255, 255, 255),
             button_secondary_bg=(228, 228, 228),
             button_secondary_hover_bg=(214, 214, 214),
-            selection_bg=(173, 214, 255),
-            selection_active_bg=(173, 214, 255),
+            # A clearer blue tint (toward the accent) so the focused row reads as
+            # selected on the white page; the dark row text stays legible on it.
+            selection_bg=(120, 180, 240),
+            selection_active_bg=(120, 180, 240),
             selection_inactive_bg=(208, 215, 224),
             text_selection_bg=(173, 214, 255),
             text_selection_inactive_bg=(216, 222, 230),
@@ -306,7 +333,7 @@ DEMO_THEMES: list[tuple[str, Theme]] = [
         Theme(
             surfaces={
                 "content": (253, 246, 227),
-                "sidebar": (238, 232, 213),
+                "sidebar": (234, 228, 206),
                 "header": (225, 219, 200),
                 "status": (38, 139, 210),
             },
@@ -314,15 +341,20 @@ DEMO_THEMES: list[tuple[str, Theme]] = [
             accent=(38, 139, 210),
             text=(88, 110, 117),
             muted_text=(147, 161, 161),
-            control_bg=(253, 246, 227),
+            # Sink the field below the warm-paper page so it reads as a distinct
+            # inset; the field darkens on hover (a sunken light control).
+            control_bg=(236, 228, 205),
+            control_hover_bg=(222, 214, 190),
             control_border=(147, 161, 161),
             button_bg=(38, 139, 210),
             button_hover_bg=(38, 120, 190),
             button_text=(253, 246, 227),
             button_secondary_bg=(238, 232, 213),
             button_secondary_hover_bg=(223, 217, 198),
-            selection_bg=(200, 224, 242),
-            selection_active_bg=(200, 224, 242),
+            # A clearer blue tint (toward the accent) so the focused row reads as
+            # selected on the warm-paper page.
+            selection_bg=(150, 195, 230),
+            selection_active_bg=(150, 195, 230),
             selection_inactive_bg=(214, 206, 184),
             text_selection_bg=(200, 224, 242),
             text_selection_inactive_bg=(221, 214, 194),
@@ -345,6 +377,18 @@ def _popup_box_style(ctx) -> Style:
     return Style(bg=theme.popup_bg, fg=theme.popup_border)
 
 
+def _popup_text_style(ctx, attr: TextAttribute = TextAttribute.NORMAL) -> Style:
+    """Background-pinned text style for content drawn on a popup/dialog surface.
+    A bg-less run on a pushed layer inherits the layer's default (dark)
+    background — the backend's hardcoded fill — which paints a dark band behind
+    the text and icon, invisible on a light theme's light dialog. Pin the
+    background to the popup fill so the text sits on the dialog surface; the
+    foreground still falls through to the theme's text color."""
+    theme = ctx.theme
+    bg = theme.popup_bg if theme is not None else None
+    return Style(bg=bg, attr=attr)
+
+
 class DemoDialog(Widget):
     """A modal dialog layer. Pushed with shadow/dim_below hints: GUI backends
     render a drop shadow and a translucent dim overlay, TUI approximates the
@@ -355,10 +399,10 @@ class DemoDialog(Widget):
 
     def draw(self, ctx):
         ctx.draw_box(0, 0, ctx.width, ctx.height, _popup_box_style(ctx), hints={"fill": True})
-        ctx.draw_icon(2, 1, "info")
-        ctx.draw_text(5, 1, "A layered dialog", BOLD)
-        ctx.draw_text(2, 3, "The content below is dimmed.")
-        ctx.draw_text(2, ctx.height - 2, "esc / enter: close", DIM)
+        ctx.draw_icon(2, 1, "info", _popup_text_style(ctx))
+        ctx.draw_text(5, 1, "A layered dialog", _popup_text_style(ctx, TextAttribute.BOLD))
+        ctx.draw_text(2, 3, "The content below is dimmed.", _popup_text_style(ctx))
+        ctx.draw_text(2, ctx.height - 2, "esc / enter: close", _popup_text_style(ctx, TextAttribute.DIM))
 
     def handle_event(self, event):
         if event.type is EventType.KEY and event.key in ("escape", "enter"):
@@ -394,14 +438,14 @@ class LayerCard(Widget):
             avail = max(0, inner - (x - 2))
             ctx.draw_text(x, y, text[:avail], style) if style else ctx.draw_text(x, y, text[:avail])
 
-        ctx.draw_icon(2, 1, "info")
-        line(5, 1, self.title, BOLD)
+        ctx.draw_icon(2, 1, "info", _popup_text_style(ctx))
+        line(5, 1, self.title, _popup_text_style(ctx, TextAttribute.BOLD))
         for i, note in enumerate(self.notes):
-            line(2, 3 + i, note)
+            line(2, 3 + i, note, _popup_text_style(ctx))
         hint = "esc / enter: close top layer"
         if self.on_open is not None:
             hint = "o: open another, " + hint
-        line(2, ctx.height - 2, hint, DIM)
+        line(2, ctx.height - 2, hint, _popup_text_style(ctx, TextAttribute.DIM))
 
     def handle_event(self, event):
         if event.type is EventType.KEY:
@@ -2274,6 +2318,10 @@ def main() -> None:
                     HSplit(
                         Item(nav, size=18, hints={"min": 12, "surface": "sidebar"}),
                         Item(content, weight=1, hints={"min_px": 300, "surface": "content"}),
+                        # A GUI hairline between the nav and the body (zero base
+                        # unit cost on TUI, where the sidebar/content surface
+                        # contrast does the separating instead).
+                        divider="subtle",
                     )
                 ),
                 Item(status, size="content", hints={"surface": "status"}),
