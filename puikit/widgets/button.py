@@ -176,9 +176,17 @@ class Button(Widget):
         #   gets the same accent bracket markers as the other single-row controls.
         if ctx.focused:
             if ctx.vector_shapes and wu >= 1 and hu >= 1:
-                inset = min(0.12, wu / 2, hu / 2)
+                # The ring is inset by an equal number of *device pixels* on
+                # every edge. The inset is expressed in base units, but a base
+                # unit is non-square (taller than wide on a GUI grid), so a flat
+                # 0.12 on both axes would draw a bigger top/bottom margin than
+                # left/right. Convert a single pixel inset into per-axis base
+                # units via base_size so the halo gap looks uniform.
+                base_w, base_h = ctx.base_size
+                inset_x = min(0.12, wu / 2)
+                inset_y = min(inset_x * base_w / base_h, hu / 2) if base_h else inset_x
                 ctx.round_rect(
-                    inset, inset, wu - 2 * inset, hu - 2 * inset,
+                    inset_x, inset_y, wu - 2 * inset_x, hu - 2 * inset_y,
                     Style(fg=ring, bg=bg), radius=_RADIUS,
                 )
             elif not ctx.vector_shapes and (self.image is not None or ctx.height >= 3):
