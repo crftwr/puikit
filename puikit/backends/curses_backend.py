@@ -122,6 +122,24 @@ def _build_tui_palette() -> list[Color]:
 
 _TUI_PALETTE: list[Color] = _build_tui_palette()
 
+# Opacity of the per-cell "dim below" composite (see dim_rect, per_cell=True):
+# every cell's fg and bg are blended this far toward the single veil color, so
+# the page reads as one translucent overlay while each surface (status, content,
+# title) still shows through faintly. Higher → closer to a flat uniform veil;
+# lower → more of the page bleeds through (and, past a point, the old patchwork).
+_DIM_BLEND: float = 0.6
+
+
+def _blend(a: Color, b: Color, t: float) -> Color:
+    """Linear a→b by t in [0, 1]; the TUI stand-in for alpha compositing a
+    translucent veil (b) at opacity t over a cell color (a)."""
+    return (
+        round(a[0] + (b[0] - a[0]) * t),
+        round(a[1] + (b[1] - a[1]) * t),
+        round(a[2] + (b[2] - a[2]) * t),
+    )
+
+
 # Fallback "dim below" scrim for callers that pass no explicit ``scrim``: a
 # single muted foreground over a single dark slate background, applied uniformly
 # to every cell. The Panel now hands dim_rect a theme-derived, polarity-correct
@@ -205,6 +223,7 @@ class CursesBackend(Backend):
         # a cache of authored RGB -> curated palette index.
         self._palette_term: list[int] = []
         self._quant_cache: dict[Color, int] = {}
+        self._slot_rgb: dict[int, Color] = {}  # terminal slot -> curated RGB
         self._clip_stack: list[tuple[int, int, int, int]] = []  # x0, y0, x1, y1
         # Where the focused text widget wants the terminal cursor (and thus the
         # terminal's own IME composition). Reset each frame; set via
@@ -514,25 +533,35 @@ class CursesBackend(Backend):
             self.draw_text(x, y + row, " " * w, style)
 
     def dim_rect(
-        self, x: int, y: int, w: int, h: int, scrim: tuple[Color, Color] | None = None
+        self,
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        scrim: tuple[Color, Color] | None = None,
+        per_cell: bool = False,
     ) -> None:
-        # TUI "dim below": recolor every cell in the region to a single muted
-        # foreground over a single dark background (the scrim), keeping each
-        # glyph in place, so the page recedes evenly behind a modal layer.
+        # TUI "dim below": recede already-drawn content behind a modal layer.
         #
-        # The Panel passes an explicit ``scrim`` (fg, bg) for the 2-frame
-        # ``fade`` stand-in, where the group must wash toward its own (possibly
-        # light) background instead of the fixed dark modal veil — otherwise a
-        # fade on a light theme flashes near-black.
+        # Two modes:
+        #  * Uniform (default): recolor every cell to ONE muted fg over ONE dark
+        #    bg (the scrim), keeping each glyph. Flat and coherent, but the page's
+        #    surfaces all collapse to the same pair. Used for the 2-frame ``fade``
+        #    stand-in, where the explicit ``scrim`` washes a group toward its own
+        #    (possibly light) background instead of a fixed dark veil.
+        #  * Per-cell (per_cell=True): composite a single translucent veil over
+        #    each cell — blend its actual fg and bg toward the veil color by
+        #    ``_DIM_BLEND`` — so the page reads as one overlay while each surface
+        #    (status, content, title) still shows through faintly. This is the
+        #    TUI stand-in for a GUI translucent overlay. The veil color is the
+        #    scrim's bg; the blend is strong enough that surfaces converge into a
+        #    coherent veil rather than the old blotchy patchwork (a *weak*
+        #    per-cell tint kept surfaces fully distinct and read as patchwork).
         #
-        # The scrim uses ONE fixed color pair for the whole region, not a
-        # darkened pair computed per cell. A per-cell tint preserves every
-        # difference between the page's surfaces (and leaves any cell still on
-        # the terminal default untouched), so the "dimmed" page reads as a
-        # blotchy patchwork of darks instead of a uniform veil. Non-color
-        # attributes are dropped too (A_REVERSE would swap the scrim's fg/bg on
-        # some cells and break the uniformity). A_DIM is no substitute: macOS
-        # Terminal.app barely renders it, and it never touches the background.
+        # Either mode drops non-color attributes (A_REVERSE would swap fg/bg on
+        # some cells and break uniformity). A_DIM is no substitute on macOS
+        # Terminal.app (barely rendered, never touches the background), so a
+        # colorless terminal falls back to it only as a last resort.
         assert self._stdscr is not None
         x, y, w, h = round(x), round(y), round(w), round(h)
         sw, sh = self.size
@@ -540,20 +569,48 @@ class CursesBackend(Backend):
         x1 = min(sw, x + w)
         if x1 <= x0:
             return
+        y0 = max(0, y)
+        y1 = min(sh, y + h)
         # A deferred emoji under the scrim would resurface at full color over the
         # dim in present(); drop it so the dimmed page reads uniform.
-        self._evict_deferred_emoji(x0, max(0, y), x1 - x0, min(sh, y + h) - max(0, y))
-        if curses.has_colors():
+        self._evict_deferred_emoji(x0, y0, x1 - x0, y1 - y0)
+        if not curses.has_colors():
+            for row in range(y0, y1):
+                for col in range(x0, x1):
+                    try:
+                        self._stdscr.chgat(row, col, 1, curses.A_DIM)
+                    except curses.error:
+                        pass
+        elif per_cell and self._slot_rgb:
+            veil = scrim[1] if scrim is not None else _DIM_BG
+            # Cache the composited attr per source color pair: the page uses only
+            # a handful of distinct pairs, so this computes the blend a few times,
+            # not once per cell.
+            attr_by_pair: dict[int, int] = {}
+            for row in range(y0, y1):
+                for col in range(x0, x1):
+                    try:
+                        ch = self._stdscr.inch(row, col)
+                    except curses.error:
+                        continue
+                    pair = curses.pair_number(ch)
+                    attr = attr_by_pair.get(pair)
+                    if attr is None:
+                        attr = curses.color_pair(self._color_pair(*self._veil_pair(pair, veil)))
+                        attr_by_pair[pair] = attr
+                    try:
+                        self._stdscr.chgat(row, col, 1, attr)
+                    except curses.error:
+                        pass
+        else:
             fg, bg = scrim if scrim is not None else (_DIM_FG, _DIM_BG)
             attr = curses.color_pair(self._color_pair(fg, bg))
-        else:
-            attr = curses.A_DIM
-        for row in range(max(0, y), min(sh, y + h)):
-            for col in range(x0, x1):
-                try:
-                    self._stdscr.chgat(row, col, 1, attr)
-                except curses.error:
-                    pass
+            for row in range(y0, y1):
+                for col in range(x0, x1):
+                    try:
+                        self._stdscr.chgat(row, col, 1, attr)
+                    except curses.error:
+                        pass
         # ``chgat`` rewrites only a cell's attributes, and curses' diff-based
         # refresh does not reliably treat an attribute-only change as "damage"
         # to flush — so the scrim is computed correctly in the buffer but never
@@ -561,13 +618,26 @@ class CursesBackend(Backend):
         # it, which is why the dim appeared not to apply (and why resizing the
         # window made it snap in). Force the dimmed rows to be re-sent on the next
         # refresh, exactly the way present() does with redrawwin for the IME case.
-        top = max(0, y)
-        count = min(sh, y + h) - top
-        if count > 0:
+        if y1 > y0:
             try:
-                self._stdscr.redrawln(top, count)
+                self._stdscr.redrawln(y0, y1 - y0)
             except curses.error:
                 pass
+
+    def _veil_pair(self, pair: int, veil: Color) -> tuple[Color, Color]:
+        """Composite (fg, bg) for a source color pair under the per-cell dim:
+        recover the cell's authored fg/bg from its bound terminal slots and blend
+        each toward the single ``veil`` color. Slots we never bound (the terminal
+        default ``-1``, or ANSI base colors) have no authored RGB, so they read
+        as the veil itself — empty/default cells settle to a flat veil while
+        painted surfaces keep a faint tint of their own color."""
+        try:
+            fg_slot, bg_slot = curses.pair_content(pair)
+        except curses.error:
+            return veil, veil
+        fg = self._slot_rgb.get(fg_slot, veil)
+        bg = self._slot_rgb.get(bg_slot, veil)
+        return _blend(fg, veil, _DIM_BLEND), _blend(bg, veil, _DIM_BLEND)
 
     def flash_rect(self, x: int, y: int, w: int, h: int, color: Color) -> None:
         # One-frame highlight stand-in (Panel's stepped "highlight" effect): set
@@ -754,6 +824,16 @@ class CursesBackend(Backend):
             self._palette_term = [base + i for i in range(len(_TUI_PALETTE))]
         else:
             self._palette_term = [self._nearest_color(c) for c in _TUI_PALETTE]
+        # Reverse map (terminal slot -> curated RGB) so dim_rect's per-cell
+        # composite can recover each already-drawn cell's color from its bound
+        # slot. The ccc path gives every palette color its own slot (exact); the
+        # fallback path may collide several palette colors onto one slot, so the
+        # first authored color to claim a slot wins (close enough for a veil
+        # blend). Slots we never bound (ANSI 0..15, the -1 default) are absent
+        # and read as the veil color by the caller.
+        self._slot_rgb = {}
+        for i, slot in enumerate(self._palette_term):
+            self._slot_rgb.setdefault(slot, _TUI_PALETTE[i])
 
     def _term_index(self, rgb: tuple[int, int, int]) -> int:
         """Terminal color index for an authored RGB: snap to the curated

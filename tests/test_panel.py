@@ -159,6 +159,34 @@ def test_dim_below_dims_underlying_content():
     assert not backend.style_at(cx, cy).attr & TextAttribute.DIM
 
 
+def test_per_cell_dim_keeps_surfaces_distinct():
+    # The per-cell dim composites a single veil over each cell's own color, so
+    # two different surfaces stay distinct (faintly) instead of collapsing to one
+    # pair — the TUI stand-in for a translucent overlay.
+    backend = MemoryBackend(width=4, height=1)
+    backend.draw_text(0, 0, "AB", Style(fg=(255, 255, 255), bg=(200, 30, 30)))
+    backend.draw_text(2, 0, "CD", Style(fg=(255, 255, 255), bg=(30, 30, 200)))
+    veil = (20, 20, 20)
+    backend.dim_rect(0, 0, 4, 1, scrim=((120, 120, 120), veil), per_cell=True)
+    red = backend.style_at(0, 0)
+    blue = backend.style_at(2, 0)
+    assert red.attr & TextAttribute.DIM and blue.attr & TextAttribute.DIM
+    # Each background moved toward the veil but the two stay distinguishable.
+    assert red.bg != blue.bg
+    assert red.bg != (200, 30, 30) and red.bg[0] > red.bg[2]  # still reddish
+    assert blue.bg != (30, 30, 200) and blue.bg[2] > blue.bg[0]  # still bluish
+
+
+def test_uniform_dim_collapses_surfaces():
+    # Without per_cell, every cell flattens to the one scrim pair (the fade
+    # stand-in / colorless fallback behavior).
+    backend = MemoryBackend(width=4, height=1)
+    backend.draw_text(0, 0, "AB", Style(fg=(255, 255, 255), bg=(200, 30, 30)))
+    backend.draw_text(2, 0, "CD", Style(fg=(255, 255, 255), bg=(30, 30, 200)))
+    backend.dim_rect(0, 0, 4, 1, scrim=((120, 120, 120), (20, 20, 20)))
+    assert backend.style_at(0, 0).bg == backend.style_at(2, 0).bg == (20, 20, 20)
+
+
 def test_shadow_hint_respects_capability():
     # TUI profile: shadow unsupported, primitive must not be called.
     backend = MemoryBackend(width=20, height=10)

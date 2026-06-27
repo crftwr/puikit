@@ -18,6 +18,18 @@ from ..event import Event
 _SCROLLBAR_THUMB = (150, 150, 150)
 _SCROLLBAR_TRACK = (60, 60, 60)
 
+# Per-cell dim opacity, mirroring CursesBackend._DIM_BLEND (kept local so this
+# headless backend never imports curses, which is absent on Windows).
+_DIM_BLEND = 0.6
+
+
+def _blend(a, b, t):
+    return (
+        round(a[0] + (b[0] - a[0]) * t),
+        round(a[1] + (b[1] - a[1]) * t),
+        round(a[2] + (b[2] - a[2]) * t),
+    )
+
 
 class MemoryBackend(Backend):
     PROFILE = PROFILE_TUI
@@ -171,12 +183,22 @@ class MemoryBackend(Backend):
     ) -> None:
         self.check_calls.append((x, y, w, h, style))
 
-    def dim_rect(self, x: int, y: int, w: int, h: int, scrim: Any = None) -> None:
+    def dim_rect(
+        self, x: int, y: int, w: int, h: int, scrim: Any = None, per_cell: bool = False
+    ) -> None:
         x, y, w, h = round(x), round(y), round(w), round(h)
+        veil = scrim[1] if scrim is not None else None
         for row in range(max(0, y), min(self._height, y + h)):
             for col in range(max(0, x), min(self._width, x + w)):
                 old = self._styles[row][col]
-                if scrim is not None:
+                if per_cell and veil is not None:
+                    # Composite the veil over each cell's own colors (the TUI
+                    # per-cell translucent overlay), so surfaces stay faintly
+                    # distinct instead of collapsing to one pair.
+                    fg = _blend(old.fg, veil, _DIM_BLEND) if old.fg else veil
+                    bg = _blend(old.bg, veil, _DIM_BLEND) if old.bg else veil
+                    self._styles[row][col] = Style(fg, bg, old.attr | TextAttribute.DIM)
+                elif scrim is not None:
                     # Record both the explicit scrim recolor (so a fade's wash
                     # toward the group background is observable) and the DIM
                     # marker that signals a dim pass happened.

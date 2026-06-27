@@ -171,15 +171,25 @@ class Backend(ABC):
 
     @abstractmethod
     def dim_rect(
-        self, x: int, y: int, w: int, h: int, scrim: tuple[Color, Color] | None = None
+        self,
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        scrim: tuple[Color, Color] | None = None,
+        per_cell: bool = False,
     ) -> None:
         """Dim already-drawn content in the region, e.g. below a dialog layer.
         GUI: translucent dark overlay; TUI: approximated with dim/dark
         attributes. ``scrim`` is an optional (fg, bg) pair a whole-cell backend
         recolors every cell with instead of its built-in modal scrim — used by
         the Panel's 2-frame ``fade`` to wash a group toward its own (possibly
-        light) background rather than a fixed dark veil. Compositing backends
-        alpha-blend and ignore it."""
+        light) background rather than a fixed dark veil. ``per_cell`` asks a
+        whole-cell backend to composite the veil (the scrim's bg) over each
+        cell's own color instead of flattening to one pair, so the page shows
+        through faintly — the TUI stand-in for the translucent overlay a
+        compositing backend always draws. Compositing backends alpha-blend and
+        ignore both hints."""
 
     def flash_rect(self, x: int, y: int, w: int, h: int, color: Color) -> None:
         """Tint already-drawn content in the region with ``color`` for one

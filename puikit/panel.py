@@ -1312,9 +1312,11 @@ class Panel:
             sw, sh = self.backend.size_units
             # The whole-cell scrim must follow the theme polarity: a light theme
             # dims to a gray veil with dark text, not a fixed near-black bar with
-            # gray text. GUI backends ignore the scrim (they composite a real
-            # translucent overlay) and read it as a no-op hint.
-            self.backend.dim_rect(0, 0, sw, sh, scrim=self.theme.dim_scrim())
+            # gray text. ``per_cell`` asks a TUI backend to composite that veil
+            # over each cell's own color so the page shows through faintly (the
+            # stand-in for the GUI translucent overlay); GUI backends ignore both
+            # hints and composite a real overlay.
+            self.backend.dim_rect(0, 0, sw, sh, scrim=self.theme.dim_scrim(), per_cell=True)
         rect = self._interpolate_rect(slot.widget, slot.rect)
         self.backend.begin_group(slot.widget, rect)
         # The shadow blurs beyond the rect, so it is drawn before clipping. A
