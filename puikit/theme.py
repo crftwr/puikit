@@ -16,6 +16,7 @@ separation quality on whole-unit backends.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from .backend import Color
 from .capability import CapabilityProfile
@@ -78,6 +79,110 @@ class Theme:
 
     def surface_bg(self, role: str) -> Color | None:
         return self.surfaces.get(role)
+
+
+# --- derivation ---------------------------------------------------------------
+# A full Theme names ~24 colors. Most are not independent decisions: a hover is a
+# lift from its resting face, an inactive selection a muted version of the active
+# one, a border a step above the surface it frames. `derive_theme` takes the six
+# colors that *are* genuine choices and computes the rest, so a theme reads as a
+# short, legible declaration. Any derived field can still be pinned by passing it
+# as an override (explicit always wins).
+
+_WHITE: Color = (255, 255, 255)
+_BLACK: Color = (0, 0, 0)
+
+
+def _lum(c: Color) -> float:
+    """Rec. 601 luma; only the relative magnitude matters here."""
+    return 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
+
+
+def _clamp(v: float) -> int:
+    return max(0, min(255, round(v)))
+
+
+def _mix(a: Color, b: Color, t: float) -> Color:
+    """Linear blend a→b by t in [0, 1]."""
+    return (
+        _clamp(a[0] + (b[0] - a[0]) * t),
+        _clamp(a[1] + (b[1] - a[1]) * t),
+        _clamp(a[2] + (b[2] - a[2]) * t),
+    )
+
+
+def derive_theme(
+    *,
+    background: Color,
+    foreground: Color,
+    muted: Color,
+    accent: Color,
+    surface: Color,
+    selection: Color,
+    **overrides: Any,
+) -> Theme:
+    """Build a full :class:`Theme` from six base colors.
+
+    - ``background`` — the content surface; its luminance also picks the lift
+      *direction* (a dark theme raises elements lighter, a light theme darker).
+    - ``foreground`` — primary text.
+    - ``muted`` — secondary text / dividers (its own base because several themes
+      use a designed "comment" gray that is not a plain fg↔bg blend).
+    - ``accent`` — focus rings, primary button, status bar.
+    - ``surface`` — the raised panel shade (sidebar / header / popup / inputs
+      derive from it).
+    - ``selection`` — the active list/text selection fill.
+
+    Every other color is a lighten/darken/blend of these. Pass any concrete
+    :class:`Theme` field name as a keyword to override its derived value; a
+    ``surfaces`` override merges per-role rather than replacing the whole dict.
+    """
+    dark = _lum(background) < 128
+
+    def lift(c: Color, amt: float) -> Color:
+        # Raise an element away from the background toward the contrast pole:
+        # lighter on a dark theme (which has the headroom), darker — and only
+        # half as far, so panels stay subtle — on a light theme.
+        return _mix(c, _WHITE, amt) if dark else _mix(c, _BLACK, amt * 0.5)
+
+    derived: dict[str, Any] = dict(
+        surfaces={
+            "content": background,
+            "sidebar": surface,
+            "header": lift(surface, 0.12),
+            "status": accent,
+        },
+        divider_color=_mix(surface, muted, 0.5),
+        accent=accent,
+        text=foreground,
+        muted_text=muted,
+        control_bg=lift(background, 0.18),
+        control_hover_bg=lift(background, 0.26),
+        control_border=lift(background, 0.34),
+        button_bg=accent,
+        # Primary-button hover tracks the theme polarity, not the accent: lighten
+        # on a dark theme, darken on a light one (VS Code's #0062A3 light hover).
+        button_hover_bg=_mix(accent, _WHITE if dark else _BLACK, 0.12),
+        # On-accent label: white over a dark accent, the page color over a light
+        # one (a bright accent needs dark text to stay legible).
+        button_text=_WHITE if _lum(accent) < 140 else background,
+        button_secondary_bg=lift(background, 0.16),
+        button_secondary_hover_bg=lift(background, 0.24),
+        selection_bg=selection,
+        selection_active_bg=selection,
+        # Inactive (focus-elsewhere) selection: a muted neutral, a blend of the
+        # surface toward the text color, never the loud accent fill.
+        selection_inactive_bg=_mix(background, foreground, 0.18),
+        text_selection_bg=_mix(accent, background, 0.45),
+        text_selection_inactive_bg=_mix(background, foreground, 0.16),
+        hover_bg=lift(background, 0.07),
+        popup_bg=surface,
+        popup_border=lift(surface, 0.18),
+    )
+    if "surfaces" in overrides:
+        derived["surfaces"] = {**derived["surfaces"], **overrides.pop("surfaces")}
+    derived.update(overrides)
+    return Theme(**derived)
 
 
 # GUI: adjacent surfaces may share a background; hairlines do the separating.

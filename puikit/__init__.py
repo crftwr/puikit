@@ -20,7 +20,7 @@ from .font import Font, FontSlant, FontWeight
 from .layout import HSplit, Item, VSplit
 from .menu import SEPARATOR, Menu, MenuItem, MenuSeparator
 from .panel import DrawContext, Panel, Rect
-from .theme import THEME_GUI, THEME_TUI, Theme, theme_for
+from .theme import THEME_GUI, THEME_TUI, Theme, derive_theme, theme_for
 
 __version__ = "0.1.0"
 
@@ -53,6 +53,7 @@ __all__ = [
     "THEME_GUI",
     "THEME_TUI",
     "Theme",
+    "derive_theme",
     "theme_for",
     "VSplit",
 ]

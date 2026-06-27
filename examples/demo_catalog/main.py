@@ -39,6 +39,7 @@ from puikit import (
     TextAttribute,
     Theme,
     VSplit,
+    derive_theme,
 )
 from puikit.backends import create_backend
 from puikit.layout import SizeRequest
@@ -130,237 +131,100 @@ def _contrast(a: tuple[int, int, int], b: tuple[int, int, int]) -> float:
     return (hi + 12.5) / (lo + 12.5)
 
 
+# Each theme is six base colors; derive_theme computes the ~24-color palette
+# (hovers, borders, inactive selections, dividers, secondary buttons) from them
+# by lighten/darken/blend rules (see puikit.theme.derive_theme). A theme reads
+# as the handful of decisions that actually differ between palettes; the derived
+# fields keep the contrast relationships consistent (a distinct sidebar, an
+# input face lifted off the page, a selection that leans on the accent). Pass a
+# concrete Theme field as a keyword to any call to pin an exception.
+#
+#   background — content surface (its luminance also picks the lift direction)
+#   foreground — primary text
+#   muted      — secondary text / dividers
+#   accent     — focus rings, primary button, status bar
+#   surface    — raised panels (sidebar / header / popup / inputs derive from it)
+#   selection  — active list / text selection fill
 DEMO_THEMES: list[tuple[str, Theme]] = [
     (
         "Dark+",
-        Theme(
-            surfaces={
-                "content": (30, 30, 30),
-                "sidebar": (48, 48, 52),
-                "header": (60, 60, 60),
-                "status": (0, 122, 204),
-            },
-            divider_color=(90, 90, 104),
+        derive_theme(
+            background=(30, 30, 30),
+            foreground=(212, 212, 212),
+            muted=(157, 157, 157),
             accent=(0, 122, 204),
-            text=(212, 212, 212),
-            muted_text=(157, 157, 157),
-            # The input face is lifted clearly above the content surface
-            # (#1E1E1E) so a text field / dropdown reads as a distinct inset,
-            # not a bare patch of page. The hover face lifts further (a field
-            # brightens, never darkens, toward the row tint on hover).
-            control_bg=(70, 70, 74),
-            control_hover_bg=(88, 88, 92),
-            control_border=(100, 100, 106),
-            button_bg=(14, 99, 156),
-            button_hover_bg=(17, 119, 187),
-            # selection_bg drives the *active* highlight on popups (dropdown,
-            # combo, menu) and text selection; keep it equal to the list's
-            # active selection fill so every "current row" cue matches. It sits
-            # close to the accent (#007ACC) so the focused row clearly reads as
-            # selected and never blends into the dark content background.
-            selection_bg=(10, 105, 178),
-            selection_active_bg=(10, 105, 178),
-            # The inactive (focus-elsewhere) fill must still read against the
-            # sidebar/content surfaces, not melt into them.
-            selection_inactive_bg=(58, 58, 64),
+            surface=(48, 48, 52),
+            selection=(10, 105, 178),
         ),
     ),
     (
         "Monokai",
-        Theme(
-            surfaces={
-                "content": (39, 40, 34),
-                "sidebar": (56, 57, 48),
-                "header": (62, 61, 52),
-                "status": (166, 226, 46),
-            },
-            divider_color=(90, 89, 77),
+        derive_theme(
+            background=(39, 40, 34),
+            foreground=(248, 248, 242),
+            muted=(140, 140, 130),
             accent=(166, 226, 46),
-            text=(248, 248, 242),
-            muted_text=(140, 140, 130),
-            control_bg=(58, 59, 50),
-            control_hover_bg=(72, 73, 62),
-            control_border=(88, 88, 74),
-            # Primary action wears the accent (a bright green here); its label /
-            # the checkbox check glyph (drawn on the accent) take a dark color so
-            # they read on that light fill.
-            button_bg=(166, 226, 46),
-            button_hover_bg=(180, 236, 80),
-            button_text=(33, 34, 28),
-            # A clearly saturated green-leaning fill (toward the accent) so the
-            # focused row pops from the olive content surface; the light row text
-            # stays legible on it.
-            selection_bg=(86, 122, 38),
-            selection_active_bg=(86, 122, 38),
-            selection_inactive_bg=(66, 66, 54),
-            hover_bg=(49, 50, 44),
-            popup_bg=(46, 47, 40),
-            popup_border=(73, 72, 62),
+            surface=(56, 57, 48),
+            selection=(86, 122, 38),
         ),
     ),
     (
         "Dracula",
-        Theme(
-            surfaces={
-                "content": (40, 42, 54),
-                "sidebar": (56, 59, 76),
-                "header": (68, 71, 90),
-                "status": (189, 147, 249),
-            },
-            divider_color=(98, 114, 164),
+        derive_theme(
+            background=(40, 42, 54),
+            foreground=(248, 248, 242),
+            muted=(98, 114, 164),
             accent=(189, 147, 249),
-            text=(248, 248, 242),
-            muted_text=(98, 114, 164),
-            control_bg=(58, 60, 76),
-            control_hover_bg=(72, 75, 94),
-            control_border=(88, 92, 114),
-            button_bg=(189, 147, 249),
-            button_hover_bg=(202, 165, 255),
-            button_text=(40, 42, 54),
-            # A clearer purple (toward the accent) so the focused row reads as
-            # selected against the blue-gray content surface.
-            selection_bg=(120, 86, 175),
-            selection_active_bg=(120, 86, 175),
-            selection_inactive_bg=(62, 65, 84),
-            hover_bg=(52, 54, 70),
-            popup_bg=(46, 48, 62),
-            popup_border=(68, 71, 90),
+            surface=(56, 59, 76),
+            selection=(120, 86, 175),
         ),
     ),
     (
         "Solarized",
-        Theme(
-            surfaces={
-                "content": (0, 43, 54),
-                "sidebar": (10, 62, 78),
-                "header": (0, 54, 68),
-                "status": (38, 139, 210),
-            },
-            divider_color=(88, 110, 117),
+        derive_theme(
+            background=(0, 43, 54),
+            foreground=(147, 161, 161),
+            muted=(88, 110, 117),
             accent=(38, 139, 210),
-            text=(147, 161, 161),
-            muted_text=(88, 110, 117),
-            control_bg=(16, 66, 80),
-            control_hover_bg=(28, 82, 98),
-            control_border=(88, 110, 117),
-            button_bg=(38, 139, 210),
-            button_hover_bg=(58, 160, 228),
-            button_text=(253, 246, 227),
-            # A clearer blue (toward the accent) so the focused row stands out
-            # from the very dark teal content surface.
-            selection_bg=(26, 102, 150),
-            selection_active_bg=(26, 102, 150),
-            selection_inactive_bg=(20, 72, 87),
-            hover_bg=(7, 54, 66),
-            popup_bg=(7, 54, 66),
-            popup_border=(88, 110, 117),
+            surface=(10, 62, 78),
+            selection=(26, 102, 150),
         ),
     ),
     (
         "Nord",
-        Theme(
-            surfaces={
-                "content": (46, 52, 64),
-                "sidebar": (62, 70, 88),
-                "header": (67, 76, 94),
-                "status": (136, 192, 208),
-            },
-            divider_color=(76, 86, 106),
+        derive_theme(
+            background=(46, 52, 64),
+            foreground=(216, 222, 233),
+            muted=(76, 86, 106),
             accent=(136, 192, 208),
-            text=(216, 222, 233),
-            muted_text=(76, 86, 106),
-            control_bg=(66, 74, 92),
-            control_hover_bg=(80, 90, 110),
-            control_border=(96, 106, 128),
-            button_bg=(136, 192, 208),
-            button_hover_bg=(150, 205, 220),
-            button_text=(46, 52, 64),
-            # A clearer cyan-blue (toward the accent) so the focused row reads
-            # as selected against the slate content surface.
-            selection_bg=(76, 128, 158),
-            selection_active_bg=(76, 128, 158),
-            selection_inactive_bg=(78, 86, 104),
-            hover_bg=(59, 66, 82),
-            popup_bg=(59, 66, 82),
-            popup_border=(76, 86, 106),
+            surface=(62, 70, 88),
+            selection=(76, 128, 158),
         ),
     ),
-    # --- light variants ---------------------------------------------------------
-    # Light themes are the reason `DrawContext` defaults an uncolored text run to
-    # `theme.text`: with dark text on a light surface, a widget that names no
-    # color (the nav, plain labels) must come out dark, not the backend's
-    # near-white default. Selections therefore use a light-blue fill so the dark
-    # row text stays legible on top.
+    # --- light variants -------------------------------------------------------
+    # A light background flips the derivation: panels and inputs sink (darken)
+    # instead of lifting, and `text` defaults a bg-less run dark (so the nav and
+    # plain labels read on the light surface). Same six bases, opposite polarity.
     (
         "Light+",
-        Theme(
-            surfaces={
-                "content": (255, 255, 255),
-                "sidebar": (235, 235, 238),
-                "header": (221, 221, 221),
-                "status": (0, 122, 204),
-            },
-            divider_color=(168, 168, 168),
+        derive_theme(
+            background=(255, 255, 255),
+            foreground=(30, 30, 30),
+            muted=(110, 110, 110),
             accent=(0, 122, 204),
-            text=(30, 30, 30),
-            muted_text=(110, 110, 110),
-            # On a pure-white page a white field is invisible; sink the input
-            # face to a light gray so it reads as a distinct inset region. The
-            # field is darker than the page (a sunken control), so its hover
-            # darkens further, the same direction as the row hover_bg.
-            control_bg=(236, 236, 240),
-            control_hover_bg=(226, 226, 232),
-            control_border=(200, 200, 200),
-            button_bg=(0, 122, 204),
-            button_hover_bg=(0, 102, 184),
-            button_text=(255, 255, 255),
-            button_secondary_bg=(228, 228, 228),
-            button_secondary_hover_bg=(214, 214, 214),
-            # A clearer blue tint (toward the accent) so the focused row reads as
-            # selected on the white page; the dark row text stays legible on it.
-            selection_bg=(120, 180, 240),
-            selection_active_bg=(120, 180, 240),
-            selection_inactive_bg=(208, 215, 224),
-            text_selection_bg=(173, 214, 255),
-            text_selection_inactive_bg=(216, 222, 230),
-            hover_bg=(232, 232, 232),
-            popup_bg=(255, 255, 255),
-            popup_border=(200, 200, 200),
+            surface=(235, 235, 238),
+            selection=(120, 180, 240),
         ),
     ),
     (
         "Solarized Light",
-        Theme(
-            surfaces={
-                "content": (253, 246, 227),
-                "sidebar": (234, 228, 206),
-                "header": (225, 219, 200),
-                "status": (38, 139, 210),
-            },
-            divider_color=(147, 161, 161),
+        derive_theme(
+            background=(253, 246, 227),
+            foreground=(88, 110, 117),
+            muted=(147, 161, 161),
             accent=(38, 139, 210),
-            text=(88, 110, 117),
-            muted_text=(147, 161, 161),
-            # Sink the field below the warm-paper page so it reads as a distinct
-            # inset; the field darkens on hover (a sunken light control).
-            control_bg=(236, 228, 205),
-            control_hover_bg=(222, 214, 190),
-            control_border=(147, 161, 161),
-            button_bg=(38, 139, 210),
-            button_hover_bg=(38, 120, 190),
-            button_text=(253, 246, 227),
-            button_secondary_bg=(238, 232, 213),
-            button_secondary_hover_bg=(223, 217, 198),
-            # A clearer blue tint (toward the accent) so the focused row reads as
-            # selected on the warm-paper page.
-            selection_bg=(150, 195, 230),
-            selection_active_bg=(150, 195, 230),
-            selection_inactive_bg=(214, 206, 184),
-            text_selection_bg=(200, 224, 242),
-            text_selection_inactive_bg=(221, 214, 194),
-            hover_bg=(238, 232, 213),
-            popup_bg=(253, 246, 227),
-            popup_border=(147, 161, 161),
+            surface=(234, 228, 206),
+            selection=(150, 195, 230),
         ),
     ),
 ]
