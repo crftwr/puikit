@@ -70,7 +70,7 @@ backend.dim_rect(x, y, w, h)         # GUI: translucent overlay; TUI: dim attrs
 # Extended (GUI only; TUI falls back)
 backend.draw_icon(x, y, icon_name)   # TUI: text emoji fallback
 backend.draw_image(x, y, path)       # TUI: no-op
-backend.draw_shadow(x, y, w, h)      # TUI: shadow_rect stand-in (whole-cell darken edge)
+backend.draw_shadow(x, y, w, h)      # TUI: shadow_rect stand-in (darkened-space edge)
 ```
 
 TUI examples:
@@ -179,12 +179,10 @@ panel.push_layer(dialog, z=10, hints={"shadow": True, "dim_below": True})
 
 - TUI: draw order only; `dim_below` approximated by graying cells; `shadow`
   approximated by a thin down-right shadow hugging the layer's right/bottom edges
-  (`shadow_rect` — both the bottom row and the right column are a whole-cell
-  darken, a darkened space painted over each shadow cell; a text cell keeps its
-  glyph but its **background** darkens toward the shade and its **foreground**
-  fades *toward* that shade — lowering contrast so the glyph recedes, not merely
-  scaling brightness, which would leave a bright/white glyph still popping over
-  the band)
+  (`shadow_rect` — every shadow cell on the bottom row and the right column is
+  **overwritten with a darkened space**, so the band is a clean shaded strip and
+  the underlying text never shows through; a glyph left under the shadow, however
+  dimmed, reads as stray characters rather than a shadow)
 - **Wide-glyph edges.** A full-width (CJK) glyph spans two cells in one write,
   so an opaque upper layer — or the drop shadow — that covers only one of those
   cells would leave the other as a broken half-glyph spilling past the edge. The

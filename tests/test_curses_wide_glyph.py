@@ -103,15 +103,28 @@ def test_clear_resets_wide_tracking(backend):
     assert backend._wide_lead == set()
 
 
+def test_shadow_overwrites_text_with_a_space(backend):
+    # A plain (non-wide) glyph under the shadow band is replaced by a space, so
+    # no characters show through the shadow.
+    backend.draw_text(0, 0, "Hello")
+    # Bottom row at y+h=0; x=1,w=1 -> the shadow cell is col 2 (the second 'l').
+    backend.shadow_rect(1, -1, 1, 1)
+    cell = backend._stdscr.calls
+    # The last write to (0, 2) is a single space.
+    last = [c for c in cell if c[0] == "addstr" and c[1] == 0 and c[2] == 2]
+    assert last and last[-1][3] == " "
+
+
 def test_shadow_over_a_wide_half_replaces_the_glyph(backend):
     # 漢 occupies cols 2,3. A drop shadow whose bottom row lands on col 3 (the
-    # trail only) must replace the whole glyph with background spaces, then
-    # darken its covered cell — never split-darken a half-glyph.
+    # trail only) replaces the whole glyph with spaces, and the shadow itself
+    # overwrites its cell with a space — no text is left under the band.
     backend.draw_text(0, 0, "AB漢CD")
     # shadow_rect bottom row sits at y+h; with y=-1,h=1 it lands on row 0, and
     # x=2,w=1 makes its cols span exactly col 3 (the glyph's trail).
     backend.shadow_rect(2, -1, 1, 1)
     spaces = _single_space_cols(backend, 0)
-    assert 2 in spaces and 3 in spaces           # whole glyph blanked
-    assert any(c[0] == "chgat" and c[1] == 0 and c[2] == 3
-               for c in backend._stdscr.calls)   # covered cell still darkened
+    assert 2 in spaces and 3 in spaces           # whole glyph gone, now spaces
+    # The shadow overwrites with a space, never an attribute-only chgat that would
+    # keep the glyph visible under the band.
+    assert not any(c[0] == "chgat" for c in backend._stdscr.calls)

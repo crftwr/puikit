@@ -146,19 +146,14 @@ _DIM_BLEND: float = 0.6
 _FADE_BLEND: float = 0.6
 
 # Per-cell "drop shadow" (see shadow_rect): a thin down-right drop shadow hugging
-# the layer's right and bottom edges. Both edges are a whole-cell darken — a
-# darkened space painted over each shadow cell (a bottom cell that holds TEXT
-# keeps its glyph and darkens both fg and bg) — so the bottom row and the right
-# column read at a matching thickness.
-# _SHADOW_STRENGTH is the fraction of brightness KEPT for the background (0.8 =
-# weak): a subtle darken so the shadow band reads without crushing the page.
-# Applying that same weak scale to a glyph's foreground is wrong, though — a
-# bright/white glyph only drops 255 -> ~200 and still pops as white over the
-# darkened band, so the text never looks "in shadow". The foreground is instead
-# faded TOWARD the shade (the darkened background) by _SHADOW_FG_FADE, lowering
-# its contrast so text under the shadow recedes regardless of its color.
+# the layer's right and bottom edges. Every shadow cell is overwritten with a
+# darkened *space* — the band is a clean shaded strip, never the underlying text
+# showing through (a glyph kept under the shadow, however dimmed, still reads as
+# stray characters in the shadow rather than a shadow). Both edges use the same
+# darkened space, so the bottom row and the right column read at a matching
+# thickness. _SHADOW_STRENGTH is the fraction of background brightness KEPT
+# (0.8 = weak): a subtle darken so the band reads without crushing the page.
 _SHADOW_STRENGTH: float = 0.8
-_SHADOW_FG_FADE: float = 0.55
 
 
 def _blend(a: Color, b: Color, t: float) -> Color:
@@ -814,23 +809,23 @@ class CursesBackend(Backend):
         # hint on a backend without real compositing). A real GUI shadow is a soft
         # blurred overlay; on a character grid the stepped equivalent is a thin
         # down-right shadow hugging the layer's right and bottom edges, shifted one
-        # cell diagonally (light from the upper-left). Each shadow cell is darkened
-        # toward black at one weak strength (_SHADOW_STRENGTH).
+        # cell diagonally (light from the upper-left).
         #
-        # Both edges are a whole-cell darken (the bottom row and the right column),
-        # painting a darkened space over each shadow cell so the two edges read at a
-        # matching thickness. (Earlier the bottom used a ▀ half-block for a thinner
-        # band, but a darkened space matches the right edge exactly.)
-        # Source colors come from self._cell_color (reliable for wide glyphs); a
-        # cell with no recorded color falls back to ``base_bg`` (the page
-        # background the Panel passes).
+        # Every shadow cell is overwritten with a darkened *space*, so the band is
+        # a clean shaded strip and the underlying text never shows through (a glyph
+        # left under the shadow reads as stray characters, not a shadow). Both
+        # edges (the bottom row and the right column) use the same darkened space,
+        # so they read at a matching thickness. The shade comes from the cell's
+        # recorded background (self._cell_color, reliable for wide glyphs); a cell
+        # with no recorded color falls back to ``base_bg`` (the page background the
+        # Panel passes).
         assert self._stdscr is not None
         x, y, w, h = round(x), round(y), round(w), round(h)
         if w <= 0 or h <= 0:
             return
         base = base_bg if base_bg is not None else _DIM_BG
         # Right column (top skipped so the layer's top-right is clear), then the
-        # bottom row incl. the corner. Every shadow cell is a whole-cell darken.
+        # bottom row incl. the corner.
         cells: list[tuple[int, int]] = []
         for row in range(y + 1, y + h):
             cells.append((row, x + w))
@@ -845,10 +840,11 @@ class CursesBackend(Backend):
                 continue
             # A deferred emoji here would resurface at full color over the shadow.
             self._evict_deferred_emoji(col, row, 1, 1)
-            # A wide glyph half under this shadow cell would be split-darkened into
-            # a broken glyph; replace the whole glyph with background spaces first
-            # (preserving its color), then darken the clean cell — the same
-            # half-glyph handling the layer edges do in draw_text.
+            # A wide glyph straddling this shadow cell: overwriting one half with a
+            # space would let the terminal blank the other (uncovered) half with the
+            # wrong background. Restore both halves to background spaces first
+            # (preserving the page color), then the darkened space goes over the
+            # covered cell — the same half-glyph handling the layer edges do.
             if self._wide_lead:
                 if (row, col) in self._wide_lead:
                     self._blank_cell_bg(row, col)        # lead under the shadow
@@ -856,30 +852,24 @@ class CursesBackend(Backend):
                 elif (row, col - 1) in self._wide_lead:
                     self._blank_cell_bg(row, col - 1)    # lead just outside
                     self._blank_cell_bg(row, col)        # trail under the shadow
-            src = self._cell_color.get((row, col), (None, None))
-            under_fg = src[0] if src[0] else base
-            under_bg = src[1] if src[1] else base
+            under_bg = self._cell_color.get((row, col), (None, None))[1] or base
             # Multiply toward black (drop brightness), then snap to the gray ramp:
             # a neutral shadow, drift-free, like the dim.
             shade = _to_gray(_blend(under_bg, (0, 0, 0), 1.0 - _SHADOW_STRENGTH))
             try:
                 if not has_color:
-                    self._stdscr.chgat(row, col, 1, curses.A_DIM)
+                    # No color to darken with: clear the band to blanks.
+                    self._stdscr.addstr(row, col, " ", curses.A_DIM)
                 else:
-                    # Whole-cell darken: a darkened space over a blank cell, or a
-                    # cell that keeps its glyph if it holds text. The foreground is
-                    # faded toward the shade (not merely dimmed toward black), so a
-                    # bright glyph loses contrast and recedes instead of staying
-                    # white over the band.
-                    nfg = _to_gray(_blend(under_fg, shade, _SHADOW_FG_FADE))
-                    self._stdscr.chgat(
-                        row, col, 1, curses.color_pair(self._color_pair(nfg, shade))
+                    # A darkened space, overwriting whatever glyph was here.
+                    self._stdscr.addstr(
+                        row, col, " ", curses.color_pair(self._color_pair(shade, shade))
                     )
                 rows_touched.append(row)
             except curses.error:
                 pass
-        # Force the touched rows to flush (attribute-only chgat is not reliably
-        # treated as damage — same fix as dim_rect).
+        # Force the touched rows to flush, defensively (same belt-and-suspenders
+        # as dim_rect: some terminals under-report single-cell damage at edges).
         if rows_touched:
             top = min(rows_touched)
             count = max(rows_touched) - top + 1
