@@ -150,8 +150,15 @@ _FADE_BLEND: float = 0.6
 # darkened space painted over each shadow cell (a bottom cell that holds TEXT
 # keeps its glyph and darkens both fg and bg) — so the bottom row and the right
 # column read at a matching thickness.
-# _SHADOW_STRENGTH is the fraction of brightness KEPT (0.8 = weak).
+# _SHADOW_STRENGTH is the fraction of brightness KEPT for the background (0.8 =
+# weak): a subtle darken so the shadow band reads without crushing the page.
+# Applying that same weak scale to a glyph's foreground is wrong, though — a
+# bright/white glyph only drops 255 -> ~200 and still pops as white over the
+# darkened band, so the text never looks "in shadow". The foreground is instead
+# faded TOWARD the shade (the darkened background) by _SHADOW_FG_FADE, lowering
+# its contrast so text under the shadow recedes regardless of its color.
 _SHADOW_STRENGTH: float = 0.8
+_SHADOW_FG_FADE: float = 0.55
 
 
 def _blend(a: Color, b: Color, t: float) -> Color:
@@ -860,8 +867,11 @@ class CursesBackend(Backend):
                     self._stdscr.chgat(row, col, 1, curses.A_DIM)
                 else:
                     # Whole-cell darken: a darkened space over a blank cell, or a
-                    # cell that keeps its glyph if it holds text.
-                    nfg = _to_gray(_blend(under_fg, (0, 0, 0), 1.0 - _SHADOW_STRENGTH))
+                    # cell that keeps its glyph if it holds text. The foreground is
+                    # faded toward the shade (not merely dimmed toward black), so a
+                    # bright glyph loses contrast and recedes instead of staying
+                    # white over the band.
+                    nfg = _to_gray(_blend(under_fg, shade, _SHADOW_FG_FADE))
                     self._stdscr.chgat(
                         row, col, 1, curses.color_pair(self._color_pair(nfg, shade))
                     )

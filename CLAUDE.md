@@ -180,8 +180,11 @@ panel.push_layer(dialog, z=10, hints={"shadow": True, "dim_below": True})
 - TUI: draw order only; `dim_below` approximated by graying cells; `shadow`
   approximated by a thin down-right shadow hugging the layer's right/bottom edges
   (`shadow_rect` — both the bottom row and the right column are a whole-cell
-  darken, a darkened space painted over each shadow cell; text cells keep their
-  glyph and darken whole)
+  darken, a darkened space painted over each shadow cell; a text cell keeps its
+  glyph but its **background** darkens toward the shade and its **foreground**
+  fades *toward* that shade — lowering contrast so the glyph recedes, not merely
+  scaling brightness, which would leave a bright/white glyph still popping over
+  the band)
 - **Wide-glyph edges.** A full-width (CJK) glyph spans two cells in one write,
   so an opaque upper layer — or the drop shadow — that covers only one of those
   cells would leave the other as a broken half-glyph spilling past the edge. The
