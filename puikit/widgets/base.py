@@ -99,6 +99,13 @@ class Widget:
     #: Whether this widget can take keyboard focus.
     focusable = False
 
+    #: Whether this widget edits text and wants the platform text-input system
+    #: (IME / dead keys / layout). When it holds focus the Panel calls
+    #: ``backend.begin_text_input()``; otherwise the backend delivers plain
+    #: command KEY events (so single-letter bindings work under any input
+    #: source). Only ``TextEdit``/``ComboBox`` set this True.
+    wants_text_input = False
+
     def draw(self, ctx: DrawContext) -> None:
         """Draw the widget into its assigned rectangle."""
 

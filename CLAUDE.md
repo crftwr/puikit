@@ -257,6 +257,26 @@ event.hints   # backend-specific additional info
 - TUI: scancode-centric; mouse limited to click and scroll
 - GUI: rich modifier keys; hover, drag, multi-touch supported
 
+**Keyboard contract.** One normalized `Event(KEY, key, char, modifiers)` on every
+backend: `key` is a canonical identity string (`"left"`, `"a"`, `"space"`,
+`"f5"`), `modifiers` a `frozenset` (`{"shift","ctrl","alt","cmd"}`). Letters are
+lowercase + Shift in modifiers (so `Shift+A` is `key="a"`+`{shift}`, distinct from
+`"a"`); a shifted symbol's identity is the produced glyph with Shift *dropped*
+(`Shift+1` → `("!", {})` everywhere). The printable-glyph rules live in one shared
+helper, `puikit.event.char_key_event`, that every backend routes through, so they
+can't drift per backend.
+
+**Command keys vs. text input — focus-gated.** A keypress is a *command* (navigate,
+shortcut) or *text* (typed into a field); conflating them breaks under an IME (a
+CJK input source would compose a file manager's single-letter bindings instead of
+dispatching them). PuiKit gates on focus rather than splitting event types: a text
+widget sets `wants_text_input = True`, and the Panel calls `backend.begin_text_input()`
+/ `end_text_input()` as focus enters/leaves it (resolving the focused leaf via
+`Panel.focused_leaf`). While a text widget is focused the GUI backend engages the OS
+text-input system (IME composition via `IME_COMPOSITION`, committed text on the KEY
+event's `char`); otherwise it delivers plain command KEY events and never touches the
+IME. Default no-op on terminals (no IME).
+
 ### 6. System Integration
 
 | Feature            | TUI      | GUI-Desktop     | GUI-Web          | Mobile           | Game (OpenGL)    |

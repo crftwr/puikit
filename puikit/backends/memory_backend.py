@@ -73,7 +73,18 @@ class MemoryBackend(Backend):
         self._pending_completes: list[Any] = []
         self.present_count = 0
         self._clip_stack: list[tuple[int, int, int, int]] = []  # x0, y0, x1, y1
+        # Text-input gating, recorded for tests: current state + transition log.
+        self.text_input_active = False
+        self.text_input_calls: list[str] = []  # "begin" / "end", in order
         self.clear()
+
+    def begin_text_input(self) -> None:
+        self.text_input_active = True
+        self.text_input_calls.append("begin")
+
+    def end_text_input(self) -> None:
+        self.text_input_active = False
+        self.text_input_calls.append("end")
 
     @property
     def capabilities(self) -> CapabilityProfile:

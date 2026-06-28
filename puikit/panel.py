@@ -15,7 +15,7 @@ from typing import Any
 from .backend import Backend, DEFAULT_STYLE, Style, TextAttribute
 from .capability import CapabilityProfile
 from .event import Event, EventType
-from .focus import focus_on_click, move_focus
+from .focus import FocusContainer, focus_on_click, move_focus
 from .font import Font, FontSlant, FontWeight
 from .theme import Theme, theme_for
 
@@ -994,6 +994,9 @@ class Panel:
         self._layers: list[_Slot] = []
         self._dividers: list[Any] = []
         self._focused: Any | None = None
+        # Tracks whether the backend's text-input system is currently engaged, so
+        # focus changes toggle it only on a real transition (see _sync_text_input).
+        self._text_input_on = False
         self._layout: Any | None = None
         self._margin_px = 0.0
         self._margin_units = 0.0
@@ -1223,7 +1226,35 @@ class Panel:
 
     # --- rendering --------------------------------------------------------------
 
+    def focused_leaf(self) -> Any | None:
+        """The deepest focused widget — descending through focused containers to
+        the leaf that actually holds focus (e.g. a ``TextEdit`` nested in a
+        ScrollView), or None. The Panel's ``_focused`` is only the focused
+        top-level slot; text-input gating needs the leaf."""
+        w = self._focused
+        while isinstance(w, FocusContainer):
+            nxt = w.get_focused()
+            if nxt is None:
+                break
+            w = nxt
+        return w
+
+    def _sync_text_input(self) -> None:
+        """Engage or release the backend's text-input system to match focus:
+        active iff the focused leaf widget declares ``wants_text_input``. Called
+        every render; idempotent, so it touches the backend only on a real
+        transition (a text field gaining or losing focus)."""
+        want = bool(getattr(self.focused_leaf(), "wants_text_input", False))
+        if want == self._text_input_on:
+            return
+        self._text_input_on = want
+        if want:
+            self.backend.begin_text_input()
+        else:
+            self.backend.end_text_input()
+
     def render(self) -> None:
+        self._sync_text_input()
         if self._layout is not None:
             self._apply_layout()
         self.backend.clear()

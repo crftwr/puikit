@@ -96,7 +96,7 @@ import objc
 
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
-from ..event import Event, EventType
+from ..event import Event, EventType, char_key_event
 from ..font import Font, FontWeight
 from ..text import display_width, glyph_runs as _glyph_runs
 
@@ -211,46 +211,39 @@ def _drag_op_name(operation: int) -> str:
     return "none"
 
 
+def _modifier_names(modifier_flags: int) -> frozenset[str]:
+    """Decode a Cocoa modifier-flag bitmask into contract modifier names."""
+    return frozenset(
+        name
+        for flag, name in (
+            (NSEventModifierFlagShift, "shift"),
+            (NSEventModifierFlagControl, "ctrl"),
+            (NSEventModifierFlagOption, "alt"),
+            (NSEventModifierFlagCommand, "cmd"),
+        )
+        if modifier_flags & flag
+    )
+
+
 def translate_key(characters: str, modifier_flags: int = 0) -> Event | None:
     """Translate a Cocoa key event payload into a PuiKit Event.
 
     Module-level so the mapping is testable without opening a window."""
     if not characters:
         return None
-    modifiers = frozenset(
-        name
-        for flag, name in [
-            (NSEventModifierFlagShift, "shift"),
-            (NSEventModifierFlagControl, "ctrl"),
-            (NSEventModifierFlagOption, "alt"),
-            (NSEventModifierFlagCommand, "cmd"),
-        ]
-        if modifier_flags & flag
-    )
+    modifiers = _modifier_names(modifier_flags)
     ch = characters[0]
     code = ord(ch)
     if code in _FUNCTION_KEYS:
         return Event(type=EventType.KEY, key=_FUNCTION_KEYS[code], modifiers=modifiers)
     if ch in _CONTROL_KEYS:
         return Event(type=EventType.KEY, key=_CONTROL_KEYS[ch], modifiers=modifiers)
-    # Space is a named key so Shift+Space is expressible like Shift+A; the typed
-    # glyph stays on char so text fields still insert a space.
-    if ch == " ":
-        return Event(type=EventType.KEY, key="space", char=" ", modifiers=modifiers)
     if ch.isprintable():
-        if ch.isalpha():
-            # Letters: lowercase the key and keep Shift, so Shift+A reads as
-            # key='a' + {shift} — one identity across backends, distinct from
-            # 'a' (Rule 2). The typed glyph stays on char.
-            return Event(type=EventType.KEY, key=ch.lower(), char=ch, modifiers=modifiers)
-        # Other printables (digits, punctuation, shifted symbols): the produced
-        # glyph IS the identity (Rule 3). charactersIgnoringModifiers already
-        # baked Shift into that glyph (it keeps Shift while dropping Cmd/Ctrl/
-        # Option), so reporting shift again would make Shift+1 read as ('!',
-        # {shift}) here but ('!', {}) in a terminal. Drop Shift to match; Ctrl/
-        # Alt/Cmd remain (they don't change the glyph and stay significant).
-        return Event(type=EventType.KEY, key=ch, char=ch,
-                     modifiers=modifiers - {"shift"})
+        # The shared contract helper names space, lowercases letters (keeping
+        # Shift), and drops the now-redundant Shift from a shifted glyph (Rule 3):
+        # charactersIgnoringModifiers already baked Shift into ``ch`` while
+        # dropping Cmd/Ctrl/Option, so Cmd/Ctrl/Alt survive in ``modifiers``.
+        return char_key_event(ch, modifiers)
     return None
 
 
@@ -374,12 +367,25 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
             self.selected_range = NSMakeRange(0, 0)
 
     def keyDown_(self, ns_event):
-        # Standard Cocoa text input: hand every key to the input context. It
-        # either composes (setMarkedText:), commits text (insertText:), or
-        # issues a command (doCommandBySelector:) — never a raw key here.
         # Stash the event so doCommandBySelector: can re-translate it (more
         # reliable than NSApp.currentEvent()).
         self._last_key_event = ns_event
+        if self.backend is not None and not self.backend._text_input_active:
+            # No text widget focused: deliver a plain command KEY event and do
+            # NOT engage the input context. interpretKeyEvents would otherwise
+            # feed every keystroke to the IME, so with a CJK input source a
+            # single-letter binding ('j', 'f', ...) would start composition
+            # instead of dispatching. translate_key reads the layout's base
+            # character (charactersIgnoringModifiers) so shortcuts stay stable.
+            event = translate_key(
+                ns_event.charactersIgnoringModifiers(), ns_event.modifierFlags()
+            )
+            if event is not None:
+                self.backend._dispatch(event)
+            return
+        # A text widget holds focus: hand the key to the input context. It either
+        # composes (setMarkedText:), commits text (insertText:), or issues an
+        # editing command (doCommandBySelector:) — never a raw key here.
         self.interpretKeyEvents_([ns_event])
 
     def inputContext(self):
@@ -459,10 +465,16 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
         self.backend._dispatch(
             Event(type=EventType.IME_COMPOSITION, hints={"preedit": "", "caret": 0})
         )
-        # Each committed character is delivered as a KEY event with a char, the
-        # same shape ordinary typing produces.
+        # Each committed character is delivered as a KEY event through the shared
+        # contract helper — the same normalization translate_key uses — so direct
+        # typing matches every backend: Shift+A is key='a' + {shift} (not 'A'),
+        # space is the named key, a shifted symbol drops shift. The modifiers come
+        # from the originating key event (interpretKeyEvents stashed it); an
+        # IME-committed glyph is non-ASCII, so it ignores shift/alt regardless.
+        ns_event = getattr(self, "_last_key_event", None)
+        mods = _modifier_names(ns_event.modifierFlags()) if ns_event is not None else frozenset()
         for ch in text:
-            self.backend._dispatch(Event(type=EventType.KEY, key=ch, char=ch))
+            self.backend._dispatch(char_key_event(ch, mods))
 
     def doCommandBySelector_(self, selector):
         # Non-text keys (arrows, enter, tab, delete, escape, ...). Re-translate
@@ -696,6 +708,11 @@ class MacOSBackend(Backend):
         # On-screen caret position (base units) reported by the focused text
         # widget; positions the IME candidate window.
         self._input_caret: tuple[float, float] = (0.0, 0.0)
+        # Whether a text widget holds focus. While False, keyDown delivers plain
+        # command KEY events and never engages the IME (so single-letter
+        # bindings work under any input source); while True it routes through
+        # the OS text-input services (insertText / IME composition).
+        self._text_input_active = False
         # Retained NSMenu target for the installed app menu bar, so item
         # callbacks survive (an NSMenuItem does not retain its target).
         self._menu_responder: Any = None
@@ -1451,6 +1468,28 @@ class MacOSBackend(Backend):
         return target, whole
 
     # --- event loop ----------------------------------------------------------
+
+    def begin_text_input(self) -> None:
+        """A text widget took focus: route keys through the OS text-input system
+        (keyDown reads this flag) and activate the input context so IME works."""
+        self._text_input_active = True
+        if self._view is not None:
+            ctx = self._view.inputContext()
+            if ctx is not None:
+                ctx.activate()
+
+    def end_text_input(self) -> None:
+        """Focus left the text widget: drop back to plain command KEY events and
+        tear down any in-progress composition so it can't leak into the next
+        field."""
+        self._text_input_active = False
+        if self._view is not None:
+            if self._view.hasMarkedText():
+                self._view.unmarkText()
+            ctx = self._view.inputContext()
+            if ctx is not None:
+                ctx.discardMarkedText()
+                ctx.deactivate()
 
     def request_text_input(self, x: int, y: int, hints: dict[str, Any] | None = None) -> None:
         """Record where the focused text widget's caret is (base units), so the

@@ -32,6 +32,7 @@ _FIELD_RADIUS = 4.0
 
 class TextEdit(Widget):
     focusable = True
+    wants_text_input = True  # engages IME / text-input while focused
 
     def __init__(
         self,

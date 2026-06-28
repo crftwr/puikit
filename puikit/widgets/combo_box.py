@@ -37,6 +37,7 @@ _CHEVRON_W = 2
 
 class ComboBox(Widget):
     focusable = True
+    wants_text_input = True  # editable field: engages IME / text-input
 
     def __init__(
         self,

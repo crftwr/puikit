@@ -13,7 +13,7 @@ from typing import Any
 
 from ..backend import Backend, Color, DEFAULT_STYLE, EventHandler, Style, TextAttribute
 from ..capability import CapabilityProfile, PROFILE_TUI
-from ..event import Event, EventType
+from ..event import Event, EventType, char_key_event
 from ..text import display_width as _display_width
 from ..text import glyph_runs as _glyph_runs
 from ..text import is_emoji_glyph as _is_emoji_glyph
@@ -1302,18 +1302,12 @@ class CursesBackend(Backend):
         if len(ch) == 1 and 0x01 <= ord(ch) <= 0x1A:
             letter = chr(ord(ch) + 0x60)
             return Event(type=EventType.KEY, key=letter, modifiers=frozenset({"ctrl"}))
-        # Space is a named key so Shift+Space is expressible like Shift+A; the
-        # typed glyph stays on char so text fields still insert a space.
-        if ch == " ":
-            return Event(type=EventType.KEY, key="space", char=" ")
-        # An uppercase letter implies Shift (a terminal can't report the modifier
-        # directly). Normalize to lowercase key + shift so Shift+A is one
-        # identity across backends, keeping the typed glyph on char (Rule 2).
-        if len(ch) == 1 and ch.isalpha() and ch.isupper():
-            return Event(type=EventType.KEY, key=ch.lower(), char=ch,
-                         modifiers=frozenset({"shift"}))
         if ch.isprintable():
-            return Event(type=EventType.KEY, key=ch, char=ch)
+            # A terminal can't report Shift for a printable; an uppercase letter
+            # implies it, so infer it and let the shared contract helper lowercase
+            # the key (Rule 2). Space and other printables follow the contract too.
+            mods = frozenset({"shift"}) if (ch.isalpha() and ch.isupper()) else frozenset()
+            return char_key_event(ch, mods)
         return None
 
     # SGR mouse button-code bits (xterm 1006): low 2 bits select the button,

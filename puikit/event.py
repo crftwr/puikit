@@ -69,3 +69,29 @@ class Event:
             modifiers=self.modifiers,
             hints=self.hints,
         )
+
+
+def char_key_event(char: str, modifiers: frozenset[str] = frozenset()) -> "Event":
+    """Build a KEY ``Event`` for a single *produced printable character*, applying
+    the keyboard contract (``doc/dev/PUIKIT_KEYBOARD_CONTRACT.md``) in one place
+    so every backend agrees on the printable-glyph case:
+
+    - **space** -> ``key="space"`` (a named key, so ``Shift+Space`` is expressible
+      like ``Shift+A``), with ``char=" "`` kept so text fields still insert it.
+    - **a letter** -> ``key`` lowercased, ``char`` as typed, ``modifiers`` kept —
+      so ``Shift+A`` is ``key="a"`` + ``{"shift"}``, distinct from ``"a"`` (Rule 2).
+    - **anything else** (digit, punctuation, shifted symbol) -> the produced glyph
+      *is* the identity (Rule 3). Shift is already baked into that glyph, so it is
+      **dropped** from ``modifiers``; ``ctrl``/``alt``/``cmd`` stay (they don't
+      change the glyph). This is why ``Shift+1`` is ``("!", {})`` on every
+      backend, never ``("!", {"shift"})`` on one and ``("!", {})`` on another.
+
+    Each backend still translates its own named / control / function keys; this
+    owns only the printable-glyph path they all share. ``modifiers`` is whatever
+    the backend can detect (a terminal reports none for a printable; a GUI window
+    reports the real chord)."""
+    if char == " ":
+        return Event(type=EventType.KEY, key="space", char=" ", modifiers=modifiers)
+    if char.isalpha():
+        return Event(type=EventType.KEY, key=char.lower(), char=char, modifiers=modifiers)
+    return Event(type=EventType.KEY, key=char, char=char, modifiers=modifiers - {"shift"})

@@ -378,6 +378,26 @@ class Backend(ABC):
         never branches; the default no-ops, so backends without the capability
         need no override."""
 
+    # --- text input / IME activation -----------------------------------------
+
+    def begin_text_input(self) -> None:
+        """Engage the platform text-input system because a text widget took
+        focus. The Panel calls this when focus lands on a widget that declares
+        ``wants_text_input`` (a ``TextEdit``/``ComboBox``).
+
+        Only after this does a GUI backend route key presses through the OS text
+        services (IME composition, dead keys, layout translation) and deliver
+        committed characters / ``IME_COMPOSITION`` preedit. **While inactive a
+        GUI backend must deliver plain command KEY events instead**, so a
+        single-letter binding (a file-manager's ``j`` / ``f``) dispatches as a
+        command even when a CJK input source is selected — otherwise the IME
+        would swallow it into composition. The default no-ops: a terminal has no
+        IME, and a still backend nothing to engage."""
+
+    def end_text_input(self) -> None:
+        """Disengage the text-input system because focus left the text widget
+        (its inverse). The default no-ops."""
+
     # --- open a URL / file (capability "os_open"; Panel falls back) ----------
 
     def open_url(self, url: str) -> bool:

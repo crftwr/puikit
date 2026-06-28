@@ -33,7 +33,7 @@ from typing import Any
 from . import _win32_native as native
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
-from ..event import Event, EventType
+from ..event import Event, EventType, char_key_event
 from ..font import Font
 from ..text import display_width, glyph_runs as _glyph_runs
 
@@ -73,6 +73,8 @@ _VK_KEYS = {
     native.VK_NEXT: "pagedown",
     native.VK_DELETE: "delete",
     native.VK_INSERT: "insert",
+    # Function keys F1-F12 (VK_F1 = 0x70 .. VK_F12 = 0x7B).
+    **{0x70 + i: f"f{i + 1}" for i in range(12)},
 }
 
 _VK_LETTER_RANGE = range(0x41, 0x5B)  # 'A'-'Z'
@@ -1040,7 +1042,11 @@ class WindowsBackend(Backend):
         if code < 0x20:
             return  # other C0 controls (Ctrl+letter) already handled in _on_key_down
         if ch.isprintable():
-            self._dispatch(Event(type=EventType.KEY, key=ch, char=ch, modifiers=mods))
+            # Shared contract helper: names space, lowercases letters (keeping
+            # Shift so Shift+A stays distinct from 'a'), and drops the redundant
+            # Shift from a shifted glyph so Shift+1 reads as ('!', {}) like every
+            # other backend — not ('!', {shift}). Ctrl/Alt survive.
+            self._dispatch(char_key_event(ch, mods))
 
     def _on_mouse_down(self, msg: int, lparam: int) -> int:
         button = _BUTTON_BY_MSG[msg]
