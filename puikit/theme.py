@@ -58,6 +58,12 @@ class Theme:
     # action, so a screen with two buttons reads one as the prominent choice.
     button_secondary_bg: Color = (58, 61, 65)         # secondary face   #3A3D41
     button_secondary_hover_bg: Color = (69, 73, 78)   # secondary hover  #45494E
+    # Outline for a neutral (secondary / bare-icon) button face. The flat
+    # secondary fill is only a small lift off the surface, so on a light theme it
+    # nearly matches the dialog/page background and the button loses its frame.
+    # A subtle outline (a step further off the surface) keeps the button readable
+    # as a button on any theme — the primary/accent face needs no border.
+    button_secondary_border: Color = (104, 104, 114)  # secondary outline #686872
     selection_bg: Color = (10, 105, 178)   # active selection            #0A69B2
     # List/row selection split by focus (interaction_states.md §4b/§5): the loud
     # accent fill goes to the *focused* widget, the muted neutral to a list whose
@@ -206,6 +212,10 @@ def derive_theme(
         button_text=_WHITE if _lum(accent) < 140 else background,
         button_secondary_bg=lift(background, 0.16),
         button_secondary_hover_bg=lift(background, 0.24),
+        # A step further off the surface than the fill, so the neutral button
+        # keeps a visible frame even where the fill itself nearly matches the
+        # surface (a light theme darkens the fill only slightly).
+        button_secondary_border=lift(background, 0.34),
         selection_bg=selection,
         selection_active_bg=selection,
         # Inactive (focus-elsewhere) selection: a muted neutral, a blend of the

@@ -113,7 +113,11 @@ class Button(Widget):
     def _colors(self, ctx: DrawContext):
         theme = ctx.theme or DEFAULT_THEME
         # `ring` is the focus-ring color, chosen to contrast the fill: a light
-        # ring on the accent fill, the accent on a neutral fill.
+        # ring on the accent fill, the accent on a neutral fill. `border` is the
+        # resting outline: a neutral (secondary / bare-icon) face nearly matches
+        # the surface on a light theme, so it carries a frame; the accent face is
+        # self-evident and takes none (border is None there).
+        border = None
         if self.style is not None and self.style.bg is not None:
             bg = self.style.bg
             fg = self.style.fg or theme.button_text
@@ -127,6 +131,7 @@ class Button(Widget):
             # neutral face.
             bg = theme.button_secondary_bg
             fg, hover, ring = theme.text, theme.button_secondary_hover_bg, theme.accent
+            border = theme.button_secondary_border
         elif self.label:
             # A primary labeled action: the accent button fill.
             bg, fg, hover, ring = theme.button_bg, theme.button_text, theme.button_hover_bg, _FOCUS_RING
@@ -135,6 +140,7 @@ class Button(Widget):
             # takes the default text color so it reads on the neutral face.
             bg, fg = theme.control_bg, theme.text
             hover, ring = _lighten(theme.control_bg), theme.accent
+            border = theme.button_secondary_border
         # Press wins over hover (the pointer is over the button while pressed),
         # and moves the fill the opposite way — darker — so the three states
         # read distinctly (docs/interaction_states.md §3).
@@ -144,12 +150,12 @@ class Button(Widget):
             face = hover
         else:
             face = bg
-        return face, fg, theme, ring
+        return face, fg, theme, ring, border
 
     # --- draw ----------------------------------------------------------------
 
     def draw(self, ctx: DrawContext) -> None:
-        bg, fg, theme, ring = self._colors(ctx)
+        bg, fg, theme, ring, border = self._colors(ctx)
         wu, hu = ctx.size_units
         # A pointing hand signals the button is clickable; one intent, resolved
         # per backend (a real NSCursor on GUI, OSC 22 on a capable terminal).
@@ -157,6 +163,14 @@ class Button(Widget):
             ctx.set_cursor("pointer")
         # A rounded fill on vector backends, a plain fill on a character grid.
         ctx.round_rect(0, 0, wu, hu, Style(bg=bg), radius=_RADIUS, hints={"fill": True})
+
+        # Resting outline for a neutral face on a vector backend, so a secondary
+        # button keeps a visible frame where its fill nearly matches the surface
+        # (a light theme). The focus ring replaces it when focused (it draws an
+        # inset perimeter in the same place), and a character grid leans on the
+        # focus box / surface contrast instead, so the border is vector-only.
+        if border is not None and not ctx.focused and ctx.vector_shapes and wu >= 1 and hu >= 1:
+            ctx.round_rect(0, 0, wu, hu, Style(fg=border, bg=bg), radius=_RADIUS)
 
         if self.image is not None and self.label:
             self._draw_icon_label(ctx, bg, fg)
