@@ -3,6 +3,7 @@
 from puikit.text import (
     char_width,
     display_width,
+    elide,
     glyph_runs,
     truncate_to_width,
     wrap_text,
@@ -53,6 +54,57 @@ def test_truncate_keeps_selector_with_base():
     # The selector must not be split from the base it modifies at the boundary.
     assert truncate_to_width("🏷️X", 2) == "🏷️"
     assert truncate_to_width("🏷️X", 1) == ""  # the 2-column glyph would straddle
+
+
+def test_truncate_with_ellipsis():
+    # Text that fits is returned unchanged, no ellipsis appended.
+    assert truncate_to_width("abc", 5, ellipsis="…") == "abc"
+    assert truncate_to_width("abc", 3, ellipsis="…") == "abc"
+    # Text that overflows: prefix + ellipsis, together within max_width.
+    assert truncate_to_width("abcdef", 4, ellipsis="…") == "abc…"  # 3 + 1
+    assert truncate_to_width("abcdef", 4, ellipsis="..") == "ab.."  # 2 + 2
+    # A wide ellipsis is measured in columns, not characters.
+    assert display_width(truncate_to_width("abcdefgh", 5, ellipsis="…")) <= 5
+    # No room for the ellipsis -> bare prefix fallback.
+    assert truncate_to_width("abcdef", 1, ellipsis="..") == "a"
+    # Empty ellipsis keeps the pure-truncation behaviour.
+    assert truncate_to_width("abcdef", 3, ellipsis="") == "abc"
+
+
+def test_elide_fits_unchanged():
+    assert elide("abc", 5) == "abc"
+    assert elide("abc", 3) == "abc"
+
+
+def test_elide_end():
+    # 6 cols: 5 of text ("longf") + "…".
+    assert elide("longfilename", 6) == "longf…"
+    assert display_width(elide("longfilename", 6)) == 6
+
+
+def test_elide_start():
+    assert elide("longfilename", 6, where="start") == "…ename"
+    assert display_width(elide("longfilename", 6, where="start")) == 6
+
+
+def test_elide_middle():
+    # budget 5 -> left 2, right 3 around the ellipsis.
+    assert elide("longfilename", 6, where="middle") == "lo…ame"
+    assert display_width(elide("longfilename.txt", 10, where="middle")) <= 10
+
+
+def test_elide_custom_ellipsis_measured_in_columns():
+    assert elide("abcdefgh", 5, ellipsis="..") == "abc.."  # 3 + 2
+    # No room for the ellipsis -> bare prefix fallback.
+    assert elide("abcdef", 1, ellipsis="..") == "a"
+
+
+def test_elide_respects_wide_glyphs():
+    # Wide (2-col) CJK: a 5-col end-elide keeps "中中" (4) + "…" (1), not a split.
+    assert elide("中中中中", 5) == "中中…"
+    assert display_width(elide("中中中中", 5)) == 5
+    # The emoji-with-selector glyph is never split from its base.
+    assert elide("🏷️abcdef", 3, where="start") == "…ef"
 
 
 def test_wrap_text_fits_in_one_line():

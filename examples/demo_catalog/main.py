@@ -43,6 +43,7 @@ from puikit import (
 )
 from puikit.backends import create_backend
 from puikit.layout import SizeRequest
+from puikit.text import elide
 from puikit.widgets import (
     BusyIndicator,
     Button,
@@ -332,6 +333,156 @@ def build_label_page(panel: Panel) -> VSplit:
         Item(Label("Reverse label", Style(attr=TextAttribute.REVERSE)), size=1),
         Item(Label("Colored label", Style(fg=(13, 188, 121))), size=1),
         Item(Label(""), weight=1),
+        gap=1,
+    )
+
+
+class KeysView(Widget):
+    """Live keyboard probe: shows what each keypress delivers under the PuiKit
+    keyboard contract (``key`` / ``char`` / ``modifiers``), newest at the
+    bottom. The same `Event` is produced on every backend, so a `Shift-A` reads
+    as ``key='a'`` + ``{shift}`` whether typed in a terminal or the native
+    window. Escape is passed through (returns False) so the shell can still
+    quit; every other key is consumed so you can watch q, digits, Shift-letters,
+    Ctrl/Cmd chords, and named keys as they arrive."""
+
+    focusable = True
+
+    _MOD_ORDER = ("cmd", "ctrl", "alt", "shift")
+
+    def __init__(self):
+        self.history: list[tuple[str, str, str]] = []
+
+    def handle_event(self, event):
+        if event.type is not EventType.KEY:
+            return False
+        if event.key == "escape":
+            return False  # let the catalog shell quit
+        mods = "+".join(m for m in self._MOD_ORDER if m in event.modifiers) or "—"
+        char = "—" if event.char is None else repr(event.char)
+        self.history.append((str(event.key), char, mods))
+        del self.history[:-256]
+        return True
+
+    def draw(self, ctx) -> None:
+        theme = ctx.theme
+        text_fg = theme.text if theme else None
+        muted_fg = theme.muted_text if theme else None
+        accent = theme.accent if theme else None
+
+        if ctx.focused:
+            ctx.draw_text(0, 0, "● capturing — press any key",
+                          Style(fg=accent, attr=TextAttribute.BOLD))
+        else:
+            ctx.draw_text(0, 0, "○ Tab here to capture keys",
+                          Style(fg=text_fg, attr=TextAttribute.BOLD))
+        ctx.draw_text(0, 1, "Esc quits · Tab moves focus", Style(fg=muted_fg, attr=TextAttribute.DIM))
+
+        ctx.draw_text(0, 3, f"{'key':<14}{'char':<10}modifiers",
+                      Style(fg=text_fg, attr=TextAttribute.BOLD))
+
+        rows = max(0, ctx.height - 4)
+        recent = self.history[-rows:] if rows else []
+        for i, (key, char, mods) in enumerate(recent):
+            newest = i == len(recent) - 1
+            style = Style(fg=accent if newest else text_fg,
+                          attr=TextAttribute.BOLD if newest else TextAttribute.NORMAL)
+            ctx.draw_text(0, 4 + i, f"{key:<14}{char:<10}{mods}", style)
+
+
+def build_keys_page(panel: Panel) -> VSplit:
+    intro = Label(
+        "Keyboard contract probe — one Event per keypress, identical on every backend.",
+        DIM,
+    )
+    return VSplit(
+        Item(intro, size="content"),
+        Item(KeysView(), weight=1),
+        gap=1,
+    )
+
+
+class TruncateView(Widget):
+    """Live text-fitting probe for `puikit.text`. A column budget you grow and
+    shrink with ←/→ (or the mouse wheel), and several sample strings fitted to
+    it three ways with `elide`: an **end** ellipsis (keep the start), a
+    **middle** ellipsis (keep both ends — the filename/path idiom), and a
+    **start** ellipsis (keep the end). A dotted guide marks the budget edge; the
+    fitted lines stop at it while the dim full text overflows past it. The
+    fitting is wide-character aware (CJK, emoji-with-selector) and identical on
+    every backend."""
+
+    focusable = True
+
+    SAMPLES = (
+        "the_quick_brown_fox.tar.gz",
+        "/usr/local/share/app/config.yaml",
+        "実装メモ_2026年.md",
+        "🏷️_tagged_release_v1.txt",
+    )
+    MODES = ("end", "middle", "start")
+
+    def __init__(self, width: int = 16):
+        self.width = width
+
+    def _resize(self, delta: int) -> None:
+        self.width = max(1, min(48, self.width + delta))
+
+    def handle_event(self, event):
+        if event.type is EventType.KEY and event.key in ("left", "right"):
+            self._resize(1 if event.key == "right" else -1)
+            return True
+        if event.type is EventType.MOUSE_SCROLL:
+            self._resize(1 if event.scroll > 0 else -1)
+            return True
+        return False
+
+    def draw(self, ctx) -> None:
+        theme = ctx.theme
+        text_fg = theme.text if theme else None
+        muted = theme.muted_text if theme else None
+        accent = theme.accent if theme else None
+
+        w = self.width
+        tag_x = 0
+        text_x = 8
+        guide_x = text_x + w
+
+        hint = ("focused — ←/→ or scroll to resize" if ctx.focused
+                else "Tab here, then ←/→ to resize")
+        ctx.draw_text(0, 0, hint, Style(fg=accent if ctx.focused else text_fg,
+                                        attr=TextAttribute.BOLD))
+        ctx.draw_text(0, 1, f"budget = {w} columns", Style(fg=muted, attr=TextAttribute.DIM))
+
+        y = 3
+        for sample in self.SAMPLES:
+            if y >= ctx.height:
+                break
+            ctx.draw_text(tag_x, y, "full", Style(fg=muted, attr=TextAttribute.DIM))
+            ctx.draw_text(text_x, y, sample, Style(fg=muted, attr=TextAttribute.DIM))
+            y += 1
+            for mode in self.MODES:
+                if y >= ctx.height:
+                    break
+                ctx.draw_text(tag_x, y, mode, Style(fg=text_fg))
+                ctx.draw_text(text_x, y, elide(sample, w, where=mode), Style(fg=text_fg))
+                y += 1
+            y += 1  # blank line between samples
+
+        # Dotted guide at the budget edge, drawn last so it cuts across the
+        # overflowing full lines while the fitted lines stop short of it.
+        for gy in range(3, min(ctx.height, y)):
+            ctx.draw_text(guide_x, gy, "┊", Style(fg=accent))
+
+
+def build_truncate_page(panel: Panel) -> VSplit:
+    intro = Label(
+        "Text fitting — elide() with end / middle / start ellipsis, wide-char aware.",
+        DIM,
+    )
+    return VSplit(
+        Item(intro, size="content"),
+        Item(TruncateView(), weight=1),
         gap=1,
     )
 
@@ -2122,6 +2273,8 @@ def build_drag_page(panel: Panel) -> VSplit:
 # both backends, so no page branches on the backend for its own name.
 PAGES = [
     ("🏷️ Label", build_label_page),
+    ("⌨️ Keys", build_keys_page),
+    ("✂️ Truncate", build_truncate_page),
     ("🎛️ Widgets", build_widgets_page),
     ("🔽 ComboBox", build_combo_page),
     ("📊 Progress", build_progress_page),

@@ -89,7 +89,7 @@ def display_width(text: str) -> int:
                for i, ch in enumerate(text))
 
 
-def truncate_to_width(text: str, max_width: int) -> str:
+def _prefix_to_width(text: str, max_width: int) -> str:
     """Longest prefix of ``text`` whose display width is <= ``max_width``.
     A trailing wide character that would straddle the boundary is dropped; a
     variation selector stays with the base character it modifies."""
@@ -102,6 +102,26 @@ def truncate_to_width(text: str, max_width: int) -> str:
             return text[:i]
         width += w
     return text
+
+
+def truncate_to_width(text: str, max_width: int, ellipsis: str = "") -> str:
+    """Fit ``text`` into ``max_width`` display columns.
+
+    With the default empty ``ellipsis`` this is a pure prefix truncation
+    (a trailing wide char that would straddle the boundary is dropped). When
+    ``ellipsis`` is given and the text does not fit, the result is a prefix plus
+    the ellipsis, together no wider than ``max_width``; if there isn't even room
+    for the ellipsis it falls back to a bare prefix."""
+    if max_width <= 0:
+        return ""
+    if not ellipsis:
+        return _prefix_to_width(text, max_width)
+    if display_width(text) <= max_width:
+        return text
+    budget = max_width - display_width(ellipsis)
+    if budget <= 0:
+        return _prefix_to_width(text, max_width)
+    return _prefix_to_width(text, budget) + ellipsis
 
 
 def attaches_to_base(ch: str) -> bool:
@@ -123,6 +143,65 @@ def glyph_runs(text: str) -> list[str]:
         else:
             glyphs.append(ch)
     return glyphs
+
+
+def _glyph_prefix(text: str, max_width: int) -> str:
+    """Longest run of leading glyphs whose total width is <= ``max_width``.
+    Like ``_prefix_to_width`` but never splits a multi-codepoint glyph (a ZWJ
+    emoji sequence, a base + combining marks)."""
+    out: list[str] = []
+    width = 0
+    for glyph in glyph_runs(text):
+        w = display_width(glyph)
+        if width + w > max_width:
+            break
+        out.append(glyph)
+        width += w
+    return "".join(out)
+
+
+def _glyph_suffix(text: str, max_width: int) -> str:
+    """Longest run of trailing glyphs whose total width is <= ``max_width``."""
+    out: list[str] = []
+    width = 0
+    for glyph in reversed(glyph_runs(text)):
+        w = display_width(glyph)
+        if width + w > max_width:
+            break
+        out.append(glyph)
+        width += w
+    return "".join(reversed(out))
+
+
+def elide(text: str, max_width: int, ellipsis: str = "…", where: str = "end") -> str:
+    """Abbreviate ``text`` to ``max_width`` display columns, marking the removed
+    content with ``ellipsis`` and keeping the part named by ``where``:
+
+    - ``"end"``    keep the start  -> ``"longfilenam…"``
+    - ``"start"``  keep the end    -> ``"…ngfilename.txt"``
+    - ``"middle"`` keep both ends  -> ``"longfi…e.txt"`` (ideal for filenames/paths)
+
+    Text already within ``max_width`` is returned unchanged. Glyph boundaries are
+    respected (a multi-codepoint emoji or a base + combining marks is never split),
+    and the ellipsis itself is measured in columns, so the result never exceeds
+    ``max_width``. With no room for the ellipsis it falls back to a bare prefix.
+
+    This is the higher-level companion to ``truncate_to_width`` (which is the pure
+    longest-prefix fitter); ``elide(text, w)`` defaults to an end ellipsis."""
+    if max_width <= 0:
+        return ""
+    if display_width(text) <= max_width:
+        return text
+    budget = max_width - display_width(ellipsis)
+    if budget <= 0:
+        # No room for the ellipsis: show as much text as fits instead.
+        return _prefix_to_width(text, max_width)
+    if where == "start":
+        return ellipsis + _glyph_suffix(text, budget)
+    if where == "middle":
+        left = budget // 2
+        return _glyph_prefix(text, left) + ellipsis + _glyph_suffix(text, budget - left)
+    return _glyph_prefix(text, budget) + ellipsis
 
 
 def _tokenize(glyphs: list[str]) -> list[tuple[bool, list[str]]]:
