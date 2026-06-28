@@ -221,7 +221,10 @@ class MenuPopup(Widget):
         sw, sh = self._panel.backend.size_units
         x = min(rx + rw, max(0.0, sw - w))
         y = min(ry + index * self._row_h, max(0.0, sh - h))
-        self._panel.push_layer(child, z=61 + self._depth(), hints={"x": x, "y": y, "w": w, "h": h})
+        self._panel.push_layer(
+            child, z=61 + self._depth(),
+            hints={"shadow": True, "x": x, "y": y, "w": w, "h": h},
+        )
 
     def _depth(self) -> int:
         d, p = 0, self.parent

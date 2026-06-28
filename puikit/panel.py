@@ -1698,7 +1698,9 @@ class Panel:
         sw, sh = self.backend.size_units
         x = max(0.0, min(x, sw - w))
         y = max(0.0, min(y, sh - h))
-        self.push_layer(popup, z=60, hints={"x": x, "y": y, "w": w, "h": h})
+        self.push_layer(
+            popup, z=60, hints={"shadow": True, "x": x, "y": y, "w": w, "h": h}
+        )
 
     # --- event routing ----------------------------------------------------------------
 
