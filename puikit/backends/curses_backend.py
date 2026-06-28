@@ -146,19 +146,12 @@ _DIM_BLEND: float = 0.6
 _FADE_BLEND: float = 0.6
 
 # Per-cell "drop shadow" (see shadow_rect): a thin down-right drop shadow hugging
-# the layer's right and bottom edges. The two edges are rendered differently so
-# they read at a *matching* visual thickness on a grid whose cells are ~twice as
-# tall as wide:
-#   * bottom edge -> the ▀ UPPER HALF BLOCK on blank cells, so the shadow is only
-#     the top half of the row below the layer (~half a cell tall).
-#   * right edge  -> a whole-cell darken (one full column). A full cell *wide* ≈ a
-#     half cell *tall*, so the right band matches the bottom band's thickness.
-# Only ▀ is used (no vertical half-block ▌, which can show inter-line seams). A
-# half-block consumes the cell's glyph slot, so a bottom cell that already holds
-# TEXT can't use it — it falls back to a whole-cell darken that keeps the glyph.
+# the layer's right and bottom edges. Both edges are a whole-cell darken — a
+# darkened space painted over each shadow cell (a bottom cell that holds TEXT
+# keeps its glyph and darkens both fg and bg) — so the bottom row and the right
+# column read at a matching thickness.
 # _SHADOW_STRENGTH is the fraction of brightness KEPT (0.8 = weak).
 _SHADOW_STRENGTH: float = 0.8
-_SHADOW_BOTTOM: str = "▀"   # U+2580 upper half block
 
 
 def _blend(a: Color, b: Color, t: float) -> Color:
@@ -286,10 +279,6 @@ class CursesBackend(Backend):
         # via inch() — which returns an unreliable color-pair number for wide /
         # non-ASCII cells (em-dashes, box lines, CJK), recoloring them wrong.
         self._cell_color: dict[tuple[int, int], tuple[Color | None, Color | None]] = {}
-        # Cells that hold a non-blank glyph this frame, so the drop shadow knows
-        # which cells it must NOT overwrite with a half-block (it would erase the
-        # text) and darkens whole-cell instead.
-        self._cell_text: set[tuple[int, int]] = set()
         self._clip_stack: list[tuple[int, int, int, int]] = []  # x0, y0, x1, y1
         # Where the focused text widget wants the terminal cursor (and thus the
         # terminal's own IME composition). Reset each frame; set via
@@ -417,7 +406,6 @@ class CursesBackend(Backend):
         self._input_pos = None
         self._deferred_emoji.clear()
         self._cell_color.clear()
-        self._cell_text.clear()
         # Recycle color pairs every frame. ``erase()`` discards the whole screen,
         # so this frame redraws every cell and re-requests exactly the pairs it
         # needs — nothing from the previous frame is still referenced. Without
@@ -585,15 +573,6 @@ class CursesBackend(Backend):
         # a separate refresh (where nothing follows it) keeps the text aligned.
         col = 0
         for glyph, gw in zip(runs, widths):
-            # Track which cells carry a real glyph vs. a blank, so the drop
-            # shadow can pick half-block (blank) vs. whole-cell darken (text).
-            cell = (y, x + col)
-            if glyph == " ":
-                self._cell_text.discard(cell)
-            else:
-                self._cell_text.add(cell)
-                if gw == 2:
-                    self._cell_text.add((y, x + col + 1))
             if _is_emoji_glyph(glyph):
                 self._deferred_emoji[(y, x + col)] = (glyph, attr)
                 col += gw
@@ -782,10 +761,10 @@ class CursesBackend(Backend):
         # cell diagonally (light from the upper-left). Each shadow cell is darkened
         # toward black at one weak strength (_SHADOW_STRENGTH).
         #
-        # The bottom edge uses the ▀ half-block on *blank* cells (a half-cell-tall
-        # band); the right edge is a whole-cell darken (a full column) so it reads
-        # at a matching thickness. A bottom cell holding TEXT can't take a
-        # half-block (it would erase the glyph), so it darkens whole-cell instead.
+        # Both edges are a whole-cell darken (the bottom row and the right column),
+        # painting a darkened space over each shadow cell so the two edges read at a
+        # matching thickness. (Earlier the bottom used a ▀ half-block for a thinner
+        # band, but a darkened space matches the right edge exactly.)
         # Source colors come from self._cell_color (reliable for wide glyphs); a
         # cell with no recorded color falls back to ``base_bg`` (the page
         # background the Panel passes).
@@ -794,19 +773,18 @@ class CursesBackend(Backend):
         if w <= 0 or h <= 0:
             return
         base = base_bg if base_bg is not None else _DIM_BG
-        # Right column (whole-cell, top skipped so the layer's top-right is clear),
-        # then the bottom row incl. the corner (▀ half-block). glyph None == darken
-        # the whole cell.
-        cells: list[tuple[int, int, str | None]] = []
+        # Right column (top skipped so the layer's top-right is clear), then the
+        # bottom row incl. the corner. Every shadow cell is a whole-cell darken.
+        cells: list[tuple[int, int]] = []
         for row in range(y + 1, y + h):
-            cells.append((row, x + w, None))
+            cells.append((row, x + w))
         for col in range(x + 1, x + w + 1):
-            cells.append((y + h, col, _SHADOW_BOTTOM))
+            cells.append((y + h, col))
 
         sw, sh = self.size
         has_color = curses.has_colors()
         rows_touched: list[int] = []
-        for row, col, glyph in cells:
+        for row, col in cells:
             if not (0 <= row < sh and 0 <= col < sw):
                 continue
             # A deferred emoji here would resurface at full color over the shadow.
@@ -820,18 +798,13 @@ class CursesBackend(Backend):
             try:
                 if not has_color:
                     self._stdscr.chgat(row, col, 1, curses.A_DIM)
-                elif glyph is None or (row, col) in self._cell_text:
-                    # Whole-cell darken: the right column, or a bottom cell that
-                    # holds text (which keeps its glyph).
+                else:
+                    # Whole-cell darken: a darkened space over a blank cell, or a
+                    # cell that keeps its glyph if it holds text.
                     nfg = _to_gray(_blend(under_fg, (0, 0, 0), 1.0 - _SHADOW_STRENGTH))
                     self._stdscr.chgat(
                         row, col, 1, curses.color_pair(self._color_pair(nfg, shade))
                     )
-                else:
-                    # Blank bottom cell: ▀ paints the shadowed top half (shade) over
-                    # the page color (under_bg) — a sub-cell shadow edge.
-                    attr = curses.color_pair(self._color_pair(shade, under_bg))
-                    self._stdscr.addstr(row, col, glyph, attr)
                 rows_touched.append(row)
             except curses.error:
                 pass

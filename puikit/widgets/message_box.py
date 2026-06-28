@@ -178,12 +178,14 @@ def show_message_box(
     cancel: int | None = None,
     on_result: Callable[[str], None] | None = None,
     z: int = 70,
+    dim_below: bool = False,
 ) -> MessageBox:
     """Push a modal MessageBox layer over ``panel`` and return it.
 
     The box is sized to its title, message, and buttons; GUI renders a drop
-    shadow over a dimmed page, TUI falls back to draw order. The chosen button
-    label is reported through ``on_result``."""
+    shadow over the page, TUI falls back to draw order. By default the page is
+    not dimmed (drop shadow only); pass ``dim_below=True`` to dim it. The chosen
+    button label is reported through ``on_result``."""
     box = MessageBox(
         message, title=title, buttons=buttons, icon=icon,
         default=default, cancel=cancel, on_result=on_result,
@@ -220,7 +222,7 @@ def show_message_box(
     h = len(lines) + 6
     box._panel = panel
     panel.push_layer(
-        box, z=z, hints={"shadow": True, "dim_below": True, "w": float(w), "h": float(h)}
+        box, z=z, hints={"shadow": True, "dim_below": dim_below, "w": float(w), "h": float(h)}
     )
     panel.animate(box, hints={"transition": "fade", "duration_ms": 150})
     return box

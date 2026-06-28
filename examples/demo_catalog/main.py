@@ -2262,7 +2262,7 @@ def main() -> None:
             panel.push_layer(
                 dialog,
                 z=10,
-                hints={"shadow": True, "dim_below": True, "w": 36, "h": 7},
+                hints={"shadow": True, "dim_below": False, "w": 36, "h": 7},
             )
             # GUI: fades in over 200ms; TUI: appears immediately.
             panel.animate(dialog, hints={"transition": "fade", "duration_ms": 200})

@@ -70,7 +70,7 @@ backend.dim_rect(x, y, w, h)         # GUI: translucent overlay; TUI: dim attrs
 # Extended (GUI only; TUI falls back)
 backend.draw_icon(x, y, icon_name)   # TUI: text emoji fallback
 backend.draw_image(x, y, path)       # TUI: no-op
-backend.draw_shadow(x, y, w, h)      # TUI: shadow_rect stand-in (half-block edge)
+backend.draw_shadow(x, y, w, h)      # TUI: shadow_rect stand-in (whole-cell darken edge)
 ```
 
 TUI examples:
@@ -179,8 +179,9 @@ panel.push_layer(dialog, z=10, hints={"shadow": True, "dim_below": True})
 
 - TUI: draw order only; `dim_below` approximated by graying cells; `shadow`
   approximated by a thin down-right shadow hugging the layer's right/bottom edges
-  (`shadow_rect` — the bottom edge a `▀` half-block on blank cells, the right edge
-  a whole-cell darken, matched thickness; text cells darken whole to keep glyphs)
+  (`shadow_rect` — both the bottom row and the right column are a whole-cell
+  darken, a darkened space painted over each shadow cell; text cells keep their
+  glyph and darken whole)
 - GUI: real layer compositing; transparency and drop shadows rendered natively
 
 ### 4. Animation
