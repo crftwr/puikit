@@ -210,6 +210,8 @@ _KEY_NAMES = {
     27: "escape",
     127: "backspace",
 }
+# Function keys F1-F12 (keyboard contract Rule 1).
+_KEY_NAMES.update({getattr(curses, f"KEY_F{n}"): f"f{n}" for n in range(1, 13)})
 
 # Control characters that get_wch() returns as one-character strings.
 _CONTROL_CHARS = {
@@ -1280,7 +1282,9 @@ class CursesBackend(Backend):
         if 0 <= ch < 0x110000:
             char = chr(ch)
             if char.isprintable():
-                return Event(type=EventType.KEY, key=char, char=char)
+                # Route through the same path so printable normalization
+                # (space, shift-letter) is applied in one place.
+                return self._translate_char(char)
         return None
 
     def _translate_char(self, ch: str) -> Event | None:
@@ -1298,6 +1302,16 @@ class CursesBackend(Backend):
         if len(ch) == 1 and 0x01 <= ord(ch) <= 0x1A:
             letter = chr(ord(ch) + 0x60)
             return Event(type=EventType.KEY, key=letter, modifiers=frozenset({"ctrl"}))
+        # Space is a named key so Shift+Space is expressible like Shift+A; the
+        # typed glyph stays on char so text fields still insert a space.
+        if ch == " ":
+            return Event(type=EventType.KEY, key="space", char=" ")
+        # An uppercase letter implies Shift (a terminal can't report the modifier
+        # directly). Normalize to lowercase key + shift so Shift+A is one
+        # identity across backends, keeping the typed glyph on char (Rule 2).
+        if len(ch) == 1 and ch.isalpha() and ch.isupper():
+            return Event(type=EventType.KEY, key=ch.lower(), char=ch,
+                         modifiers=frozenset({"shift"}))
         if ch.isprintable():
             return Event(type=EventType.KEY, key=ch, char=ch)
         return None

@@ -157,6 +157,8 @@ _FUNCTION_KEYS = {
     0xF72B: "end",
     0xF72C: "pageup",
     0xF72D: "pagedown",
+    # Function keys F1-F12 (NSF1FunctionKey = 0xF704 .. F12 = 0xF70F).
+    **{0xF704 + i: f"f{i + 1}" for i in range(12)},
 }
 
 _CONTROL_KEYS = {
@@ -231,8 +233,17 @@ def translate_key(characters: str, modifier_flags: int = 0) -> Event | None:
         return Event(type=EventType.KEY, key=_FUNCTION_KEYS[code], modifiers=modifiers)
     if ch in _CONTROL_KEYS:
         return Event(type=EventType.KEY, key=_CONTROL_KEYS[ch], modifiers=modifiers)
+    # Space is a named key so Shift+Space is expressible like Shift+A; the typed
+    # glyph stays on char so text fields still insert a space.
+    if ch == " ":
+        return Event(type=EventType.KEY, key="space", char=" ", modifiers=modifiers)
     if ch.isprintable():
-        return Event(type=EventType.KEY, key=ch, char=ch, modifiers=modifiers)
+        # Letters: lowercase the key so Shift+A is one identity across backends,
+        # keeping the typed glyph on char and shift in modifiers (Rule 2). Other
+        # printables keep the literal char as identity (Rule 3); the matcher
+        # ignores shift/alt for those.
+        key = ch.lower() if ch.isalpha() else ch
+        return Event(type=EventType.KEY, key=key, char=ch, modifiers=modifiers)
     return None
 
 
