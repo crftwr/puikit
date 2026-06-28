@@ -985,6 +985,46 @@ def build_wrap_page(panel: Panel) -> VSplit:
     )
 
 
+class PairMeter(Widget):
+    """A live readout of the TUI backend's curses color-pair usage, drawn at the
+    right of the status bar. It reads ``backend.color_pair_stats()`` every frame
+    (so the count reflects what the *current* screen — page + any dialog — has
+    allocated), and shows ``used/capacity`` plus an ``ovf`` (overflow) counter:
+    distinct (fg, bg) requests that arrived after COLOR_PAIRS ran out. A non-zero
+    ``ovf`` is the live proof the screen is exhausting pairs. Backends without
+    the method (GUI) render nothing — color pairs are a curses concept."""
+
+    # A fixed-width format so measure and draw reserve the same extent every
+    # frame (no per-frame width jitter as the numbers change).
+    _FMT = " pairs {used:>4}/{cap:<4} ovf {ovf:>5} "
+
+    def __init__(self, style: Style | None = None):
+        self.style = style if style is not None else Style()
+
+    def _text(self, backend) -> str:
+        stats = getattr(backend, "color_pair_stats", None)
+        if stats is None:
+            return ""
+        used, cap, ovf = stats()
+        return self._FMT.format(used=used, cap=cap, ovf=ovf)
+
+    def draw(self, ctx) -> None:
+        text = self._text(ctx.panel.backend)
+        if not text:
+            return
+        # Flag overflow in red so it pops the moment pairs run out.
+        used, cap, ovf = ctx.panel.backend.color_pair_stats()
+        style = self.style if ovf == 0 else Style(fg=(255, 120, 120), bg=self.style.bg)
+        ctx.draw_text(0, 0, text, style)
+
+    def measure(self, ctx, axis: str, available: float):
+        if axis == "x":
+            w = ctx.measure_text(self._FMT.format(used=0, cap=0, ovf=0), self.style)
+            return SizeRequest(min=w, preferred=w, max=w)
+        h = ctx.measure_line_height(self.style)
+        return SizeRequest(min=h, preferred=h, max=h)
+
+
 class Swatch(Widget):
     """A filled color block labeled with its RGB. The app passes one RGB
     intent; GUI paints the exact channel values, TUI approximates them through
@@ -2139,6 +2179,9 @@ def main() -> None:
         # The title/status label styles are (re)set by apply_theme below.
         title = Label(" PuiKit Demo Catalog", BOLD, padding_px=4)
         status = Label("", padding_px=4)
+        # Live curses color-pair usage at the right of the status bar (TUI only;
+        # the GUI backend has no color_pair_stats, so it renders nothing).
+        pair_meter = PairMeter()
 
         # Mutable shell state shared by the page/theme switchers.
         page_index = 0
@@ -2172,9 +2215,22 @@ def main() -> None:
             # color over the accent surface.
             title.style = Style(fg=theme.text, attr=TextAttribute.BOLD)
             status.style = Style(fg=_on_accent_fg(theme.accent), bg=theme.surfaces["status"])
+            pair_meter.style = status.style
             update_status()
 
         nav = ListView([name for name, _ in PAGES], on_change=show_page)
+
+        # The pair meter is a curses-only diagnostic; only give it a slot when
+        # the backend actually reports color-pair stats, so GUI doesn't reserve
+        # dead status-bar width for it.
+        if hasattr(backend, "color_pair_stats"):
+            status_bar = HSplit(
+                Item(status, weight=1, hints={"surface": "status"}),
+                Item(pair_meter, size="content", hints={"surface": "status"}),
+            )
+            status_item = Item(status_bar, size="content")
+        else:
+            status_item = Item(status, size="content", hints={"surface": "status"})
 
         panel.set_layout(
             VSplit(
@@ -2189,7 +2245,7 @@ def main() -> None:
                         divider="subtle",
                     )
                 ),
-                Item(status, size="content", hints={"surface": "status"}),
+                status_item,
             ),
             # GUI: inset the whole layout 4px from the window frame. Edge panes
             # bleed their backgrounds across the margin, so it reads as padding,

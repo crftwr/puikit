@@ -21,7 +21,7 @@ classifiers = [
 dependencies = ["numpy"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "pytest-timeout>=2"]
 macos = ["pyobjc-framework-Cocoa>=10", "pyobjc-framework-Quartz>=10"]
 
 [project.urls]
@@ -32,3 +32,10 @@ include = ["puikit*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Fail-safe: no single test may hang forever. A bug that spins (e.g. a
+# `while` that never advances its guard) would otherwise leave an orphaned
+# Python process pegged at 100% CPU after the runner's own timeout kills only
+# the shell. The signal method raises in the main thread between bytecodes, so
+# it interrupts even a pure-Python busy loop and reports which test hung.
+timeout = 60
+timeout_method = "signal"

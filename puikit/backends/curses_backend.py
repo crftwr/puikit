@@ -122,12 +122,28 @@ def _build_tui_palette() -> list[Color]:
 
 _TUI_PALETTE: list[Color] = _build_tui_palette()
 
+# The most color pairs ``curses.color_pair(n)`` can address. The pair number is
+# packed into the legacy 8-bit ``A_COLOR`` attribute field, so n must be < 256
+# even on terminals that advertise COLOR_PAIRS=32767 (those extra pairs are only
+# reachable through the extended ncurses API, which addstr-based drawing cannot
+# use). Allocating past this and OR'ing color_pair(n>=256) into a cell attribute
+# overflows the field and renders wrong colors. See _pair_capacity.
+_LEGACY_PAIR_LIMIT: int = 256
+
 # Opacity of the per-cell "dim below" composite (see dim_rect, per_cell=True):
 # every cell's fg and bg are blended this far toward the single veil color, so
 # the page reads as one translucent overlay while each surface (status, content,
 # title) still shows through faintly. Higher → closer to a flat uniform veil;
 # lower → more of the page bleeds through (and, past a point, the old patchwork).
 _DIM_BLEND: float = 0.6
+
+# Opacity of the 2-frame ``fade`` stand-in (see dim_rect, fade=True): each cell's
+# OWN foreground is blended this far toward its OWN background, so the content
+# sinks halfway into the surface it sits on (the alpha model) while every cell
+# keeps its own background and glyph. The intermediate frame then follows the
+# actual grid cells — a popup surface stays popup-colored, a button fill stays
+# its own color — instead of collapsing every surface to one scrim pair.
+_FADE_BLEND: float = 0.6
 
 # Per-cell "drop shadow" (see shadow_rect): a thin down-right drop shadow hugging
 # the layer's right and bottom edges. The two edges are rendered differently so
@@ -246,6 +262,20 @@ class CursesBackend(Backend):
         self._quit_requested = False
         self._color_pairs: dict[tuple[int, int], int] = {}
         self._next_pair_id = 1
+        # Palette RGB displayed by each allocated pair (fg, bg; None == default),
+        # so that once COLOR_PAIRS is exhausted a new request can fall back to the
+        # nearest *already-allocated* pair instead of pair 0 (see _color_pair).
+        self._pair_rgb: dict[int, tuple[Color | None, Color | None]] = {}
+        # Previous frame's pair->RGB map (see clear()). Pairs are recycled each
+        # frame, so a pair NUMBER can carry a different color than it did last
+        # frame; when that happens curses' diff refresh would leave cells that
+        # kept the same (glyph, pair#) showing the stale color, so present()
+        # forces a full repaint whenever this differs from _pair_rgb.
+        self._prev_pair_rgb: dict[int, tuple[Color | None, Color | None]] = {}
+        # Count of distinct (fg, bg) requests that arrived after COLOR_PAIRS was
+        # exhausted (each fell back to a nearest existing pair). Exposed via
+        # color_pair_stats() so a caller can show live whether pairs ran out.
+        self._pair_overflow = 0
         # Curated palette -> terminal color index, computed once at open() (an
         # empty list until then means "map directly", e.g. in unit tests). Plus
         # a cache of authored RGB -> curated palette index.
@@ -388,6 +418,29 @@ class CursesBackend(Backend):
         self._deferred_emoji.clear()
         self._cell_color.clear()
         self._cell_text.clear()
+        # Recycle color pairs every frame. ``erase()`` discards the whole screen,
+        # so this frame redraws every cell and re-requests exactly the pairs it
+        # needs — nothing from the previous frame is still referenced. Without
+        # this, pairs are allocated for the life of the backend and accumulate:
+        # cycling themes and opening dialogs each mint new (fg, bg) combinations
+        # that are never reused, so the count climbs monotonically until it
+        # crosses the 256-pair ceiling and later colors degrade. Resetting bounds
+        # the count to the DISTINCT colors visible in the current frame (well
+        # under the ceiling for any real screen). For static content draw order is
+        # stable, so a given (fg, bg) lands on the same pair number each frame and
+        # init_pair re-sets it to the same color (a no-op, no flicker, and the
+        # diff refresh resends nothing). When a pair number's color DOES change
+        # (content changed, or draw order shifted), present() detects it and forces
+        # a full repaint so no cell is left on a stale pair color.
+        # _quant_cache is a pure RGB->palette cache and stays. Keep the previous
+        # frame's pair->RGB map (fresh dicts, not .clear(), so the saved
+        # reference is untouched) so present() can tell whether any pair changed
+        # color and must force a full repaint.
+        self._prev_pair_rgb = self._pair_rgb
+        self._color_pairs = {}
+        self._pair_rgb = {}
+        self._next_pair_id = 1
+        self._pair_overflow = 0
 
     def request_text_input(self, x: int, y: int, hints: dict[str, Any] | None = None) -> None:
         """The focused text widget's caret position (screen base units). In a
@@ -592,6 +645,7 @@ class CursesBackend(Backend):
         h: int,
         scrim: tuple[Color, Color] | None = None,
         per_cell: bool = False,
+        fade: bool = False,
     ) -> None:
         # TUI "dim below": recede already-drawn content behind a modal layer.
         #
@@ -636,6 +690,36 @@ class CursesBackend(Backend):
                 for col in range(x0, x1):
                     try:
                         self._stdscr.chgat(row, col, 1, curses.A_DIM)
+                    except curses.error:
+                        pass
+        elif fade:
+            # 2-frame ``fade`` stand-in: opacity, not a veil. Blend each cell's
+            # OWN fg toward its OWN bg (content sinking into its surface), keeping
+            # the bg and the glyph, so the intermediate frame follows the actual
+            # grid cells — a popup surface stays popup-colored, a button fill its
+            # own color — instead of collapsing every surface to one scrim pair.
+            # An untouched cell (no recorded color) falls back to the scrim, which
+            # the Panel still passes for that polarity-correct default. Cache the
+            # blend per source pair: the group uses only a handful of colors.
+            fallback = scrim if scrim is not None else (_DIM_FG, _DIM_BG)
+            by_src: dict[tuple[Color | None, Color | None], tuple[Color, Color, int]] = {}
+            for row in range(y0, y1):
+                for col in range(x0, x1):
+                    src = self._cell_color.get((row, col), (None, None))
+                    out = by_src.get(src)
+                    if out is None:
+                        fg, bg = src
+                        bg = bg if bg else fallback[1]
+                        fg = fg if fg else fallback[0]
+                        nfg = _blend(fg, bg, _FADE_BLEND)
+                        out = (nfg, bg, curses.color_pair(self._color_pair(nfg, bg)))
+                        by_src[src] = out
+                    nfg, nbg, attr = out
+                    # Record the faded color so a later effect on these cells
+                    # composites from what is now shown, not the pre-fade color.
+                    self._cell_color[(row, col)] = (nfg, nbg)
+                    try:
+                        self._stdscr.chgat(row, col, 1, attr)
                     except curses.error:
                         pass
         elif per_cell:
@@ -807,12 +891,19 @@ class CursesBackend(Backend):
         # and their text neighbours are placed by pure-width writes the terminal
         # cannot drift (see draw_text / text.is_emoji_glyph).
         #
-        # Some terminals (Terminal.app) realize IME composition by *inserting*
-        # the preedit at the cursor, shifting the rest of the row right and
-        # pushing trailing cells (e.g. the scroll bar) off the grid — and never
-        # restore them. curses' diff-based refresh can't see that damage, so
-        # while a text field is focused we force a full repaint to repair it.
-        if self._input_pos is not None:
+        # Two cases force a full repaint past curses' diff-based refresh, which
+        # only resends cells whose (glyph, pair#) changed:
+        #  * IME: some terminals (Terminal.app) realize composition by *inserting*
+        #    the preedit at the cursor, shifting the rest of the row right and
+        #    pushing trailing cells (e.g. the scroll bar) off the grid — and never
+        #    restoring them; the diff can't see that damage.
+        #  * Recolored pairs: pairs are recycled each frame (see clear()), so a
+        #    pair NUMBER may now carry a different color. A cell that kept the same
+        #    (glyph, pair#) would be skipped by the diff and keep showing the
+        #    pair's stale color (a single out-of-place cell in a gradient). When
+        #    any pair's color changed since last frame, repaint everything so the
+        #    recolored cells are re-sent.
+        if self._input_pos is not None or self._pair_rgb != self._prev_pair_rgb:
             self._stdscr.redrawwin()
         self._stdscr.refresh()
         # Phase 2 — overlay each deferred emoji as an isolated write. Because its
@@ -854,22 +945,75 @@ class CursesBackend(Backend):
             attr |= curses.color_pair(self._color_pair(style.fg, style.bg))
         return attr
 
+    def _pair_capacity(self) -> int:
+        """Usable color-pair count. macOS Terminal.app (and any terminal whose
+        ncurses packs the pair number into the legacy 8-bit ``A_COLOR`` attribute
+        field) advertises ``COLOR_PAIRS`` as 32767, but ``curses.color_pair(n)``
+        — which is how every drawn cell carries its pair, via the attr OR'd into
+        ``addstr`` — can only address 256 of them; pair numbers >= 256 overflow
+        the field and render as WRONG colors. We do not use the ncurses extended
+        color-pair API (there is no per-cell extended-pair path through addstr),
+        so the real ceiling is 256 regardless of what the terminal advertises."""
+        return min(getattr(curses, "COLOR_PAIRS", 256), _LEGACY_PAIR_LIMIT)
+
     def _color_pair(self, fg: tuple[int, int, int] | None, bg: tuple[int, int, int] | None) -> int:
         fg_idx = self._term_index(fg) if fg else -1
         bg_idx = self._term_index(bg) if bg else -1
         key = (fg_idx, bg_idx)
         pair = self._color_pairs.get(key)
         if pair is None:
-            # Out of color pairs: reuse the default pair rather than erroring.
-            # The curated palette bounds how many distinct pairs we ask for, so
-            # this only trips on terminals with an unusually small COLOR_PAIRS.
-            if self._next_pair_id >= getattr(curses, "COLOR_PAIRS", 256):
-                return 0
+            # Out of color pairs: degrade gracefully to the nearest *already
+            # allocated* pair (closest fg+bg in palette RGB) rather than pair 0.
+            # Pair 0 is the terminal's fixed default (typically white-on-black),
+            # which would punch undimmed blocks through a dimmed page on a
+            # pair-heavy screen (e.g. the demo's 400-swatch hue table). The
+            # nearest pair keeps a dimmed cell looking dimmed and a faded cell
+            # faded — an approximate color instead of a jarring default. Memoize
+            # the resolution so repeated cells stay O(1). The ceiling is the
+            # legacy 256-pair limit (see _pair_capacity), NOT the advertised
+            # COLOR_PAIRS — exceeding 256 is exactly what broke colors when a
+            # dialog's dim/fade pushed the pair count past the field width.
+            if self._next_pair_id >= self._pair_capacity():
+                self._pair_overflow += 1
+                pair = self._nearest_pair(fg, bg)
+                self._color_pairs[key] = pair
+                return pair
             pair = self._next_pair_id
             self._next_pair_id += 1
             curses.init_pair(pair, fg_idx, bg_idx)
             self._color_pairs[key] = pair
+            self._pair_rgb[pair] = (fg, bg)
         return pair
+
+    def _nearest_pair(
+        self, fg: tuple[int, int, int] | None, bg: tuple[int, int, int] | None
+    ) -> int:
+        """The allocated pair whose (fg, bg) is closest to the requested colors,
+        used only once COLOR_PAIRS is exhausted. The background dominates the
+        match (it covers the whole cell), so it is weighted above the foreground.
+        Falls back to pair 0 if nothing comparable is allocated yet."""
+        def dist(a: Color | None, b: Color | None) -> int:
+            if a is None or b is None:
+                return 0 if a is b else 3 * 255 * 255  # default vs colored: far
+            return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2
+
+        best, best_d = 0, None
+        for pair, (pfg, pbg) in self._pair_rgb.items():
+            d = 2 * dist(bg, pbg) + dist(fg, pfg)
+            if best_d is None or d < best_d:
+                best, best_d = pair, d
+        return best
+
+    def color_pair_stats(self) -> tuple[int, int, int]:
+        """Live curses color-pair usage as ``(used, capacity, overflow)``:
+        pairs allocated so far, the USABLE ceiling (the legacy 256-pair limit,
+        not the inflated ``COLOR_PAIRS`` the terminal may advertise — see
+        _pair_capacity), and the number of distinct (fg, bg) requests that
+        arrived after the ceiling was hit (each served by the nearest existing
+        pair). A non-zero ``overflow`` is the live signal that the screen has
+        more distinct colors than the terminal can render at once."""
+        used = self._next_pair_id - 1  # pair 0 is the immutable terminal default
+        return used, self._pair_capacity(), self._pair_overflow
 
     def _disable_back_color_erase(self) -> None:
         """Force ncurses to fill pane backgrounds with explicit space cells
@@ -928,11 +1072,20 @@ class CursesBackend(Backend):
         palette for indices >= 16 — which is the right call precisely because a
         ``ccc`` terminal (e.g. macOS Terminal.app) owns that palette and does
         not guarantee the standard xterm-256 cube there. Every curated color
-        gets a slot (222 colors fit in 16..237), so quantization always lands
-        on a defined slot — no on-demand allocation, no clobbering.
+        gets a slot, so quantization always lands on a defined slot — no
+        on-demand allocation, no clobbering.
 
         Fallback: terminals that cannot redefine colors map each curated color
-        to the nearest entry in the terminal's existing palette."""
+        to the nearest entry in the terminal's existing palette.
+
+        ``PUIKIT_TUI_PALETTE`` is an escape hatch: ``native`` forces the
+        nearest-standard-xterm-256 mapping (no init_color). This is ONLY correct
+        on terminals that actually hold the standard xterm-256 cube in slots
+        16..255 — it is WRONG on macOS Terminal.app, which owns that range and
+        renders garish colors for standard-cube indices (verified). The default
+        (``init``) redefinition path is the correct one there; ``native`` exists
+        for terminals whose init_color is unreliable but whose built-in cube is
+        standard."""
         base = 16  # leave the 16 ANSI slots (and use_default_colors -1) alone
         colors = getattr(curses, "COLORS", 0)
         can_change = False
@@ -940,7 +1093,8 @@ class CursesBackend(Backend):
             can_change = curses.can_change_color()
         except curses.error:
             pass
-        if can_change and colors >= base + len(_TUI_PALETTE):
+        mode = os.environ.get("PUIKIT_TUI_PALETTE", "init").lower()
+        if mode != "native" and can_change and colors >= base + len(_TUI_PALETTE):
             for i, (r, g, b) in enumerate(_TUI_PALETTE):
                 curses.init_color(base + i, r * 1000 // 255, g * 1000 // 255, b * 1000 // 255)
             self._palette_term = [base + i for i in range(len(_TUI_PALETTE))]

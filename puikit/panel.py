@@ -1501,11 +1501,13 @@ class Panel:
         if eff.kind == "fade":
             # No alpha on a terminal: a fade reads as one dim pass over the
             # group. Unlike the modal dim_below veil (a fixed dark scrim), a fade
-            # washes the group toward its own background, so on a light theme it
-            # never flashes near-black — the theme supplies the polarity-correct
-            # (fg, bg) scrim.
+            # is opacity — each cell sinks toward its OWN background (fade=True),
+            # so the intermediate frame follows the actual grid cells (a popup
+            # surface stays popup-colored) instead of collapsing every surface to
+            # one pair. The theme scrim is still passed as the polarity-correct
+            # fallback for any untouched cell.
             self.backend.dim_rect(
-                rect.x, rect.y, rect.w, rect.h, scrim=self.theme.fade_scrim()
+                rect.x, rect.y, rect.w, rect.h, scrim=self.theme.fade_scrim(), fade=True
             )
         else:  # highlight
             color = eff.hints.get("color") or self.theme.accent

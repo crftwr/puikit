@@ -178,6 +178,7 @@ class Backend(ABC):
         h: int,
         scrim: tuple[Color, Color] | None = None,
         per_cell: bool = False,
+        fade: bool = False,
     ) -> None:
         """Dim already-drawn content in the region, e.g. below a dialog layer.
         GUI: translucent dark overlay; TUI: approximated with dim/dark
@@ -188,8 +189,12 @@ class Backend(ABC):
         whole-cell backend to composite the veil (the scrim's bg) over each
         cell's own color instead of flattening to one pair, so the page shows
         through faintly — the TUI stand-in for the translucent overlay a
-        compositing backend always draws. Compositing backends alpha-blend and
-        ignore both hints."""
+        compositing backend always draws. ``fade`` asks a whole-cell backend to
+        play the 2-frame ``fade`` as opacity: blend each cell's own fg toward its
+        own bg (keeping the bg), so the intermediate frame follows the actual
+        grid cells rather than collapsing every surface to the ``scrim`` pair
+        (the scrim is then only the fallback for untouched cells). Compositing
+        backends alpha-blend and ignore all three hints."""
 
     def flash_rect(self, x: int, y: int, w: int, h: int, color: Color) -> None:
         """Tint already-drawn content in the region with ``color`` for one

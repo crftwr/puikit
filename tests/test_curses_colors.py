@@ -83,6 +83,112 @@ def test_bind_palette_falls_back_when_too_few_slots(monkeypatch):
     assert backend._palette_term == [CursesBackend._nearest_color(c) for c in _TUI_PALETTE]
 
 
+def test_color_pair_falls_back_to_nearest_when_exhausted(monkeypatch):
+    # Regression: on a pair-heavy screen (the demo's 400-swatch hue table plus a
+    # dialog + dim) curses' COLOR_PAIRS limit is reached. The allocator used to
+    # return pair 0 (the terminal's fixed white-on-black default), which punched
+    # undimmed blocks through the dimmed page. It now degrades to the nearest
+    # already-allocated pair so a dimmed cell still reads as a near color.
+    monkeypatch.setattr(curses, "init_pair", lambda *a: None)
+    monkeypatch.setattr(curses, "COLOR_PAIRS", 4, raising=False)
+    backend = CursesBackend()
+    # Fill the (tiny) pair table: pairs 1..3 for three distinct dark grays.
+    near_dark = backend._color_pair((20, 20, 20), (30, 30, 38))
+    mid = backend._color_pair((120, 120, 120), (140, 140, 140))
+    light = backend._color_pair((240, 240, 240), (246, 246, 246))
+    assert len({near_dark, mid, light}) == 3
+    assert backend._next_pair_id >= 4  # exhausted
+    # A new request now reuses the closest existing pair, never 0.
+    pair = backend._color_pair((22, 22, 22), (31, 31, 40))
+    assert pair == near_dark
+    assert pair != 0
+    # And the resolution is memoized (no further growth).
+    before = dict(backend._color_pairs)
+    assert backend._color_pair((22, 22, 22), (31, 31, 40)) == near_dark
+    assert backend._color_pairs == before
+
+
+def test_pair_capacity_capped_at_legacy_limit_despite_advertised(monkeypatch):
+    # macOS Terminal.app advertises COLOR_PAIRS=32767, but curses.color_pair(n)
+    # packs n into the 8-bit A_COLOR field, so only 256 pairs are actually usable
+    # — past that, cells render wrong colors. The allocator must cap at 256
+    # regardless of the advertised (inflated) ceiling, and switch to graceful
+    # fallback there, which is exactly what broke when a dialog's dim/fade pushed
+    # the pair count past 256.
+    monkeypatch.setattr(curses, "init_pair", lambda *a: None)
+    monkeypatch.setattr(curses, "COLOR_PAIRS", 32767, raising=False)
+    backend = CursesBackend()
+    assert backend._pair_capacity() == 256  # capped, not 32767
+
+    # Simulate a screen that has already allocated every usable pair (1..255):
+    # two real pairs recorded for the nearest-fallback to pick from, and the
+    # allocator advanced to the cap.
+    backend._pair_rgb = {1: ((20, 20, 20), (30, 30, 38)), 2: ((230, 230, 230), (0, 0, 0))}
+    backend._next_pair_id = 256
+
+    # The next distinct (fg, bg) must NOT allocate pair 256 (curses.color_pair
+    # cannot address it — that overflow is what corrupted colors when a dialog's
+    # dim/fade pushed the count past 256). It degrades to the nearest in-range
+    # pair and counts the overflow.
+    pair = backend._color_pair((22, 22, 22), (31, 31, 40))
+    assert pair == 1  # nearest of the two recorded pairs (the dark one)
+    assert 0 < pair < 256
+    assert backend._next_pair_id == 256  # never advanced past the cap
+    assert backend.color_pair_stats() == (255, 256, 1)
+
+
+def test_recolored_pair_forces_full_repaint(monkeypatch):
+    # Per-frame pair recycling can give a pair NUMBER a new color between frames.
+    # curses' diff refresh would leave a cell that kept the same (glyph, pair#)
+    # showing the stale color (a lone out-of-place cell in a gradient), so
+    # present() forces a full repaint (redrawwin) whenever any pair's color
+    # changed since the previous frame — and skips it for static content so the
+    # cheap diff path is kept.
+    class _Scr:
+        def __init__(self):
+            self.calls = []
+
+        def getmaxyx(self):
+            return (12, 40)
+
+        def erase(self):
+            pass
+
+        def refresh(self):
+            self.calls.append("refresh")
+
+        def redrawwin(self):
+            self.calls.append("redrawwin")
+
+        def move(self, *a):
+            pass
+
+    monkeypatch.setattr(curses, "init_pair", lambda *a: None)
+    monkeypatch.setattr(curses, "curs_set", lambda *a: None, raising=False)
+    backend = CursesBackend()
+    backend._stdscr = _Scr()
+
+    # Frame 1: first paint (prev map empty) -> repaint, as expected.
+    backend.clear()
+    backend._color_pair((10, 20, 30), (40, 50, 60))
+    backend.present()
+    assert "redrawwin" in backend._stdscr.calls
+
+    # Frame 2: identical content -> pair #1 keeps its color -> no forced repaint.
+    backend._stdscr.calls.clear()
+    backend.clear()
+    backend._color_pair((10, 20, 30), (40, 50, 60))
+    backend.present()
+    assert "redrawwin" not in backend._stdscr.calls
+
+    # Frame 3: pair #1 is now a different color -> forced repaint.
+    backend._stdscr.calls.clear()
+    backend.clear()
+    backend._color_pair((200, 100, 0), (0, 0, 0))
+    backend.present()
+    assert "redrawwin" in backend._stdscr.calls
+
+
 def test_xterm256_grayscale_ramp_distinguishes_dark_panes():
     # Two subtly different dark grays must land on different palette slots,
     # otherwise pane backgrounds are indistinguishable on TUI.

@@ -196,14 +196,23 @@ class MemoryBackend(Backend):
         self.check_calls.append((x, y, w, h, style))
 
     def dim_rect(
-        self, x: int, y: int, w: int, h: int, scrim: Any = None, per_cell: bool = False
+        self, x: int, y: int, w: int, h: int, scrim: Any = None, per_cell: bool = False,
+        fade: bool = False,
     ) -> None:
         x, y, w, h = round(x), round(y), round(w), round(h)
         veil = scrim[1] if scrim is not None else None
         for row in range(max(0, y), min(self._height, y + h)):
             for col in range(max(0, x), min(self._width, x + w)):
                 old = self._styles[row][col]
-                if per_cell and veil is not None:
+                if fade:
+                    # Opacity stand-in: each cell's own fg sinks toward its own bg
+                    # (keeping the bg), so the faded frame follows the actual grid
+                    # cells. An untouched cell falls back to the scrim pair.
+                    bg = old.bg if old.bg else (scrim[1] if scrim is not None else None)
+                    fg = old.fg if old.fg else (scrim[0] if scrim is not None else None)
+                    nfg = _blend(fg, bg, _DIM_BLEND) if (fg and bg) else fg
+                    self._styles[row][col] = Style(nfg, bg, old.attr | TextAttribute.DIM)
+                elif per_cell and veil is not None:
                     # Composite the veil over each cell's own colors then gray it
                     # (the TUI per-cell translucent overlay), so surfaces stay
                     # faintly distinct by brightness instead of collapsing to one

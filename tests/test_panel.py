@@ -566,6 +566,37 @@ def test_fade_scrim_follows_theme_polarity_not_fixed_dark():
     assert sum(bg) > 600
 
 
+def test_fade_intermediate_follows_each_cells_own_surface():
+    # Regression: a fade's intermediate frame used to flatten every cell to the
+    # one theme (content-surface) scrim pair, so a group drawn on a *different*
+    # surface (e.g. a MessageBox on the popup surface) faded toward the wrong
+    # color — the intermediate did not follow the actual grid cells. The fade is
+    # now per-cell opacity: each cell's own fg sinks toward its OWN bg, keeping
+    # the bg, so a popup-surface cell stays popup-colored.
+    class _SurfaceProbe(Widget):
+        def __init__(self, fg, bg):
+            self._fg, self._bg = fg, bg
+
+        def draw(self, ctx):
+            ctx.draw_text(0, 0, "X", Style(fg=self._fg, bg=self._bg))
+
+    surface_bg = (200, 60, 60)  # a vivid, non-content surface color
+    text_fg = (250, 250, 250)
+    backend = MemoryBackend(width=20, height=10, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+    probe = _SurfaceProbe(text_fg, surface_bg)
+    panel.add(probe, x=0, y=0, w=4, h=1)
+    panel.animate(probe, hints={"transition": "fade"})
+    backend.run_animation_ticks()
+    cell = backend.style_at(0, 0)
+    # The cell keeps its own surface background (not the theme content scrim bg).
+    assert cell.bg == surface_bg
+    assert cell.bg != panel.theme.fade_scrim()[1]
+    # Its foreground sank toward that same surface bg (opacity), so it lies
+    # strictly between the original text and the surface — never the content scrim.
+    assert surface_bg[0] < cell.fg[0] < text_fg[0]
+
+
 def test_highlight_is_two_frame_flash_on_tui():
     # Highlight has no alpha on a terminal: a one-frame color flash over the
     # group, then the clean target frame.
