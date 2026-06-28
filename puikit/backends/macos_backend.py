@@ -238,12 +238,19 @@ def translate_key(characters: str, modifier_flags: int = 0) -> Event | None:
     if ch == " ":
         return Event(type=EventType.KEY, key="space", char=" ", modifiers=modifiers)
     if ch.isprintable():
-        # Letters: lowercase the key so Shift+A is one identity across backends,
-        # keeping the typed glyph on char and shift in modifiers (Rule 2). Other
-        # printables keep the literal char as identity (Rule 3); the matcher
-        # ignores shift/alt for those.
-        key = ch.lower() if ch.isalpha() else ch
-        return Event(type=EventType.KEY, key=key, char=ch, modifiers=modifiers)
+        if ch.isalpha():
+            # Letters: lowercase the key and keep Shift, so Shift+A reads as
+            # key='a' + {shift} — one identity across backends, distinct from
+            # 'a' (Rule 2). The typed glyph stays on char.
+            return Event(type=EventType.KEY, key=ch.lower(), char=ch, modifiers=modifiers)
+        # Other printables (digits, punctuation, shifted symbols): the produced
+        # glyph IS the identity (Rule 3). charactersIgnoringModifiers already
+        # baked Shift into that glyph (it keeps Shift while dropping Cmd/Ctrl/
+        # Option), so reporting shift again would make Shift+1 read as ('!',
+        # {shift}) here but ('!', {}) in a terminal. Drop Shift to match; Ctrl/
+        # Alt/Cmd remain (they don't change the glyph and stay significant).
+        return Event(type=EventType.KEY, key=ch, char=ch,
+                     modifiers=modifiers - {"shift"})
     return None
 
 
