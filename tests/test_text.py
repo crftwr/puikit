@@ -107,6 +107,35 @@ def test_elide_respects_wide_glyphs():
     assert elide("🏷️abcdef", 3, where="start") == "…ef"
 
 
+# A fake *proportional* metric: every char is one unit except a narrow "i"
+# (0.5) and a wide "W" (2.0). Stands in for a GUI font's measure_text so the
+# fitting can be exercised without a backend.
+def _prop(s: str) -> float:
+    return sum({"i": 0.5, "W": 2.0}.get(c, 1.0) for c in s)
+
+
+def test_elide_measure_proportional_vs_grid():
+    # Ten narrow "i" glyphs measure 5.0 units but count as 10 columns. Fitting by
+    # the proportional measure keeps more of them than the column-count default.
+    assert elide("iiiiiiiiii", 3) == "ii…"                      # grid: 2 cols + …
+    assert elide("iiiiiiiiii", 3, measure=_prop) == "iiii…"     # 4*0.5 + … = 3.0
+    # Wide "W" glyphs go the other way: fewer fit by real width.
+    assert elide("WWWW", 3) == "WW…"                            # grid: 2 cols + …
+    assert elide("WWWW", 3, measure=_prop) == "W…"              # 2.0 + 1.0 = 3.0
+
+
+def test_elide_measure_middle_and_start():
+    assert elide("iiiiiiiiii", 4, where="middle", measure=_prop) == "iii…iii"
+    assert elide("iiiiiiiiii", 3, where="start", measure=_prop) == "…iiii"
+
+
+def test_truncate_to_width_measure():
+    # Pure truncation by proportional width: 6 "i" glyphs = 3.0 units.
+    assert truncate_to_width("iiiiiiiiii", 3, measure=_prop) == "iiiiii"
+    # With an ellipsis it matches the end-elide.
+    assert truncate_to_width("iiiiiiiiii", 3, ellipsis="…", measure=_prop) == "iiii…"
+
+
 def test_wrap_text_fits_in_one_line():
     assert wrap_text("hello world", 20, _cols) == ["hello world"]
     assert wrap_text("", 10, _cols) == [""]  # a blank line stays one segment

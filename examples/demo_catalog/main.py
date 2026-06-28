@@ -403,14 +403,19 @@ def build_keys_page(panel: Panel) -> VSplit:
 
 
 class TruncateView(Widget):
-    """Live text-fitting probe for `puikit.text`. A column budget you grow and
-    shrink with ←/→ (or the mouse wheel), and several sample strings fitted to
-    it three ways with `elide`: an **end** ellipsis (keep the start), a
-    **middle** ellipsis (keep both ends — the filename/path idiom), and a
-    **start** ellipsis (keep the end). A dotted guide marks the budget edge; the
-    fitted lines stop at it while the dim full text overflows past it. The
-    fitting is wide-character aware (CJK, emoji-with-selector) and identical on
-    every backend."""
+    """Live text-fitting probe for `puikit.text`. A width budget you grow and
+    shrink with ←/→ (or the wheel), and several sample strings fitted to it three
+    ways with `elide`: an **end** ellipsis (keep the start), a **middle**
+    ellipsis (keep both ends — the filename/path idiom), and a **start** ellipsis
+    (keep the end). A dotted guide marks the budget edge; the fitted lines stop
+    at it while the dim full text overflows past it.
+
+    The point over TTK: the samples render in a **proportional** font on GUI and
+    are fitted by their real measured width (`elide(..., measure=ctx.measure_text)`),
+    not a column count — so the fit follows the actual glyph advances, kerning and
+    all. On TUI the proportional font folds to the grid and `measure_text` returns
+    columns, so the same code degrades to monospace fitting. Wide CJK and
+    emoji-with-selector glyphs are never split."""
 
     focusable = True
 
@@ -421,6 +426,8 @@ class TruncateView(Widget):
         "🏷️_tagged_release_v1.txt",
     )
     MODES = ("end", "middle", "start")
+    # Proportional on GUI (system face); folds to the grid font on TUI.
+    SAMPLE_FONT = Font()
 
     def __init__(self, width: int = 16):
         self.width = width
@@ -443,29 +450,38 @@ class TruncateView(Widget):
         muted = theme.muted_text if theme else None
         accent = theme.accent if theme else None
 
-        w = self.width
+        w = self.width  # in base units (= columns on TUI, the grid cell on GUI)
         tag_x = 0
         text_x = 8
         guide_x = text_x + w
+
+        # Fit by the sample font's real measured width, not a column count.
+        full_style = Style(fg=muted, attr=TextAttribute.DIM, font=self.SAMPLE_FONT)
+        samp_style = Style(fg=text_fg, font=self.SAMPLE_FONT)
+
+        def measure(s: str) -> float:
+            return ctx.measure_text(s, samp_style)
 
         hint = ("focused — ←/→ or scroll to resize" if ctx.focused
                 else "Tab here, then ←/→ to resize")
         ctx.draw_text(0, 0, hint, Style(fg=accent if ctx.focused else text_fg,
                                         attr=TextAttribute.BOLD))
-        ctx.draw_text(0, 1, f"budget = {w} columns", Style(fg=muted, attr=TextAttribute.DIM))
+        ctx.draw_text(0, 1, f"budget = {w} base units (proportional fit)",
+                      Style(fg=muted, attr=TextAttribute.DIM))
 
         y = 3
         for sample in self.SAMPLES:
             if y >= ctx.height:
                 break
             ctx.draw_text(tag_x, y, "full", Style(fg=muted, attr=TextAttribute.DIM))
-            ctx.draw_text(text_x, y, sample, Style(fg=muted, attr=TextAttribute.DIM))
+            ctx.draw_text(text_x, y, sample, full_style)
             y += 1
             for mode in self.MODES:
                 if y >= ctx.height:
                     break
+                fitted = elide(sample, w, where=mode, measure=measure)
                 ctx.draw_text(tag_x, y, mode, Style(fg=text_fg))
-                ctx.draw_text(text_x, y, elide(sample, w, where=mode), Style(fg=text_fg))
+                ctx.draw_text(text_x, y, fitted, samp_style)
                 y += 1
             y += 1  # blank line between samples
 
@@ -477,7 +493,7 @@ class TruncateView(Widget):
 
 def build_truncate_page(panel: Panel) -> VSplit:
     intro = Label(
-        "Text fitting — elide() with end / middle / start ellipsis, wide-char aware.",
+        "Text fitting — elide() by measured width (proportional on GUI), end/middle/start.",
         DIM,
     )
     return VSplit(

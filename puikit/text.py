@@ -104,16 +104,27 @@ def _prefix_to_width(text: str, max_width: int) -> str:
     return text
 
 
-def truncate_to_width(text: str, max_width: int, ellipsis: str = "") -> str:
-    """Fit ``text`` into ``max_width`` display columns.
+def truncate_to_width(
+    text: str, max_width: float, ellipsis: str = "", measure=None
+) -> str:
+    """Fit ``text`` into ``max_width`` by truncating its end.
 
     With the default empty ``ellipsis`` this is a pure prefix truncation
     (a trailing wide char that would straddle the boundary is dropped). When
     ``ellipsis`` is given and the text does not fit, the result is a prefix plus
-    the ellipsis, together no wider than ``max_width``; if there isn't even room
-    for the ellipsis it falls back to a bare prefix."""
+    the ellipsis, together no wider than ``max_width``.
+
+    ``measure`` defaults to grid columns (``display_width``); pass a backend's
+    ``DrawContext.measure_text`` and a base-unit ``max_width`` to truncate a
+    **proportional** font by real rendered width instead of column count. For the
+    end ellipsis this is ``elide(text, max_width, ellipsis, measure=...)``."""
     if max_width <= 0:
         return ""
+    if measure is not None:
+        if not ellipsis:
+            return _fit_prefix(text, max_width, measure)
+        return elide(text, max_width, ellipsis, where="end", measure=measure)
+    # Grid (monospace / TUI) fast path.
     if not ellipsis:
         return _prefix_to_width(text, max_width)
     if display_width(text) <= max_width:
@@ -145,63 +156,70 @@ def glyph_runs(text: str) -> list[str]:
     return glyphs
 
 
-def _glyph_prefix(text: str, max_width: int) -> str:
-    """Longest run of leading glyphs whose total width is <= ``max_width``.
-    Like ``_prefix_to_width`` but never splits a multi-codepoint glyph (a ZWJ
-    emoji sequence, a base + combining marks)."""
-    out: list[str] = []
-    width = 0
+def _fit_prefix(text: str, max_width: float, measure) -> str:
+    """Longest run of leading glyphs whose measured length is <= ``max_width``.
+    ``measure`` is applied to the *growing prefix string*, not summed per glyph,
+    so kerning in a proportional font is honored; whole glyphs only (a ZWJ emoji
+    sequence or a base + combining marks is never split)."""
+    cur = ""
     for glyph in glyph_runs(text):
-        w = display_width(glyph)
-        if width + w > max_width:
+        if measure(cur + glyph) > max_width:
             break
-        out.append(glyph)
-        width += w
-    return "".join(out)
+        cur += glyph
+    return cur
 
 
-def _glyph_suffix(text: str, max_width: int) -> str:
-    """Longest run of trailing glyphs whose total width is <= ``max_width``."""
-    out: list[str] = []
-    width = 0
+def _fit_suffix(text: str, max_width: float, measure) -> str:
+    """Longest run of trailing glyphs whose measured length is <= ``max_width``."""
+    cur = ""
     for glyph in reversed(glyph_runs(text)):
-        w = display_width(glyph)
-        if width + w > max_width:
+        if measure(glyph + cur) > max_width:
             break
-        out.append(glyph)
-        width += w
-    return "".join(reversed(out))
+        cur = glyph + cur
+    return cur
 
 
-def elide(text: str, max_width: int, ellipsis: str = "…", where: str = "end") -> str:
-    """Abbreviate ``text`` to ``max_width`` display columns, marking the removed
-    content with ``ellipsis`` and keeping the part named by ``where``:
+def elide(
+    text: str,
+    max_width: float,
+    ellipsis: str = "…",
+    where: str = "end",
+    measure=display_width,
+) -> str:
+    """Abbreviate ``text`` to ``max_width``, marking the removed content with
+    ``ellipsis`` and keeping the part named by ``where``:
 
     - ``"end"``    keep the start  -> ``"longfilenam…"``
     - ``"start"``  keep the end    -> ``"…ngfilename.txt"``
     - ``"middle"`` keep both ends  -> ``"longfi…e.txt"`` (ideal for filenames/paths)
 
-    Text already within ``max_width`` is returned unchanged. Glyph boundaries are
-    respected (a multi-codepoint emoji or a base + combining marks is never split),
-    and the ellipsis itself is measured in columns, so the result never exceeds
-    ``max_width``. With no room for the ellipsis it falls back to a bare prefix.
+    ``measure`` returns the length of a string in the same unit as ``max_width``;
+    it defaults to ``display_width`` (grid columns, for monospace / TUI), but a
+    pixel backend passes ``DrawContext.measure_text`` so **proportional fonts fit
+    by real rendered width**, not column count — the same seam ``wrap_text`` uses,
+    and the reason this is more than TTK's monospace-only truncation. The ellipsis
+    is measured in the same unit, so the result never exceeds ``max_width``.
 
-    This is the higher-level companion to ``truncate_to_width`` (which is the pure
+    Text already within ``max_width`` is returned unchanged; glyph boundaries are
+    respected; with no room for even the ellipsis it falls back to a bare prefix.
+
+    This is the higher-level companion to ``truncate_to_width`` (the pure
     longest-prefix fitter); ``elide(text, w)`` defaults to an end ellipsis."""
     if max_width <= 0:
         return ""
-    if display_width(text) <= max_width:
+    if measure(text) <= max_width:
         return text
-    budget = max_width - display_width(ellipsis)
+    budget = max_width - measure(ellipsis)
     if budget <= 0:
         # No room for the ellipsis: show as much text as fits instead.
-        return _prefix_to_width(text, max_width)
+        return _fit_prefix(text, max_width, measure)
     if where == "start":
-        return ellipsis + _glyph_suffix(text, budget)
+        return ellipsis + _fit_suffix(text, budget, measure)
     if where == "middle":
-        left = budget // 2
-        return _glyph_prefix(text, left) + ellipsis + _glyph_suffix(text, budget - left)
-    return _glyph_prefix(text, budget) + ellipsis
+        left = _fit_prefix(text, budget / 2, measure)
+        right = _fit_suffix(text, budget - measure(left), measure)
+        return left + ellipsis + right
+    return _fit_prefix(text, budget, measure) + ellipsis
 
 
 def _tokenize(glyphs: list[str]) -> list[tuple[bool, list[str]]]:
