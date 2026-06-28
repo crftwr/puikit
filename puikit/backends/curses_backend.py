@@ -279,6 +279,12 @@ class CursesBackend(Backend):
         # via inch() — which returns an unreliable color-pair number for wide /
         # non-ASCII cells (em-dashes, box lines, CJK), recoloring them wrong.
         self._cell_color: dict[tuple[int, int], tuple[Color | None, Color | None]] = {}
+        # Lead (left) cells of wide (2-cell) glyphs drawn this frame. A wide glyph
+        # is one addstr spanning two cells; if a higher layer or the drop shadow
+        # covers only one of them, the orphaned half renders as a broken glyph that
+        # spills past the covering edge. We track the leads so such a half can be
+        # replaced with a background space (see _blank_cell_bg).
+        self._wide_lead: set[tuple[int, int]] = set()
         self._clip_stack: list[tuple[int, int, int, int]] = []  # x0, y0, x1, y1
         # Where the focused text widget wants the terminal cursor (and thus the
         # terminal's own IME composition). Reset each frame; set via
@@ -406,6 +412,7 @@ class CursesBackend(Backend):
         self._input_pos = None
         self._deferred_emoji.clear()
         self._cell_color.clear()
+        self._wide_lead.clear()
         # Recycle color pairs every frame. ``erase()`` discards the whole screen,
         # so this frame redraws every cell and re-requests exactly the pairs it
         # needs — nothing from the previous frame is still referenced. Without
@@ -518,6 +525,25 @@ class CursesBackend(Backend):
             if y <= ey < y + h and x <= ex < x + w:
                 del self._deferred_emoji[(ey, ex)]
 
+    def _blank_cell_bg(self, y: int, x: int) -> None:
+        """Replace cell (y, x) with a background space, preserving its recorded
+        background color, and drop it from the wide-glyph tracking.
+
+        Used to clear the orphaned half of a wide (2-cell) glyph when a higher
+        layer — or the drop shadow — covers only its other half. Writing a single
+        space here makes the terminal blank the whole wide glyph; we then keep the
+        owning cell as a plain background space so a clean left/right half remains
+        instead of a glyph spilling past the covering edge."""
+        assert self._stdscr is not None
+        bg = self._cell_color.get((y, x), (None, None))[1] or _DIM_BG
+        attr = curses.color_pair(self._color_pair(bg, bg)) if curses.has_colors() else 0
+        try:
+            self._stdscr.addstr(y, x, " ", attr)
+        except curses.error:
+            pass
+        self._cell_color[(y, x)] = (bg, bg)
+        self._wide_lead.discard((y, x))
+
     def draw_text(self, x: int, y: int, text: str, style: Style = DEFAULT_STYLE) -> None:
         assert self._stdscr is not None
         # Defensive: widgets or layouts may hand us whole-valued floats.
@@ -550,6 +576,24 @@ class CursesBackend(Backend):
         # (an opaque layer — a Drawer fill, a dialog — covering the nav must hide
         # its emoji). fill_rect / draw_box route through here, so they inherit it.
         self._evict_deferred_emoji(x, y, total, 1)
+        # A wide (2-cell) glyph from a lower layer may straddle this run's left or
+        # right edge — our opaque run covers one of its cells and would otherwise
+        # leave the other as a broken half-glyph spilling past our edge. Detect
+        # those before we repaint the row (which drops the lower glyph from
+        # _wide_lead), then replace the orphaned cell with a background space.
+        # Skipped entirely when no wide glyph is on screen (the common case).
+        if self._wide_lead:
+            left_orphan = x - 1 >= 0 and (y, x - 1) in self._wide_lead
+            right_orphan = (y, x + total - 1) in self._wide_lead
+            for c in range(total):
+                self._wide_lead.discard((y, x + c))
+            if left_orphan:
+                # The cell at x is the trail of a wide glyph whose lead (x-1) we do
+                # not cover; blank the lead.
+                self._blank_cell_bg(y, x - 1)
+            if right_orphan:
+                # We cover the lead at x+total-1; its trail at x+total is orphaned.
+                self._blank_cell_bg(y, x + total)
         # Pre-paint the run's full display width with the style's background
         # first. An emoji + variation selector (e.g. "🏷️" = base + U+FE0F) is one
         # display column wide to wcwidth but two to us, so curses writes it into
@@ -584,6 +628,11 @@ class CursesBackend(Backend):
                 # advances off-screen; the base unit itself is drawn, so this
                 # is safe to ignore.
                 pass
+            if gw == 2:
+                # Track this wide glyph's lead cell so a later layer or the shadow
+                # covering one half can blank the orphan (see the edge handling
+                # above and shadow_rect).
+                self._wide_lead.add((y, x + col))
             col += gw
         # Record this run's colors for the per-cell dim (dim_rect): every cell
         # the run painted carries the style's (fg, bg). Reading them here is
@@ -789,6 +838,17 @@ class CursesBackend(Backend):
                 continue
             # A deferred emoji here would resurface at full color over the shadow.
             self._evict_deferred_emoji(col, row, 1, 1)
+            # A wide glyph half under this shadow cell would be split-darkened into
+            # a broken glyph; replace the whole glyph with background spaces first
+            # (preserving its color), then darken the clean cell — the same
+            # half-glyph handling the layer edges do in draw_text.
+            if self._wide_lead:
+                if (row, col) in self._wide_lead:
+                    self._blank_cell_bg(row, col)        # lead under the shadow
+                    self._blank_cell_bg(row, col + 1)    # its trail
+                elif (row, col - 1) in self._wide_lead:
+                    self._blank_cell_bg(row, col - 1)    # lead just outside
+                    self._blank_cell_bg(row, col)        # trail under the shadow
             src = self._cell_color.get((row, col), (None, None))
             under_fg = src[0] if src[0] else base
             under_bg = src[1] if src[1] else base

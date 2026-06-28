@@ -182,6 +182,14 @@ panel.push_layer(dialog, z=10, hints={"shadow": True, "dim_below": True})
   (`shadow_rect` — both the bottom row and the right column are a whole-cell
   darken, a darkened space painted over each shadow cell; text cells keep their
   glyph and darken whole)
+- **Wide-glyph edges.** A full-width (CJK) glyph spans two cells in one write,
+  so an opaque upper layer — or the drop shadow — that covers only one of those
+  cells would leave the other as a broken half-glyph spilling past the edge. The
+  curses backend tracks each wide glyph's lead cell (`_wide_lead`) and, when a
+  later draw/shadow lands on one half, replaces the orphaned half with a
+  background space (preserving its color, `_blank_cell_bg`) so only a clean
+  left/right half survives. This is layer-system geometry, not a per-widget
+  concern — the same fixup serves every layer and the shadow
 - GUI: real layer compositing; transparency and drop shadows rendered natively
 
 ### 4. Animation
