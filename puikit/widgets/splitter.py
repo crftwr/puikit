@@ -58,12 +58,18 @@ class Splitter(FocusContainer, Widget):
         fraction: float = 0.5,
         min_first: float = 4.0,
         min_second: float = 4.0,
+        flat: bool = False,
     ):
         self.first = first
         self.second = second
         # "horizontal" -> panes side by side, a vertical handle between them;
         # "vertical"   -> panes stacked, a horizontal handle.
         self._horizontal = orientation in ("horizontal", "h")
+        # flat: on a character grid, give the handle no footprint so the boundary
+        # consumes no cell — the adjacent widgets abut and one of them (e.g. a
+        # pane footer) reads as the divider. The drag still works through the
+        # grab margin straddling the boundary. The vector hairline is unchanged.
+        self._flat = flat
         self.fraction = fraction
         self.min_first = min_first
         self.min_second = min_second
@@ -151,9 +157,10 @@ class Splitter(FocusContainer, Widget):
     def _handle_thickness(self, ctx: DrawContext) -> float:
         """Handle thickness in base units: a whole cell on a character grid (a
         sub-unit line can be neither drawn nor hit there), a sharp hairline of a
-        few device pixels on a vector backend."""
+        few device pixels on a vector backend. A flat splitter draws no cell on
+        the grid (zero footprint); the grab margin still makes it draggable."""
         if not ctx.vector_shapes:
-            return _HANDLE_UNITS
+            return 0.0 if self._flat else _HANDLE_UNITS
         px = ctx.base_size[0] if self._horizontal else ctx.base_size[1]
         return _HANDLE_PX / max(1, px)
 
