@@ -1144,6 +1144,14 @@ class Panel:
             return None
         return self._layers.pop().widget
 
+    @property
+    def has_layers(self) -> bool:
+        """True while any overlay layer (dialog, message box, menu popup) is
+        open. The topmost layer is modal — it owns events — so an app whose own
+        key handling is outside ``dispatch_event`` can consult this to defer to
+        the active layer instead of acting on the key itself."""
+        return bool(self._layers)
+
     def _layer_rect(self, hints: dict[str, Any]) -> Rect:
         # Center within the backend's exact (fractional) base unit extent, dividing
         # by 2 — not integer // on whole base units: a layer must center at device-
@@ -1230,8 +1238,15 @@ class Panel:
         """The deepest focused widget — descending through focused containers to
         the leaf that actually holds focus (e.g. a ``TextEdit`` nested in a
         ScrollView), or None. The Panel's ``_focused`` is only the focused
-        top-level slot; text-input gating needs the leaf."""
-        w = self._focused
+        top-level slot; text-input gating needs the leaf.
+
+        When an overlay layer is open it is modal — it owns events
+        (``dispatch_event`` routes to the top layer) — so it owns the focus leaf
+        too: descend from the top layer's widget, not the (page) ``_focused``.
+        This is what lets a ``TextEdit`` inside a modal dialog / drawer engage
+        the IME, and it survives ``_apply_layout`` (which only manages page
+        focus) because it reads the layer, not ``_focused``."""
+        w = self._layers[-1].widget if self._layers else self._focused
         while isinstance(w, FocusContainer):
             nxt = w.get_focused()
             if nxt is None:

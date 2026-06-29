@@ -69,6 +69,52 @@ def test_focused_leaf_descends_into_containers():
     assert backend.text_input_active is True
 
 
+def test_modal_layer_owns_the_focus_leaf():
+    # A modal layer is the focus root while open (it owns events, so it owns the
+    # focus leaf): a TextEdit inside a pushed FocusContainer layer engages input
+    # even though the page's own focus is a non-text widget — and survives the
+    # _apply_layout re-render that manages only page focus. Closing the layer
+    # releases input back to the page's focus.
+    backend = MemoryBackend()
+    panel = Panel(backend)
+    page_nav = _Focusable()
+    panel.add(page_nav, 0, 0, 10, 3)
+    panel.set_focused(page_nav)
+    panel.render()
+    assert backend.text_input_active is False
+
+    field = TextEdit()
+
+    class _Dialog(Widget, FocusContainer):
+        focusable = True
+
+        def __init__(self, child):
+            self._child = child
+            self._focused = child
+
+        def focus_children(self):
+            return [self._child]
+
+        def draw(self, ctx):  # pragma: no cover - layer must draw its child
+            ctx.draw_child(self._child, 0, 0, ctx.width, 1)
+
+    dialog = _Dialog(field)
+    panel.push_layer(dialog, z=70, hints={"w": 10.0, "h": 5.0})
+    panel.render()
+    assert panel.focused_leaf() is field
+    assert backend.text_input_active is True
+
+    # A re-render (which runs _apply_layout, resetting page focus) must not drop
+    # the layer's text input.
+    panel.render()
+    assert backend.text_input_active is True
+
+    # Close the modal: input returns to the (non-text) page focus.
+    panel.pop_layer()
+    panel.render()
+    assert backend.text_input_active is False
+
+
 def test_no_focus_keeps_input_disengaged():
     backend = MemoryBackend()
     panel = Panel(backend)
