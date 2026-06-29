@@ -241,8 +241,12 @@ class MenuPopup(Widget):
         if entry.submenu is not None:
             self._open_submenu(index)
             return
-        entry.activate()
+        # Tear the menu chain down *before* firing the callback: an action may
+        # itself push a layer (a message box, a dialog), and once it does this
+        # popup is no longer the top layer, so a later _dismiss() would skip it
+        # (see _pop_if_top) and leave the menu open behind the new overlay.
         self._dismiss()
+        entry.activate()
 
     def handle_event(self, event: Event) -> bool:
         if event.type is EventType.KEY:
