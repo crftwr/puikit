@@ -904,20 +904,25 @@ class CursesBackend(Backend):
                 pass
 
     def draw_scrollbar(
-        self, x: int, y: int, h: int, pos: float, ratio: float, style: Style = DEFAULT_STYLE
+        self, x: int, y: int, h: int, pos: float, ratio: float,
+        style: Style = DEFAULT_STYLE, orientation: str = "vertical",
     ) -> None:
         x, y, h = round(x), round(y), round(h)
-        thumb_h = max(1, round(h * ratio))
-        thumb_y = round((h - thumb_h) * pos)
+        thumb_len = max(1, round(h * ratio))
+        thumb_off = round((h - thumb_len) * pos)
         # Paint the bar with base unit *background* colors rather than block glyphs:
-        # the base unit background fills the full row height (including the
-        # terminal's line spacing), so the thumb reads as one continuous bar
-        # with no gaps, whereas a stacked `█` glyph leaves inter-line gaps.
+        # the base unit background fills the full cell (including the terminal's
+        # line spacing), so the thumb reads as one continuous bar with no gaps,
+        # whereas a stacked `█` glyph leaves inter-line gaps. A character grid
+        # cannot draw a sub-cell line, so the bar is one cell thick either way.
         thumb_style = Style(bg=style.fg or _SCROLLBAR_THUMB)
         track_style = Style(bg=style.bg or _SCROLLBAR_TRACK)
-        for row in range(h):
-            in_thumb = thumb_y <= row < thumb_y + thumb_h
-            self.draw_text(x, y + row, " ", thumb_style if in_thumb else track_style)
+        for i in range(h):
+            cell = thumb_style if thumb_off <= i < thumb_off + thumb_len else track_style
+            if orientation == "horizontal":
+                self.draw_text(x + i, y, " ", cell)
+            else:
+                self.draw_text(x, y + i, " ", cell)
 
     def present(self) -> None:
         assert self._stdscr is not None

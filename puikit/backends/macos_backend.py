@@ -1057,9 +1057,10 @@ class MacOSBackend(Backend):
             self._anim_timer = None
 
     def draw_scrollbar(
-        self, x: int, y: int, h: int, pos: float, ratio: float, style: Style = DEFAULT_STYLE
+        self, x: int, y: int, h: int, pos: float, ratio: float,
+        style: Style = DEFAULT_STYLE, orientation: str = "vertical",
     ) -> None:
-        self._back.append(("scrollbar", x, y, h, pos, ratio, style))
+        self._back.append(("scrollbar", x, y, h, pos, ratio, style, orientation))
 
     def draw_icon(self, x: int, y: int, icon_name: str, style: Style = DEFAULT_STYLE) -> None:
         glyph = _ICON_GLYPHS.get(icon_name, "❓")
@@ -1424,17 +1425,34 @@ class MacOSBackend(Backend):
         NSGraphicsContext.restoreGraphicsState()
 
     def _render_scrollbar(
-        self, x: int, y: int, h: int, pos: float, ratio: float, style: Style
+        self, x: int, y: int, h: int, pos: float, ratio: float, style: Style,
+        orientation: str = "vertical",
     ) -> None:
+        track_color = _ns_color(style.bg or (60, 60, 60))
+        thumb_color = _ns_color(style.fg or (150, 150, 150))
+        if orientation == "horizontal":
+            # Match the vertical bar's px thickness (one base-unit *width*); a full
+            # base-unit row would be base_h tall — too thick. Centered in the row.
+            thick = self._base_w
+            top = y * self._base_h + (self._base_h - thick) / 2.0
+            track_w = h * self._base_w
+            left = x * self._base_w
+            track_color.setFill()
+            NSRectFill(NSMakeRect(left, top, track_w, thick))
+            thumb_w = max(2.0, track_w * ratio)
+            thumb_x = left + (track_w - thumb_w) * pos
+            thumb_color.setFill()
+            NSRectFill(NSMakeRect(thumb_x, top, thumb_w, thick))
+            return
         track = self._unit_rect(x, y, 1, h)
-        _ns_color(style.bg or (60, 60, 60)).setFill()
+        track_color.setFill()
         NSRectFill(track)
         # Pixel-level thumb: size and position are computed in device pixels
         # (not snapped to whole base units), so the scroll position is exact.
         track_h = track.size.height
         thumb_h = max(2.0, track_h * ratio)
         thumb_y = track.origin.y + (track_h - thumb_h) * pos
-        _ns_color(style.fg or (150, 150, 150)).setFill()
+        thumb_color.setFill()
         NSRectFill(NSMakeRect(track.origin.x, thumb_y, track.size.width, thumb_h))
 
     def _render_image(self, x: int, y: int, path: str, hints: dict[str, Any]) -> None:

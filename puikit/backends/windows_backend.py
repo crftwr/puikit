@@ -534,9 +534,10 @@ class WindowsBackend(Backend):
         self._back.append(("clip_pop",))
 
     def draw_scrollbar(
-        self, x: int, y: int, h: int, pos: float, ratio: float, style: Style = DEFAULT_STYLE
+        self, x: int, y: int, h: int, pos: float, ratio: float,
+        style: Style = DEFAULT_STYLE, orientation: str = "vertical",
     ) -> None:
-        self._back.append(("scrollbar", x, y, h, pos, ratio, style))
+        self._back.append(("scrollbar", x, y, h, pos, ratio, style, orientation))
 
     def draw_icon(self, x: int, y: int, icon_name: str, style: Style = DEFAULT_STYLE) -> None:
         glyph = _ICON_GLYPHS.get(icon_name, "❓")
@@ -831,7 +832,24 @@ class WindowsBackend(Backend):
         else:
             native.rt_fill_rectangle(self._render_target, rect, self._brush)
 
-    def _render_scrollbar(self, x: int, y: int, h: int, pos: float, ratio: float, style: Style) -> None:
+    def _render_scrollbar(self, x: int, y: int, h: int, pos: float, ratio: float,
+                          style: Style, orientation: str = "vertical") -> None:
+        if orientation == "horizontal":
+            # Match the vertical bar's px thickness (one base-unit *width*); a full
+            # base-unit row would be base_h tall — too thick. Centered in the row.
+            thick = self._base_w
+            top = y * self._base_h + (self._base_h - thick) / 2.0
+            left = x * self._base_w
+            track_w = h * self._base_w
+            self._set_brush(style.bg or (60, 60, 60))
+            native.rt_fill_rectangle(
+                self._render_target, native.D2D1_RECT_F(left, top, left + track_w, top + thick), self._brush)
+            thumb_w = max(2.0, track_w * ratio)
+            thumb_x = left + (track_w - thumb_w) * pos
+            self._set_brush(style.fg or (150, 150, 150))
+            native.rt_fill_rectangle(
+                self._render_target, native.D2D1_RECT_F(thumb_x, top, thumb_x + thumb_w, top + thick), self._brush)
+            return
         track = self._unit_rect(x, y, 1, h)
         self._set_brush(style.bg or (60, 60, 60))
         native.rt_fill_rectangle(self._render_target, track, self._brush)

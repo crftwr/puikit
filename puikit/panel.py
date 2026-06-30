@@ -484,7 +484,8 @@ class DrawContext:
         self._pushed_clips = 0
 
     def draw_scrollbar(
-        self, x: int, y: int, h: int, pos: float, ratio: float, style: Style = DEFAULT_STYLE
+        self, x: int, y: int, h: int, pos: float, ratio: float,
+        style: Style = DEFAULT_STYLE, orientation: str = "vertical",
     ) -> None:
         # Scrollbar colors are theme tokens, not the pane background: fill the
         # thumb (fg) and track (bg) from the theme when the caller leaves them
@@ -492,6 +493,7 @@ class DrawContext:
         # _resolve instead would inject the pane background as the track — which,
         # now that the backend paints the track from style.bg, would make the
         # groove vanish into the surface. A caller may still override either.
+        # ``orientation`` selects a vertical (default) or horizontal bar.
         theme = self._panel.theme if self._panel is not None else None
         fg = style.fg
         bg = style.bg
@@ -502,7 +504,7 @@ class DrawContext:
                 bg = getattr(theme, "scrollbar_track", None)
         self._backend.draw_scrollbar(
             self._rect.x + x, self._rect.y + y, h, pos, ratio,
-            Style(fg=fg, bg=bg, attr=style.attr),
+            Style(fg=fg, bg=bg, attr=style.attr), orientation,
         )
 
     def draw_icon(

@@ -311,19 +311,23 @@ class MemoryBackend(Backend):
             on_complete()
 
     def draw_scrollbar(
-        self, x: int, y: int, h: int, pos: float, ratio: float, style: Style = DEFAULT_STYLE
+        self, x: int, y: int, h: int, pos: float, ratio: float,
+        style: Style = DEFAULT_STYLE, orientation: str = "vertical",
     ) -> None:
         x, y, h = round(x), round(y), round(h)
-        thumb_h = max(1, round(h * ratio))
-        thumb_y = round((h - thumb_h) * pos)
+        thumb_len = max(1, round(h * ratio))
+        thumb_off = round((h - thumb_len) * pos)
         # Mirror the curses backend: the bar is painted with base unit background
         # colors (a space glyph), not block characters, so the thumb fills the
-        # full row height with no inter-line gaps. Tests inspect style_at().
+        # full cell with no inter-line gaps. Tests inspect style_at().
         thumb_style = Style(bg=style.fg or _SCROLLBAR_THUMB)
         track_style = Style(bg=style.bg or _SCROLLBAR_TRACK)
-        for row in range(h):
-            in_thumb = thumb_y <= row < thumb_y + thumb_h
-            self.draw_text(x, y + row, " ", thumb_style if in_thumb else track_style)
+        for i in range(h):
+            cell = thumb_style if thumb_off <= i < thumb_off + thumb_len else track_style
+            if orientation == "horizontal":
+                self.draw_text(x + i, y, " ", cell)
+            else:
+                self.draw_text(x, y + i, " ", cell)
 
     def draw_icon(self, x: int, y: int, icon_name: str, style: Style = DEFAULT_STYLE) -> None:
         self.icon_calls.append((x, y, icon_name))

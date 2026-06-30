@@ -282,3 +282,13 @@ def test_scrollbar_thumb_position(backend):
     assert column[0] == track
     assert column[9] == thumb  # thumb at the bottom for pos=1.0
     assert column.count(thumb) == 3  # 30% of 10 rows
+
+
+def test_scrollbar_horizontal_orientation(backend):
+    # A horizontal bar lays the thumb out along a row (one cell tall on the grid).
+    from puikit.backends.memory_backend import _SCROLLBAR_THUMB, _SCROLLBAR_TRACK
+    backend.draw_scrollbar(0, 0, 10, 1.0, 0.3, orientation="horizontal")
+    row = [backend.style_at(col, 0).bg for col in range(10)]
+    assert row[0] == _SCROLLBAR_TRACK
+    assert row[9] == _SCROLLBAR_THUMB        # thumb at the right for pos=1.0
+    assert row.count(_SCROLLBAR_THUMB) == 3  # 30% of 10 columns

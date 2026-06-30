@@ -205,10 +205,15 @@ class Backend(ABC):
 
     @abstractmethod
     def draw_scrollbar(
-        self, x: int, y: int, h: int, pos: float, ratio: float, style: Style = DEFAULT_STYLE
+        self, x: int, y: int, h: int, pos: float, ratio: float,
+        style: Style = DEFAULT_STYLE, orientation: str = "vertical",
     ) -> None:
-        """Vertical scrollbar. ``pos`` (0..1) is the thumb position,
-        ``ratio`` (0..1) is the visible fraction of the content."""
+        """A scrollbar of length ``h`` along its axis, anchored at ``(x, y)``.
+        ``pos`` (0..1) is the thumb position, ``ratio`` (0..1) the visible
+        fraction of the content. ``orientation`` is "vertical" (``h`` runs down)
+        or "horizontal" (``h`` runs right). A vector backend draws the horizontal
+        bar the same px thickness as the vertical one (a base-unit *row* would be
+        too thick), centered in its row."""
 
     @abstractmethod
     def fill_rect(self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE) -> None:
