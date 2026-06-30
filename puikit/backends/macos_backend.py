@@ -607,17 +607,29 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
 
     def scrollWheel_(self, ns_event):
         delta = ns_event.scrollingDeltaY()
-        if delta == 0:
+        delta_x = ns_event.scrollingDeltaX()
+        if delta == 0 and delta_x == 0:
             return
+        # Axis lock: a scroll event drives only its dominant (faster) axis, so a
+        # slightly diagonal trackpad swipe scrolls cleanly one way instead of
+        # creeping on both axes at once. A tie keeps the vertical axis.
+        if abs(delta_x) > abs(delta):
+            delta = 0
+        else:
+            delta_x = 0
         x, y = self._mouse_unit(ns_event)
-        scroll = 1 if delta > 0 else -1
-        # A trackpad / precise wheel reports pixel-resolution deltas; convert
-        # them to base units so widgets can scroll at pixel granularity. A
-        # classic line wheel reports whole lines, so it stays a discrete notch
-        # (no scroll_units hint) and widgets fall back to ``scroll``.
+        scroll = 1 if delta > 0 else (-1 if delta < 0 else 0)
+        # A trackpad / precise wheel reports pixel-resolution deltas; convert them
+        # to base units so widgets can scroll at pixel granularity, on both axes
+        # (a two-finger horizontal swipe drives ``scroll_units_x``). A classic line
+        # wheel reports whole lines, so it stays a discrete notch (no unit hints)
+        # and widgets fall back to ``scroll``.
         hints = {}
         if ns_event.hasPreciseScrollingDeltas():
-            hints["scroll_units"] = delta / self.backend._base_h
+            if delta != 0:
+                hints["scroll_units"] = delta / self.backend._base_h
+            if delta_x != 0:
+                hints["scroll_units_x"] = delta_x / self.backend._base_w
         self.backend._dispatch(
             Event(type=EventType.MOUSE_SCROLL, x=x, y=y, scroll=scroll, hints=hints)
         )

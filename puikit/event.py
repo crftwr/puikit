@@ -42,7 +42,10 @@ class Event:
     y: float | None = None
     # MOUSE_CLICK / MOUSE_DRAG: "left", "middle", "right"
     button: str | None = None
-    # MOUSE_SCROLL: positive = up/away, negative = down/toward
+    # MOUSE_SCROLL: positive = up/away, negative = down/toward (a discrete notch).
+    # A precise (trackpad) scroll also carries sub-unit deltas in hints:
+    # ``scroll_units`` (vertical) and ``scroll_units_x`` (horizontal), in base
+    # units, for pixel-granular smooth scrolling.
     scroll: int = 0
     modifiers: frozenset[str] = frozenset()
     hints: dict[str, Any] = field(default_factory=dict)
