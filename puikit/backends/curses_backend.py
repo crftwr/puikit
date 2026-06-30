@@ -146,13 +146,14 @@ _DIM_BLEND: float = 0.6
 _FADE_BLEND: float = 0.6
 
 # Per-cell "drop shadow" (see shadow_rect): a thin down-right drop shadow hugging
-# the layer's right and bottom edges. Every shadow cell is overwritten with a
-# darkened *space* — the band is a clean shaded strip, never the underlying text
-# showing through (a glyph kept under the shadow, however dimmed, still reads as
-# stray characters in the shadow rather than a shadow). Both edges use the same
-# darkened space, so the bottom row and the right column read at a matching
-# thickness. _SHADOW_STRENGTH is the fraction of background brightness KEPT
-# (0.8 = weak): a subtle darken so the band reads without crushing the page.
+# the layer's right and bottom edges. The underlying text never shows through (a
+# glyph kept under the shadow, however dimmed, still reads as stray characters in
+# the shadow rather than a shadow), so every shadow cell is overwritten. The right
+# column uses a full darkened *space*; the bottom row uses a lower-half block so
+# the down-shadow reads as a thin half-cell band — the glyph's bg shades the upper
+# half (hugging the layer edge) while its fg keeps the page color in the lower
+# half. _SHADOW_STRENGTH is the fraction of background brightness KEPT (0.8 =
+# weak): a subtle darken so the band reads without crushing the page.
 _SHADOW_STRENGTH: float = 0.8
 
 
@@ -237,6 +238,10 @@ _SCROLLBAR_THUMB = (150, 150, 150)
 _SCROLLBAR_TRACK = (60, 60, 60)
 #: Lower half block — a horizontal scrollbar's thin bar on a character grid.
 _HBAR_GLYPH = "▄"
+#: Lower half block — the down-side drop shadow's thin half-cell band (see
+#: shadow_rect): the glyph's fg keeps the page color in the lower half, its bg
+#: shades the upper half (hugging the layer edge).
+_SHADOW_BOTTOM_GLYPH = "▄"
 
 
 class CursesBackend(Backend):
@@ -815,31 +820,33 @@ class CursesBackend(Backend):
         # down-right shadow hugging the layer's right and bottom edges, shifted one
         # cell diagonally (light from the upper-left).
         #
-        # Every shadow cell is overwritten with a darkened *space*, so the band is
-        # a clean shaded strip and the underlying text never shows through (a glyph
-        # left under the shadow reads as stray characters, not a shadow). Both
-        # edges (the bottom row and the right column) use the same darkened space,
-        # so they read at a matching thickness. The shade comes from the cell's
-        # recorded background (self._cell_color, reliable for wide glyphs); a cell
-        # with no recorded color falls back to ``base_bg`` (the page background the
-        # Panel passes).
+        # Every shadow cell is overwritten so the underlying text never shows
+        # through (a glyph left under the shadow reads as stray characters, not a
+        # shadow). The right column uses a full darkened *space*; the bottom row
+        # uses a lower-half block ("▄") so the down-shadow is a thin half-cell
+        # band — the glyph's bg shades the upper half (hugging the layer edge)
+        # while its fg keeps the page color in the lower half. The shade comes from
+        # the cell's recorded background (self._cell_color, reliable for wide
+        # glyphs); a cell with no recorded color falls back to ``base_bg`` (the
+        # page background the Panel passes).
         assert self._stdscr is not None
         x, y, w, h = round(x), round(y), round(w), round(h)
         if w <= 0 or h <= 0:
             return
         base = base_bg if base_bg is not None else _DIM_BG
         # Right column (top skipped so the layer's top-right is clear), then the
-        # bottom row incl. the corner.
-        cells: list[tuple[int, int]] = []
+        # bottom row incl. the corner. ``bottom`` marks the rows that get the
+        # thin half-cell band rather than a full darkened space.
+        cells: list[tuple[int, int, bool]] = []
         for row in range(y + 1, y + h):
-            cells.append((row, x + w))
+            cells.append((row, x + w, False))
         for col in range(x + 1, x + w + 1):
-            cells.append((y + h, col))
+            cells.append((y + h, col, True))
 
         sw, sh = self.size
         has_color = curses.has_colors()
         rows_touched: list[int] = []
-        for row, col in cells:
+        for row, col, bottom in cells:
             if not (0 <= row < sh and 0 <= col < sw):
                 continue
             # A deferred emoji here would resurface at full color over the shadow.
@@ -864,6 +871,13 @@ class CursesBackend(Backend):
                 if not has_color:
                     # No color to darken with: clear the band to blanks.
                     self._stdscr.addstr(row, col, " ", curses.A_DIM)
+                elif bottom:
+                    # Lower-half block: page color in the lower half (fg), shaded
+                    # upper half (bg) hugging the layer edge — a thin half-cell band.
+                    self._stdscr.addstr(
+                        row, col, _SHADOW_BOTTOM_GLYPH,
+                        curses.color_pair(self._color_pair(under_bg, shade)),
+                    )
                 else:
                     # A darkened space, overwriting whatever glyph was here.
                     self._stdscr.addstr(

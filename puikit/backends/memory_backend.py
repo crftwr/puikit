@@ -38,10 +38,10 @@ def _to_gray(c):
     return (y, y, y)
 
 
-# Thin down-right drop shadow, mirroring CursesBackend: ▀ half-block bottom edge,
+# Thin down-right drop shadow, mirroring CursesBackend: ▄ half-block bottom edge,
 # whole-cell darken right edge (matched thickness; no vertical ▌).
 _SHADOW_STRENGTH = 0.8
-_SHADOW_BOTTOM = "▀"   # U+2580 upper half block (shadow on top half)
+_SHADOW_BOTTOM = "▄"   # U+2584 lower half block (page on bottom, shadow on top via bg)
 
 
 class MemoryBackend(Backend):
@@ -246,7 +246,7 @@ class MemoryBackend(Backend):
         self, x: int, y: int, w: int, h: int, base_bg: Any = None
     ) -> None:
         # TUI drop-shadow stand-in: a thin down-right shadow hugging the layer's
-        # right (whole-cell darken) and bottom (▀ half-block on blank cells) edges;
+        # right (whole-cell darken) and bottom (▄ half-block on blank cells) edges;
         # a text cell keeps its glyph and darkens whole — mirrors CursesBackend.
         self.shadow_rect_calls.append((round(x), round(y), round(w), round(h)))
         x, y, w, h = round(x), round(y), round(w), round(h)
@@ -263,9 +263,10 @@ class MemoryBackend(Backend):
             under_bg = old.bg if old.bg else base
             shade = _to_gray(_blend(under_bg, (0, 0, 0), 1.0 - _SHADOW_STRENGTH)) if under_bg else None
             if glyph is not None and self._grid[row][col] == " ":
-                # Blank bottom cell: ▀ paints the shadowed top half over the page.
+                # Blank bottom cell: ▄ keeps the page in the lower half (fg) and
+                # shades the upper half (bg), hugging the layer's bottom edge.
                 self._grid[row][col] = glyph
-                self._styles[row][col] = Style(shade, under_bg, old.attr)
+                self._styles[row][col] = Style(under_bg, shade, old.attr)
             else:
                 # Right column, or a text cell: keep the glyph, darken the whole cell.
                 nfg = _to_gray(_blend(under_fg, (0, 0, 0), 1.0 - _SHADOW_STRENGTH)) if under_fg else None

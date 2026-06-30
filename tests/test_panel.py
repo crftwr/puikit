@@ -221,21 +221,22 @@ class FillWithGlyph(Widget):
 
 
 def test_tui_shadow_bottom_halfblock_right_wholecell():
-    # The TUI shadow hugs the layer's right + bottom edges. The bottom edge is a ▀
-    # half-block on blank cells (shadowed top half over the page color); the right
-    # edge is a whole-cell darken (no glyph). Both at one weak strength (0.8 kept).
+    # The TUI shadow hugs the layer's right + bottom edges. The bottom edge is a ▄
+    # half-block on blank cells (page color in the lower half via fg, shadow in the
+    # upper half via bg); the right edge is a whole-cell darken (no glyph). Both at
+    # one weak strength (0.8 kept).
     backend = MemoryBackend(width=12, height=8)
     panel = Panel(backend)
     panel.add(FillWidget(), x=0, y=0, w=12, h=8)
     panel.push_layer(BoxWidget(), z=10, hints={"shadow": True, "w": 6, "h": 3})
     panel.render()
     # Layer centered: cols 3..8, rows 2..4. Shadow: right col 9 rows 3..4
-    # (whole-cell), bottom row 5 cols 4..9 (▀, incl. corner).
+    # (whole-cell), bottom row 5 cols 4..9 (▄, incl. corner).
     snap = backend.snapshot()
-    # Bottom edge: ▀ half-block, fg = shadowed half, bg = page color.
-    assert snap[5][6] == "▀" and snap[5][9] == "▀"
+    # Bottom edge: ▄ half-block, fg = page color (lower half), bg = shadow (top).
+    assert snap[5][6] == "▄" and snap[5][9] == "▄"
     bottom = backend.style_at(6, 5)
-    assert bottom.fg == (160, 160, 160) and bottom.bg == (200, 200, 200)
+    assert bottom.fg == (200, 200, 200) and bottom.bg == (160, 160, 160)
     # Right edge: whole-cell darken, no glyph, bg fully shaded.
     assert snap[3][9] == " "
     assert backend.style_at(9, 3).bg == (160, 160, 160)
