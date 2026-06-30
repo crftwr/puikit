@@ -1059,7 +1059,11 @@ class MacOSBackend(Backend):
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float,
         style: Style = DEFAULT_STYLE, orientation: str = "vertical",
+        surface: tuple[int, int, int] | None = None,
     ) -> None:
+        # ``surface`` is only meaningful to the character-grid half-block bar; the
+        # vector render paints just the thin bar, so the row already shows the
+        # surface around it. Accepted for signature parity, not recorded.
         self._back.append(("scrollbar", x, y, h, pos, ratio, style, orientation))
 
     def draw_icon(self, x: int, y: int, icon_name: str, style: Style = DEFAULT_STYLE) -> None:

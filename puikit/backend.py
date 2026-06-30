@@ -207,13 +207,20 @@ class Backend(ABC):
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float,
         style: Style = DEFAULT_STYLE, orientation: str = "vertical",
+        surface: tuple[int, int, int] | None = None,
     ) -> None:
         """A scrollbar of length ``h`` along its axis, anchored at ``(x, y)``.
         ``pos`` (0..1) is the thumb position, ``ratio`` (0..1) the visible
         fraction of the content. ``orientation`` is "vertical" (``h`` runs down)
         or "horizontal" (``h`` runs right). A vector backend draws the horizontal
         bar the same px thickness as the vertical one (a base-unit *row* would be
-        too thick), centered in its row."""
+        too thick), centered in its row.
+
+        ``surface`` is the client-area background behind the bar. On a character
+        grid the horizontal bar is a lower-half-block glyph, so its *upper* half
+        shows this color (None → the terminal default); the vector backends, which
+        only paint the thin bar itself, ignore it (the row already shows the
+        surface around it)."""
 
     @abstractmethod
     def fill_rect(self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE) -> None:

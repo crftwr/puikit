@@ -285,10 +285,17 @@ def test_scrollbar_thumb_position(backend):
 
 
 def test_scrollbar_horizontal_orientation(backend):
-    # A horizontal bar lays the thumb out along a row (one cell tall on the grid).
-    from puikit.backends.memory_backend import _SCROLLBAR_THUMB, _SCROLLBAR_TRACK
-    backend.draw_scrollbar(0, 0, 10, 1.0, 0.3, orientation="horizontal")
-    row = [backend.style_at(col, 0).bg for col in range(10)]
+    # A horizontal bar lays the thumb out along a row, drawn with a lower-half
+    # block glyph (a thin bar, not a full cell), the color on the glyph fg.
+    from puikit.backends.memory_backend import (
+        _HBAR_GLYPH, _SCROLLBAR_THUMB, _SCROLLBAR_TRACK,
+    )
+    surface = (20, 20, 20)
+    backend.draw_scrollbar(0, 0, 10, 1.0, 0.3, orientation="horizontal", surface=surface)
+    assert backend.snapshot()[0][:10] == _HBAR_GLYPH * 10  # half-block, not spaces
+    row = [backend.style_at(col, 0).fg for col in range(10)]
     assert row[0] == _SCROLLBAR_TRACK
     assert row[9] == _SCROLLBAR_THUMB        # thumb at the right for pos=1.0
     assert row.count(_SCROLLBAR_THUMB) == 3  # 30% of 10 columns
+    # The glyph's upper half shows the client surface, not the terminal default.
+    assert all(backend.style_at(col, 0).bg == surface for col in range(10))

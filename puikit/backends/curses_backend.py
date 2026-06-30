@@ -235,6 +235,8 @@ _ATTR_MAP = [
 # Scroll bar colors (shared intent with the GUI backends).
 _SCROLLBAR_THUMB = (150, 150, 150)
 _SCROLLBAR_TRACK = (60, 60, 60)
+#: Lower half block — a horizontal scrollbar's thin bar on a character grid.
+_HBAR_GLYPH = "▄"
 
 
 class CursesBackend(Backend):
@@ -906,23 +908,33 @@ class CursesBackend(Backend):
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float,
         style: Style = DEFAULT_STYLE, orientation: str = "vertical",
+        surface: tuple[int, int, int] | None = None,
     ) -> None:
         x, y, h = round(x), round(y), round(h)
         thumb_len = max(1, round(h * ratio))
         thumb_off = round((h - thumb_len) * pos)
-        # Paint the bar with base unit *background* colors rather than block glyphs:
-        # the base unit background fills the full cell (including the terminal's
-        # line spacing), so the thumb reads as one continuous bar with no gaps,
-        # whereas a stacked `█` glyph leaves inter-line gaps. A character grid
-        # cannot draw a sub-cell line, so the bar is one cell thick either way.
+        if orientation == "horizontal":
+            # A horizontal bar is a single row, so a lower-half-block glyph reads
+            # as a thin bar (half the cell height) rather than a full cell — and
+            # the inter-line gap that rules out block glyphs for a *stacked*
+            # vertical bar cannot occur in one row. The bar color rides the glyph
+            # fg; the cell bg is the client surface, so the glyph's *upper* half
+            # blends into the area behind the bar instead of the terminal default.
+            thumb_style = Style(fg=style.fg or _SCROLLBAR_THUMB, bg=surface)
+            track_style = Style(fg=style.bg or _SCROLLBAR_TRACK, bg=surface)
+            for i in range(h):
+                st = thumb_style if thumb_off <= i < thumb_off + thumb_len else track_style
+                self.draw_text(x + i, y, _HBAR_GLYPH, st)
+            return
+        # Vertical: paint base unit *background* colors rather than block glyphs:
+        # the background fills the full cell (including the terminal's line
+        # spacing), so a stacked thumb reads as one continuous bar with no gaps,
+        # whereas a stacked `█` glyph would leave inter-line gaps.
         thumb_style = Style(bg=style.fg or _SCROLLBAR_THUMB)
         track_style = Style(bg=style.bg or _SCROLLBAR_TRACK)
         for i in range(h):
             cell = thumb_style if thumb_off <= i < thumb_off + thumb_len else track_style
-            if orientation == "horizontal":
-                self.draw_text(x + i, y, " ", cell)
-            else:
-                self.draw_text(x, y + i, " ", cell)
+            self.draw_text(x, y + i, " ", cell)
 
     def present(self) -> None:
         assert self._stdscr is not None

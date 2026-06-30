@@ -17,6 +17,8 @@ from ..event import Event
 # Scroll bar colors (shared intent with the curses/GUI backends).
 _SCROLLBAR_THUMB = (150, 150, 150)
 _SCROLLBAR_TRACK = (60, 60, 60)
+#: Lower half block — a horizontal scrollbar's thin bar on a character grid.
+_HBAR_GLYPH = "▄"
 
 # Per-cell dim opacity, mirroring CursesBackend._DIM_BLEND (kept local so this
 # headless backend never imports curses, which is absent on Windows).
@@ -313,21 +315,27 @@ class MemoryBackend(Backend):
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float,
         style: Style = DEFAULT_STYLE, orientation: str = "vertical",
+        surface: tuple[int, int, int] | None = None,
     ) -> None:
         x, y, h = round(x), round(y), round(h)
         thumb_len = max(1, round(h * ratio))
         thumb_off = round((h - thumb_len) * pos)
-        # Mirror the curses backend: the bar is painted with base unit background
-        # colors (a space glyph), not block characters, so the thumb fills the
-        # full cell with no inter-line gaps. Tests inspect style_at().
+        # Mirror the curses backend. Horizontal: a lower-half-block glyph (bar color
+        # on the fg, client surface on the bg so the upper half blends) is a thin
+        # bar in a single row. Vertical: base unit background colors fill the full
+        # cell so a stacked thumb has no inter-line gaps.
+        if orientation == "horizontal":
+            thumb_style = Style(fg=style.fg or _SCROLLBAR_THUMB, bg=surface)
+            track_style = Style(fg=style.bg or _SCROLLBAR_TRACK, bg=surface)
+            for i in range(h):
+                st = thumb_style if thumb_off <= i < thumb_off + thumb_len else track_style
+                self.draw_text(x + i, y, _HBAR_GLYPH, st)
+            return
         thumb_style = Style(bg=style.fg or _SCROLLBAR_THUMB)
         track_style = Style(bg=style.bg or _SCROLLBAR_TRACK)
         for i in range(h):
             cell = thumb_style if thumb_off <= i < thumb_off + thumb_len else track_style
-            if orientation == "horizontal":
-                self.draw_text(x + i, y, " ", cell)
-            else:
-                self.draw_text(x, y + i, " ", cell)
+            self.draw_text(x, y + i, " ", cell)
 
     def draw_icon(self, x: int, y: int, icon_name: str, style: Style = DEFAULT_STYLE) -> None:
         self.icon_calls.append((x, y, icon_name))

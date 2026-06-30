@@ -486,6 +486,7 @@ class DrawContext:
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float,
         style: Style = DEFAULT_STYLE, orientation: str = "vertical",
+        surface: tuple[int, int, int] | None = None,
     ) -> None:
         # Scrollbar colors are theme tokens, not the pane background: fill the
         # thumb (fg) and track (bg) from the theme when the caller leaves them
@@ -504,7 +505,7 @@ class DrawContext:
                 bg = getattr(theme, "scrollbar_track", None)
         self._backend.draw_scrollbar(
             self._rect.x + x, self._rect.y + y, h, pos, ratio,
-            Style(fg=fg, bg=bg, attr=style.attr), orientation,
+            Style(fg=fg, bg=bg, attr=style.attr), orientation, surface,
         )
 
     def draw_icon(
