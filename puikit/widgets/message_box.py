@@ -110,7 +110,14 @@ class MessageBox:
         if self.title:
             ctx.draw_text(5, 1, self.title, title_style)
         for i, line in enumerate(self._lines()):
-            ctx.draw_text(2, 3 + i, line[: max(0, ctx.width - 4)], msg_style)
+            # Draw the whole line and let draw_text clip it: it truncates
+            # per-font (columns for monospace, pixel clip rect for the
+            # proportional GUI font). Slicing by ``ctx.width`` characters here
+            # would instead chop proportional text — the box is sized in base
+            # units, but a proportional glyph is narrower than a base unit, so a
+            # line has more characters than the box has units and the tail gets
+            # cut even though it fits.
+            ctx.draw_text(2, 3 + i, line, msg_style)
 
         # Button row along the bottom, centered as a group and drawn as real
         # Button widgets via draw_child — so each carries the flat fill, focus
