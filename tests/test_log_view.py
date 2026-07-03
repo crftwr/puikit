@@ -115,6 +115,22 @@ def test_logview_select_all_and_copy(backend):
     assert panel.get_clipboard() == "alpha\nbeta"
 
 
+def test_logview_selection_color_tracks_focus(backend):
+    panel = Panel(backend)
+    log = LogView(["alpha"], auto_scroll=False)
+    other = LogView(["x"], auto_scroll=False)
+    panel.add(log, x=0, y=0, w=20, h=2)
+    panel.add(other, x=0, y=3, w=20, h=1)
+    panel.render()
+    panel.dispatch_event(Event(type=EventType.KEY, key="a", modifiers=frozenset({"ctrl"})))
+    panel.render()
+    assert backend.style_at(0, 0).bg == panel.theme.text_selection_bg  # focused
+    # Focus moves away: the highlight stays but reads as inactive.
+    panel.focus_tab(1)
+    panel.render()
+    assert backend.style_at(0, 0).bg == panel.theme.text_selection_inactive_bg
+
+
 def test_logview_drag_selection_copies_visible_text(backend):
     panel = Panel(backend)
     log = LogView(["abcdef"], auto_scroll=False)

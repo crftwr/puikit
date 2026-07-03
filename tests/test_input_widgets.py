@@ -399,9 +399,26 @@ def test_label_select_all_and_highlight(backend):
     panel.dispatch_event(_key("a", char="a", modifiers=frozenset({"cmd"})))
     assert label.selection_text() == "hi"
     panel.render()
-    # Both glyphs sit selected: their cells take the selection background.
-    assert backend.style_at(0, 0).bg == panel.theme.selection_bg
-    assert backend.style_at(1, 0).bg == panel.theme.selection_bg
+    # Both glyphs sit selected: their cells take the focused-selection color
+    # (the label holds focus, since the Cmd+A reached it).
+    assert backend.style_at(0, 0).bg == panel.theme.text_selection_bg
+    assert backend.style_at(1, 0).bg == panel.theme.text_selection_bg
+
+
+def test_label_selection_dims_when_focus_leaves(backend):
+    panel = Panel(backend)
+    label = Label("hi", selectable=True)
+    other = Label("x", selectable=True)
+    panel.add(label, x=0, y=0, w=12, h=1)
+    panel.add(other, x=0, y=2, w=12, h=1)
+    panel.render()
+    panel.dispatch_event(_key("a", char="a", modifiers=frozenset({"cmd"})))
+    panel.render()
+    assert backend.style_at(0, 0).bg == panel.theme.text_selection_bg  # focused
+    # Move focus to the other widget: the selection stays but reads as inactive.
+    panel.focus_tab(1)
+    panel.render()
+    assert backend.style_at(0, 0).bg == panel.theme.text_selection_inactive_bg
 
 
 def test_textblock_selects_across_rows(backend):

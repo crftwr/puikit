@@ -493,7 +493,10 @@ class LogView(Widget):
             return
         x = ctx.measure_text("".join(glyphs[:start]), style)
         seg = "".join(glyphs[start:end])
-        sel = Style(fg=style.fg, bg=theme.selection_bg, attr=style.attr, font=style.font)
+        # The highlight reads as active only while the view holds focus: a
+        # legible blue when focused, a muted neutral when focus is elsewhere.
+        sel_bg = theme.text_selection_bg if ctx.focused else theme.text_selection_inactive_bg
+        sel = Style(fg=style.fg, bg=sel_bg, attr=style.attr, font=style.font)
         ctx.draw_text(x, y, seg, sel)
 
     # --- selection -----------------------------------------------------------
