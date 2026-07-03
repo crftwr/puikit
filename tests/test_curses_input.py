@@ -142,3 +142,51 @@ def test_bare_motion_is_mouse_move_only_under_all_motion_tracking():
     # Mode 1003 (with pointer shapes) reports hover as MOUSE_MOVE.
     ev = CursesBackend(pointer_shape=True)._parse_sgr_mouse("[<32;9;3M")
     assert ev.type is EventType.MOUSE_MOVE and (ev.x, ev.y) == (8, 2)
+
+
+# --- dead-terminal (EOF busy-spin) detection ------------------------------------
+
+
+def test_idle_wake_that_blocked_does_not_arm_quit():
+    # A live but idle terminal: get_wch() blocked ~the full timeout before
+    # returning "no input". No streak accumulates and the loop keeps running.
+    be = CursesBackend()
+    for _ in range(CursesBackend._DEAD_TERMINAL_WAKE_STREAK * 2):
+        be._note_idle_wake(timeout_ms=50, elapsed_s=0.050)
+    assert be._empty_wake_streak == 0
+    assert be._quit_requested is False
+
+
+def test_instant_idle_wakes_arm_quit_after_streak():
+    # A dead terminal: timeout(50) returns instantly with no input, over and
+    # over. Once the streak crosses the threshold the backend requests quit so
+    # the caller's loop exits instead of busy-spinning a CPU core.
+    be = CursesBackend()
+    for _ in range(CursesBackend._DEAD_TERMINAL_WAKE_STREAK - 1):
+        be._note_idle_wake(timeout_ms=50, elapsed_s=0.0)
+    assert be._quit_requested is False  # not yet
+    be._note_idle_wake(timeout_ms=50, elapsed_s=0.0)
+    assert be._quit_requested is True
+
+
+def test_a_real_blocked_wake_resets_the_streak():
+    # A single genuine idle wake (blocked ~timeout) breaks a run of instant
+    # wakes, so transient instant returns never accumulate to a false positive.
+    be = CursesBackend()
+    for _ in range(CursesBackend._DEAD_TERMINAL_WAKE_STREAK - 1):
+        be._note_idle_wake(timeout_ms=50, elapsed_s=0.0)
+    be._note_idle_wake(timeout_ms=50, elapsed_s=0.050)  # really blocked
+    assert be._empty_wake_streak == 0
+    for _ in range(CursesBackend._DEAD_TERMINAL_WAKE_STREAK - 1):
+        be._note_idle_wake(timeout_ms=50, elapsed_s=0.0)
+    assert be._quit_requested is False
+
+
+def test_nonblocking_poll_instant_returns_are_not_eof():
+    # timeout_ms == 0 is a non-blocking poll; an instant empty read is normal
+    # (e.g. escape-sequence collection) and must never be read as a dead terminal.
+    be = CursesBackend()
+    for _ in range(CursesBackend._DEAD_TERMINAL_WAKE_STREAK * 2):
+        be._note_idle_wake(timeout_ms=0, elapsed_s=0.0)
+    assert be._empty_wake_streak == 0
+    assert be._quit_requested is False

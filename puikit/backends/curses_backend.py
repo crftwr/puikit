@@ -10,6 +10,7 @@ import dataclasses
 import locale
 import os
 import sys
+import time
 from typing import Any
 
 from ..backend import Backend, Color, DEFAULT_STYLE, EventHandler, Style, TextAttribute
@@ -265,6 +266,14 @@ class CursesBackend(Backend):
         self._pointer_shape: str | None = None
         self._stdscr: "curses.window | None" = None
         self._quit_requested = False
+        # Consecutive idle wakes that returned far faster than the requested
+        # blocking timeout. A positive timeout() must make get_wch() block until
+        # input arrives or the timeout elapses; if it instead keeps returning
+        # "no input" instantly, the input side is at EOF — the terminal's pty
+        # master closed (its window/tab was closed) while this process kept
+        # running. Left unchecked the event loop then busy-spins a whole CPU
+        # core forever. Counting the streak lets us detect that and quit.
+        self._empty_wake_streak = 0
         self._color_pairs: dict[tuple[int, int], int] = {}
         self._next_pair_id = 1
         # Palette RGB displayed by each allocated pair (fg, bg; None == default),
@@ -1268,6 +1277,28 @@ class CursesBackend(Backend):
         while self.run_event_loop_iteration(handler, timeout_ms=50):
             pass
 
+    # An idle wake that returns in well under the requested blocking window
+    # means timeout() did not actually block — the input FD is at EOF (its
+    # terminal closed). A single such wake is noise (a signal can cut the wait
+    # short); a long unbroken run of them is a dead terminal, so quit rather
+    # than spin. On EOF each wake costs microseconds, so even a high threshold
+    # is crossed in well under a millisecond; on a live but idle terminal the
+    # streak never builds because each idle wake genuinely blocks ~the timeout.
+    _DEAD_TERMINAL_WAKE_STREAK = 100
+
+    def _note_idle_wake(self, timeout_ms: int, elapsed_s: float) -> None:
+        if timeout_ms <= 0:
+            # Non-blocking poll: an instant empty read is expected, not EOF.
+            self._empty_wake_streak = 0
+            return
+        if elapsed_s * 1000.0 >= timeout_ms * 0.5:
+            # Actually blocked ~the timeout: a live, merely-idle terminal.
+            self._empty_wake_streak = 0
+            return
+        self._empty_wake_streak += 1
+        if self._empty_wake_streak >= self._DEAD_TERMINAL_WAKE_STREAK:
+            self._quit_requested = True
+
     def run_event_loop_iteration(self, handler: EventHandler, timeout_ms: int = 0) -> bool:
         assert self._stdscr is not None
         if self._quit_requested:
@@ -1277,13 +1308,17 @@ class CursesBackend(Backend):
         # character, so committed IME / CJK text arrives whole instead of as
         # individual bytes. It returns a str for characters, an int for special
         # keys, and raises on timeout with no input.
+        start = time.monotonic()
         try:
             ch = self._stdscr.get_wch()
         except curses.error:
-            # Idle wake (timed out with no input): advance any self-driven
-            # animation, which re-renders itself, then loop.
+            # Idle wake (timed out with no input): note it for dead-terminal
+            # detection, advance any self-driven animation (which re-renders
+            # itself), then loop.
+            self._note_idle_wake(timeout_ms, time.monotonic() - start)
             self._run_ticks()
             return not self._quit_requested
+        self._empty_wake_streak = 0
         # An ESC may begin an SGR mouse report (ESC [ < b ; x ; y M/m). Mouse
         # tracking is driven directly (see open()), so these arrive as raw bytes
         # rather than a KEY_MOUSE; assemble and parse them here. Real function /
