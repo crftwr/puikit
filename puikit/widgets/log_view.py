@@ -537,6 +537,12 @@ class LogView(Widget):
             parts.append("".join(glyphs[start:end]))
         return "\n".join(parts)
 
+    def clear_selection(self) -> None:
+        """Drop any active selection (and its highlight), leaving the buffer and
+        scroll position untouched. Public counterpart to the internal reset, for
+        a host that copies then cancels the selection."""
+        self._reset_selection()
+
     def _pos_at(self, x: float, y: float) -> Pos:
         if self._total_rows == 0:
             return (0, 0)
