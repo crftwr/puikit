@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import colorsys
+import contextlib
 import curses
 import dataclasses
 import locale
@@ -388,6 +389,36 @@ class CursesBackend(Backend):
         curses.echo()
         curses.endwin()
         self._stdscr = None
+
+    @contextlib.contextmanager
+    def suspended(self):
+        """Drop out of curses so a full-screen child (editor / shell) owns the
+        terminal, then restore. Uses the canonical ncurses shell-out dance:
+        ``def_prog_mode`` saves the current raw/noecho/keypad state, ``endwin``
+        returns the tty to cooked/shell mode; on exit ``reset_prog_mode`` restores
+        the saved state and a repaint redraws the UI. Mouse tracking (driven by
+        raw DECSET sequences, not curses) and the hidden cursor are toggled by
+        hand since ``reset_prog_mode`` does not cover them."""
+        if self._stdscr is None:
+            yield
+            return
+        curses.def_prog_mode()
+        self._set_mouse_tracking(False)
+        try:
+            curses.curs_set(1)
+        except curses.error:
+            pass
+        curses.endwin()
+        try:
+            yield
+        finally:
+            curses.reset_prog_mode()
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
+            self._set_mouse_tracking(True)
+            self._stdscr.refresh()
 
     def _set_mouse_tracking(self, on: bool) -> None:
         """Enable/disable xterm SGR mouse tracking by writing the DECSET/DECRST

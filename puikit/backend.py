@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import IntFlag
 from typing import Any
@@ -468,3 +469,16 @@ class Backend(ABC):
     @abstractmethod
     def quit(self) -> None:
         """Request the event loop to stop after the current iteration."""
+
+    # --- shell-out ----------------------------------------------------------
+
+    @contextmanager
+    def suspended(self):
+        """Temporarily hand the display back to the terminal/OS so a full-screen
+        child process (an editor, a subshell) can own it, then reclaim it.
+
+        The base implementation is a no-op: on GUI backends a launched program
+        opens in its own window and nothing needs releasing. Terminal backends
+        override this to leave curses/raw mode on entry and restore it on exit.
+        Use as ``with backend.suspended(): subprocess.run(...)``."""
+        yield
