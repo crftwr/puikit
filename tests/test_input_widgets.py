@@ -449,6 +449,36 @@ def test_label_press_reseeds_anchor_not_previous_click(backend):
     assert label.selection_text() == "de"
 
 
+def test_label_outside_press_drag_in_does_not_select(backend):
+    panel = Panel(backend)
+    label = Label("abcdef", selectable=True)
+    # Leave columns 0-2 as empty panel space to the left of the label.
+    panel.add(label, x=3, y=0, w=10, h=1)
+    panel.render()
+    # Press on empty space, then drag across the label: not a selection gesture.
+    # Two drag points, so a missing guard would leave a non-empty range.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=0, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=5, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=9, y=0, button="left"))
+    assert label.selection_text() == ""
+
+
+def test_label_release_ends_gesture_so_later_drag_is_ignored(backend):
+    panel = Panel(backend)
+    label = Label("abcdef", selectable=True)
+    panel.add(label, x=3, y=0, w=10, h=1)
+    panel.render()
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=3, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=5, y=0, button="left"))
+    assert label.selection_text() == "ab"
+    panel.dispatch_event(Event(type=EventType.MOUSE_UP, x=5, y=0, button="left"))
+    # A press on empty space then a drag back into the label after the release
+    # must not resume extending the earlier selection.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=0, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=9, y=0, button="left"))
+    assert label.selection_text() == "ab"
+
+
 def test_textblock_double_click_drag_extends_by_word(backend):
     panel = Panel(backend)
     block = TextBlock("foo bar\nbaz qux", selectable=True)

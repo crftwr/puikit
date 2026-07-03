@@ -303,6 +303,10 @@ class LogView(Widget):
         self._last_click_time = 0.0
         self._last_click_pos: Pos | None = None
         self._moved_since_press = False
+        # True between a press inside this view and its release: a drag only
+        # extends the selection while it is set, so a press that began outside
+        # (on empty space or another widget) and wandered in is ignored.
+        self._pressed = False
         self._panel = None
 
     # --- buffer management ---------------------------------------------------
@@ -622,7 +626,9 @@ class LogView(Widget):
                 amount = float(event.scroll)
             self.scroll_by(-amount)
             return True
-        if self.selectable and event.type in (EventType.MOUSE_DOWN, EventType.MOUSE_DRAG):
+        if self.selectable and event.type in (
+            EventType.MOUSE_DOWN, EventType.MOUSE_UP, EventType.MOUSE_DRAG
+        ):
             return self._handle_mouse(event)
         return False
 
@@ -654,13 +660,21 @@ class LogView(Widget):
         return True
 
     def _handle_mouse(self, event: Event) -> bool:
+        if event.type is EventType.MOUSE_UP:
+            self._pressed = False  # gesture ends; a later stray drag won't extend
+            return False
         pos = self._pos_at(event.x or 0, event.y or 0)
         if event.type is EventType.MOUSE_DRAG:
+            # A drag only counts as part of a selection the press began here; one
+            # that wandered in from an outside press leaves the selection alone.
+            if not self._pressed:
+                return False
             self._moved_since_press = True
             self._extend_to(pos)
             return True
         # MOUSE_DOWN: a press escalates the selection granularity by how many
         # times it repeats in place (caret -> word -> line), then wraps back.
+        self._pressed = True
         count = self._advance_click_count(pos)
         self._click_count = count
         self._moved_since_press = False
@@ -684,8 +698,8 @@ class LogView(Widget):
         """Move the drag end to ``pos``. At caret granularity the cursor lands
         exactly there; after a double/triple click the selection instead grows
         to the union of the fixed base span and the whole word/line at ``pos``,
-        so the drag keeps whole-word/line edges. A drag with no prior press
-        anchors here (a backend that emits MOUSE_DRAG without MOUSE_DOWN)."""
+        so the drag keeps whole-word/line edges. Only called mid-press, so the
+        anchor is already seeded; the guard is pure belt-and-suspenders."""
         if self._sel_anchor is None:
             self._sel_anchor = pos
         if self._sel_base is None:

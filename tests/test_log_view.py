@@ -120,10 +120,25 @@ def test_logview_drag_selection_copies_visible_text(backend):
     log = LogView(["abcdef"], auto_scroll=False)
     panel.add(log, x=0, y=0, w=20, h=5)
     panel.render()
-    # Drag from column 1 to column 4 on row 0 selects "bcd".
-    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=1, y=0, button="left"))
+    # Press at column 1, drag to column 4 on row 0: selects "bcd".
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=1, y=0, button="left"))
     panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=4, y=0, button="left"))
     assert log.selection_text() == "bcd"
+
+
+def test_logview_outside_press_drag_in_does_not_select(backend):
+    panel = Panel(backend)
+    log = LogView(["abcdef"], auto_scroll=False)
+    # Leave columns 0-2 as empty panel space to the left of the view.
+    panel.add(log, x=3, y=0, w=10, h=5)
+    panel.render()
+    # Press on empty space (no widget captures it), then drag across the view:
+    # the gesture did not begin in the view, so it must not start a selection
+    # (two drag points, so a missing guard would leave a non-empty range).
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=0, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=5, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=9, y=0, button="left"))
+    assert log.selection_text() == ""
 
 
 def test_logview_press_seeds_anchor_at_press_point(backend):
