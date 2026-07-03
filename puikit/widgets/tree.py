@@ -107,6 +107,10 @@ class TreeView(Widget):
         theme = ctx.theme
         first = int(self.offset)
         frac = self.offset - first
+        # Clip by the row font's real width so a proportional GUI font fits at
+        # the edge, not by column count; on a grid backend measure_text returns
+        # the column width, so the monospace result is unchanged.
+        measure = lambda t: ctx.measure_text(t, self.style)
         row = 0
         while True:
             index = first + row
@@ -126,7 +130,9 @@ class TreeView(Widget):
                     content, text_x = marker + node.label, indent
                 else:
                     content, text_x = " " * indent + marker + node.label, 0
-                clipped = truncate_to_width(content, max(1, text_w - int(text_x)))
+                clipped = truncate_to_width(
+                    content, max(1, text_w - int(text_x)), measure=measure
+                )
                 style = self.style
                 if index == self.selected:
                     style = selected_row_style(

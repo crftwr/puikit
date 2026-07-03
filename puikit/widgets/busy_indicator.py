@@ -24,7 +24,6 @@ import time
 from ..backend import DEFAULT_STYLE, Style
 from ..layout import LayoutContext, SizeRequest
 from ..panel import DrawContext
-from ..text import display_width
 from ..theme import DEFAULT_THEME
 from .base import Widget
 
@@ -79,8 +78,12 @@ class BusyIndicator(Widget):
         fg = self.style.fg or theme.accent
         ctx.draw_text(0, 0, self._frame(), Style(fg=fg, bg=self.style.bg))
         if self.label:
+            # Offset the label by the frame glyph's real rendered width (it is
+            # drawn with the default font, so measure with it), not a column
+            # count — a proportional GUI font advances the braille glyph by
+            # something other than one base unit. Grid backends report 1.0.
             ctx.draw_text(
-                display_width(_FRAMES[0]) + _GAP, 0, self.label,
+                ctx.measure_text(_FRAMES[0]) + _GAP, 0, self.label,
                 Style(fg=theme.text, bg=self.style.bg),
             )
         # Drive our own re-renders on a capable backend, exactly once: the guard
@@ -107,7 +110,7 @@ class BusyIndicator(Widget):
     def measure(self, ctx: LayoutContext, axis: str, available: float) -> SizeRequest:
         if axis == "y":
             return SizeRequest(min=1.0, preferred=1.0, max=1.0)
-        w = float(display_width(_FRAMES[0]))
+        w = float(ctx.measure_text(_FRAMES[0]))
         if self.label:
             w += _GAP + ctx.measure_text(self.label, self.style)
         return SizeRequest(min=w, preferred=w, max=w)

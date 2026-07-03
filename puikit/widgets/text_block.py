@@ -74,7 +74,9 @@ class TextBlock(SelectableText, Widget):
         # for ordinary text.
         pitch = ctx.line_height(self.style)
         if self.selectable:
-            self._set_selection_rows(rows, pitch, ctx.panel)
+            self._set_selection_rows(
+                rows, pitch, ctx.panel, lambda t: ctx.measure_text(t, self.style)
+            )
         theme = ctx.theme or DEFAULT_THEME
         for row, line in enumerate(rows):
             y = row * pitch

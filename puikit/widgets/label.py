@@ -57,7 +57,10 @@ class Label(SelectableText, Widget):
             ctx.draw_text(ox, oy, self.text, self.style)
             return
         theme = ctx.theme or DEFAULT_THEME
-        self._set_selection_rows([self.text], ctx.line_height(self.style), ctx.panel)
+        self._set_selection_rows(
+            [self.text], ctx.line_height(self.style), ctx.panel,
+            lambda t: ctx.measure_text(t, self.style),
+        )
         self._draw_selected_row(ctx, 0, self.text, oy, self.style, theme, x0=ox)
 
     def handle_event(self, event: Event) -> bool:

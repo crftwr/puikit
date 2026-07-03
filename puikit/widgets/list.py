@@ -139,6 +139,11 @@ class ListView(Widget):
         content_h = len(self.items)
         first = int(self.offset)
         frac = self.offset - first
+        # Measure by the row font's real rendered width, so a proportional GUI
+        # font clips where it actually reaches the edge, not by column count. On
+        # a grid backend measure_text returns the column width, so this is the
+        # same result as the monospace path.
+        measure = lambda t: ctx.measure_text(t, self.style)
         row = 0
         while True:
             index = first + row
@@ -151,7 +156,7 @@ class ListView(Widget):
                 # length-based clip would let the row overflow the pane by a
                 # column. draw_list_row then spans the highlight to the full pane
                 # width (a proportional row is narrower than its column count).
-                clipped = truncate_to_width(self.items[index], text_w)
+                clipped = truncate_to_width(self.items[index], text_w, measure=measure)
                 style = self.style
                 if index == self.selected:
                     style = selected_row_style(

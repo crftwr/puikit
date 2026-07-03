@@ -2,8 +2,18 @@
 
 import pytest
 
-from puikit import Event, EventType, Panel, PROFILE_GUI_DESKTOP, PROFILE_TUI, TextAttribute
+from puikit import (
+    Event,
+    EventType,
+    Font,
+    Panel,
+    PROFILE_GUI_DESKTOP,
+    PROFILE_TUI,
+    Style,
+    TextAttribute,
+)
 from puikit.backends.memory_backend import MemoryBackend
+from puikit.text import display_width
 from puikit.widgets import Label, ListView, ScrollBar
 
 
@@ -61,6 +71,41 @@ def test_listview_pads_rows_by_display_width(backend):
     assert rows, "expected the list rows to be drawn"
     for row in rows:
         assert display_width(row) == 8
+
+
+class _ProportionalBackend(MemoryBackend):
+    """A fonts-capable GUI backend whose per-Style font measures at half a base
+    unit per glyph, so a proportional row packs twice as many characters as its
+    base-unit width. Records the text handed to each draw_text."""
+
+    def __init__(self, **kw):
+        super().__init__(capabilities=PROFILE_GUI_DESKTOP, **kw)
+        self.rows: list[str] = []
+
+    def measure_text(self, text, style=None):
+        if style is not None and style.font is not None:
+            return 0.5 * len(text)
+        return float(display_width(text))
+
+    def draw_text(self, x, y, text, style=None):
+        if text.strip():
+            self.rows.append(text.rstrip())
+        super().draw_text(x, y, text) if style is None else super().draw_text(x, y, text, style)
+
+
+def test_listview_clips_by_measured_width_not_column_count():
+    # With a proportional font (0.5 base units/glyph), a width-6 pane fits 12
+    # glyphs, not 6. The 12-char item must reach the backend whole (a column
+    # count would have sliced it to 6), and the 30-char item must be clipped to
+    # the 12 glyphs that actually fit — by measured width, not character count.
+    backend = _ProportionalBackend(width=20, height=4)
+    panel = Panel(backend)
+    listview = ListView(["abcdefghijkl", "z" * 30], style=Style(font=Font()))
+    panel.add(listview, x=0, y=0, w=6, h=3)
+    panel.render()
+    assert "abcdefghijkl" in backend.rows          # 12 glyphs, fits exactly
+    assert "z" * 12 in backend.rows                 # clipped to what fits at 0.5/glyph
+    assert "z" * 13 not in backend.rows             # not one glyph past the edge
 
 
 def test_listview_keyboard_navigation_scrolls(backend):

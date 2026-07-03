@@ -20,19 +20,22 @@ from __future__ import annotations
 
 from ..backend import Style
 from ..event import Event, EventType
-from ..text import char_width, glyph_runs
+from ..text import display_width, glyph_runs
 
 # A selection position: the row (display line) and a glyph index within it
 # (0..len, so a position past the last glyph is the row end).
 Pos = tuple[int, int]
 
 
-def _col_to_index(glyphs: list[str], target_col: int) -> int:
-    """Glyph index at display column ``target_col``, walking by glyph width so a
-    wide (CJK) glyph counts as two columns — the same rule the renderer uses."""
-    idx, col = 0, 0
-    while idx < len(glyphs) and col < target_col:
-        col += char_width(glyphs[idx])
+def _col_to_index(glyphs: list[str], target_x: float, measure) -> int:
+    """Glyph index at horizontal offset ``target_x`` (base units), advancing past
+    each glyph whose right edge is still <= ``target_x``. ``measure`` is applied
+    to the growing prefix string, so a proportional GUI font hit-tests by real
+    rendered width and honors kerning — the same measurement the highlight uses
+    in ``_draw_selected_row``. On a grid backend ``measure`` returns the column
+    width, so a wide (CJK) glyph still counts as two columns as before."""
+    idx = 0
+    while idx < len(glyphs) and measure("".join(glyphs[: idx + 1])) <= target_x:
         idx += 1
     return idx
 
@@ -52,13 +55,19 @@ class SelectableText:
         self._sel_cursor: Pos | None = None  # moving end (drag / shift-click)
         self._sel_glyphs: list[list[str]] = []  # glyph runs per displayed row
         self._sel_pitch: float = 1.0            # row pitch in base units
+        # Maps a prefix string to its rendered width; the subclass supplies a
+        # font-aware one each draw. The column-count default keeps hit-testing
+        # sane before the first draw (and on grid backends).
+        self._sel_measure = lambda t: float(display_width(t))
         self._panel = None
 
     # --- fed by the subclass's draw -----------------------------------------
 
-    def _set_selection_rows(self, rows: list[str], pitch: float, panel) -> None:
+    def _set_selection_rows(self, rows: list[str], pitch: float, panel, measure=None) -> None:
         self._sel_glyphs = [glyph_runs(r) for r in rows]
         self._sel_pitch = pitch or 1.0
+        if measure is not None:
+            self._sel_measure = measure
         self._panel = panel
 
     def _draw_selected_row(
@@ -146,7 +155,7 @@ class SelectableText:
             return (0, 0)
         row = int(max(0.0, y) / self._sel_pitch)
         row = max(0, min(row, len(self._sel_glyphs) - 1))
-        return (row, _col_to_index(self._sel_glyphs[row], int(max(0.0, x))))
+        return (row, _col_to_index(self._sel_glyphs[row], max(0.0, x), self._sel_measure))
 
     def _select_all(self) -> None:
         if not self._sel_glyphs:
