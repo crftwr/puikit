@@ -21,9 +21,9 @@ from ..backend import DEFAULT_STYLE, Style, TextAttribute
 from ..event import Event, EventType
 from ..layout import LayoutContext, SizeRequest
 from ..panel import DrawContext
-from ..text import display_width
+from ..text import display_width, word_bounds
 from ..theme import DEFAULT_THEME
-from ._input import typed_char
+from ._input import MultiClickTracker, typed_char
 from .base import CONTROL_HEIGHT, Widget
 
 # Corner radius of the field, in device pixels (dropped on a character grid).
@@ -55,6 +55,18 @@ class TextEdit(Widget):
         self.style = style
         self.cursor = len(text)
         self._anchor: int | None = None  # selection start; None = no selection
+        # Double/triple-click selection, keyed on the buffer index pressed: a
+        # double-click takes the word, a triple-click the whole line (the field
+        # is single-line, so that is select-all). ``_sel_base`` is the span the
+        # multi-click fixed, so a following drag grows by that same unit; the
+        # granularity is 1 (caret) / 2 (word) / 3 (line).
+        self._clicks: MultiClickTracker[int] = MultiClickTracker()
+        self._sel_base: tuple[int, int] | None = None
+        self._sel_granularity = 1
+        # True between a press inside the field and its release, so a drag that
+        # began outside (empty space or another widget) and wandered in is
+        # ignored rather than hijacking the selection.
+        self._pressed = False
         self._view = 0          # first visible index into the displayed string
         self._preedit = ""      # IME marked (composition) text, not yet committed
         self._preedit_caret = 0  # caret offset within the preedit
@@ -271,21 +283,43 @@ class TextEdit(Widget):
             # Only the field is clickable, not the empty slot to its right.
             if event.x is not None and event.x >= self._field_w:
                 return False
+            self._pressed = True
             idx = self._index_at_column((event.x or 0) - 1)
             if "shift" in event.modifiers:
-                # Shift+click extends from the existing cursor (or selection).
+                # Shift+click extends from the existing cursor (or selection); it
+                # is a fresh drag, not part of a double-click run.
                 if self._anchor is None:
                     self._anchor = self.cursor
+                self.cursor = idx
+                self._sel_base = None
+                self._sel_granularity = 1
+                self._clicks.reset()
+                return True
+            count = self._clicks.press(idx)
+            self._sel_granularity = (count - 1) % 3 + 1
+            if self._sel_granularity == 2:
+                self._sel_base = self._word_range(idx)  # double-click: the word
+            elif self._sel_granularity == 3:
+                self._sel_base = (0, len(self.text))    # triple-click: whole line
             else:
                 # A plain press collapses the cursor and seeds the anchor a drag
                 # will pivot around.
+                self._sel_base = None
                 self._anchor = idx
-            self.cursor = idx
+                self.cursor = idx
+                return True
+            self._anchor, self.cursor = self._sel_base
             return True
+        if event.type is EventType.MOUSE_UP:
+            self._pressed = False  # gesture ends; a later stray drag won't extend
+            return False
         if event.type is EventType.MOUSE_DRAG:
-            if self._anchor is None:
-                self._anchor = self.cursor
-            self.cursor = self._index_at_column((event.x or 0) - 1)
+            # A drag only extends a selection the press began in this field; one
+            # that wandered in from an outside press leaves the field alone.
+            if not self._pressed:
+                return False
+            self._clicks.note_drag()
+            self._extend_drag(self._index_at_column((event.x or 0) - 1))
             return True
         if event.type is not EventType.KEY:
             return False
@@ -316,6 +350,28 @@ class TextEdit(Widget):
             prev = cur
             idx += 1
         return min(len(self.text), idx)
+
+    def _word_range(self, idx: int) -> tuple[int, int]:
+        """The half-open buffer range of the word at index ``idx`` — the run of
+        one character class (:func:`~puikit.text.word_bounds`). Indices address
+        the buffer character-by-character, matching the rest of the field."""
+        return word_bounds(list(self.text), idx)
+
+    def _extend_drag(self, idx: int) -> None:
+        """Extend the active drag to buffer index ``idx``. At caret granularity
+        the cursor simply moves there; after a double/triple click the selection
+        grows to the union of the fixed base span and the word/line at ``idx``,
+        keeping whole-word/line edges."""
+        if self._sel_base is None:
+            if self._anchor is None:
+                self._anchor = self.cursor
+            self.cursor = idx
+            return
+        b0, b1 = self._sel_base
+        p0, p1 = self._word_range(idx) if self._sel_granularity == 2 else (0, len(self.text))
+        # _selection() orders the endpoints, so cover both spans without tracking
+        # drag direction.
+        self._anchor, self.cursor = min(b0, p0), max(b1, p1)
 
     def _handle_command(self, key: str | None) -> bool:
         if key == "a":  # select all

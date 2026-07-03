@@ -20,20 +20,15 @@ the later mouse hit-test and copy work off the same geometry.
 
 from __future__ import annotations
 
-import time
-
 from ..backend import Style
 from ..event import Event, EventType
 from ..text import display_width, glyph_runs, word_bounds
+from ._input import MultiClickTracker
 
 # A selection position: the row (display line) and a glyph index within it
-# (0..len, so a position past the last glyph is the row end).
+# (0..len, so a position past the last glyph is the row end). A repeated press
+# escalates the selection: 1 = caret, 2 = word, 3 = line.
 Pos = tuple[int, int]
-
-# Two presses within this window at the same position, with no drag between
-# them, escalate the selection: 1 press = caret, 2 = word, 3 = line. Matches the
-# usual desktop double-click cadence; a longer gap starts a fresh count.
-_MULTI_CLICK_SECONDS = 0.4
 
 
 def _col_to_index(glyphs: list[str], target_x: float, measure) -> int:
@@ -74,10 +69,8 @@ class SelectableText:
         # None for a plain caret drag (character granularity).
         self._sel_granularity = 1
         self._sel_base: tuple[Pos, Pos] | None = None
-        self._click_count = 0
-        self._last_click_time = 0.0
-        self._last_click_pos: Pos | None = None
-        self._moved_since_press = False
+        # Double/triple-click detector, keyed on the (row, glyph) press position.
+        self._clicks: MultiClickTracker[Pos] = MultiClickTracker()
         # True between a press inside this widget and its release: a drag only
         # extends the selection while it is set, so a press that began outside
         # (empty space or another widget) and wandered in is ignored.
@@ -177,15 +170,13 @@ class SelectableText:
             # that wandered in from an outside press leaves the selection alone.
             if not self._pressed:
                 return False
-            self._moved_since_press = True
+            self._clicks.note_drag()
             self._extend_to(pos)
             return True
         # MOUSE_DOWN: a press escalates the selection granularity by how many
         # times it repeats in place (caret -> word -> line), then wraps back.
         self._pressed = True
-        count = self._advance_click_count(pos)
-        self._click_count = count
-        self._moved_since_press = False
+        count = self._clicks.press(pos)
         self._sel_granularity = (count - 1) % 3 + 1
         if self._sel_granularity == 2:
             self._sel_base = self._word_span(pos)
@@ -234,22 +225,6 @@ class SelectableText:
         row = pos[0]
         glyphs = self._sel_glyphs[row] if row < len(self._sel_glyphs) else []
         return (row, 0), (row, len(glyphs))
-
-    def _advance_click_count(self, pos: Pos) -> int:
-        """Number of this press in a rolling multi-click run: 1 for a fresh
-        press, one more than the last when it lands at the same position soon
-        enough with no drag between (so a moved or slow press restarts at 1)."""
-        now = time.monotonic()
-        same = (
-            self._click_count > 0
-            and not self._moved_since_press
-            and pos == self._last_click_pos
-            and now - self._last_click_time <= _MULTI_CLICK_SECONDS
-        )
-        count = self._click_count + 1 if same else 1
-        self._last_click_time = now
-        self._last_click_pos = pos
-        return count
 
     def _pos_at(self, x: float, y: float) -> Pos:
         if not self._sel_glyphs:

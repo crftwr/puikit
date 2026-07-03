@@ -34,7 +34,6 @@ following the moment they scroll up.
 from __future__ import annotations
 
 import bisect
-import time
 from collections.abc import Iterable
 from dataclasses import replace
 
@@ -52,6 +51,7 @@ from ..text import (
     wrap_text,
 )
 from ..theme import DEFAULT_THEME
+from ._input import MultiClickTracker
 from .base import Widget
 
 _ZWJ = "‍"  # zero-width joiner: glues emoji into one combined glyph
@@ -80,13 +80,9 @@ def _as_mono(style: Style) -> Style:
     no font, so log content stays column-aligned under the proportional default."""
     return style if style.font is not None else replace(style, font=_LOG_FONT)
 # A selection position: a global display-row index and a glyph index within it
-# (0..len, so a position past the last glyph is the row end).
+# (0..len, so a position past the last glyph is the row end). A repeated press
+# escalates the selection: 1 = caret, 2 = word, 3 = line.
 Pos = tuple[int, int]
-
-# Two presses within this window at the same position, with no drag between
-# them, escalate the selection: 1 press = caret, 2 = word, 3 = line. Matches the
-# usual desktop double-click cadence; a longer gap starts a fresh count.
-_MULTI_CLICK_SECONDS = 0.4
 
 
 def _col_to_index(glyphs: list[str], target_col: int) -> int:
@@ -298,11 +294,8 @@ class LogView(Widget):
         # None for a plain caret drag (character granularity).
         self._sel_granularity = 1
         self._sel_base: tuple[Pos, Pos] | None = None
-        # Rolling press count for double/triple detection.
-        self._click_count = 0
-        self._last_click_time = 0.0
-        self._last_click_pos: Pos | None = None
-        self._moved_since_press = False
+        # Double/triple-click detector, keyed on the (row, glyph) press position.
+        self._clicks: MultiClickTracker[Pos] = MultiClickTracker()
         # True between a press inside this view and its release: a drag only
         # extends the selection while it is set, so a press that began outside
         # (on empty space or another widget) and wandered in is ignored.
@@ -508,8 +501,7 @@ class LogView(Widget):
         self._sel_granularity = 1
         # A buffer edit shifts row indices, so a stale press position must not
         # count toward a later double-click.
-        self._click_count = 0
-        self._last_click_pos = None
+        self._clicks.reset()
 
     def _selection_range(self) -> tuple[Pos, Pos] | None:
         a, b = self._sel_anchor, self._sel_cursor
@@ -555,7 +547,7 @@ class LogView(Widget):
 
     def _word_span(self, pos: Pos) -> tuple[Pos, Pos]:
         """The (start, end) positions of the word under ``pos`` — the maximal
-        run of one character class on that display row (see :func:`_char_class`).
+        run of one character class on that display row (:func:`~puikit.text.word_bounds`).
         A position on or past an empty row is its own zero-width span."""
         row, idx = pos
         if self._total_rows == 0:
@@ -572,22 +564,6 @@ class LogView(Widget):
             return (row, 0), (row, 0)
         glyphs = glyph_runs(self._row_at(row)[0])
         return (row, 0), (row, len(glyphs))
-
-    def _advance_click_count(self, pos: Pos) -> int:
-        """Number of this press in a rolling multi-click run: 1 for a fresh
-        press, one more than the last when it lands at the same position soon
-        enough with no drag between (so a moved or slow press restarts at 1)."""
-        now = time.monotonic()
-        same = (
-            self._click_count > 0
-            and not self._moved_since_press
-            and pos == self._last_click_pos
-            and now - self._last_click_time <= _MULTI_CLICK_SECONDS
-        )
-        count = self._click_count + 1 if same else 1
-        self._last_click_time = now
-        self._last_click_pos = pos
-        return count
 
     def _select_all(self) -> None:
         if self._total_rows == 0:
@@ -672,15 +648,13 @@ class LogView(Widget):
             # that wandered in from an outside press leaves the selection alone.
             if not self._pressed:
                 return False
-            self._moved_since_press = True
+            self._clicks.note_drag()
             self._extend_to(pos)
             return True
         # MOUSE_DOWN: a press escalates the selection granularity by how many
         # times it repeats in place (caret -> word -> line), then wraps back.
         self._pressed = True
-        count = self._advance_click_count(pos)
-        self._click_count = count
-        self._moved_since_press = False
+        count = self._clicks.press(pos)
         self._sel_granularity = (count - 1) % 3 + 1
         if self._sel_granularity == 2:
             self._sel_base = self._word_span(pos)

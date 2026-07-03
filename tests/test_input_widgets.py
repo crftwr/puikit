@@ -309,6 +309,70 @@ def test_textedit_mouse_drag_selects(backend):
     assert field.selection_text == "hel"
 
 
+def test_textedit_double_click_selects_word(backend):
+    panel = Panel(backend)
+    field = TextEdit("foo bar baz", width=16)
+    panel.add(field, x=0, y=0, w=16, h=1)
+    panel.render()
+    # Two presses in place on "bar" grab the whole word.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=6, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=6, y=0, button="left"))
+    assert field.selection_text == "bar"
+
+
+def test_textedit_triple_click_selects_all(backend):
+    panel = Panel(backend)
+    field = TextEdit("foo bar baz", width=16)
+    panel.add(field, x=0, y=0, w=16, h=1)
+    panel.render()
+    for _ in range(3):
+        panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=6, y=0, button="left"))
+    assert field.selection_text == "foo bar baz"
+
+
+def test_textedit_double_click_drag_extends_by_word(backend):
+    panel = Panel(backend)
+    field = TextEdit("foo bar baz", width=16)
+    panel.add(field, x=0, y=0, w=16, h=1)
+    panel.render()
+    # Double-click "foo", then drag into "baz": whole-word edges are kept, so the
+    # selection spans all three words even though the drag ends mid-word.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=2, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=2, y=0, button="left"))
+    assert field.selection_text == "foo"
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=10, y=0, button="left"))
+    assert field.selection_text == "foo bar baz"
+
+
+def test_textedit_outside_press_drag_in_does_not_select(backend):
+    panel = Panel(backend)
+    field = TextEdit("abcdef", width=10)
+    # Leave columns 0-2 as empty panel space to the left of the field.
+    panel.add(field, x=3, y=0, w=10, h=1)
+    panel.render()
+    # Press on empty space, then drag across the field: not a selection gesture.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=0, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=5, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=9, y=0, button="left"))
+    assert field.selection_text == ""
+
+
+def test_textedit_release_ends_gesture_so_later_drag_is_ignored(backend):
+    panel = Panel(backend)
+    field = TextEdit("abcdef", width=10)
+    panel.add(field, x=3, y=0, w=10, h=1)
+    panel.render()
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=4, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=6, y=0, button="left"))
+    assert field.selection_text == "ab"
+    panel.dispatch_event(Event(type=EventType.MOUSE_UP, x=6, y=0, button="left"))
+    # A press on empty space then a drag back into the field after the release
+    # must not resume extending the earlier selection.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=0, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=9, y=0, button="left"))
+    assert field.selection_text == "ab"
+
+
 def test_textedit_copy_and_paste(backend):
     panel = Panel(backend)
     field = TextEdit("hello", width=12)
