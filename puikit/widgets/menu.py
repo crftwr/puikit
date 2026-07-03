@@ -146,17 +146,11 @@ class MenuPopup(Widget):
             if top >= hu:
                 break
             if isinstance(entry, MenuSeparator):
-                if ctx.vector_shapes:
-                    px = 1.0 / max(1, ctx.base_size[1])  # one device pixel high
-                    ctx.fill_rect(
-                        _PAD, top + row_h / 2.0, max(0.0, wu - 2 * _PAD), px,
-                        Style(bg=theme.popup_border),
-                    )
-                else:
-                    ctx.draw_text(
-                        _PAD, int(top), "─" * max(0, int(wu) - 2 * _PAD),
-                        Style(fg=theme.popup_border, bg=theme.popup_bg),
-                    )
+                # A hairline on GUI, a ─ run on grid — the Panel layer picks.
+                ctx.draw_hairline(
+                    _PAD, top + row_h / 2.0, max(0.0, wu - 2 * _PAD),
+                    style=Style(fg=theme.popup_border, bg=theme.popup_bg),
+                )
                 continue
             enabled = entry.is_enabled()
             if i == self.cursor:

@@ -378,3 +378,58 @@ def test_link_falls_back_to_clipboard_without_os_open(backend):
     panel.render()
     panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=1, y=0))
     assert panel.get_clipboard() == "http://x"
+
+
+_LINE_DOC = "> quoted line\n\n---\n"
+
+
+class _VectorBackend(MemoryBackend):
+    """Memory backend that keeps ``vector_shapes`` on (the base MemoryBackend
+    forces it off, being a character grid) so a widget's vector-stroke path can
+    be exercised off-screen. A distinct base-unit size makes strokes sub-unit."""
+
+    def __init__(self, **kw):
+        super().__init__(capabilities=PROFILE_GUI_DESKTOP, **kw)
+
+    @property
+    def capabilities(self):
+        return self._capabilities  # unmodified: vector_shapes stays True
+
+    @property
+    def base_size(self):
+        return (8, 16)
+
+
+def test_rule_and_quote_are_hairlines_not_glyphs_on_gui():
+    # The horizontal rule (─) and the blockquote bar (│) must reach a vector
+    # backend as real strokes, never box-drawing characters.
+    backend = _VectorBackend(width=20, height=8)
+    texts: list[str] = []
+    fills: list[tuple] = []
+    orig_text, orig_fill = backend.draw_text, backend.fill_rect
+
+    def text_spy(x, y, text, style=None):
+        texts.append(text)
+        return orig_text(x, y, text) if style is None else orig_text(x, y, text, style)
+
+    def fill_spy(x, y, w, h, style=None):
+        fills.append((x, y, w, h))
+        return orig_fill(x, y, w, h) if style is None else orig_fill(x, y, w, h, style)
+
+    backend.draw_text, backend.fill_rect = text_spy, fill_spy
+    panel = Panel(backend)
+    panel.add(MarkdownView(_LINE_DOC), x=0, y=0, w=20, h=8)
+    panel.render()
+    joined = "".join(texts)
+    assert "─" not in joined and "│" not in joined  # no box glyphs on GUI
+    # Both structural lines are thinner than a base unit (device-pixel strokes).
+    assert any(0 < h < 1.0 or 0 < w < 1.0 for _, _, w, h in fills)
+
+
+def test_rule_and_quote_are_glyphs_on_tui():
+    backend = MemoryBackend(width=20, height=8, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+    panel.add(MarkdownView(_LINE_DOC), x=0, y=0, w=20, h=8)
+    panel.render()
+    joined = "".join(backend.snapshot())
+    assert "─" in joined and "│" in joined  # grid keeps the box glyphs

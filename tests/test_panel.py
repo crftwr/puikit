@@ -738,3 +738,57 @@ def test_cursor_intent_is_not_pushed_without_capability():
     panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=2.0, y=1.0))
     panel.render()
     assert calls == []
+
+
+class _HairlineBackend(MemoryBackend):
+    """A grid backend that keeps ``vector_shapes`` on (the base MemoryBackend
+    forces it off) and records fill_rect / draw_text, so ``draw_hairline``'s
+    stroke-vs-glyph resolution can be inspected off-screen."""
+
+    def __init__(self, **kw):
+        super().__init__(capabilities=PROFILE_GUI_DESKTOP, **kw)
+        self.fills: list[tuple] = []
+        self.texts: list[str] = []
+
+    @property
+    def capabilities(self):
+        return self._capabilities  # unmodified: vector_shapes stays True
+
+    @property
+    def base_size(self):
+        return (8, 16)
+
+    def fill_rect(self, x, y, w, h, style=DEFAULT_STYLE):
+        self.fills.append((x, y, w, h))
+        super().fill_rect(x, y, w, h, style)
+
+    def draw_text(self, x, y, text, style=DEFAULT_STYLE):
+        self.texts.append(text)
+        super().draw_text(x, y, text, style)
+
+
+class _Hairliner(Widget):
+    def draw(self, ctx):
+        ctx.draw_hairline(2.0, 1.5, 4.0, style=Style(fg=(200, 60, 60)))                # horizontal
+        ctx.draw_hairline(3.5, 0.0, 3.0, vertical=True, style=Style(fg=(200, 60, 60)))  # vertical
+
+
+def test_draw_hairline_strokes_thin_rects_on_vector():
+    # On a vector backend the line is a device-pixel-thin fill_rect, never a box
+    # glyph — the visible-vs-grid choice is resolved in the Panel layer.
+    backend = _HairlineBackend(width=10, height=5)
+    panel = Panel(backend)
+    panel.add(_Hairliner(), x=0, y=0, w=10, h=5)
+    panel.render()
+    assert all("─" not in t and "│" not in t for t in backend.texts)
+    assert any(0 < h < 1.0 for _, _, _, h in backend.fills)  # thin horizontal stroke
+    assert any(0 < w < 1.0 for _, _, w, _ in backend.fills)  # thin vertical stroke
+
+
+def test_draw_hairline_uses_box_glyphs_on_grid():
+    backend = MemoryBackend(width=10, height=5)  # TUI profile: vector_shapes off
+    panel = Panel(backend)
+    panel.add(_Hairliner(), x=0, y=0, w=10, h=5)
+    panel.render()
+    snap = "".join(backend.snapshot())
+    assert "─" in snap and "│" in snap

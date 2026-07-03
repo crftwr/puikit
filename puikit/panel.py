@@ -593,6 +593,58 @@ class DrawContext:
                     self._rect.x + x, self._rect.y + y, iw, ih, style, hints
                 )
 
+    def draw_hairline(
+        self,
+        x: float,
+        y: float,
+        length: float,
+        *,
+        vertical: bool = False,
+        style: Style = DEFAULT_STYLE,
+    ) -> None:
+        """A thin separating line — the intent primitive for a rule, a column
+        divider, or a menu / blockquote bar. This is where the visible-vs-grid
+        choice is made, so a widget never branches on ``vector_shapes`` to pick
+        it (mirroring :meth:`round_rect` and :meth:`draw_divider`):
+
+        - ``vector_shapes`` backends stroke a **device-pixel-thin** ``fill_rect``;
+        - grid backends draw the box-drawing run (``─`` / ``│``).
+
+        The *across-axis* coordinate is the line's **centerline**; the *along-axis*
+        coordinate is its start. So for a horizontal line ``x`` is the left end and
+        ``y`` is the vertical center; for a vertical line ``y`` is the top and ``x``
+        is the horizontal center. On a grid the glyph lands in the cell that
+        centerline falls in (``int``), so passing ``cell + 0.5`` targets that cell.
+        ``length`` is the extent in base units along the axis.
+
+        The line color is ``style.fg`` (falling back to the theme divider color);
+        pass a full ``Style`` to also set a cell background on the grid glyph.
+        Callers wanting seamless multi-row vertical connection on a terminal pass
+        an fg-only style so the glyphs sit on the default terminal background. For
+        a *layout* Divider use :meth:`draw_divider`; this is the free-form
+        companion for lines a widget positions itself."""
+        color = style.fg
+        if color is None:
+            theme = self.theme
+            color = theme.divider_color if theme is not None else (110, 110, 124)
+        if self._caps.supports("vector_shapes"):
+            bw, bh = self.base_size
+            if vertical:
+                lw = 1.0 / max(1, bw)
+                self.fill_rect(x - lw / 2.0, y, lw, length, Style(bg=color))
+            else:
+                lh = 1.0 / max(1, bh)
+                self.fill_rect(x, y - lh / 2.0, length, lh, Style(bg=color))
+            return
+        # Grid: the box-drawing run, in the cell the centerline falls in.
+        n = max(1, int(round(length)))
+        if vertical:
+            col = int(x)
+            for row in range(n):
+                self.draw_text(col, int(y) + row, "│", style)
+        else:
+            self.draw_text(x, int(y), "─" * n, style)
+
     def draw_focus_brackets(
         self,
         w: float,

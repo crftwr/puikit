@@ -118,6 +118,11 @@ class _Row:
     spans: list[Span]
     height: float
     image: tuple[str, str | None, float, float] | None = None
+    # Structural lines a vector backend strokes as real hairlines instead of box
+    # glyphs: ``rule`` = a full-width horizontal rule; ``quote`` = a vertical bar
+    # in the left margin. Both stay False on a grid backend (the line is a span).
+    rule: bool = False
+    quote: bool = False
 
 
 # --- inline parsing -----------------------------------------------------------
@@ -529,9 +534,9 @@ class MarkdownView(Widget):
                 rows.append(_Row(0.0, [], self._line_pitch))
                 continue
             if sem.block == "rule":
-                # A grid (font=None) rule spans the pane exactly: one ─ per unit.
-                style = Style(fg=theme.muted_text)
-                rows.append(_Row(0.0, [("─" * max(1, int(width)), style, None)], self._line_pitch))
+                # A hairline on GUI, a ─ run on grid — resolved by draw_hairline
+                # in draw(); the layout just marks the row.
+                rows.append(_Row(0.0, [], self._line_pitch, rule=True))
                 continue
             if sem.block == "image":
                 if lc is None:
@@ -566,8 +571,13 @@ class MarkdownView(Widget):
             prefix_w = measure(sem.prefix, prefix_style) if sem.prefix else 0.0
             avail = max(1.0, width - prefix_w)
             wrapped = _wrap_spans(spans, avail, measure, word=sem.wrap)
+            # A blockquote's ``│`` bar is a hairline drawn by draw_hairline() on
+            # every wrapped row (a real stroke on GUI, a │ glyph on grid), so the
+            # text always hangs at prefix_w and no prefix glyph is emitted; other
+            # prefixes (list markers) stay a text cell on the first row.
+            is_quote = sem.block == "quote"
             for k, row in enumerate(wrapped):
-                if k == 0 and sem.prefix:
+                if k == 0 and sem.prefix and not is_quote:
                     cells = [(sem.prefix, prefix_style, None)] + row
                     x0 = 0.0
                 else:
@@ -576,7 +586,7 @@ class MarkdownView(Widget):
                     cells = row
                     x0 = prefix_w
                 height = max((line_height(st) for _, st, _ in cells), default=line_height(base))
-                rows.append(_Row(x0, cells, height))
+                rows.append(_Row(x0, cells, height, quote=is_quote))
         self._rows = rows
         tops = [0.0]
         for row in rows:
@@ -591,6 +601,7 @@ class MarkdownView(Widget):
     def draw(self, ctx: DrawContext) -> None:
         self._panel = ctx.panel
         self._link_hits = []
+        theme = ctx.theme or DEFAULT_THEME
         # Use the exact (fractional) width on pixel backends so proportional text
         # wraps to the real pane edge, not a column-snapped one.
         full_w, view_h = ctx.size_units
@@ -621,6 +632,16 @@ class MarkdownView(Widget):
                 path, alt, w, h = row.image
                 ctx.draw_image(row.x0, y, path, hints={"w": w, "h": h, "fit": "contain", "alt": alt})
                 continue
+            if row.rule:
+                # A full-width horizontal rule centered in the row.
+                ctx.draw_hairline(0.0, y + row.height / 2.0, self._wrap_width,
+                                  style=Style(fg=theme.muted_text))
+                continue
+            if row.quote:
+                # A vertical bar in the reserved left-margin column, spanning the
+                # row (centerline at column 0's center).
+                ctx.draw_hairline(0.5, y, row.height, vertical=True,
+                                  style=Style(fg=theme.muted_text))
             x = row.x0
             for text, style, href in row.spans:
                 if not text:
