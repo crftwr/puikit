@@ -48,6 +48,7 @@ from ..text import (
     display_width,
     glyph_runs,
     truncate_to_width,
+    word_bounds,
     wrap_text,
 )
 from ..theme import DEFAULT_THEME
@@ -86,21 +87,6 @@ Pos = tuple[int, int]
 # them, escalate the selection: 1 press = caret, 2 = word, 3 = line. Matches the
 # usual desktop double-click cadence; a longer gap starts a fresh count.
 _MULTI_CLICK_SECONDS = 0.4
-
-
-def _char_class(glyph: str) -> str:
-    """Coarse class of a display glyph for word selection: whitespace, a word
-    character (alphanumeric — including CJK — or underscore), or punctuation.
-    A double-click extends over the maximal run of one class, so ``bar`` in
-    ``foo bar`` selects whole but the surrounding spaces and dots do not join
-    it. Classified by the glyph's base char, so an emoji-plus-selector run
-    stays a single unit."""
-    c = glyph[0]
-    if c.isspace():
-        return "space"
-    if c.isalnum() or c == "_":
-        return "word"
-    return "punct"
 
 
 def _col_to_index(glyphs: list[str], target_col: int) -> int:
@@ -568,16 +554,7 @@ class LogView(Widget):
         if self._total_rows == 0:
             return (row, 0), (row, 0)
         glyphs = glyph_runs(self._row_at(row)[0])
-        if not glyphs:
-            return (row, 0), (row, 0)
-        i = min(idx, len(glyphs) - 1)
-        cls = _char_class(glyphs[i])
-        start = i
-        while start > 0 and _char_class(glyphs[start - 1]) == cls:
-            start -= 1
-        end = i + 1
-        while end < len(glyphs) and _char_class(glyphs[end]) == cls:
-            end += 1
+        start, end = word_bounds(glyphs, idx)
         return (row, start), (row, end)
 
     def _line_span(self, pos: Pos) -> tuple[Pos, Pos]:

@@ -6,12 +6,40 @@ from puikit.text import (
     elide,
     glyph_runs,
     truncate_to_width,
+    word_bounds,
     wrap_text,
 )
 
 
 def _cols(text: str) -> int:
     return display_width(text)
+
+
+def test_word_bounds_picks_word_run():
+    g = glyph_runs("foo bar baz")
+    assert word_bounds(g, 5) == (4, 7)  # inside "bar"
+    assert "".join(g[4:7]) == "bar"
+
+
+def test_word_bounds_on_space_takes_the_space_run():
+    g = glyph_runs("foo   bar")
+    assert word_bounds(g, 4) == (3, 6)  # the run of spaces, not a neighbour word
+
+
+def test_word_bounds_punctuation_is_its_own_class():
+    g = glyph_runs("a=b.c")
+    assert word_bounds(g, 1) == (1, 2)  # "=" alone; letters do not join it
+
+
+def test_word_bounds_cjk_run_is_a_word():
+    g = glyph_runs("日本語x")
+    assert word_bounds(g, 1) == (0, 4)  # CJK counts as word chars, ascii joins run
+
+
+def test_word_bounds_clamps_index_and_empty():
+    g = glyph_runs("hi")
+    assert word_bounds(g, 99) == (0, 2)  # past the end clamps onto the last glyph
+    assert word_bounds([], 0) == (0, 0)
 
 
 def test_char_width_ascii_and_wide():

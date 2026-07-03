@@ -222,6 +222,39 @@ def elide(
     return _fit_prefix(text, budget, measure) + ellipsis
 
 
+def _char_class(glyph: str) -> str:
+    """Coarse class of a display glyph for word selection: whitespace, a word
+    character (alphanumeric — including CJK — or underscore), or punctuation. A
+    double-click extends over the maximal run of one class, so ``bar`` in
+    ``foo bar`` selects whole while the surrounding spaces and dots do not join
+    it. Classified by the glyph's base char, so an emoji-plus-selector run stays
+    a single unit."""
+    c = glyph[0]
+    if c.isspace():
+        return "space"
+    if c.isalnum() or c == "_":
+        return "word"
+    return "punct"
+
+
+def word_bounds(glyphs: list[str], index: int) -> tuple[int, int]:
+    """The half-open glyph range ``(start, end)`` of the word at ``index`` — the
+    maximal run of one character class (see :func:`_char_class`) containing it.
+    This is the unit a double-click grabs. ``index`` is clamped into range; an
+    empty glyph list returns ``(0, 0)``."""
+    if not glyphs:
+        return (0, 0)
+    i = min(max(index, 0), len(glyphs) - 1)
+    cls = _char_class(glyphs[i])
+    start = i
+    while start > 0 and _char_class(glyphs[start - 1]) == cls:
+        start -= 1
+    end = i + 1
+    while end < len(glyphs) and _char_class(glyphs[end]) == cls:
+        end += 1
+    return (start, end)
+
+
 def _tokenize(glyphs: list[str]) -> list[tuple[bool, list[str]]]:
     """Group glyph runs into maximal whitespace and non-whitespace tokens, the
     units a word wrap may break between. Each token is ``(is_space, glyphs)``."""

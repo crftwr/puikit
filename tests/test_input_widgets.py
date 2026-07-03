@@ -382,7 +382,9 @@ def test_label_drag_selects_and_copies(backend):
     panel.add(label, x=0, y=0, w=12, h=1)
     assert label.focusable is True
     panel.render()
-    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=0, y=0, button="left"))
+    # The gesture starts on the raw press (MOUSE_DOWN); the click only fires on
+    # release, so a drag-select must anchor at the button-down point.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=0, y=0, button="left"))
     panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=3, y=0, button="left"))
     assert label.selection_text() == "hel"
     panel.dispatch_event(_key("c", char="c", modifiers=frozenset({"cmd"})))
@@ -407,10 +409,58 @@ def test_textblock_selects_across_rows(backend):
     block = TextBlock("ab\ncd", selectable=True)
     panel.add(block, x=0, y=0, w=12, h=4)
     panel.render()
-    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=0, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=0, y=0, button="left"))
     panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=1, y=1, button="left"))
     # Whole first row plus the first glyph of the second, copied as two lines.
     assert block.selection_text() == "ab\nc"
+
+
+def test_label_double_click_selects_word(backend):
+    panel = Panel(backend)
+    label = Label("foo bar baz", selectable=True)
+    panel.add(label, x=0, y=0, w=20, h=1)
+    panel.render()
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=5, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=5, y=0, button="left"))
+    assert label.selection_text() == "bar"
+
+
+def test_label_triple_click_selects_whole_row(backend):
+    panel = Panel(backend)
+    label = Label("foo bar baz", selectable=True)
+    panel.add(label, x=0, y=0, w=20, h=1)
+    panel.render()
+    for _ in range(3):
+        panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=5, y=0, button="left"))
+    assert label.selection_text() == "foo bar baz"
+
+
+def test_label_press_reseeds_anchor_not_previous_click(backend):
+    panel = Panel(backend)
+    label = Label("abcdef", selectable=True)
+    panel.add(label, x=0, y=0, w=20, h=1)
+    panel.render()
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=0, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=2, y=0, button="left"))
+    assert label.selection_text() == "ab"
+    # A fresh press elsewhere must not inherit the previous gesture's anchor.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=3, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=5, y=0, button="left"))
+    assert label.selection_text() == "de"
+
+
+def test_textblock_double_click_drag_extends_by_word(backend):
+    panel = Panel(backend)
+    block = TextBlock("foo bar\nbaz qux", selectable=True)
+    panel.add(block, x=0, y=0, w=20, h=4)
+    panel.render()
+    # Double-click "foo", then drag into the second row's "baz": whole-word
+    # edges are kept across the row boundary.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=1, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=1, y=0, button="left"))
+    assert block.selection_text() == "foo"
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=1, y=1, button="left"))
+    assert block.selection_text() == "foo bar\nbaz"
 
 
 def test_textblock_select_all_copies_all_rows(backend):
