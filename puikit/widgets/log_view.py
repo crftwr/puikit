@@ -15,9 +15,10 @@ three things a log needs:
   width changes or new lines arrive, never per draw, so wrapping does not cost
   the virtualization;
 - **selection + clipboard copy** — drag to highlight across rows (even rows
-  scrolled off-screen), ``Cmd``/``Ctrl``+``A`` to select all, ``Cmd``/``Ctrl``
-  +``C`` to copy, exactly what the eye sees (wrapped rows copy as separate
-  lines).
+  scrolled off-screen), double-click to take a word and triple-click a whole
+  display row (a following drag then extends by that same word/line unit),
+  ``Cmd``/``Ctrl``+``A`` to select all, ``Cmd``/``Ctrl``+``C`` to copy, exactly
+  what the eye sees (wrapped rows copy as separate lines).
 
 The selection is modeled over **global display rows** — the rows the widget
 would paint after wrapping, numbered across the whole buffer — as ``(row,
@@ -33,6 +34,7 @@ following the moment they scroll up.
 from __future__ import annotations
 
 import bisect
+import time
 from collections.abc import Iterable
 from dataclasses import replace
 
@@ -79,6 +81,26 @@ def _as_mono(style: Style) -> Style:
 # A selection position: a global display-row index and a glyph index within it
 # (0..len, so a position past the last glyph is the row end).
 Pos = tuple[int, int]
+
+# Two presses within this window at the same position, with no drag between
+# them, escalate the selection: 1 press = caret, 2 = word, 3 = line. Matches the
+# usual desktop double-click cadence; a longer gap starts a fresh count.
+_MULTI_CLICK_SECONDS = 0.4
+
+
+def _char_class(glyph: str) -> str:
+    """Coarse class of a display glyph for word selection: whitespace, a word
+    character (alphanumeric — including CJK — or underscore), or punctuation.
+    A double-click extends over the maximal run of one class, so ``bar`` in
+    ``foo bar`` selects whole but the surrounding spaces and dots do not join
+    it. Classified by the glyph's base char, so an emoji-plus-selector run
+    stays a single unit."""
+    c = glyph[0]
+    if c.isspace():
+        return "space"
+    if c.isalnum() or c == "_":
+        return "word"
+    return "punct"
 
 
 def _col_to_index(glyphs: list[str], target_col: int) -> int:
@@ -284,6 +306,17 @@ class LogView(Widget):
         # Selection endpoints in global-display-row coordinates.
         self._sel_anchor: Pos | None = None
         self._sel_cursor: Pos | None = None
+        # Multi-click state: how the current gesture selects (1 caret / 2 word /
+        # 3 line) and, for word/line, the span the press fixed — a drag then
+        # grows the selection by whole words/lines out from it. ``_sel_base`` is
+        # None for a plain caret drag (character granularity).
+        self._sel_granularity = 1
+        self._sel_base: tuple[Pos, Pos] | None = None
+        # Rolling press count for double/triple detection.
+        self._click_count = 0
+        self._last_click_time = 0.0
+        self._last_click_pos: Pos | None = None
+        self._moved_since_press = False
         self._panel = None
 
     # --- buffer management ---------------------------------------------------
@@ -478,6 +511,12 @@ class LogView(Widget):
     def _reset_selection(self) -> None:
         self._sel_anchor = None
         self._sel_cursor = None
+        self._sel_base = None
+        self._sel_granularity = 1
+        # A buffer edit shifts row indices, so a stale press position must not
+        # count toward a later double-click.
+        self._click_count = 0
+        self._last_click_pos = None
 
     def _selection_range(self) -> tuple[Pos, Pos] | None:
         a, b = self._sel_anchor, self._sel_cursor
@@ -521,12 +560,59 @@ class LogView(Widget):
         glyphs = glyph_runs(self._row_at(row)[0])
         return (row, _col_to_index(glyphs, int(max(0.0, x))))
 
+    def _word_span(self, pos: Pos) -> tuple[Pos, Pos]:
+        """The (start, end) positions of the word under ``pos`` — the maximal
+        run of one character class on that display row (see :func:`_char_class`).
+        A position on or past an empty row is its own zero-width span."""
+        row, idx = pos
+        if self._total_rows == 0:
+            return (row, 0), (row, 0)
+        glyphs = glyph_runs(self._row_at(row)[0])
+        if not glyphs:
+            return (row, 0), (row, 0)
+        i = min(idx, len(glyphs) - 1)
+        cls = _char_class(glyphs[i])
+        start = i
+        while start > 0 and _char_class(glyphs[start - 1]) == cls:
+            start -= 1
+        end = i + 1
+        while end < len(glyphs) and _char_class(glyphs[end]) == cls:
+            end += 1
+        return (row, start), (row, end)
+
+    def _line_span(self, pos: Pos) -> tuple[Pos, Pos]:
+        """The (start, end) positions spanning the whole display row under
+        ``pos`` — start of the row to just past its last glyph."""
+        row = pos[0]
+        if self._total_rows == 0:
+            return (row, 0), (row, 0)
+        glyphs = glyph_runs(self._row_at(row)[0])
+        return (row, 0), (row, len(glyphs))
+
+    def _advance_click_count(self, pos: Pos) -> int:
+        """Number of this press in a rolling multi-click run: 1 for a fresh
+        press, one more than the last when it lands at the same position soon
+        enough with no drag between (so a moved or slow press restarts at 1)."""
+        now = time.monotonic()
+        same = (
+            self._click_count > 0
+            and not self._moved_since_press
+            and pos == self._last_click_pos
+            and now - self._last_click_time <= _MULTI_CLICK_SECONDS
+        )
+        count = self._click_count + 1 if same else 1
+        self._last_click_time = now
+        self._last_click_pos = pos
+        return count
+
     def _select_all(self) -> None:
         if self._total_rows == 0:
             return
         last = self._total_rows - 1
         self._sel_anchor = (0, 0)
         self._sel_cursor = (last, len(glyph_runs(self._row_at(last)[0])))
+        self._sel_base = None
+        self._sel_granularity = 1
 
     def _copy_selection(self) -> bool:
         text = self.selection_text()
@@ -559,7 +645,7 @@ class LogView(Widget):
                 amount = float(event.scroll)
             self.scroll_by(-amount)
             return True
-        if self.selectable and event.type in (EventType.MOUSE_CLICK, EventType.MOUSE_DRAG):
+        if self.selectable and event.type in (EventType.MOUSE_DOWN, EventType.MOUSE_DRAG):
             return self._handle_mouse(event)
         return False
 
@@ -593,11 +679,44 @@ class LogView(Widget):
     def _handle_mouse(self, event: Event) -> bool:
         pos = self._pos_at(event.x or 0, event.y or 0)
         if event.type is EventType.MOUSE_DRAG:
-            if self._sel_anchor is None:
-                self._sel_anchor = pos
+            self._moved_since_press = True
+            self._extend_to(pos)
+            return True
+        # MOUSE_DOWN: a press escalates the selection granularity by how many
+        # times it repeats in place (caret -> word -> line), then wraps back.
+        count = self._advance_click_count(pos)
+        self._click_count = count
+        self._moved_since_press = False
+        self._sel_granularity = (count - 1) % 3 + 1
+        if self._sel_granularity == 2:
+            self._sel_base = self._word_span(pos)
+            self._sel_anchor, self._sel_cursor = self._sel_base
+        elif self._sel_granularity == 3:
+            self._sel_base = self._line_span(pos)
+            self._sel_anchor, self._sel_cursor = self._sel_base
         elif "shift" in event.modifiers and self._sel_anchor is not None:
-            pass  # shift+click extends from the existing anchor
+            self._sel_base = None
+            self._sel_cursor = pos  # shift+press extends from the existing anchor
         else:
-            self._sel_anchor = pos  # a plain press starts a fresh selection
-        self._sel_cursor = pos
+            self._sel_base = None
+            self._sel_anchor = pos  # a plain press starts a fresh selection here
+            self._sel_cursor = pos
         return True
+
+    def _extend_to(self, pos: Pos) -> None:
+        """Move the drag end to ``pos``. At caret granularity the cursor lands
+        exactly there; after a double/triple click the selection instead grows
+        to the union of the fixed base span and the whole word/line at ``pos``,
+        so the drag keeps whole-word/line edges. A drag with no prior press
+        anchors here (a backend that emits MOUSE_DRAG without MOUSE_DOWN)."""
+        if self._sel_anchor is None:
+            self._sel_anchor = pos
+        if self._sel_base is None:
+            self._sel_cursor = pos
+            return
+        b0, b1 = self._sel_base
+        p0, p1 = self._word_span(pos) if self._sel_granularity == 2 else self._line_span(pos)
+        # _selection_range sorts the endpoints, so the low/high assignment here
+        # only needs to cover both spans, not track drag direction.
+        self._sel_anchor = min(b0, p0)
+        self._sel_cursor = max(b1, p1)

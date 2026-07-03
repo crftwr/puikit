@@ -126,6 +126,95 @@ def test_logview_drag_selection_copies_visible_text(backend):
     assert log.selection_text() == "bcd"
 
 
+def test_logview_press_seeds_anchor_at_press_point(backend):
+    panel = Panel(backend)
+    log = LogView(["abcdef"], auto_scroll=False)
+    panel.add(log, x=0, y=0, w=20, h=5)
+    panel.render()
+    # A completed selection somewhere, then a fresh press elsewhere: the new
+    # press must reseed the anchor at the press point, so a following drag does
+    # not start from the stale anchor of the previous gesture (the reported bug).
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=0, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=2, y=0, button="left"))
+    assert log.selection_text() == "ab"
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=3, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=5, y=0, button="left"))
+    assert log.selection_text() == "de"
+
+
+def test_logview_plain_press_clears_selection(backend):
+    panel = Panel(backend)
+    log = LogView(["abcdef"], auto_scroll=False)
+    panel.add(log, x=0, y=0, w=20, h=5)
+    panel.render()
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=1, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=4, y=0, button="left"))
+    assert log.selection_text() == "bcd"
+    # A plain press with no drag collapses anchor onto cursor: nothing selected.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=2, y=0, button="left"))
+    assert log.selection_text() == ""
+
+
+def test_logview_double_click_selects_word(backend):
+    panel = Panel(backend)
+    log = LogView(["foo bar baz"], auto_scroll=False)
+    panel.add(log, x=0, y=0, w=20, h=5)
+    panel.render()
+    # Two presses in place on "bar" grab the whole word, not the surrounding
+    # spaces.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=5, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=5, y=0, button="left"))
+    assert log.selection_text() == "bar"
+
+
+def test_logview_triple_click_selects_line(backend):
+    panel = Panel(backend)
+    log = LogView(["foo bar baz"], auto_scroll=False)
+    panel.add(log, x=0, y=0, w=20, h=5)
+    panel.render()
+    for _ in range(3):
+        panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=5, y=0, button="left"))
+    assert log.selection_text() == "foo bar baz"
+
+
+def test_logview_fourth_click_wraps_back_to_caret(backend):
+    panel = Panel(backend)
+    log = LogView(["foo bar baz"], auto_scroll=False)
+    panel.add(log, x=0, y=0, w=20, h=5)
+    panel.render()
+    # caret -> word -> line -> caret: a fourth press collapses the selection.
+    for _ in range(4):
+        panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=5, y=0, button="left"))
+    assert log.selection_text() == ""
+
+
+def test_logview_double_click_drag_extends_by_word(backend):
+    panel = Panel(backend)
+    log = LogView(["foo bar baz"], auto_scroll=False)
+    panel.add(log, x=0, y=0, w=20, h=5)
+    panel.render()
+    # Double-click "foo", then drag into "baz": whole-word edges are kept, so
+    # the whole span "foo bar baz" is taken even though the drag ends mid-word.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=1, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=1, y=0, button="left"))
+    assert log.selection_text() == "foo"
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=9, y=0, button="left"))
+    assert log.selection_text() == "foo bar baz"
+
+
+def test_logview_drag_after_press_is_not_a_double_click(backend):
+    panel = Panel(backend)
+    log = LogView(["foo bar baz"], auto_scroll=False)
+    panel.add(log, x=0, y=0, w=20, h=5)
+    panel.render()
+    # A drag between two presses breaks the multi-click run: the second press is
+    # a fresh caret, not a word selection.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=5, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=6, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=5, y=0, button="left"))
+    assert log.selection_text() == ""
+
+
 def test_logview_max_lines_trims_oldest(backend):
     panel = Panel(backend)
     log = LogView(max_lines=100, auto_scroll=False)
