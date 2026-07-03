@@ -675,9 +675,14 @@ class MacOSBackend(Backend):
         return CapabilityProfile({**self.PROFILE, "animation": False})
 
     def __init__(self, width: int = 100, height: int = 30, title: str = "PuiKit",
-                 base_font: Font | None = None):
+                 base_font: Font | None = None, frame_autosave_name: str | None = None):
         self._initial_size = (width, height)
         self._title = title
+        # When set, AppKit persists this window's frame (position + size) to the
+        # user defaults under this name and restores it on the next launch — the
+        # standard NSWindow frame-autosave feature. None keeps the default of
+        # opening at the initial size with no restore.
+        self._frame_autosave_name = frame_autosave_name
         # The base font is the monospaced grid font, named with the same Font
         # descriptor a text widget uses. The base unit (the layout's length
         # unit) is derived from this font's glyph box on open (base font ->
@@ -759,6 +764,14 @@ class MacOSBackend(Backend):
         self._window.setContentView_(self._view)
         self._window.setAcceptsMouseMovedEvents_(True)
         self._window.makeFirstResponder_(self._view)
+
+        # Restore the saved frame (if any) and enable ongoing autosave. Setting
+        # the frame from the saved name resizes the content view, which size()
+        # reads live, so the restored geometry is in effect before the first
+        # paint.
+        if self._frame_autosave_name:
+            self._window.setFrameUsingName_(self._frame_autosave_name)
+            self._window.setFrameAutosaveName_(self._frame_autosave_name)
 
         self._delegate = _PuiKitWindowDelegate.alloc().init()
         self._delegate.backend = self
