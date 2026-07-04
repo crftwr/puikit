@@ -253,20 +253,31 @@ class MemoryBackend(Backend):
         if w <= 0 or h <= 0:
             return
         base = base_bg
-        cells = [(row, x + w, None) for row in range(y + 1, y + h)]
-        cells += [(y + h, col, _SHADOW_BOTTOM) for col in range(x + 1, x + w + 1)]
-        for row, col, glyph in cells:
+        # Shifted one cell right and half a cell down: the right-edge shadow begins
+        # in the lower half of the top-right cell ("top"), runs full cells down the
+        # edge ("full"), and the bottom edge is a half-block ("bottom").
+        cells = [(y, x + w, "top")]
+        cells += [(row, x + w, "full") for row in range(y + 1, y + h)]
+        cells += [(y + h, col, "bottom") for col in range(x + 1, x + w + 1)]
+        for row, col, kind in cells:
             if not (0 <= row < self._height and 0 <= col < self._width):
                 continue
             old = self._styles[row][col]
             under_fg = old.fg if old.fg else base
             under_bg = old.bg if old.bg else base
             shade = _to_gray(_blend(under_bg, (0, 0, 0), 1.0 - _SHADOW_STRENGTH)) if under_bg else None
-            if glyph is not None and self._grid[row][col] == " ":
+            blank = self._grid[row][col] == " "
+            if kind == "bottom" and blank:
                 # Blank bottom cell: ▄ keeps the page in the lower half (fg) and
                 # shades the upper half (bg), hugging the layer's bottom edge.
-                self._grid[row][col] = glyph
+                self._grid[row][col] = _SHADOW_BOTTOM
                 self._styles[row][col] = Style(under_bg, shade, old.attr)
+            elif kind == "top" and blank:
+                # Blank top-right cell: same ▄ with halves swapped — shade the lower
+                # half (fg), page in the upper half (bg) — the half-cell start of
+                # the right-edge shadow.
+                self._grid[row][col] = _SHADOW_BOTTOM
+                self._styles[row][col] = Style(shade, under_bg, old.attr)
             else:
                 # Right column, or a text cell: keep the glyph, darken the whole cell.
                 nfg = _to_gray(_blend(under_fg, (0, 0, 0), 1.0 - _SHADOW_STRENGTH)) if under_fg else None

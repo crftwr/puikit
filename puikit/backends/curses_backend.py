@@ -877,19 +877,23 @@ class CursesBackend(Backend):
         if w <= 0 or h <= 0:
             return
         base = base_bg if base_bg is not None else _DIM_BG
-        # Right column (top skipped so the layer's top-right is clear), then the
-        # bottom row incl. the corner. ``bottom`` marks the rows that get the
-        # thin half-cell band rather than a full darkened space.
-        cells: list[tuple[int, int, bool]] = []
+        # The shadow is shifted one cell right and half a cell down (light from the
+        # upper-left), so the right column's shadow begins in the *lower* half of
+        # the cell just past the top-right corner, runs full cells down the edge,
+        # and the bottom row is a thin half-cell band in the *upper* half. ``kind``
+        # selects the rendering: "top" = lower-half band (the top-right start),
+        # "full" = full darkened space, "bottom" = upper-half band.
+        cells: list[tuple[int, int, str]] = []
+        cells.append((y, x + w, "top"))
         for row in range(y + 1, y + h):
-            cells.append((row, x + w, False))
+            cells.append((row, x + w, "full"))
         for col in range(x + 1, x + w + 1):
-            cells.append((y + h, col, True))
+            cells.append((y + h, col, "bottom"))
 
         sw, sh = self.size
         has_color = curses.has_colors()
         rows_touched: list[int] = []
-        for row, col, bottom in cells:
+        for row, col, kind in cells:
             if not (0 <= row < sh and 0 <= col < sw):
                 continue
             # A deferred emoji here would resurface at full color over the shadow.
@@ -920,13 +924,21 @@ class CursesBackend(Backend):
                 if not has_color:
                     # No color to darken with: clear the band to blanks.
                     self._stdscr.addstr(row, col, " ", curses.A_DIM)
-                elif bottom:
+                elif kind == "bottom":
                     # Lower-half block: page content in the lower half (fg = the
                     # color the page painted here, e.g. the blue footer), shaded
                     # upper half (bg) hugging the layer edge — a thin half-cell band.
                     self._stdscr.addstr(
                         row, col, _SHADOW_BOTTOM_GLYPH,
                         curses.color_pair(self._color_pair(under_bg, shade)),
+                    )
+                elif kind == "top":
+                    # Same glyph, halves swapped: shade the *lower* half (fg) with
+                    # the page color kept in the upper half (bg). This is the top-
+                    # right start of the right-edge shadow, half a cell down.
+                    self._stdscr.addstr(
+                        row, col, _SHADOW_BOTTOM_GLYPH,
+                        curses.color_pair(self._color_pair(shade, under_bg)),
                     )
                 else:
                     # A darkened space, overwriting whatever glyph was here.

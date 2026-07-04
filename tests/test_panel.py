@@ -244,8 +244,13 @@ def test_tui_shadow_bottom_halfblock_right_wholecell():
     assert backend.style_at(9, 3).bg == (160, 160, 160)
     # No vertical half-block anywhere.
     assert all("▌" not in row for row in snap)
-    # Down-right only, light from top-left: top-right corner & left untouched.
-    assert snap[2][9] == " " and backend.style_at(9, 2).bg == (200, 200, 200)
+    # Shifted half a cell down: the right-edge shadow starts in the lower half of
+    # the top-right cell — a ▄ with the shade in the lower half (fg) and the page
+    # kept in the upper half (bg).
+    assert snap[2][9] == "▄"
+    top = backend.style_at(9, 2)
+    assert top.fg == (160, 160, 160) and top.bg == (200, 200, 200)
+    # Down-right only, light from top-left: left edge untouched.
     assert backend.style_at(1, 3).bg == (200, 200, 200)
 
 
