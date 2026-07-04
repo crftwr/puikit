@@ -30,3 +30,11 @@ def test_mobile_overrides_web():
     assert PROFILE_MOBILE.supports("touch")
     assert PROFILE_MOBILE.supports("virtual_keyboard")
     assert not PROFILE_MOBILE.supports("native_file_dialog")
+
+
+def test_main_thread_dispatch_only_on_native_desktop():
+    # A native run loop on a UI thread can accept work from workers; a browser
+    # (single-threaded JS) and a TUI poll loop cannot.
+    assert PROFILE_GUI_DESKTOP.supports("main_thread_dispatch")
+    assert not PROFILE_GUI_WEB.supports("main_thread_dispatch")
+    assert not PROFILE_TUI.supports("main_thread_dispatch")

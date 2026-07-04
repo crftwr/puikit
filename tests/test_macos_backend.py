@@ -283,3 +283,23 @@ def test_frame_timer_stops_when_nothing_left(monkeypatch):
     assert timer.invalidated
     assert backend._anim_timer is None
     assert backend._anim_timer_interval is None
+
+
+def test_call_on_main_thread_posts_via_apphelper(monkeypatch):
+    # The backend hands the callback to AppHelper.callAfter, which performs a
+    # selector on the main thread (waking a blocked run loop). We only assert the
+    # hand-off; the actual main-thread hop needs a running loop.
+    from puikit.backends import macos_backend as mb
+
+    posted = []
+    monkeypatch.setattr(mb.AppHelper, "callAfter", lambda fn, *a, **k: posted.append(fn))
+
+    backend = MacOSBackend()
+    sentinel = lambda: None  # noqa: E731
+    backend.call_on_main_thread(sentinel)
+    assert posted == [sentinel]
+
+
+def test_macos_backend_advertises_main_thread_dispatch():
+    backend = MacOSBackend()
+    assert backend.capabilities.supports("main_thread_dispatch")

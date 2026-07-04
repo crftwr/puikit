@@ -344,6 +344,15 @@ class Backend(ABC):
         "size" transition). The callback returns False to unregister."""
         raise CapabilityNotSupported("animation")
 
+    def call_on_main_thread(self, callback: Callable[[], None]) -> None:
+        """Schedule ``callback`` to run on the event-loop (UI) thread, waking a
+        blocked loop if necessary. Thread-safe: the whole point is for a worker
+        thread to hand UI work back without polling. Gated on the
+        ``main_thread_dispatch`` capability — only backends that run a native
+        loop on a distinct thread provide it; a single-threaded poll-loop backend
+        drains its own producers each iteration and does not need it."""
+        raise CapabilityNotSupported("main_thread_dispatch")
+
     # --- command grouping ----------------------------------------------------
 
     def begin_group(self, key: Any, rect: Any = None) -> None:

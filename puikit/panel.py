@@ -1578,6 +1578,25 @@ class Panel:
         self.backend.request_animation_ticks(callback)
         return True
 
+    @property
+    def dispatches_to_main_thread(self) -> bool:
+        """True when ``call_on_main_thread`` is available — i.e. the backend runs
+        a native loop on a UI thread that worker threads can hand work back to.
+        An app reads this to choose an event-driven design (wake the UI thread on
+        each producer) over a polling animation tick that drains queues on a
+        timer. False on single-threaded poll-loop backends, which drain their own
+        producers each iteration."""
+        return self.backend.capabilities.supports("main_thread_dispatch")
+
+    def call_on_main_thread(self, callback: Any) -> bool:
+        """Schedule ``callback`` on the UI thread from any thread, waking the
+        loop. Returns False (a no-op) when the backend can't dispatch, so callers
+        that only take this path under ``dispatches_to_main_thread`` stay simple."""
+        if not self.backend.capabilities.supports("main_thread_dispatch"):
+            return False
+        self.backend.call_on_main_thread(callback)
+        return True
+
     def _start_geometry_animation(
         self, widget: Any, hints: dict[str, Any], stepped: bool
     ) -> None:

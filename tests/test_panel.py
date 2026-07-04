@@ -799,3 +799,32 @@ def test_draw_hairline_uses_box_glyphs_on_grid():
     panel.render()
     snap = "".join(backend.snapshot())
     assert "─" in snap and "│" in snap
+
+
+class _DispatchBackend(MemoryBackend):
+    """Native-desktop-capable memory backend that records main-thread hops."""
+
+    def __init__(self, **kw):
+        super().__init__(capabilities=PROFILE_GUI_DESKTOP, **kw)
+        self.dispatched = []
+
+    def call_on_main_thread(self, callback):
+        self.dispatched.append(callback)
+
+
+def test_panel_forwards_main_thread_dispatch_when_supported():
+    backend = _DispatchBackend(width=10, height=3)
+    panel = Panel(backend)
+    assert panel.dispatches_to_main_thread is True
+    sentinel = lambda: None  # noqa: E731
+    assert panel.call_on_main_thread(sentinel) is True
+    assert backend.dispatched == [sentinel]
+
+
+def test_panel_main_thread_dispatch_is_noop_without_capability():
+    # A TUI backend can't dispatch; the Panel returns False and never calls the
+    # backend method (whose base raises), so callers stay branch-free.
+    backend = MemoryBackend(width=10, height=3, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+    assert panel.dispatches_to_main_thread is False
+    assert panel.call_on_main_thread(lambda: None) is False

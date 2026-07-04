@@ -94,6 +94,7 @@ from Foundation import (
     NSZeroPoint,
 )
 import objc
+from PyObjCTools import AppHelper
 
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, is_transparent
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
@@ -1041,6 +1042,14 @@ class MacOSBackend(Backend):
         if callback not in self._tick_callbacks:
             self._tick_callbacks.append(callback)
         self._ensure_animation_timer()
+
+    def call_on_main_thread(self, callback) -> None:
+        # callAfter posts via performSelectorOnMainThread, which signals a run-loop
+        # source and wakes a loop blocked in nextEventMatchingMask; the callback
+        # then runs on the main (UI) thread. This is what lets an app be fully
+        # event-driven — a worker enqueues, wakes the UI thread to drain, and no
+        # idle polling timer is needed.
+        AppHelper.callAfter(callback)
 
     #: Frame-timer rates. A live animation wants smooth 60fps; a permanent tick
     #: callback with no animation (e.g. TFM's idle filesystem-monitoring pump)
