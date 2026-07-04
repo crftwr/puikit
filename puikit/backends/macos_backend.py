@@ -1064,7 +1064,13 @@ class MacOSBackend(Backend):
             on_complete = anim.hints.get("on_complete")
             if on_complete is not None:
                 on_complete()
-        if self._view is not None:
+        # Only repaint per-frame when something is actually animating. A permanent
+        # tick callback (e.g. an idle filesystem-monitoring pump) keeps this timer
+        # alive but must NOT drag the whole window through a 60fps re-rasterization
+        # while nothing moves — such callbacks request their own redraw via
+        # render()/present() when they genuinely change state. ``finished`` gets one
+        # last frame so a just-completed animation lands at its rest position.
+        if self._view is not None and (self._animations or finished):
             self._view.setNeedsDisplay_(True)
         if not self._animations and not self._tick_callbacks:
             # One last redraw at the final state has been requested above.
