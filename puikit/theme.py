@@ -155,6 +155,18 @@ def _mix(a: Color, b: Color, t: float) -> Color:
     )
 
 
+def lift(c: Color, amt: float, *, dark: bool | None = None) -> Color:
+    """Raise a color away from its background toward the contrast pole: lighter on
+    a dark surface (which has the headroom), darker — and only half as far, so
+    raised bands stay subtle — on a light one. ``dark`` overrides the polarity
+    (default: inferred from ``c``'s own luminance), so a caller can lift a band
+    relative to whatever surface it will sit on. ``derive_theme`` keeps its own
+    closure that pins the polarity to the theme background."""
+    if dark is None:
+        dark = _lum(c) < 128
+    return _mix(c, _WHITE, amt) if dark else _mix(c, _BLACK, amt * 0.5)
+
+
 def derive_theme(
     *,
     background: Color,

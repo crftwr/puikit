@@ -15,7 +15,14 @@ from puikit.widgets.markdown_view import (
     _parse_inline,
     parse_markdown,
 )
-from puikit.theme import DEFAULT_THEME
+from puikit.theme import DEFAULT_THEME, lift
+
+# A table lifts its header/zebra bands off the surface the view actually sits on
+# (self.style.bg); a default-styled view has no bg, so it falls back to the
+# canonical content shade. These are the bands the tests below expect.
+_TABLE_SURFACE = (30, 30, 38)
+_HEADER_BG = lift(_TABLE_SURFACE, 0.12)
+_STRIPE_BG = lift(_TABLE_SURFACE, 0.08)
 
 
 class SizedBackend(MemoryBackend):
@@ -695,10 +702,10 @@ def test_table_rows_are_distinguished_by_background_banding(backend):
         y = next(i for i, r in enumerate(snap) if needle in r)
         return backend.style_at(snap[y].index(needle), y).bg
 
-    assert row_bg("H") == DEFAULT_THEME.control_bg      # header band
-    assert row_bg("r0") is None                          # first body row: surface
-    assert row_bg("r1") == DEFAULT_THEME.hover_bg        # zebra stripe
-    assert row_bg("r2") is None                          # back to surface
+    assert row_bg("H") == _HEADER_BG      # header band
+    assert row_bg("r0") is None            # first body row: surface
+    assert row_bg("r1") == _STRIPE_BG      # zebra stripe
+    assert row_bg("r2") is None            # back to surface
 
 
 def test_table_uses_inter_row_lines_not_zebra_on_gui():
@@ -713,7 +720,7 @@ def test_table_uses_inter_row_lines_not_zebra_on_gui():
         bg = style.bg if style else None
         if w > 1 and h < 0.5:
             hrules.add(round(y, 2))
-        if bg in (DEFAULT_THEME.control_bg, DEFAULT_THEME.hover_bg) and w > 1:
+        if bg in (_HEADER_BG, _STRIPE_BG) and w > 1:
             bands.append(bg)
         return orig(x, y, w, h) if style is None else orig(x, y, w, h, style)
 
@@ -724,8 +731,8 @@ def test_table_uses_inter_row_lines_not_zebra_on_gui():
     # top, header/body, two between the three body rows, bottom = five rules.
     assert len(hrules) == 5
     # Header fills; body rows do not zebra-stripe on GUI.
-    assert DEFAULT_THEME.control_bg in bands
-    assert DEFAULT_THEME.hover_bg not in bands
+    assert _HEADER_BG in bands
+    assert _STRIPE_BG not in bands
 
 
 def test_table_band_fill_stays_inside_the_border_columns_on_tui():
@@ -740,7 +747,7 @@ def test_table_band_fill_stays_inside_the_border_columns_on_tui():
     row = snap[hy]
     bar_col = row.index("│")
     assert backend.style_at(bar_col, hy).bg is None                 # rule: surface
-    assert backend.style_at(row.index("H"), hy).bg == DEFAULT_THEME.control_bg  # cell: filled
+    assert backend.style_at(row.index("H"), hy).bg == _HEADER_BG     # cell: filled
 
 
 def test_table_right_alignment(backend):

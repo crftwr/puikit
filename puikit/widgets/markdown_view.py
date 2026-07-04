@@ -54,7 +54,7 @@ from ..font import Font
 from ..image import aspect_extent
 from ..panel import DrawContext
 from ..text import glyph_runs
-from ..theme import DEFAULT_THEME, Theme
+from ..theme import DEFAULT_THEME, Theme, lift
 from .base import Widget
 
 # Syntax highlighting is optional: if Pygments is installed a fenced code block
@@ -1194,8 +1194,18 @@ class MarkdownView(Widget):
         # The header always takes a distinct fill. Body rows: a vector backend
         # rules a cheap hairline between them; a grid backend zebra-stripes them
         # (a rule would cost a whole extra text row there).
-        header_bg = theme.control_bg
-        stripe_bg = theme.hover_bg
+        #
+        # Both bands lift off the surface the table actually sits on (the view's
+        # own bg — e.g. a popup's gray), not a fixed theme role. control_bg /
+        # hover_bg are calibrated against the dark content pane, so over a lighter
+        # dialog the header read as a disconnected bar and the zebra washed out;
+        # lifting from self.style.bg keeps a consistent step on any surface and
+        # picks the right polarity for a light theme. The stripe is a hair
+        # stronger than a bare hover so the body-row boundary still reads on TUI,
+        # where zebra alternation is the only separator between body rows.
+        surface = self.style.bg or theme.surface_bg("content") or (30, 30, 38)
+        header_bg = lift(surface, 0.12)
+        stripe_bg = lift(surface, 0.08)
         rows: list[_Row] = [
             hline("top"),
             band_row(tbl.header, replace(hdr, bg=header_bg), header_bg),
