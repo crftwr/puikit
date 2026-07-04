@@ -797,9 +797,12 @@ and joints (`┌ ┬ ┼ ┤ ┘`) on a terminal.
 
 ## Fenced code
 
-```
+A continuous panel background sits behind the block; with Pygments installed a
+language tag turns on syntax colors (a flat code color otherwise).
+
+```python
 def greet(name):
-    print(f"hello {name}")  # not inline-parsed
+    print(f"hello {name}")  # not inline-parsed as Markdown
 ```
 
 ---

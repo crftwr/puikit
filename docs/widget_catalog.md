@@ -177,7 +177,9 @@ Inline mixed styles, links, flowing content.
   faces, but the missing piece was a **styled-run model** (intra-line mixed
   styles + link hrefs). `MarkdownView` introduces it and uses it to render
   Markdown: proportional prose vs. monospace code, per-level sized headings,
-  block quotes/lists/rules, fenced code, GFM pipe **tables** (boxed, per-column
+  block quotes/lists/rules, **fenced code** (continuous panel background, plus
+  optional **Pygments syntax highlighting** when a language tag is present),
+  GFM pipe **tables** (boxed, per-column
   alignment), **task lists** (`- [ ]` / `- [x]`), **clickable hyperlinks**
   (`Panel.open_url`, new `os_open` capability, clipboard fallback on TUI, a
   `pointer` cursor over a link's hit rect, `#heading` anchors scroll in-document),
@@ -196,17 +198,19 @@ Inline mixed styles, links, flowing content.
    `LogView` / `TextBlock` (`_selection.py`: drag-select + `Cmd`/`Ctrl`+`C`).
    Reuse that machinery so a reader can copy passages. *(Highest-value gap —
    this is a widget-interaction feature, not a Markdown one.)*
-2. **Syntax highlighting** in fenced code blocks (a continuous background fill
-   behind the block is also still open). Deferred as out-of-scope-for-now: it
-   needs a per-language lexer, a large dependency for a small widget.
-3. **Inline images.** Only standalone `![alt](url)` lines are blocks today;
+2. **Inline images.** Only standalone `![alt](url)` lines are blocks today;
    a mid-paragraph image *run* (a row as tall as its tallest run) is rare and
    layout-heavy, so it stays deferred.
+3. **Themeable syntax palette.** The seven syntax colors are fixed module
+   constants (VS Code Dark+ hues, mirroring TFM's `tfm_colors` categories); lift
+   them onto `Theme` if a light-surface code block ever needs different hues.
 
 *Shipped since the initial cut* (all GitHub-rendered, so in scope): GFM tables,
 task lists, strikethrough, `<autolink>` / bare-URL / reference links, setext
 headings, hard line breaks, nested + reflowed block quotes, `#heading` anchor
-links, and the link-hover `pointer` cursor.
+links, the link-hover `pointer` cursor, a continuous code-block background, and
+optional **Pygments syntax highlighting** (graceful flat-color fallback when
+Pygments is absent or the language is unknown).
 
 #### Accordion / collapsible panel
 - **Existing flexibility?** **Yes** — `Tree` (disclosure) and `Tabs` (swapping)

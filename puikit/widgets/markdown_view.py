@@ -48,7 +48,7 @@ import bisect
 import re
 from dataclasses import dataclass, field, replace
 
-from ..backend import DEFAULT_STYLE, Style, TextAttribute
+from ..backend import DEFAULT_STYLE, Color, Style, TextAttribute
 from ..event import Event, EventType
 from ..font import Font
 from ..image import aspect_extent
@@ -56,6 +56,16 @@ from ..panel import DrawContext
 from ..text import glyph_runs
 from ..theme import DEFAULT_THEME, Theme
 from .base import Widget
+
+# Syntax highlighting is optional: if Pygments is installed a fenced code block
+# with a language tag (``` ```python ```) is colored; without it (or for an
+# unknown language) the block still renders, just in the one flat code color.
+try:  # pragma: no cover - import guard
+    from pygments.lexers import get_lexer_by_name
+
+    _PYGMENTS = True
+except Exception:  # pragma: no cover
+    _PYGMENTS = False
 
 # Default body / code faces. ``Font()`` (all defaults) is the backend's
 # proportional UI font on GUI; ``Font(monospace=True)`` is its fixed-advance
@@ -93,6 +103,77 @@ _QUOTE_INDENT = 2.0
 # ``│`` has a cell of its own and never lands on top of text).
 _TABLE_PAD = 1.0
 _TABLE_BORDER = 1.0
+# Inner left/right padding of a fenced code block, in base units, so the text
+# does not sit flush against the edge of its filled background.
+_CODE_PAD = 1.0
+
+# Syntax palette (VS Code Dark+ hues, tuned to read on the code block's fill) and
+# the neutral default when a token has no category. Categories mirror the seven
+# TFM uses in its Pygments text viewer (``get_syntax_color`` in ``tfm_colors``):
+# keyword / string / comment / number / operator / builtin / name.
+_SYNTAX_DEFAULT_FG: Color = (212, 212, 212)
+_SYNTAX: dict[str, Color] = {
+    "keyword": (86, 156, 214),    # blue
+    "string": (206, 145, 120),    # orange-brown
+    "comment": (106, 153, 85),    # green
+    "number": (181, 206, 168),    # light green
+    "operator": (212, 212, 212),  # default gray (VS Code leaves these neutral)
+    "builtin": (78, 201, 176),    # teal
+    "name": (156, 220, 254),      # light blue (identifiers)
+}
+
+
+def _syntax_color(token_type) -> Color | None:
+    """Map a Pygments token type to a palette color, by the same substring test
+    TFM's viewer uses so the two stay visually in step. None → the block default."""
+    s = str(token_type)
+    if "Keyword" in s:
+        return _SYNTAX["keyword"]
+    if "String" in s:
+        return _SYNTAX["string"]
+    if "Comment" in s:
+        return _SYNTAX["comment"]
+    if "Number" in s:
+        return _SYNTAX["number"]
+    if "Operator" in s or "Punctuation" in s:
+        return _SYNTAX["operator"]
+    if "Builtin" in s:
+        return _SYNTAX["builtin"]
+    if "Name" in s:
+        return _SYNTAX["name"]
+    return None
+
+
+def _highlight(lines: list[str], lang: str) -> list[list[tuple[str, "Color | None"]]] | None:
+    """Tokenize ``lines`` as ``lang`` with Pygments, returning per-source-line
+    ``(text, color)`` segments (color None = block default). Returns None when
+    Pygments is absent or the language is unknown, so the caller falls back to
+    plain code. One row per input line is preserved so wrapping stays line-based."""
+    if not _PYGMENTS or not lang:
+        return None
+    try:
+        lexer = get_lexer_by_name(lang)
+    except Exception:
+        return None
+    out: list[list[tuple[str, Color | None]]] = [[]]
+    try:
+        tokens = lexer.get_tokens("\n".join(lines))
+    except Exception:
+        return None
+    for token_type, text in tokens:
+        color = _syntax_color(token_type)
+        parts = text.split("\n")
+        for k, part in enumerate(parts):
+            if k > 0:
+                out.append([])
+            if part:
+                out[-1].append((part, color))
+    # Pygments appends a trailing newline; keep exactly one row per source line.
+    if len(out) > len(lines):
+        out = out[: len(lines)]
+    while len(out) < len(lines):
+        out.append([])
+    return out
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _HRULE_RE = re.compile(r"^(?:-{3,}|\*{3,}|_{3,})$")
@@ -180,6 +261,9 @@ class _Row:
     # A ``table`` block lays out as one ``_Row`` per grid row carrying this
     # payload instead of ``spans``; ``_draw_table_row`` renders its cells + rules.
     table: "_TableRow | None" = None
+    # A fenced-code row: the fill color painted across the whole block width
+    # behind the text (a continuous background, not just per-glyph), else None.
+    code_bg: Color | None = None
 
 
 @dataclass
@@ -524,11 +608,20 @@ def _parse_lines(lines: list[str], refs: dict[str, str]) -> list[_SemLine]:
         fence = _FENCE_RE.match(raw)
         if fence:
             marker = fence.group(1)[0]
+            # The info string after the opening fence names the language; its
+            # first word drives syntax highlighting (``data`` carries it).
+            info = raw[fence.end():].strip()
+            lang = info.split()[0] if info else ""
             i += 1
+            code_lines: list[str] = []
             while i < n and not lines[i].lstrip().startswith(marker * 3):
-                out.append(_SemLine("code", 0, "", [(lines[i], frozenset(), None)], wrap=False))
+                code_lines.append(lines[i])
                 i += 1
             i += 1  # consume the closing fence (or run off the end)
+            # One sem for the whole block (so it tokenizes as a unit); each source
+            # line is a plain run, literal — fenced code is never inline-parsed.
+            runs = [(ln, frozenset(), None) for ln in code_lines]
+            out.append(_SemLine("code", 0, "", runs, wrap=False, data=(lang or None)))
             continue
 
         if stripped == "":
@@ -904,6 +997,9 @@ class MarkdownView(Widget):
                 # in draw(); the layout just marks the row.
                 rows.append(_Row(0.0, [], self._line_pitch, rule=True, quote=qd))
                 continue
+            if sem.block == "code":
+                rows.extend(self._layout_code(sem, width, measure, line_height, theme, qd))
+                continue
             if sem.block == "table" and sem.table is not None:
                 # A vector backend overlaps real strokes, so its border rows need
                 # no grid cell of their own (near-zero height keeps the vertical
@@ -982,6 +1078,37 @@ class MarkdownView(Widget):
         self._anchors = {slug: tops[idx] for slug, idx in anchors if slug}
         self._wrap_width = width
         self._wrap_view_h = self._view_h
+        return rows
+
+    def _layout_code(
+        self, sem: _SemLine, width: float, measure, line_height, theme: Theme, qd: int
+    ) -> list[_Row]:
+        """Lay out a fenced code block: one row per (char-wrapped) source line,
+        each carrying a ``code_bg`` so ``draw`` paints a continuous block-wide
+        background. When Pygments is present and the fence named a language, runs
+        are colored per token; otherwise the whole block is the flat code color."""
+        qind = qd * _QUOTE_INDENT
+        left = qind + _CODE_PAD
+        avail = max(1.0, width - qind - 2 * _CODE_PAD)
+        code_lines = [t for t, _, _ in sem.runs]
+        highlighted = _highlight(code_lines, sem.data) if sem.data else None
+        # When highlighting, the uncolored default is a neutral gray; without it,
+        # the block keeps the flat warm code color (unchanged look).
+        default_fg = _SYNTAX_DEFAULT_FG if highlighted is not None else _CODE_FG
+        bg = theme.control_bg
+
+        def style_for(color: Color | None) -> Style:
+            return Style(fg=color or default_fg, bg=bg, font=self.code_font)
+
+        base = style_for(None)
+        h = line_height(base)
+        rows: list[_Row] = []
+        segments = highlighted if highlighted is not None else [[(ln, None)] for ln in code_lines]
+        for segs in segments:
+            spans = [(text, style_for(color), None) for text, color in segs if text]
+            wrapped = _wrap_spans(spans or [("", base, None)], avail, measure, word=False)
+            for row in wrapped:
+                rows.append(_Row(left, row, h, quote=qd, code_bg=bg))
         return rows
 
     def _layout_table(
@@ -1111,6 +1238,12 @@ class MarkdownView(Widget):
             if row.table is not None:
                 self._draw_table_row(ctx, y, row.height, row.table, theme)
                 continue
+            if row.code_bg is not None:
+                # A continuous fill across the whole block width behind the code,
+                # so consecutive rows read as one panel (not a ragged per-glyph bg).
+                fx = row.x0 - _CODE_PAD
+                ctx.fill_rect(fx, y, max(0.0, self._wrap_width - fx), row.height,
+                              Style(bg=row.code_bg))
             x = row.x0
             for text, style, href in row.spans:
                 if not text:

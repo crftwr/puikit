@@ -186,10 +186,54 @@ def test_fenced_code_block_is_mono():
     panel.add(MarkdownView("```\nmono\n```"), x=0, y=0, w=40, h=10)
     panel.render()
     for y, row in enumerate(backend.snapshot()):
-        if row.startswith("mono"):
-            assert backend.style_at(0, y).font.monospace
+        # A code block carries a one-column inner pad, so the text starts at col 1.
+        if "mono" in row:
+            assert backend.style_at(row.index("m"), y).font.monospace
             return
     raise AssertionError("code block not rendered")
+
+
+def test_code_block_has_continuous_background(backend):
+    panel = Panel(backend)
+    panel.add(MarkdownView("```\nab\n```"), x=0, y=0, w=20, h=8)
+    panel.render()
+    fill = DEFAULT_THEME.control_bg
+    row = next(y for y, r in enumerate(backend.snapshot()) if "ab" in r)
+    # The fill spans the whole block width — the leading pad column and the
+    # empty space past the text both carry the code background, not just glyphs.
+    assert backend.style_at(0, row).bg == fill
+    assert backend.style_at(15, row).bg == fill
+
+
+def test_code_block_language_is_captured():
+    sems = parse_markdown("```python\nx = 1\n```\n")
+    code = [s for s in sems if s.block == "code"]
+    assert len(code) == 1 and code[0].data == "python"
+
+
+def test_syntax_highlighting_colors_a_keyword(backend):
+    from puikit.widgets.markdown_view import _PYGMENTS, _SYNTAX
+
+    if not _PYGMENTS:
+        pytest.skip("Pygments not installed")
+    panel = Panel(backend)
+    panel.add(MarkdownView("```python\ndef f(): return 1\n```\n"), x=0, y=0, w=40, h=8)
+    panel.render()
+    row = next(y for y, r in enumerate(backend.snapshot()) if "def" in r)
+    col = backend.snapshot()[row].index("def")
+    assert backend.style_at(col, row).fg == _SYNTAX["keyword"]
+
+
+def test_unknown_language_falls_back_to_flat_code_color(backend):
+    from puikit.widgets.markdown_view import _CODE_FG
+
+    panel = Panel(backend)
+    panel.add(MarkdownView("```\nplain text\n```\n"), x=0, y=0, w=40, h=8)
+    panel.render()
+    row = next(y for y, r in enumerate(backend.snapshot()) if "plain" in r)
+    col = backend.snapshot()[row].index("plain")
+    # No language tag → the whole block keeps the one flat code color.
+    assert backend.style_at(col, row).fg == _CODE_FG
 
 
 def test_heading_levels_carry_descending_sizes():
