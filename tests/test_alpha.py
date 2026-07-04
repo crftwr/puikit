@@ -8,6 +8,7 @@ opaque RGB before it ever reaches the backend."""
 import pytest
 
 from puikit import Panel, PROFILE_GUI_DESKTOP, PROFILE_TUI, Style
+from puikit.backend import TRANSPARENT, is_transparent
 from puikit.backends.memory_backend import MemoryBackend
 from puikit.panel import _composite
 from puikit.widgets import ImageView, Widget
@@ -69,6 +70,56 @@ def test_rgba_fill_flattens_over_pane_background_color():
     panel.render()
     r, g, b = backend.style_at(0, 0).bg
     assert r > 120 and b > 90 and g == 0  # blended, not pure red or pure blue
+
+
+# --- transparent (no-fill) background ---------------------------------------
+
+
+def test_is_transparent_only_true_for_alpha_zero_rgba():
+    assert is_transparent(TRANSPARENT)
+    assert is_transparent((10, 20, 30, 0))
+    assert not is_transparent(None)          # inherit the pane bg, not transparent
+    assert not is_transparent((10, 20, 30))  # opaque RGB
+    assert not is_transparent((10, 20, 30, 255))
+    assert not is_transparent((10, 20, 30, 1))
+
+
+class _Text(Widget):
+    def __init__(self, bg):
+        self.bg = bg
+
+    def draw(self, ctx):
+        ctx.draw_text(0, 0, "x", Style(fg=(255, 255, 255), bg=self.bg))
+
+
+@pytest.mark.parametrize(
+    "profile,expected",
+    [
+        # TUI cannot skip a per-cell fill, so a transparent bg flattens to the
+        # pane background (fully-transparent over base == base).
+        (PROFILE_TUI, (0, 0, 40)),
+        # A transparency-capable backend keeps the alpha-0 bg, so the text
+        # renderer can recognize it and paint no background fill at all.
+        (PROFILE_GUI_DESKTOP, TRANSPARENT),
+    ],
+    ids=["tui-flattens-to-pane-bg", "gui-keeps-transparent"],
+)
+def test_transparent_text_bg_resolves_per_capability(profile, expected):
+    backend = MemoryBackend(width=4, height=2, capabilities=profile)
+    panel = Panel(backend)
+    panel.add(_Text(TRANSPARENT), x=0, y=0, w=4, h=2, hints={"bg": (0, 0, 40)})
+    panel.render()
+    assert backend.style_at(0, 0).bg == expected
+
+
+def test_none_text_bg_still_inherits_pane_background():
+    # A None bg (the default) must keep inheriting the pane background — the
+    # transparent path is opt-in and must not change this.
+    backend = MemoryBackend(width=4, height=2, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    panel.add(_Text(None), x=0, y=0, w=4, h=2, hints={"bg": (0, 0, 40)})
+    panel.render()
+    assert backend.style_at(0, 0).bg == (0, 0, 40)
 
 
 # --- image global opacity ---------------------------------------------------

@@ -38,6 +38,22 @@ class TextAttribute(IntFlag):
 Color = tuple[int, int, int] | tuple[int, int, int, int]
 
 
+#: A fully-transparent background (RGBA, alpha 0). Text drawn with this as its
+#: ``bg`` renders its glyphs only — no background fill — on transparency-capable
+#: backends, so it composites over whatever was already drawn beneath it (e.g. a
+#: cursor outline that must stay unbroken). Because it is not ``None``, the Panel
+#: style resolver leaves it in place instead of inheriting the pane background;
+#: backends without per-pixel transparency have that resolver flatten it back to
+#: the pane background (an opaque approximation) before it reaches them.
+TRANSPARENT: "Color" = (0, 0, 0, 0)
+
+
+def is_transparent(color: "Color | None") -> bool:
+    """True when ``color`` is a fully-transparent RGBA (alpha 0), i.e. a request
+    to paint no background at all — distinct from ``None`` (inherit the pane's)."""
+    return color is not None and len(color) == 4 and color[3] == 0
+
+
 @dataclass(frozen=True)
 class Style:
     fg: Color | None = None

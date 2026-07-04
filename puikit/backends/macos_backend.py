@@ -95,7 +95,7 @@ from Foundation import (
 )
 import objc
 
-from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute
+from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, is_transparent
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..event import Event, EventType, char_key_event
 from ..font import Font, FontWeight
@@ -1264,7 +1264,7 @@ class MacOSBackend(Backend):
         runs = _glyph_runs(text)
         widths = [max(1, display_width(glyph)) for glyph in runs]
         total = sum(widths)
-        if bg is not None:
+        if bg is not None and not is_transparent(bg):
             _ns_color(bg).setFill()
             NSRectFill(self._unit_rect(x, y, total, 1))
         kerned = dict(attrs)
@@ -1314,7 +1314,7 @@ class MacOSBackend(Backend):
         key = ("f", text, id(ns_font), tuple(fg) if fg else None, alpha, underline, strike)
         ns_text = self._cached_attr_string(key, text, attrs)
         origin = self._unit_rect(x, y, 1, 1).origin
-        if bg is not None:
+        if bg is not None and not is_transparent(bg):
             width = ns_text.size().width
             _ns_color(bg).setFill()
             NSRectFill(NSMakeRect(origin.x, origin.y, width, self._base_h))
