@@ -906,10 +906,16 @@ class CursesBackend(Backend):
                 elif (row, col - 1) in self._wide_lead:
                     self._blank_cell_bg(row, col - 1)    # lead just outside
                     self._blank_cell_bg(row, col)        # trail under the shadow
-            under_bg = self._cell_color.get((row, col), (None, None))[1] or base
-            # Multiply toward black (drop brightness), then snap to the gray ramp:
-            # a neutral shadow, drift-free, like the dim.
-            shade = _to_gray(_blend(under_bg, (0, 0, 0), 1.0 - _SHADOW_STRENGTH))
+            # Shade uniformly from the page background the Panel passes, NOT each
+            # cell's own recorded bg. The band hugs the layer's right/bottom edge,
+            # so it must read as one continuous shadow; deriving it per-cell made it
+            # pick up whatever sits behind each row — and, worse, cells the page
+            # never painted fell back to ``base`` while painted cells used their own
+            # bg, so the shadow alternated shade row to row (the right edge looked
+            # like it changed color). ``base`` is the page surface, so a uniform
+            # shade off it is both consistent and polarity-correct. Multiply toward
+            # black (drop brightness), then snap to the gray ramp — drift-free.
+            shade = _to_gray(_blend(base, (0, 0, 0), 1.0 - _SHADOW_STRENGTH))
             try:
                 if not has_color:
                     # No color to darken with: clear the band to blanks.
@@ -919,7 +925,7 @@ class CursesBackend(Backend):
                     # upper half (bg) hugging the layer edge — a thin half-cell band.
                     self._stdscr.addstr(
                         row, col, _SHADOW_BOTTOM_GLYPH,
-                        curses.color_pair(self._color_pair(under_bg, shade)),
+                        curses.color_pair(self._color_pair(base, shade)),
                     )
                 else:
                     # A darkened space, overwriting whatever glyph was here.

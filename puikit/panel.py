@@ -645,6 +645,46 @@ class DrawContext:
         else:
             self.draw_text(x, int(y), "─" * n, style)
 
+    def draw_frame_divider(self, y: float, style: Style = DEFAULT_STYLE) -> None:
+        """A horizontal rule spanning this context edge to edge that **connects
+        into the surrounding box frame** — the separator under a dialog's title
+        bar. Unlike :meth:`draw_hairline` (a free-floating rule a widget positions
+        anywhere), this reaches both side borders and joins them, so it is the
+        intent for splitting a framed surface into a header and a body. Like the
+        other face primitives it owns the visible-vs-grid choice, so a widget never
+        branches on ``vector_shapes`` to draw it:
+
+        - a ``vector_shapes`` backend strokes a **device-pixel-thin** ``fill_rect``
+          across the full width, meeting the frame's vertical strokes at both ends;
+        - a grid backend draws the box-drawing run with left/right tee glyphs
+          (``├`` … ``┤``) so the single-line frame stays continuous through the row.
+
+        ``y`` is the row the rule sits in (grid) / its centerline (vector). The line
+        color is ``style.fg`` (falling back to the theme popup-border / divider
+        color); ``style.bg`` sets the surface behind the grid glyphs, which callers
+        should pin to the dialog fill so the run doesn't sit on the layer's default
+        (darker) background."""
+        color = style.fg
+        if color is None:
+            theme = self.theme
+            if theme is not None:
+                color = getattr(theme, "popup_border", None) or theme.divider_color
+            else:
+                color = (110, 110, 124)
+        if self.vector_shapes:
+            _, bh = self.base_size
+            lh = 1.0 / max(1, bh)
+            wu = self.size_units[0]
+            self.fill_rect(0.0, y - lh / 2.0, wu, lh, Style(bg=color))
+            return
+        # Grid: box-drawing run with tee ends so it fuses with the single-line
+        # frame. Carry style.bg so the glyphs sit on the dialog surface, not the
+        # layer's default fill (an fg-only style would paint a dark band on TUI).
+        w = self.width
+        if w < 2:
+            return
+        self.draw_text(0, int(y), "├" + "─" * (w - 2) + "┤", Style(fg=color, bg=style.bg))
+
     def draw_focus_brackets(
         self,
         w: float,

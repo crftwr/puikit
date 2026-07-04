@@ -27,6 +27,20 @@ from .markdown_view import MarkdownView
 # Horizontal gap between adjacent buttons in the row, in base units.
 _BUTTON_GAP = 1.0
 
+# Vector (GUI) vertical rhythm, in base units. On a character grid the box uses
+# whole rows; on a vector backend those read as an airy, over-tall dialog, so the
+# header is sized to the measured title line — an equal pad above and below its
+# line box, so it is thin and balanced — and one uniform gap separates the bands
+# (title→message, message→buttons, buttons→bottom), so they read evenly spaced.
+_GUI_GAP = 0.65
+_GUI_TITLE_PAD = 0.18
+
+
+def _gui_title_bar_h(line_h: float) -> float:
+    """Vector title-bar height: the title line box framed by an equal pad above
+    and below. Shared by draw() and the size calc so they agree."""
+    return line_h + 2.0 * _GUI_TITLE_PAD
+
 
 class MessageBox:
     """Modal layer content for an alert/confirm dialog. Construct via
@@ -103,7 +117,13 @@ class MessageBox:
         box_style = (
             Style(bg=theme.popup_bg, fg=theme.popup_border) if theme is not None else DEFAULT_STYLE
         )
-        ctx.draw_box(0, 0, ctx.width, ctx.height, box_style, hints={"fill": True})
+        # Frame the box at its *exact* extent, not ctx.width/ctx.height — those
+        # truncate the layer's fractional size to whole units, so a box with a
+        # fractional height (the GUI rhythm below) would draw its frame short of
+        # the fill (the Panel fills the full fractional rect). size_units is the
+        # true extent; whole-unit backends round it back to the same cells.
+        box_w, box_h = ctx.size_units
+        ctx.draw_box(0, 0, box_w, box_h, box_style, hints={"fill": True})
         # The icon, title, and message must sit on the dialog *surface*, so pin
         # their background to the box fill (popup_bg). A bg-less run instead
         # inherits the layer's default background — the backend's dark fill —
@@ -113,10 +133,30 @@ class MessageBox:
         surface_bg = theme.popup_bg if theme is not None else None
         title_style = Style(bg=surface_bg, attr=TextAttribute.BOLD)
         msg_style = Style(bg=surface_bg)
+        # On a character grid the header takes whole rows (icon/title on row 1, the
+        # rule on row 2, the message from row 3). On a vector backend those full
+        # base-unit rows read as an airy, over-tall header, so the header is sized
+        # to the measured title line — an equal pad above/below its line box, thin
+        # and balanced — with the message a uniform gap below the rule. (Kept in
+        # step with tfm_dialog_geometry.draw_title_bar and the size calc below.)
+        tight = ctx.vector_shapes
+        if tight:
+            head_y = _GUI_TITLE_PAD
+            rule_y = _gui_title_bar_h(ctx.line_height(title_style))
+            msg_y0 = rule_y + _GUI_GAP
+        else:
+            head_y, rule_y, msg_y0 = 1.0, 2.0, 3.0
         if self.icon:
-            ctx.draw_icon(2, 1, self.icon, msg_style)
+            ctx.draw_icon(2, head_y, self.icon, msg_style)
         if self.title:
-            ctx.draw_text(5, 1, self.title, title_style)
+            ctx.draw_text(5, head_y, self.title, title_style)
+            # A rule beneath the title (and icon), connecting to the box frame, so
+            # the title reads as a distinct bar separated from the message rather
+            # than floating above it; drawn on the popup surface in the frame color.
+            rule_style = (
+                Style(fg=theme.popup_border, bg=surface_bg) if theme is not None else DEFAULT_STYLE
+            )
+            ctx.draw_frame_divider(rule_y, style=rule_style)
 
         # Button row along the bottom, centered as a group and drawn as real
         # Button widgets via draw_child — so each carries the flat fill, focus
@@ -130,7 +170,10 @@ class MessageBox:
         total = sum(widths) + _BUTTON_GAP * (len(widths) - 1)
         wu, hu = ctx.size_units
         bx = max(2.0, (wu - total) / 2.0)
-        by = max(0.0, hu - bh - 1.0)
+        # Buttons bottom-anchored one gap above the bottom frame; on vector that
+        # gap equals the message→button and title→message gaps, so the three read
+        # evenly (the grid keeps its whole-row spacing).
+        by = max(0.0, hu - bh - (_GUI_GAP if tight else 1.0))
         if lc.snap:
             # Whole-unit backends round each draw coordinate independently, so a
             # half-unit row origin (an odd-width box centering an even-width row)
@@ -145,15 +188,15 @@ class MessageBox:
             # must sit on the popup surface, so pin the view's base background to
             # popup_bg (re-parse only when it actually changes — e.g. a theme
             # toggle — so a static dialog re-lays out once). The region spans from
-            # the message row (y=3) down to the button row; the view top-aligns
-            # and virtualizes, so extra space is just blank surface.
+            # the message row down to the button row; the view top-aligns and
+            # virtualizes, so extra space is just blank surface.
             md_style = Style(bg=surface_bg)
             if self._md is None:
                 self._md = MarkdownView(self.message, style=md_style)
             elif self._md.style != md_style:
                 self._md.style = md_style
                 self._md.set_source(self.message)
-            ctx.draw_child(self._md, 2, 3, max(1.0, wu - 4.0), max(1.0, by - 3.0))
+            ctx.draw_child(self._md, 2, msg_y0, max(1.0, wu - 4.0), max(1.0, by - msg_y0))
         else:
             for i, line in enumerate(self._lines()):
                 # Draw the whole line and let draw_text clip it: it truncates
@@ -163,7 +206,7 @@ class MessageBox:
                 # units, but a proportional glyph is narrower than a base unit, so
                 # a line has more characters than the box has units and the tail
                 # gets cut even though it fits.
-                ctx.draw_text(2, 3 + i, line, msg_style)
+                ctx.draw_text(2, msg_y0 + i, line, msg_style)
 
         self._button_x = []
         for i, (widget, w) in enumerate(zip(self._widgets, widths)):
@@ -274,7 +317,7 @@ def show_message_box(
         snap=not caps.supports("pixel_layout"),
         measure=panel.backend.measure_text,
     )
-    btn_widths, _ = box._row_metrics(lc)
+    btn_widths, btn_h = box._row_metrics(lc)
     label_w = sum(btn_widths) + _BUTTON_GAP * (len(btn_widths) - 1)
     content_w = max(
         mt(title, prop_bold) + 5,
@@ -296,11 +339,16 @@ def show_message_box(
                 for s in sems
             ),
         )
-    # title row at y=1, message from y=3, then the button row (bottom-anchored,
-    # its own height, one unit above the border) and the bottom border at h-1.
-    # The message is top-anchored and the buttons bottom-anchored, so the extra
-    # rows added here fall between them as breathing room above the buttons.
-    h = n_rows + 7
+    # Header + message + button row + borders. On a grid these are whole rows
+    # (message top-anchored, buttons bottom-anchored, slack between them). On a
+    # vector backend the box is sized to the measured rhythm draw() lays out so
+    # the three gaps come out equal: title bar, gap, message, gap, buttons, gap —
+    # i.e. h = title_bar + n_rows + button_h + 3·gap (plus a hair for the frame).
+    if caps.supports("vector_shapes"):
+        title_bar = _gui_title_bar_h(panel.backend.measure_line_height(prop_bold)) if title else 0.0
+        h = title_bar + n_rows + btn_h + 3.0 * _GUI_GAP
+    else:
+        h = n_rows + 7
     box._panel = panel
     panel.push_layer(
         box, z=z, hints={"shadow": True, "dim_below": dim_below, "w": float(w), "h": float(h)}
