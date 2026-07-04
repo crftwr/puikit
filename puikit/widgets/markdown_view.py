@@ -195,6 +195,7 @@ class _TableRow:
     edges: list[float]
     hline: bool = False
     role: str = ""
+    pad_v: float = 0.0  # inner top/bottom margin so text clears the rules (vector)
 
 
 # Box-drawing glyph for a junction by which of its four arms carry a line. Used
@@ -908,9 +909,16 @@ class MarkdownView(Widget):
                 # no grid cell of their own (near-zero height keeps the vertical
                 # bars of adjacent text rows touching the horizontals); a grid
                 # backend gives each border its own one-cell row for the glyphs.
-                border_h = (1.0 / max(1, ctx.base_size[1])) if ctx.vector_shapes else self._line_pitch
+                bh = max(1, ctx.base_size[1])
+                border_h = (1.0 / bh) if ctx.vector_shapes else self._line_pitch
+                # A small inner top/bottom margin so cell text does not sit flush
+                # against the rules on GUI. The grid keeps borders in their own
+                # rows (natural gap) and must stay integer-aligned, so 0 there.
+                cell_pad_v = max(2.0 / bh, 0.1 * self._line_pitch) if ctx.vector_shapes else 0.0
                 rows.extend(
-                    self._layout_table(sem.table, width - qind, measure, theme, qd, border_h)
+                    self._layout_table(
+                        sem.table, width - qind, measure, theme, qd, border_h, cell_pad_v
+                    )
                 )
                 continue
             if sem.block == "image":
@@ -977,14 +985,16 @@ class MarkdownView(Widget):
         return rows
 
     def _layout_table(
-        self, tbl: _Table, width: float, measure, theme: Theme, qd: int, border_h: float
+        self, tbl: _Table, width: float, measure, theme: Theme, qd: int,
+        border_h: float, cell_pad_v: float,
     ) -> list[_Row]:
         """Lay a GFM table out as one ``_Row`` per grid row. Columns take their
         natural content width, scaled down proportionally (with a floor) when the
         table would overflow ``width``; each cell then wraps to its column and the
         row is as tall as its tallest cell. Border edges are shared by every row;
         ``border_h`` is the height a horizontal-rule row reserves (thin on a
-        vector backend, a full grid cell on a character one)."""
+        vector backend, a full grid cell on a character one), and ``cell_pad_v``
+        the inner top/bottom margin added to each text row."""
         ncol = len(tbl.aligns)
         if ncol == 0:
             return []
@@ -1039,7 +1049,8 @@ class MarkdownView(Widget):
                 lines = _wrap_spans(spans, w, measure, word=True)
                 n_lines = max(n_lines, len(lines))
                 cells.append((text_x, w, align, lines))
-            return _Row(qind, [], n_lines * self._line_pitch, quote=qd, table=_TableRow(cells, edges))
+            height = n_lines * self._line_pitch + 2 * cell_pad_v
+            return _Row(qind, [], height, quote=qd, table=_TableRow(cells, edges, pad_v=cell_pad_v))
 
         # A boxed table: a top rule, the header, a header/body separator, each
         # body row, then a bottom rule. Body rows share continuous column bars but
@@ -1173,7 +1184,7 @@ class MarkdownView(Widget):
                 else:
                     ox = 0.0
                 x = text_x + ox
-                ly = y + li * self._line_pitch
+                ly = y + tr.pad_v + li * self._line_pitch
                 for text, style, href in line:
                     if not text:
                         continue

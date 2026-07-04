@@ -612,6 +612,32 @@ def test_table_borders_are_strokes_not_glyphs_on_gui():
     assert any(0 < w < 1.0 or 0 < h < 1.0 for _, _, w, h in fills)  # thin strokes
 
 
+def test_table_cell_has_vertical_inner_margin_on_gui():
+    # Cell text must not sit flush against the horizontal rules: at least ~1px of
+    # inner top margin between the top rule and the header text on a vector backend.
+    backend = _VectorBackend(width=30, height=16)
+    text_ys: dict[str, float] = {}
+    hlines: list[float] = []
+    orig_text, orig_fill = backend.draw_text, backend.fill_rect
+
+    def text_spy(x, y, text, style=None):
+        text_ys[text] = y
+        return orig_text(x, y, text) if style is None else orig_text(x, y, text, style)
+
+    def fill_spy(x, y, w, h, style=None):
+        if w > 1.0 and h < 1.0:  # a horizontal rule stroke
+            hlines.append(y)
+        return orig_fill(x, y, w, h) if style is None else orig_fill(x, y, w, h, style)
+
+    backend.draw_text, backend.fill_rect = text_spy, fill_spy
+    panel = Panel(backend)
+    panel.add(MarkdownView("| Head |\n|-|\n| val |\n"), x=0, y=0, w=30, h=16)
+    panel.render()
+    base_h = backend.base_size[1]
+    margin_units = text_ys["Head"] - min(hlines)
+    assert margin_units * base_h >= 1.0  # at least one device pixel of clearance
+
+
 def test_table_right_alignment(backend):
     panel = Panel(backend)
     doc = "| N |\n| --: |\n| 7 |\n"
