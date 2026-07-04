@@ -906,26 +906,27 @@ class CursesBackend(Backend):
                 elif (row, col - 1) in self._wide_lead:
                     self._blank_cell_bg(row, col - 1)    # lead just outside
                     self._blank_cell_bg(row, col)        # trail under the shadow
-            # Shade uniformly from the page background the Panel passes, NOT each
-            # cell's own recorded bg. The band hugs the layer's right/bottom edge,
-            # so it must read as one continuous shadow; deriving it per-cell made it
-            # pick up whatever sits behind each row — and, worse, cells the page
-            # never painted fell back to ``base`` while painted cells used their own
-            # bg, so the shadow alternated shade row to row (the right edge looked
-            # like it changed color). ``base`` is the page surface, so a uniform
-            # shade off it is both consistent and polarity-correct. Multiply toward
-            # black (drop brightness), then snap to the gray ramp — drift-free.
-            shade = _to_gray(_blend(base, (0, 0, 0), 1.0 - _SHADOW_STRENGTH))
+            # The shadow band is the underlying page content in shadow, NOT a flat
+            # mono gray: read the color the page actually painted here (the cell's
+            # recorded bg), then desaturate to gray and multiply toward black. So a
+            # band over the blue footer reads as a dark blue-gray, one over the file
+            # list as its own darker tone. Cells the page never painted fall back to
+            # the page ``base``. (Blending toward black and snapping to the gray ramp
+            # commute, so this is "original color → grayscale → darken", drift-free
+            # like the dim.)
+            under_bg = self._cell_color.get((row, col), (None, None))[1] or base
+            shade = _to_gray(_blend(under_bg, (0, 0, 0), 1.0 - _SHADOW_STRENGTH))
             try:
                 if not has_color:
                     # No color to darken with: clear the band to blanks.
                     self._stdscr.addstr(row, col, " ", curses.A_DIM)
                 elif bottom:
-                    # Lower-half block: page color in the lower half (fg), shaded
+                    # Lower-half block: page content in the lower half (fg = the
+                    # color the page painted here, e.g. the blue footer), shaded
                     # upper half (bg) hugging the layer edge — a thin half-cell band.
                     self._stdscr.addstr(
                         row, col, _SHADOW_BOTTOM_GLYPH,
-                        curses.color_pair(self._color_pair(base, shade)),
+                        curses.color_pair(self._color_pair(under_bg, shade)),
                     )
                 else:
                     # A darkened space, overwriting whatever glyph was here.
