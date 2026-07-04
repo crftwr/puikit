@@ -19,6 +19,7 @@ container like ``Container``, not a leaf that swallows input.
 from __future__ import annotations
 
 import math
+import time
 from typing import Any
 
 from ..backend import Style
@@ -41,6 +42,10 @@ _HANDLE_HOVER_PX = 3.0  # vector: thicker accent line while hovered / dragging
 # unit (~8px) that would feel far too wide for a hairline.
 _GRAB_UNITS = 1.0     # grid: one cell each side
 _GRAB_PX = 2.0        # vector: device pixels each side (symmetric about the line)
+# Seconds the pointer must dwell in the grab zone before the divider lights to
+# its accent color. A short settle keeps a pointer merely sweeping across the
+# divider from flashing it; a drag lights it immediately (no dwell).
+_HOVER_DELAY = 0.3
 
 
 def _clamp01(v: float) -> float:
@@ -84,6 +89,11 @@ class Splitter(FocusContainer, Widget):
         self._grab = _GRAB_UNITS      # grab margin in base units; set per draw
         self._snap = False            # whole-unit backend? set per draw
         self._dragging = False
+        # Hover-dwell state: when the pointer entered the grab zone, the Panel to
+        # wake across the delay, and whether a wake-up tick is registered.
+        self._hover_start: float | None = None
+        self._panel: Any | None = None
+        self._ticking = False
 
     @staticmethod
     def _is_focusable(child: Any) -> bool:
@@ -147,12 +157,49 @@ class Splitter(FocusContainer, Widget):
         # Resize affordance: a horizontal splitter (side-by-side panes, vertical
         # handle) drags left/right; a vertical one drags up/down. Requested
         # while hovering the grab zone or mid-drag (so the cursor holds even if
-        # the pointer slips off the thin line). Issued after the panes draw, so
-        # it wins over a child's cursor only inside the grab zone. One intent,
-        # resolved per backend.
+        # the pointer slips off the thin line). The cursor is immediate on hover
+        # — only the *color* change dwells (see _hover_active). Issued after the
+        # panes draw, so it wins over a child's cursor only inside the grab zone.
         if hovered or self._dragging:
             ctx.set_cursor("col-resize" if self._horizontal else "row-resize")
-        self._draw_handle(ctx, handle, hovered)
+        active = self._dragging or self._hover_active(ctx, hovered)
+        self._draw_handle(ctx, handle, active)
+
+    def _hover_active(self, ctx: DrawContext, hovered: bool) -> bool:
+        """Whether the divider should show its accent color for hover. Unlike the
+        cursor, the color lags the pointer entering the grab zone by
+        ``_HOVER_DELAY`` so a pointer merely sweeping across does not flash it;
+        it returns True only once the pointer has *dwelt* in the zone that long.
+        (A drag lights the divider immediately — the caller ORs in ``_dragging``.)"""
+        if not hovered:
+            self._hover_start = None
+            return False
+        self._panel = ctx.panel
+        now = time.monotonic()
+        if self._hover_start is None:
+            self._hover_start = now
+        # Wake the Panel across the delay so the accent appears even if the
+        # pointer then holds still (no further events would trigger a redraw). On
+        # a still backend nothing registers and the accent instead lands on the
+        # next event after the delay — a graceful degradation.
+        if not self._ticking and ctx.animated and ctx.panel is not None:
+            self._ticking = ctx.panel.request_animation_ticks(self._hover_tick)
+        return (now - self._hover_start) >= _HOVER_DELAY
+
+    def _hover_tick(self) -> bool:
+        # Drives redraws only until the dwell delay elapses (then the accent is
+        # up and holds until the pointer leaves, which its own move event
+        # redraws) or the pointer has already left. Self-terminating, so unlike a
+        # spinner it never pins the widget re-rendering.
+        if self._panel is None or self._hover_start is None:
+            self._ticking = False
+            return False
+        elapsed = time.monotonic() - self._hover_start
+        self._panel.render()
+        if elapsed >= _HOVER_DELAY:
+            self._ticking = False
+            return False
+        return True
 
     def _handle_thickness(self, ctx: DrawContext) -> float:
         """Handle thickness in base units: a whole cell on a character grid (a
@@ -183,15 +230,15 @@ class Splitter(FocusContainer, Widget):
         sx, sy, _sw, _sh = ctx.screen_rect
         return self._near_handle(p[0] - sx, p[1] - sy)
 
-    def _draw_handle(self, ctx: DrawContext, handle: Rect, hovered: bool) -> None:
+    def _draw_handle(self, ctx: DrawContext, handle: Rect, active: bool) -> None:
         # The divider line is the whole affordance (no grip mark). At rest it is a
-        # hairline in the border color; hovered or dragging it thickens into an
-        # accent line so it reads as draggable. The thicker line is *centered* on
-        # the thin handle and overlays the panes, so the layout footprint — and
-        # the pane positions — never shift on hover. On a grid the thickness stays
-        # one cell (sub-cell lines do not exist); only the color changes.
+        # hairline in the border color; when active (dragging, or hover held past
+        # the dwell delay) it thickens into an accent line so it reads as
+        # draggable. The thicker line is *centered* on the thin handle and
+        # overlays the panes, so the layout footprint — and the pane positions —
+        # never shift on hover. On a grid the thickness stays one cell (sub-cell
+        # lines do not exist); only the color changes.
         theme = ctx.theme or DEFAULT_THEME
-        active = self._dragging or hovered
         color = theme.accent if active else theme.control_border
         if ctx.vector_shapes and active:
             px = ctx.base_size[0] if self._horizontal else ctx.base_size[1]

@@ -203,6 +203,65 @@ def test_splitter_requests_resize_cursor_over_handle():
     assert shapes[-1] == "col-resize"
 
 
+def test_splitter_hover_color_waits_for_dwell_delay(monkeypatch):
+    # A grid backend so the handle is a single readable cell.
+    backend = MemoryBackend(width=40, height=16, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+    split, _, _ = _splitter()  # horizontal: vertical handle between the panes
+    panel.add(split, x=0, y=0, w=30, h=6)
+    panel.render()
+
+    # A clock we advance by hand, so the dwell is deterministic (no sleeping).
+    from puikit.widgets import splitter as splitter_mod
+
+    clock = {"t": 100.0}
+    monkeypatch.setattr(splitter_mod.time, "monotonic", lambda: clock["t"])
+
+    h = split._handle_rect
+    hx, hy = int(h.x), int(h.y + h.h / 2)
+
+    # Pointer enters the grab zone: the cursor may light, but the divider color
+    # still holds at the resting border until the dwell delay passes.
+    panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=h.x + h.w / 2, y=2.0))
+    panel.render()
+    assert backend.style_at(hx, hy).bg == panel.theme.control_border
+
+    # Still short of the delay: still the resting color.
+    clock["t"] += splitter_mod._HOVER_DELAY - 0.05
+    panel.render()
+    assert backend.style_at(hx, hy).bg == panel.theme.control_border
+
+    # Past the delay with the pointer still dwelling: now the accent.
+    clock["t"] += 0.1
+    panel.render()
+    assert backend.style_at(hx, hy).bg == panel.theme.accent
+
+    # Pointer leaves: back to the resting color at once (no exit delay).
+    panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=1.0, y=1.0))
+    panel.render()
+    assert backend.style_at(hx, hy).bg == panel.theme.control_border
+
+
+def test_splitter_drag_lights_immediately_without_dwell(monkeypatch):
+    backend = MemoryBackend(width=40, height=16, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+    split, _, _ = _splitter()
+    panel.add(split, x=0, y=0, w=30, h=6)
+    panel.render()
+
+    from puikit.widgets import splitter as splitter_mod
+
+    monkeypatch.setattr(splitter_mod.time, "monotonic", lambda: 100.0)
+
+    h = split._handle_rect
+    # A press that starts a drag lights the divider on the same frame — a grab is
+    # deliberate, so it never waits out the hover dwell.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=h.x + h.w / 2, y=2.0))
+    panel.render()
+    assert split._dragging
+    assert backend.style_at(int(h.x), int(h.y + h.h / 2)).bg == panel.theme.accent
+
+
 def _cursor_backend():
     caps = CapabilityProfile({**PROFILE_GUI_DESKTOP, "pointer_shape": True})
     backend = MemoryBackend(width=40, height=16, capabilities=caps)
