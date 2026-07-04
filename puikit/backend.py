@@ -28,6 +28,7 @@ class TextAttribute(IntFlag):
     DIM = 8
     BLINK = 16
     ITALIC = 32
+    STRIKETHROUGH = 64
 
 
 # RGB, or RGBA with a 4th alpha channel (0-255 per channel; alpha 255 = opaque,

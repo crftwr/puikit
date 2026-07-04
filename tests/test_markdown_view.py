@@ -87,7 +87,9 @@ def test_parse_blocks():
     kinds = [s.block for s in sems]
     assert "heading" in kinds
     assert kinds.count("list") == 2
-    assert "quote" in kinds
+    # A block quote is now a regular block carrying a quote depth (not its own
+    # block kind), so nested quotes / lists-in-quotes reflow through one parser.
+    assert any(s.quote_depth > 0 for s in sems)
     assert "rule" in kinds
 
 
@@ -433,3 +435,163 @@ def test_rule_and_quote_are_glyphs_on_tui():
     panel.render()
     joined = "".join(backend.snapshot())
     assert "─" in joined and "│" in joined  # grid keeps the box glyphs
+
+
+# --- GitHub-flavored extensions ----------------------------------------------
+
+
+def _roles(runs, needle):
+    for text, roles, href in runs:
+        if needle in text:
+            return roles, href
+    raise AssertionError(f"no run containing {needle!r}")
+
+
+def test_parse_strikethrough():
+    roles, _ = _roles(_parse_inline("keep ~~drop~~ keep"), "drop")
+    assert "strike" in roles
+
+
+def test_strikethrough_renders_attribute(backend):
+    panel = Panel(backend)
+    panel.add(MarkdownView("~~x~~"), x=0, y=0, w=24, h=8)
+    panel.render()
+    assert backend.style_at(0, 0).attr & TextAttribute.STRIKETHROUGH
+
+
+def test_single_tilde_is_literal():
+    roles, _ = _roles(_parse_inline("a ~b~ c"), "~b~")
+    assert "strike" not in roles
+
+
+def test_angle_autolink_and_bare_url():
+    runs = _parse_inline("see <https://a.test> and http://b.test now")
+    assert _roles(runs, "https://a.test") == (frozenset({"link"}), "https://a.test")
+    assert _roles(runs, "http://b.test") == (frozenset({"link"}), "http://b.test")
+
+
+def test_bare_url_trailing_punctuation_trimmed():
+    # The sentence period is not part of the link.
+    roles, href = _roles(_parse_inline("go to https://a.test. ok"), "https://a.test")
+    assert href == "https://a.test" and "link" in roles
+
+
+def test_email_autolink_gets_mailto():
+    _, href = _roles(_parse_inline("mail <me@x.test> please"), "me@x.test")
+    assert href == "mailto:me@x.test"
+
+
+def test_reference_link_resolves_and_def_is_hidden():
+    sems = parse_markdown("see [the docs][d] now\n\n[d]: https://ref.test\n")
+    para = next(s for s in sems if s.block == "para")
+    _, href = _roles(para.runs, "the docs")
+    assert href == "https://ref.test"
+    # The definition line itself renders nothing.
+    assert not any("ref.test" in t for s in sems for t, _, _ in s.runs)
+
+
+def test_shortcut_reference_link():
+    sems = parse_markdown("[Puikit] rocks\n\n[puikit]: https://p.test\n")
+    para = next(s for s in sems if s.block == "para")
+    _, href = _roles(para.runs, "Puikit")
+    assert href == "https://p.test"
+
+
+def test_setext_headings():
+    sems = parse_markdown("Big\n===\n\nSmall\n---\n")
+    heads = [(s.block, s.level) for s in sems if s.block == "heading"]
+    assert heads == [("heading", 1), ("heading", 2)]
+
+
+def test_setext_dash_beats_horizontal_rule():
+    # A '---' directly under paragraph text is a heading underline, not a rule.
+    sems = parse_markdown("Title\n---\n")
+    assert sems[0].block == "heading" and sems[0].level == 2
+    assert all(s.block != "rule" for s in sems)
+
+
+def test_bare_dashes_stay_a_rule():
+    sems = parse_markdown("para\n\n---\n")
+    assert any(s.block == "rule" for s in sems)
+
+
+def test_task_list_items():
+    sems = [s for s in parse_markdown("- [ ] todo\n- [x] done\n") if s.block == "list"]
+    assert [s.checked for s in sems] == [False, True]
+    assert sems[0].prefix.endswith("☐ ") and sems[1].prefix.endswith("☑ ")
+    # The checkbox marker is stripped from the item text.
+    assert sems[0].runs[0][0] == "todo"
+
+
+def test_task_checkbox_renders(backend):
+    panel = Panel(backend)
+    panel.add(MarkdownView("- [x] done"), x=0, y=0, w=24, h=8)
+    panel.render()
+    assert "☑" in backend.snapshot()[0]
+
+
+def test_hard_line_break_splits_a_row(backend):
+    # Without the break these fit on one row; the two trailing spaces force two.
+    panel = Panel(backend)
+    panel.add(MarkdownView("alpha  \nbeta"), x=0, y=0, w=24, h=8)
+    panel.render()
+    snap = backend.snapshot()
+    assert snap[0].startswith("alpha") and snap[1].startswith("beta")
+
+
+def test_backslash_hard_break():
+    sems = parse_markdown("alpha\\\nbeta\n")
+    # The break becomes a literal newline in the flowed run; the '\' is dropped.
+    assert sems[0].runs[0][0] == "alpha\nbeta"
+
+
+def test_nested_blockquote_depth():
+    sems = parse_markdown("> outer\n> > inner\n")
+    depths = [s.quote_depth for s in sems if s.runs]
+    assert depths == [1, 2]
+
+
+def test_blockquote_multiline_reflows():
+    sems = parse_markdown("> one\n> two\n")
+    quoted = [s for s in sems if s.quote_depth]
+    assert len(quoted) == 1  # two source lines flow into one paragraph
+    assert quoted[0].runs[0][0] == "one two"
+
+
+def test_table_parses_alignment():
+    sems = parse_markdown("| L | C | R |\n| :- | :-: | -: |\n| a | b | c |\n")
+    tbl = next(s.table for s in sems if s.block == "table")
+    assert tbl.aligns == ["left", "center", "right"]
+    assert len(tbl.rows) == 1 and len(tbl.header) == 3
+
+
+def test_table_renders_cells_and_borders(backend):
+    panel = Panel(backend)
+    doc = "| Name | Age |\n| :-- | --: |\n| Bob | 30 |\n"
+    panel.add(MarkdownView(doc), x=0, y=0, w=30, h=10)
+    panel.render()
+    joined = "".join(backend.snapshot())
+    assert all(cell in joined for cell in ("Name", "Age", "Bob", "30"))
+    assert "─" in joined and "│" in joined  # boxed grid
+
+
+def test_table_right_alignment(backend):
+    panel = Panel(backend)
+    doc = "| N |\n| --: |\n| 7 |\n"
+    panel.add(MarkdownView(doc), x=0, y=0, w=12, h=8)
+    panel.render()
+    # The lone digit hugs the right edge of its (widened) column, not the left.
+    body = next(row for row in backend.snapshot() if "7" in row)
+    assert body.index("7") > body.index("│")
+
+
+def test_anchor_link_scrolls_to_heading():
+    doc = "\n".join(["[go](#target-section)"] + [""] * 30 + ["## Target Section", "body"])
+    view = MarkdownView(doc)
+    backend = MemoryBackend(width=30, height=6, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=30, h=6)
+    panel.render()
+    assert view.offset == 0.0
+    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=1, y=0))
+    assert view.offset > 0.0  # jumped down toward the heading

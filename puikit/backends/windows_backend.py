@@ -684,9 +684,10 @@ class WindowsBackend(Backend):
             fg, bg = (bg or _DEFAULT_BG), (style.fg or _DEFAULT_FG)
         alpha = 0.55 if style.attr & TextAttribute.DIM else 1.0
         underline = bool(style.attr & TextAttribute.UNDERLINE)
+        strike = bool(style.attr & TextAttribute.STRIKETHROUGH)
 
         if style.font is not None:
-            self._render_flow_text(x, y, text, style, fg, bg, alpha, underline)
+            self._render_flow_text(x, y, text, style, fg, bg, alpha, underline, strike)
             return
 
         weight = TextAttribute.BOLD if style.attr & TextAttribute.BOLD else TextAttribute.NORMAL
@@ -713,15 +714,17 @@ class WindowsBackend(Backend):
                 self._render_target, glyph, text_format, rect, self._brush, options=native.D2D1_DRAW_TEXT_OPTIONS_CLIP
             )
             col += width
-        if underline:
+        if underline or strike:
             full = self._unit_rect(x, y, total, 1)
-            ly = full.bottom - 2.0
-            native.rt_draw_line(
-                self._render_target, native.D2D1_POINT_2F(full.left, ly), native.D2D1_POINT_2F(full.right, ly), self._brush
-            )
+            for ly in (
+                [full.bottom - 2.0] if underline else []
+            ) + ([(full.top + full.bottom) / 2.0] if strike else []):
+                native.rt_draw_line(
+                    self._render_target, native.D2D1_POINT_2F(full.left, ly), native.D2D1_POINT_2F(full.right, ly), self._brush
+                )
 
     def _render_flow_text(
-        self, x: int, y: int, text: str, style: Style, fg: tuple, bg: tuple | None, alpha: float, underline: bool
+        self, x: int, y: int, text: str, style: Style, fg: tuple, bg: tuple | None, alpha: float, underline: bool, strike: bool = False
     ) -> None:
         """Render with a real per-Style font: one DrawText call at the run's
         natural advances (no per-glyph grid placement) — proportional and
@@ -742,8 +745,9 @@ class WindowsBackend(Backend):
         # already bounds what's visible, so this only needs to avoid wrapping.
         rect = native.D2D1_RECT_F(origin_x, origin_y, origin_x + 100000.0, origin_y + 100000.0)
         native.rt_draw_text(self._render_target, text, text_format, rect, self._brush)
-        if underline:
-            ly = origin_y + line_h - 2.0
+        for ly in (
+            [origin_y + line_h - 2.0] if underline else []
+        ) + ([origin_y + line_h / 2.0] if strike else []):
             native.rt_draw_line(
                 self._render_target,
                 native.D2D1_POINT_2F(origin_x, ly),

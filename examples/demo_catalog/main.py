@@ -742,39 +742,57 @@ _MARKDOWN_SAMPLE = """\
 A read-only **rich-text** viewer for *Markdown*, parsed once into semantic
 blocks whose inline roles (`bold`, `code`, links) are colored by the active
 `Theme` — so the same document follows each backend's palette. Headings stand
-out by **weight and size** alone, in the body color.
+out by **weight and size** alone, in the body color. The subset tracks the
+common GitHub-flavored cases.
 
 ## Inline runs
 
-Mix **bold**, *italic*, ***both***, inline `code`, and a real
+Mix **bold**, *italic*, ***both***, ~~struck out~~, inline `code`, and a real
 [PuiKit link](https://github.com/crftwr/tfm) in one sentence. Prose uses a
 proportional font and `code` a monospace one on GUI; both fold to the one grid
 font (bold / italic kept) on a terminal.
 
-## Hyperlinks
+## Links every which way
 
 Click [the Anthropic site](https://www.anthropic.com) — on GUI it opens in the
-browser; on a terminal the URL is copied to the clipboard instead. One intent,
-resolved per backend.
+browser; on a terminal the URL is copied to the clipboard instead. An
+`<autolink>` like <https://example.com> and a bare URL such as
+https://puikit.dev also linkify, and a [reference link][repo] resolves from a
+definition further down. A hard break splits this line here
+onto the next row (two trailing spaces did that).
 
-## Images
+Setext heading
+--------------
 
-![a small scene]({scene})
+This section title uses the underlined form (`===` / `---`), which parses to the
+same heading as `##`.
 
-GUI draws the picture, sized to its aspect ratio; TUI shows the alt glyph.
-
-## Lists
+## Lists & tasks
 
 - first bullet, long enough to wrap to the pane width and show the hanging
   indent that keeps the continuation aligned under the text
 - second bullet
   - a nested item
+- [x] a finished task
+- [ ] a pending task
 1. ordered one
 2. ordered two
 
-## Block quote
+## Table
 
-> Quotes render muted and italic, with a bar in the gutter.
+| Widget       | Backend | Aligns |
+| :----------- | :-----: | -----: |
+| `MarkdownView` | GUI/TUI |     1 |
+| `Table`      |   any   |    12 |
+
+Columns take their natural width and align by the `:` markers in the delimiter
+row; the grid strokes as hairlines on GUI, box glyphs on a terminal.
+
+## Block quotes
+
+> Quotes render muted, with a bar in the gutter, and reflow across
+> several source lines into one paragraph.
+> > Nested quotes stack another bar.
 
 ## Fenced code
 
@@ -785,7 +803,10 @@ def greet(name):
 
 ---
 
-Scroll with the arrow / page keys, Home / End, or the mouse wheel.
+[Back to top](#markdownview) · scroll with the arrow / page keys, Home / End,
+or the mouse wheel.
+
+[repo]: https://github.com/crftwr/tfm
 """
 
 

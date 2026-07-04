@@ -29,11 +29,17 @@ to the first visible row and stops at the pane edge, so a long document scrolls
 cheaply. Navigation is pure scrolling (a document has no "current item"):
 arrows / page keys / home / end move the viewport and the mouse wheel scrolls.
 
-The Markdown subset is deliberately small but covers the common cases: ATX
-headings (``#``..``######``), paragraphs, ``-``/``*``/``+`` and ordered list
-items (nested by indentation), ``>`` block quotes, ``` ``` ``` / ``~~~`` fenced
-code, ``---`` horizontal rules, and the inline runs ``**bold**``, ``*italic*`` /
-``_italic_``, ```` `code` ````, ``[text](url)`` links, and backslash escapes.
+The Markdown subset covers the common GitHub-flavored cases: ATX headings
+(``#``..``######``) and setext (``===`` / ``---`` underline) headings,
+paragraphs with hard line breaks (two trailing spaces or a backslash),
+``-``/``*``/``+`` and ordered list items (nested by indentation) including
+``[ ]`` / ``[x]`` task items, ``>`` block quotes (nested and multi-line,
+reflowed), ``` ``` ``` /
+``~~~`` fenced code, ``---`` horizontal rules, GFM pipe ``| tables |``, block
+images, and the inline runs ``**bold**``, ``*italic*`` / ``_italic_``,
+``~~strikethrough~~``, ```` `code` ````, ``[text](url)`` / ``[text][ref]``
+reference links, ``<autolinks>`` and bare URLs, and backslash escapes. A
+``[jump](#heading)`` link scrolls the view to that heading.
 """
 
 from __future__ import annotations
@@ -79,6 +85,15 @@ InlineRun = tuple[str, frozenset, "str | None"]
 # same convention every editor uses for a code span.
 _CODE_FG = (206, 145, 120)
 
+# Left indent reserved per block-quote nesting level, in base units: one column
+# for the vertical bar plus a space of gutter before the quoted content.
+_QUOTE_INDENT = 2.0
+# Horizontal padding inside a table cell, and the width reserved for each
+# vertical border column, both in base units (a border is one grid column so the
+# ``│`` has a cell of its own and never lands on top of text).
+_TABLE_PAD = 1.0
+_TABLE_BORDER = 1.0
+
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _HRULE_RE = re.compile(r"^(?:-{3,}|\*{3,}|_{3,})$")
 _LIST_RE = re.compile(r"^(\s*)([-*+]|\d+[.)])\s+(.*)$")
@@ -88,22 +103,60 @@ _LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)\s]*)(?:\s+\"[^\"]*\")?\)")
 # the image's aspect ratio (the inline form mid-paragraph is intentionally not
 # supported — an image is a block here).
 _IMAGE_RE = re.compile(r"^!\[([^\]]*)\]\(([^)\s]*)(?:\s+\"[^\"]*\")?\)$")
+# A setext underline turns the paragraph line(s) above it into a heading: a run
+# of ``=`` is level 1, a run of ``-`` is level 2. Only reached with paragraph
+# text above (a bare ``---`` at a block start is a horizontal rule instead).
+_SETEXT_RE = re.compile(r"^\s{0,3}(=+|-+)\s*$")
+# A GitHub task-list marker at the head of a list item's text: ``[ ]`` / ``[x]``.
+_TASK_RE = re.compile(r"^\[([ xX])\]\s+(.*)$")
+# A link reference definition line: ``[label]: url "optional title"``. Collected
+# in a pre-pass so a ``[text][label]`` / ``[label]`` reference resolves even when
+# the definition appears later in the document.
+_REF_DEF_RE = re.compile(r'^ {0,3}\[([^\]]+)\]:\s*<?([^>\s]+)>?(?:\s+["\'(].*)?$')
+# An angle-bracket autolink: an absolute ``<scheme:...>`` URI or a bare
+# ``<user@host>`` email (the latter opens as ``mailto:``).
+_AUTOLINK_RE = re.compile(
+    r"<((?:[a-zA-Z][a-zA-Z0-9+.\-]*:[^<>\s]+)|(?:[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+))>"
+)
+# A bare URL written inline (GFM autolink extension), linkified where it starts
+# at a word boundary. Trailing sentence punctuation is trimmed by ``_trim_url``.
+_BARE_URL_RE = re.compile(r"https?://[^\s<>]+")
+_SCHEME_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]*:")
+# GFM pipe-table delimiter row (``| --- | :--: |``): every cell is dashes with
+# optional leading/trailing ``:`` for alignment. Presence of this row on the
+# line below a header row is what marks a block as a table.
+_TABLE_DELIM_RE = re.compile(r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$")
+
+
+@dataclass
+class _Table:
+    """A parsed GFM pipe table: each header/body cell is a list of inline runs,
+    and ``aligns`` is one of ``left`` / ``center`` / ``right`` per column."""
+
+    header: list[list[InlineRun]]
+    aligns: list[str]
+    rows: list[list[list[InlineRun]]]
 
 
 @dataclass
 class _SemLine:
     """One semantic line of the document: its block kind, an optional rendered
-    prefix (a list marker, a quote bar), and its inline runs (role-tagged, not
-    yet colored). ``wrap`` is False for atoms that must stay on one row (a fenced
-    code line, a rule, a blank spacer). ``data`` carries the image path for an
-    ``image`` block."""
+    prefix (a list marker), and its inline runs (role-tagged, not yet colored).
+    ``wrap`` is False for atoms that must stay on one row (a fenced code line, a
+    rule, a blank spacer). ``data`` carries the image path for an ``image``
+    block, ``checked`` the state of a ``[ ]`` / ``[x]`` task item (else None),
+    ``quote_depth`` the block-quote nesting level (0 = not quoted), and ``table``
+    the parsed grid for a ``table`` block."""
 
-    block: str  # heading | para | list | quote | code | rule | blank | image
+    block: str  # heading | para | list | code | rule | blank | image | table
     level: int  # heading level, or list nesting depth
     prefix: str  # rendered indent / marker, drawn before the inline runs
     runs: list[InlineRun] = field(default_factory=list)
     wrap: bool = True
     data: str | None = None
+    checked: bool | None = None
+    quote_depth: int = 0
+    table: _Table | None = None
 
 
 @dataclass
@@ -119,19 +172,93 @@ class _Row:
     height: float
     image: tuple[str, str | None, float, float] | None = None
     # Structural lines a vector backend strokes as real hairlines instead of box
-    # glyphs: ``rule`` = a full-width horizontal rule; ``quote`` = a vertical bar
-    # in the left margin. Both stay False on a grid backend (the line is a span).
+    # glyphs: ``rule`` = a full-width horizontal rule; ``quote`` = the count of
+    # left-margin vertical bars (block-quote nesting depth, 0 = none). Both stay
+    # absent on a grid backend only for width — the glyphs still draw there.
     rule: bool = False
-    quote: bool = False
+    quote: int = 0
+    # A ``table`` block lays out as one ``_Row`` per grid row carrying this
+    # payload instead of ``spans``; ``_draw_table_row`` renders its cells + rules.
+    table: "_TableRow | None" = None
+
+
+@dataclass
+class _TableRow:
+    """A laid-out table row. A ``hline`` row is a pure horizontal border (the top,
+    the header/body separator, the bottom) drawn as one rule across the table
+    width; a text row carries per-cell ``(x, width, align, wrapped_lines)`` and a
+    vertical bar at each of the shared border ``edges``. Keeping horizontals and
+    verticals on separate rows means they never collide on a character grid."""
+
+    cells: list[tuple[float, float, str, list[list[Span]]]]
+    edges: list[float]
+    hline: bool = False
 
 
 # --- inline parsing -----------------------------------------------------------
 
 
-def _scan_inline(text: str, roles: frozenset, href: str | None = None) -> list[InlineRun]:
+def _trim_url(url: str) -> str:
+    """Trim trailing sentence punctuation a bare URL scooped up (``see http://x.``
+    → ``http://x``), keeping a ``)`` only while parens stay balanced (so a URL
+    with a real trailing paren survives)."""
+    while url and url[-1] in ".,;:!?)":
+        if url[-1] == ")" and url.count("(") >= url.count(")"):
+            break
+        url = url[:-1]
+    return url
+
+
+def _match_bracket(text: str, i: int) -> int:
+    """Index just past the ``]`` matching the ``[`` at ``i`` (respecting nesting
+    and backslash escapes), or ``-1`` if unbalanced."""
+    depth, j, n = 0, i, len(text)
+    while j < n:
+        if text[j] == "\\":
+            j += 2
+            continue
+        if text[j] == "[":
+            depth += 1
+        elif text[j] == "]":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
+    return -1
+
+
+def _resolve_reflink(text: str, i: int, refs: dict[str, str]) -> tuple[str, str, int] | None:
+    """Resolve a reference link at ``[`` position ``i`` — full ``[text][label]``,
+    collapsed ``[text][]``, or shortcut ``[label]`` — to ``(label_text, url,
+    end)`` using ``refs``, or None when it is not a (defined) reference."""
+    close = _match_bracket(text, i)
+    if close < 0:
+        return None
+    label_text = text[i + 1 : close - 1]
+    n = len(text)
+    if close < n and text[close] == "[":  # full or collapsed
+        close2 = _match_bracket(text, close)
+        if close2 < 0:
+            return None
+        ref = text[close + 1 : close2 - 1].strip() or label_text
+        end = close2
+    else:  # shortcut
+        ref, end = label_text, close
+    url = refs.get(ref.strip().lower())
+    if url is None:
+        return None
+    return label_text, url, end
+
+
+def _scan_inline(
+    text: str, roles: frozenset, href: str | None = None, refs: dict[str, str] | None = None
+) -> list[InlineRun]:
     """Split ``text`` into role-tagged runs, recursing so emphasis nests
     (``**bold _and italic_**``). ``roles`` is the set already in force from the
-    enclosing scan; ``href`` is the link URL when scanning inside a link."""
+    enclosing scan; ``href`` is the link URL when scanning inside a link; ``refs``
+    resolves ``[text][label]`` reference links. A literal ``\\n`` is a hard line
+    break, passed through for the wrapper to split a row on."""
+    refs = refs or {}
     out: list[InlineRun] = []
     buf: list[str] = []
     i, n = 0, len(text)
@@ -162,14 +289,43 @@ def _scan_inline(text: str, roles: frozenset, href: str | None = None) -> list[I
             buf.append(c)
             i += 1
             continue
+        if c == "~" and i + 1 < n and text[i + 1] == "~" and "code" not in roles:
+            close = text.find("~~", i + 2)
+            if close != -1 and close > i + 2:
+                flush()
+                out.extend(_scan_inline(text[i + 2 : close], roles | {"strike"}, href, refs))
+                i = close + 2
+                continue
+            buf.append(c)
+            i += 1
+            continue
+        if c == "<":
+            m = _AUTOLINK_RE.match(text, i)
+            if m:
+                flush()
+                target = m.group(1)
+                url = target if _SCHEME_RE.match(target) else "mailto:" + target
+                out.append((target, roles | {"link"}, url))
+                i = m.end()
+                continue
+            buf.append(c)
+            i += 1
+            continue
         if c == "[":
             m = _LINK_RE.match(text, i)
             if m:
                 flush()
                 # Carry the link's URL into every run of its (still inline-parsed)
                 # label, so a click anywhere on the label opens it.
-                out.extend(_scan_inline(m.group(1), roles | {"link"}, m.group(2)))
+                out.extend(_scan_inline(m.group(1), roles | {"link"}, m.group(2), refs))
                 i = m.end()
+                continue
+            ref = _resolve_reflink(text, i, refs)
+            if ref is not None:
+                label_text, url, end = ref
+                flush()
+                out.extend(_scan_inline(label_text, roles | {"link"}, url, refs))
+                i = end
                 continue
             buf.append(c)
             i += 1
@@ -185,20 +341,35 @@ def _scan_inline(text: str, roles: frozenset, href: str | None = None) -> list[I
             close = text.find(marker, k)
             if close != -1 and close > k:
                 flush()
-                out.extend(_scan_inline(text[k:close], roles | added, href))
+                out.extend(_scan_inline(text[k:close], roles | added, href, refs))
                 i = close + len(marker)
                 continue
             buf.append(text[i:k])
             i = k
             continue
+        # A bare URL at a word boundary (GFM): linkify it, leaving any trailing
+        # sentence punctuation behind for normal text.
+        if (
+            c in "hH"
+            and "link" not in roles
+            and (i == 0 or not text[i - 1].isalnum())
+        ):
+            bm = _BARE_URL_RE.match(text, i)
+            if bm:
+                url = _trim_url(bm.group(0))
+                if url:
+                    flush()
+                    out.append((url, roles | {"link"}, url))
+                    i += len(url)
+                    continue
         buf.append(c)
         i += 1
     flush()
     return out
 
 
-def _parse_inline(text: str) -> list[InlineRun]:
-    return _scan_inline(text, frozenset())
+def _parse_inline(text: str, refs: dict[str, str] | None = None) -> list[InlineRun]:
+    return _scan_inline(text, frozenset(), refs=refs)
 
 
 # --- block parsing ------------------------------------------------------------
@@ -217,9 +388,116 @@ def _is_block_break(line: str) -> bool:
     )
 
 
+def _hard_break(raw: str) -> bool:
+    """A source line ends with a hard line break when it has two+ trailing spaces
+    or a trailing backslash (GFM) — the next line then starts its own row."""
+    return raw.endswith("  ") or raw.rstrip(" ").endswith("\\")
+
+
+def _join_para(raw_lines: list[str]) -> str:
+    """Join a paragraph's source lines into one flow: a hard break at a line end
+    becomes a literal ``\\n`` (a forced row break the wrapper honors), every other
+    join a space. A ``\\`` that signalled the break is dropped."""
+    segs: list[str] = []
+    n = len(raw_lines)
+    for k, raw in enumerate(raw_lines):
+        s = raw.strip()
+        hard = k < n - 1 and _hard_break(raw)
+        if hard and not raw.endswith("  ") and s.endswith("\\"):
+            s = s[:-1]
+        segs.append(s)
+        if k < n - 1:
+            segs.append("\n" if hard else " ")
+    return "".join(segs)
+
+
+def _split_table_row(line: str) -> list[str]:
+    """Split a pipe-table row into trimmed cell texts, honoring ``\\|`` escapes
+    and the optional leading/trailing outer pipes."""
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|") and not s.endswith("\\|"):
+        s = s[:-1]
+    cells: list[str] = []
+    buf: list[str] = []
+    k = 0
+    while k < len(s):
+        ch = s[k]
+        if ch == "\\" and k + 1 < len(s):
+            buf.append(s[k + 1])
+            k += 2
+            continue
+        if ch == "|":
+            cells.append("".join(buf))
+            buf = []
+            k += 1
+            continue
+        buf.append(ch)
+        k += 1
+    cells.append("".join(buf))
+    return [c.strip() for c in cells]
+
+
+def _slug(text: str) -> str:
+    """A GitHub-style heading anchor slug: lowercased, punctuation dropped, spaces
+    to hyphens. ``## My Section!`` -> ``my-section`` so ``[x](#my-section)`` finds it."""
+    text = re.sub(r"[^\w\- ]", "", text).strip().lower()
+    return re.sub(r"\s+", "-", text)
+
+
+def _delim_align(cell: str) -> str:
+    """Column alignment from a delimiter cell: ``:--`` left, ``--:`` right,
+    ``:-:`` center, plain dashes default to left (GitHub's default)."""
+    cell = cell.strip()
+    left, right = cell.startswith(":"), cell.endswith(":")
+    if left and right:
+        return "center"
+    if right:
+        return "right"
+    return "left"
+
+
+def _collect_refs(lines: list[str]) -> tuple[dict[str, str], list[str]]:
+    """First pass: pull ``[label]: url`` reference definitions out of the source
+    (skipping fenced code) into a dict, blanking their lines so they never render
+    — a later ``[text][label]`` resolves even when the def appears below it."""
+    refs: dict[str, str] = {}
+    kept: list[str] = []
+    in_fence, fence_marker = False, ""
+    for ln in lines:
+        fm = _FENCE_RE.match(ln)
+        if fm:
+            marker = fm.group(1)[0]
+            if in_fence:
+                if marker == fence_marker:
+                    in_fence = False
+            else:
+                in_fence, fence_marker = True, marker
+            kept.append(ln)
+            continue
+        if not in_fence:
+            m = _REF_DEF_RE.match(ln)
+            if m:
+                refs.setdefault(m.group(1).strip().lower(), m.group(2))
+                kept.append("")
+                continue
+        kept.append(ln)
+    return refs, kept
+
+
 def parse_markdown(src: str) -> list[_SemLine]:
     """Parse Markdown source into the semantic line list the view lays out."""
     lines = src.split("\n")
+    refs, lines = _collect_refs(lines)
+    return _parse_lines(lines, refs)
+
+
+def _parse_lines(lines: list[str], refs: dict[str, str]) -> list[_SemLine]:
+    """The block loop, over a (ref-stripped) line list. Split from
+    ``parse_markdown`` so a block quote can re-parse its inner lines recursively
+    (nested quotes, lists in quotes, reflowed multi-line quotes) with the same
+    reference definitions in scope."""
     out: list[_SemLine] = []
     i, n = 0, len(lines)
     while i < n:
@@ -252,7 +530,7 @@ def parse_markdown(src: str) -> list[_SemLine]:
 
         m = _HEADING_RE.match(raw)
         if m:
-            out.append(_SemLine("heading", len(m.group(1)), "", _parse_inline(m.group(2))))
+            out.append(_SemLine("heading", len(m.group(1)), "", _parse_inline(m.group(2), refs)))
             i += 1
             continue
 
@@ -262,9 +540,40 @@ def parse_markdown(src: str) -> list[_SemLine]:
             continue
 
         if stripped.startswith(">"):
-            content = re.sub(r"^\s*>\s?", "", raw)
-            out.append(_SemLine("quote", 0, "│ ", _parse_inline(content)))
-            i += 1
+            # Gather the whole block quote (consecutive '>' lines and their lazy
+            # paragraph continuations), strip one '>' level, and parse the inner
+            # text recursively so a nested quote, a list inside a quote, and a
+            # multi-line quoted paragraph all render (the last reflows as a flow).
+            inner: list[str] = []
+            while i < n and lines[i].strip():
+                ln = lines[i]
+                if ln.lstrip().startswith(">"):
+                    inner.append(re.sub(r"^\s*>\s?", "", ln))
+                elif _is_block_break(ln):
+                    break
+                else:
+                    inner.append(ln.strip())
+                i += 1
+            for sem in _parse_lines(inner, refs):
+                sem.quote_depth += 1
+                out.append(sem)
+            continue
+
+        if "|" in raw and i + 1 < n and _TABLE_DELIM_RE.match(lines[i + 1]):
+            header = _split_table_row(raw)
+            ncol = len(header)
+            aligns = [_delim_align(d) for d in _split_table_row(lines[i + 1])]
+            aligns = (aligns + ["left"] * ncol)[:ncol]
+            i += 2
+            body: list[list[list[InlineRun]]] = []
+            while i < n and lines[i].strip() and "|" in lines[i] and not _is_block_break(lines[i]):
+                cells = (_split_table_row(lines[i]) + [""] * ncol)[:ncol]
+                body.append([_parse_inline(c, refs) for c in cells])
+                i += 1
+            tbl = _Table(
+                header=[_parse_inline(c, refs) for c in header], aligns=aligns, rows=body
+            )
+            out.append(_SemLine("table", 0, "", [], wrap=False, table=tbl))
             continue
 
         lm = _LIST_RE.match(raw)
@@ -280,16 +589,35 @@ def parse_markdown(src: str) -> list[_SemLine]:
                 content.append(lines[i].strip())
                 i += 1
             text = " ".join(content)
-            out.append(_SemLine("list", depth, "  " * depth + bullet, _parse_inline(text)))
+            # A GitHub task item: a '[ ]'/'[x]' at the head of a bullet item
+            # renders as an (un)checked box in place of the bullet.
+            checked: bool | None = None
+            tm = _TASK_RE.match(text)
+            if tm and marker in ("-", "*", "+"):
+                checked = tm.group(1).lower() == "x"
+                text = tm.group(2)
+                bullet = ("☑ " if checked else "☐ ")
+            out.append(
+                _SemLine(
+                    "list", depth, "  " * depth + bullet,
+                    _parse_inline(text, refs), checked=checked,
+                )
+            )
             continue
 
-        # Paragraph: gather consecutive plain lines into one wrapped flow.
-        para = [stripped]
+        # Paragraph, or a setext heading when the gathered line(s) are followed
+        # by a '===' / '---' underline.
+        para_raw = [raw]
         i += 1
-        while i < n and not _is_block_break(lines[i]):
-            para.append(lines[i].strip())
+        while i < n and not _is_block_break(lines[i]) and not _SETEXT_RE.match(lines[i]):
+            para_raw.append(lines[i])
             i += 1
-        out.append(_SemLine("para", 0, "", _parse_inline(" ".join(para))))
+        if i < n and _SETEXT_RE.match(lines[i]) and any(p.strip() for p in para_raw):
+            level = 1 if lines[i].lstrip()[0] == "=" else 2
+            out.append(_SemLine("heading", level, "", _parse_inline(_join_para(para_raw), refs)))
+            i += 1
+            continue
+        out.append(_SemLine("para", 0, "", _parse_inline(_join_para(para_raw), refs)))
     return out
 
 
@@ -319,10 +647,6 @@ def _block_style(
         scale = heading_scales.get(level)
         font = replace(text_font, size=body_size * scale) if scale is not None else text_font
         return Style(fg=base.fg, bg=base.bg, attr=attr, font=font)
-    if block == "quote":
-        return Style(
-            fg=theme.muted_text, bg=base.bg, attr=base.attr | TextAttribute.ITALIC, font=text_font
-        )
     if block == "code":
         return Style(fg=_CODE_FG, bg=theme.control_bg, attr=base.attr, font=code_font)
     return Style(fg=base.fg, bg=base.bg, attr=base.attr, font=text_font)
@@ -336,6 +660,8 @@ def _run_style(run_roles: frozenset, base: Style, theme: Theme, code_font: Font)
         attr |= TextAttribute.BOLD
     if "italic" in run_roles:
         attr |= TextAttribute.ITALIC
+    if "strike" in run_roles:
+        attr |= TextAttribute.STRIKETHROUGH
     if "code" in run_roles:
         fg, bg, font = _CODE_FG, theme.control_bg, code_font
     if "link" in run_roles:
@@ -367,13 +693,30 @@ def _measure_cells(cells: list[Span], measure) -> float:
 
 def _wrap_spans(spans: list[Span], width: float, measure, *, word: bool) -> list[list[Span]]:
     """Word-wrap a styled line to ``width`` base units, preserving each glyph's
-    style (and link href) across the break. ``measure(text, style)`` reports a
-    fragment's width in base units (a column count on the grid, native metrics
-    for a proportional font), so the same wrap follows both. ``word=False`` breaks
-    between glyphs regardless (the fenced-code path), so no content is lost."""
+    style (and link href) across the break. A literal ``\\n`` cell is a hard line
+    break: the flow is split there and each segment starts a fresh row."""
     cells: list[Span] = [
         (g, st, href) for text, st, href in spans for g in glyph_runs(text)
     ]
+    if not any(c[0] == "\n" for c in cells):
+        return _wrap_cells(cells, width, measure, word=word)
+    rows: list[list[Span]] = []
+    seg: list[Span] = []
+    for c in cells:
+        if c[0] == "\n":
+            rows.extend(_wrap_cells(seg, width, measure, word=word))
+            seg = []
+        else:
+            seg.append(c)
+    rows.extend(_wrap_cells(seg, width, measure, word=word))
+    return rows or [[]]
+
+
+def _wrap_cells(cells: list[Span], width: float, measure, *, word: bool) -> list[list[Span]]:
+    """Wrap a flat cell list to ``width`` base units. ``measure(text, style)``
+    reports a fragment's width in base units (a column count on the grid, native
+    metrics for a proportional font), so the same wrap follows both. ``word=False``
+    breaks between glyphs regardless (the fenced-code path), so no content is lost."""
     if width <= 0 or not cells:
         return [_merge_cells(cells)] if cells else [[]]
     rows: list[list[Span]] = []
@@ -465,6 +808,9 @@ class MarkdownView(Widget):
         # base units, one per visible link span. The Panel is kept to open a URL.
         self._link_hits: list[tuple[float, float, float, float, str]] = []
         self._panel = None
+        # Heading slug -> its top offset (base units), for ``[jump](#slug)`` links.
+        # Rebuilt each layout alongside the row index.
+        self._anchors: dict[str, float] = {}
 
     # --- construction ---------------------------------------------------------
 
@@ -529,14 +875,22 @@ class MarkdownView(Widget):
         # widget keeps only the per-level ratio (DEFAULT_HEADING_SCALES).
         body_size = ctx.font_size(Style(font=self.text_font))
         rows: list[_Row] = []
+        anchors: list[tuple[str, int]] = []  # (slug, first row index) per heading
         for sem in self._sems:
+            qd = sem.quote_depth
+            qind = qd * _QUOTE_INDENT
             if sem.block == "blank":
-                rows.append(_Row(0.0, [], self._line_pitch))
+                rows.append(_Row(0.0, [], self._line_pitch, quote=qd))
                 continue
             if sem.block == "rule":
                 # A hairline on GUI, a ─ run on grid — resolved by draw_hairline
                 # in draw(); the layout just marks the row.
-                rows.append(_Row(0.0, [], self._line_pitch, rule=True))
+                rows.append(_Row(0.0, [], self._line_pitch, rule=True, quote=qd))
+                continue
+            if sem.block == "table" and sem.table is not None:
+                rows.extend(
+                    self._layout_table(sem.table, width - qind, measure, line_height, theme, qd)
+                )
                 continue
             if sem.block == "image":
                 if lc is None:
@@ -557,43 +911,120 @@ class MarkdownView(Widget):
                     # Unknown / unreadable image: reserve one line and let the
                     # backend draw the alt glyph (TUI) or its own missing-image.
                     w, h, x0 = width, self._line_pitch, 0.0
-                rows.append(_Row(x0, [], h, image=(sem.data, alt, w, h)))
+                rows.append(_Row(x0, [], h, image=(sem.data, alt, w, h), quote=qd))
                 continue
             base = _block_style(
                 sem.block, sem.level, self.style, theme,
                 self.text_font, self.code_font, self.heading_scales, body_size,
             )
+            # Quoted text reads muted (a GitHub blockquote), so recolor the base
+            # for every run that doesn't set its own color (a link keeps accent).
+            if qd:
+                base = replace(base, fg=theme.muted_text)
+            if sem.block == "heading":
+                plain = "".join(t for t, _, _ in sem.runs)
+                anchors.append((_slug(plain), len(rows)))
             spans = [
                 (text, _run_style(roles, base, theme, self.code_font), href)
                 for text, roles, href in sem.runs
             ]
-            prefix_style = Style(fg=theme.muted_text) if sem.block == "quote" else base
-            prefix_w = measure(sem.prefix, prefix_style) if sem.prefix else 0.0
-            avail = max(1.0, width - prefix_w)
+            prefix_w = measure(sem.prefix, base) if sem.prefix else 0.0
+            avail = max(1.0, width - qind - prefix_w)
             wrapped = _wrap_spans(spans, avail, measure, word=sem.wrap)
-            # A blockquote's ``│`` bar is a hairline drawn by draw_hairline() on
-            # every wrapped row (a real stroke on GUI, a │ glyph on grid), so the
-            # text always hangs at prefix_w and no prefix glyph is emitted; other
-            # prefixes (list markers) stay a text cell on the first row.
-            is_quote = sem.block == "quote"
+            # A list marker / task box stays a text cell on the first row; a
+            # block quote's ``│`` bars are strokes drawn by draw() from the row's
+            # quote depth, so the content simply hangs at qind (+ prefix width).
             for k, row in enumerate(wrapped):
-                if k == 0 and sem.prefix and not is_quote:
-                    cells = [(sem.prefix, prefix_style, None)] + row
-                    x0 = 0.0
+                if k == 0 and sem.prefix:
+                    cells = [(sem.prefix, base, None)] + row
+                    x0 = qind
                 else:
                     # Continuation rows hang under the text, indented by the
                     # measured prefix width (exact on every backend).
                     cells = row
-                    x0 = prefix_w
+                    x0 = qind + prefix_w
                 height = max((line_height(st) for _, st, _ in cells), default=line_height(base))
-                rows.append(_Row(x0, cells, height, quote=is_quote))
+                rows.append(_Row(x0, cells, height, quote=qd))
         self._rows = rows
         tops = [0.0]
         for row in rows:
             tops.append(tops[-1] + row.height)
         self._row_tops = tops
+        self._anchors = {slug: tops[idx] for slug, idx in anchors if slug}
         self._wrap_width = width
         self._wrap_view_h = self._view_h
+        return rows
+
+    def _layout_table(
+        self, tbl: _Table, width: float, measure, line_height, theme: Theme, qd: int
+    ) -> list[_Row]:
+        """Lay a GFM table out as one ``_Row`` per grid row. Columns take their
+        natural content width, scaled down proportionally (with a floor) when the
+        table would overflow ``width``; each cell then wraps to its column and the
+        row is as tall as its tallest cell. Border edges are shared by every row."""
+        ncol = len(tbl.aligns)
+        if ncol == 0:
+            return []
+        qind = qd * _QUOTE_INDENT
+        base = Style(fg=self.style.fg, bg=self.style.bg, font=self.text_font)
+        if qd:
+            base = replace(base, fg=theme.muted_text)
+        hdr = replace(base, attr=base.attr | TextAttribute.BOLD)
+
+        def to_spans(runs: list[InlineRun], b: Style) -> list[Span]:
+            return [(t, _run_style(r, b, theme, self.code_font), h) for t, r, h in runs]
+
+        def cell_w(spans: list[Span]) -> float:
+            return sum(measure(t, st) for t, st, _ in spans if t)
+
+        header_spans = [to_spans(c, hdr) for c in tbl.header]
+        body_spans = [[to_spans(c, base) for c in r] for r in tbl.rows]
+        content_w = [
+            max(
+                [cell_w(header_spans[j])]
+                + [cell_w(r[j]) for r in body_spans if j < len(r)]
+            )
+            for j in range(ncol)
+        ]
+        fixed = ncol * 2 * _TABLE_PAD + (ncol + 1) * _TABLE_BORDER
+        avail = width - fixed
+        total = sum(content_w)
+        if total > avail and total > 0:
+            scale = max(0.0, avail) / total
+            content_w = [max(3.0, w * scale) for w in content_w]
+
+        # Border-column left coords (ncol + 1) and per-column text origins.
+        edges: list[float] = []
+        cols: list[tuple[float, float, str]] = []
+        x = qind
+        for j in range(ncol):
+            edges.append(x)
+            x += _TABLE_BORDER
+            text_x = x + _TABLE_PAD
+            cols.append((text_x, content_w[j], tbl.aligns[j]))
+            x = text_x + content_w[j] + _TABLE_PAD
+        edges.append(x)
+
+        def hline() -> _Row:
+            return _Row(qind, [], self._line_pitch, quote=qd, table=_TableRow([], edges, hline=True))
+
+        def text_row(row_spans: list[list[Span]]) -> _Row:
+            cells: list[tuple[float, float, str, list[list[Span]]]] = []
+            n_lines = 1
+            for j, (text_x, w, align) in enumerate(cols):
+                spans = row_spans[j] if j < len(row_spans) else []
+                lines = _wrap_spans(spans, w, measure, word=True)
+                n_lines = max(n_lines, len(lines))
+                cells.append((text_x, w, align, lines))
+            return _Row(qind, [], n_lines * self._line_pitch, quote=qd, table=_TableRow(cells, edges))
+
+        # A boxed table: a top rule, the header, a header/body separator, each
+        # body row, then a bottom rule. Body rows share continuous column bars but
+        # carry no inter-row horizontals (readable, and cheap to virtualize).
+        rows: list[_Row] = [hline(), text_row(header_spans), hline()]
+        for r in body_spans:
+            rows.append(text_row(r))
+        rows.append(hline())
         return rows
 
     # --- drawing --------------------------------------------------------------
@@ -637,11 +1068,14 @@ class MarkdownView(Widget):
                 ctx.draw_hairline(0.0, y + row.height / 2.0, self._wrap_width,
                                   style=Style(fg=theme.muted_text))
                 continue
-            if row.quote:
-                # A vertical bar in the reserved left-margin column, spanning the
-                # row (centerline at column 0's center).
-                ctx.draw_hairline(0.5, y, row.height, vertical=True,
+            for d in range(row.quote):
+                # One vertical bar per block-quote nesting level, each in its own
+                # reserved left column (centerline at that column's center).
+                ctx.draw_hairline(d * _QUOTE_INDENT + 0.5, y, row.height, vertical=True,
                                   style=Style(fg=theme.muted_text))
+            if row.table is not None:
+                self._draw_table_row(ctx, y, row.height, row.table, theme)
+                continue
             x = row.x0
             for text, style, href in row.spans:
                 if not text:
@@ -672,6 +1106,39 @@ class MarkdownView(Widget):
                 ctx.size_units[0] - 1, 0, view_h, max(0.0, min(1.0, pos)), ratio, self.style
             )
 
+    def _draw_table_row(
+        self, ctx: DrawContext, y: float, height: float, tr: _TableRow, theme: Theme
+    ) -> None:
+        """Draw one table row. A horizontal-border row is a single rule across the
+        table width; a text row draws each cell's wrapped lines aligned within its
+        column, then a vertical bar at every column edge."""
+        stroke = Style(fg=theme.muted_text)
+        if tr.hline:
+            left, right = tr.edges[0], tr.edges[-1] + _TABLE_BORDER
+            ctx.draw_hairline(left, y + height / 2.0, right - left, style=stroke)
+            return
+        for text_x, w, align, lines in tr.cells:
+            for li, line in enumerate(lines):
+                lw = sum(ctx.measure_text(t, st) for t, st, _ in line if t)
+                if align == "right":
+                    ox = w - lw
+                elif align == "center":
+                    ox = max(0.0, (w - lw) / 2.0)
+                else:
+                    ox = 0.0
+                x = text_x + ox
+                ly = y + li * self._line_pitch
+                for text, style, href in line:
+                    if not text:
+                        continue
+                    ctx.draw_text(x, ly, text, style)
+                    tw = ctx.measure_text(text, style)
+                    if href:
+                        self._link_hits.append((x, ly, x + tw, ly + self._line_pitch, href))
+                    x += tw
+        for e in tr.edges:
+            ctx.draw_hairline(e + _TABLE_BORDER / 2.0, y, height, vertical=True, style=stroke)
+
     # --- scrolling ------------------------------------------------------------
 
     def _content_h(self) -> float:
@@ -700,14 +1167,19 @@ class MarkdownView(Widget):
         return False
 
     def _handle_click(self, event: Event) -> bool:
-        """Open the link under the click, if any. The Panel resolves the open:
-        ``os_open`` backends launch the OS handler, others copy the URL to the
-        clipboard — the widget never branches."""
+        """Open the link under the click, if any. A ``#slug`` link scrolls to that
+        heading in-document; otherwise the Panel resolves the open (``os_open``
+        backends launch the OS handler, others copy the URL) — no widget branch."""
         if event.x is None or event.y is None:
             return False
         for x0, y0, x1, y1, url in self._link_hits:
             if x0 <= event.x < x1 and y0 <= event.y < y1:
-                if self._panel is not None:
+                if url.startswith("#"):
+                    top = self._anchors.get(_slug(url[1:]))
+                    if top is not None:
+                        self.offset = top
+                        self._clamp(self._content_h())
+                elif self._panel is not None:
                     self._panel.open_url(url)
                 return True
         return False

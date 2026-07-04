@@ -72,6 +72,7 @@ from AppKit import (
     NSTrackingInVisibleRect,
     NSTrackingMouseEnteredAndExited,
     NSTrackingMouseMoved,
+    NSStrikethroughStyleAttributeName,
     NSUnderlineStyleAttributeName,
     NSUnderlineStyleSingle,
     NSView,
@@ -1227,6 +1228,7 @@ class MacOSBackend(Backend):
             return
 
         underline = bool(style.attr & TextAttribute.UNDERLINE)
+        strike = bool(style.attr & TextAttribute.STRIKETHROUGH)
         # font=None uses the prebuilt NORMAL/BOLD base faces; a grid-aligned
         # per-Style monospace font resolves to the same face honoring its own
         # weight/slant (a monospaced bold/italic keeps the base advance, so the
@@ -1244,6 +1246,8 @@ class MacOSBackend(Backend):
         }
         if underline:
             attrs[NSUnderlineStyleAttributeName] = NSUnderlineStyleSingle
+        if strike:
+            attrs[NSStrikethroughStyleAttributeName] = NSUnderlineStyleSingle
 
         # Lock each glyph to its base unit column without drawing it in its own
         # call. The base unit width is the monospaced advance rounded *up*, so a
@@ -1266,7 +1270,7 @@ class MacOSBackend(Backend):
         kerned[NSKernAttributeName] = self._grid_kern
         # id(ns_font) keys the cache by the exact resolved face, covering both
         # the NORMAL/BOLD base faces and any grid-aligned per-Style monospace.
-        sig = (id(ns_font), fg, alpha, underline)
+        sig = (id(ns_font), fg, alpha, underline, strike)
         col = 0
         i = 0
         n = len(runs)
@@ -1297,13 +1301,16 @@ class MacOSBackend(Backend):
         overflow. This is the GUI "no text grid" path (docs/font_system.md §9)."""
         ns_font = self._resolve_style_font(style)
         underline = bool(style.attr & TextAttribute.UNDERLINE)
+        strike = bool(style.attr & TextAttribute.STRIKETHROUGH)
         attrs = {
             NSFontAttributeName: ns_font,
             NSForegroundColorAttributeName: _ns_color(fg, alpha),
         }
         if underline:
             attrs[NSUnderlineStyleAttributeName] = NSUnderlineStyleSingle
-        key = ("f", text, id(ns_font), tuple(fg) if fg else None, alpha, underline)
+        if strike:
+            attrs[NSStrikethroughStyleAttributeName] = NSUnderlineStyleSingle
+        key = ("f", text, id(ns_font), tuple(fg) if fg else None, alpha, underline, strike)
         ns_text = self._cached_attr_string(key, text, attrs)
         origin = self._unit_rect(x, y, 1, 1).origin
         if bg is not None:

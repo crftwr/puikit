@@ -233,6 +233,9 @@ _ATTR_MAP = [
     (TextAttribute.DIM, curses.A_DIM),
     (TextAttribute.BLINK, curses.A_BLINK),
     (TextAttribute.ITALIC, getattr(curses, "A_ITALIC", 0)),
+    # A_STRIKEOUT is not in every ncurses build; drop to 0 (folds away, like a
+    # heading's size) where the terminal can't render it.
+    (TextAttribute.STRIKETHROUGH, getattr(curses, "A_STRIKEOUT", 0)),
 ]
 
 # Scroll bar colors (shared intent with the GUI backends).
