@@ -179,8 +179,10 @@ Inline mixed styles, links, flowing content.
   Markdown: proportional prose vs. monospace code, per-level sized headings,
   block quotes/lists/rules, **fenced code** (continuous panel background, plus
   optional **Pygments syntax highlighting** when a language tag is present),
-  GFM pipe **tables** (boxed, per-column
-  alignment), **task lists** (`- [ ]` / `- [x]`), **clickable hyperlinks**
+  GFM pipe **tables** (boxed with connected corner/tee/cross junctions, per-column
+  alignment; rows separated by a per-row hairline on a vector backend and by a
+  header fill + zebra stripes on a character grid, where a rule per row would cost
+  a whole text row), **task lists** (`- [ ]` / `- [x]`), **clickable hyperlinks**
   (`Panel.open_url`, new `os_open` capability, clipboard fallback on TUI, a
   `pointer` cursor over a link's hit rect, `#heading` anchors scroll in-document),
   and **block images** (sized to aspect ratio via `aspect_extent`, alt glyph on

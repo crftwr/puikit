@@ -787,7 +787,9 @@ same heading as `##`.
 
 Columns take their natural width and align by the `:` markers in the delimiter
 row; the frame connects — crossing hairline strokes on GUI, box-drawing corners
-and joints (`┌ ┬ ┼ ┤ ┘`) on a terminal.
+and joints (`┌ ┬ ┼ ┤ ┘`) on a terminal. Rows are told apart by a hairline
+between each on GUI, and by a distinct header fill + zebra body stripes on a
+terminal (where a rule per row would cost real vertical space).
 
 ## Block quotes
 

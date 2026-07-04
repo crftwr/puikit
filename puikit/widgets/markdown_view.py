@@ -280,6 +280,7 @@ class _TableRow:
     hline: bool = False
     role: str = ""
     pad_v: float = 0.0  # inner top/bottom margin so text clears the rules (vector)
+    bg: Color | None = None  # row band fill (header / zebra stripe), else surface
 
 
 # Box-drawing glyph for a junction by which of its four arms carry a line. Used
@@ -1013,7 +1014,8 @@ class MarkdownView(Widget):
                 cell_pad_v = max(2.0 / bh, 0.1 * self._line_pitch) if ctx.vector_shapes else 0.0
                 rows.extend(
                     self._layout_table(
-                        sem.table, width - qind, measure, theme, qd, border_h, cell_pad_v
+                        sem.table, width - qind, measure, theme, qd, border_h,
+                        cell_pad_v, ctx.vector_shapes,
                     )
                 )
                 continue
@@ -1113,7 +1115,7 @@ class MarkdownView(Widget):
 
     def _layout_table(
         self, tbl: _Table, width: float, measure, theme: Theme, qd: int,
-        border_h: float, cell_pad_v: float,
+        border_h: float, cell_pad_v: float, vector: bool,
     ) -> list[_Row]:
         """Lay a GFM table out as one ``_Row`` per grid row. Columns take their
         natural content width, scaled down proportionally (with a floor) when the
@@ -1121,7 +1123,11 @@ class MarkdownView(Widget):
         row is as tall as its tallest cell. Border edges are shared by every row;
         ``border_h`` is the height a horizontal-rule row reserves (thin on a
         vector backend, a full grid cell on a character one), and ``cell_pad_v``
-        the inner top/bottom margin added to each text row."""
+        the inner top/bottom margin added to each text row.
+
+        Rows are told apart differently per backend: a vector backend draws a
+        cheap hairline between every row, while a character grid — where a rule
+        would cost a whole text row — zebra-stripes the body instead."""
         ncol = len(tbl.aligns)
         if ncol == 0:
             return []
@@ -1168,24 +1174,38 @@ class MarkdownView(Widget):
         def hline(role: str) -> _Row:
             return _Row(qind, [], border_h, quote=qd, table=_TableRow([], edges, hline=True, role=role))
 
-        def text_row(row_spans: list[list[Span]]) -> _Row:
+        def band_row(cell_runs: list[list[InlineRun]], base_style: Style, band_bg: Color | None) -> _Row:
+            # Cell text carries the band bg per glyph (a grid draw_text replaces the
+            # whole cell style, so the fill alone would be erased under the text);
+            # draw() also fills the band across the row so the gaps carry it too.
             cells: list[tuple[float, float, str, list[list[Span]]]] = []
             n_lines = 1
             for j, (text_x, w, align) in enumerate(cols):
-                spans = row_spans[j] if j < len(row_spans) else []
-                lines = _wrap_spans(spans, w, measure, word=True)
+                runs = cell_runs[j] if j < len(cell_runs) else []
+                lines = _wrap_spans(to_spans(runs, base_style), w, measure, word=True)
                 n_lines = max(n_lines, len(lines))
                 cells.append((text_x, w, align, lines))
             height = n_lines * self._line_pitch + 2 * cell_pad_v
-            return _Row(qind, [], height, quote=qd, table=_TableRow(cells, edges, pad_v=cell_pad_v))
+            return _Row(
+                qind, [], height, quote=qd,
+                table=_TableRow(cells, edges, pad_v=cell_pad_v, bg=band_bg),
+            )
 
-        # A boxed table: a top rule, the header, a header/body separator, each
-        # body row, then a bottom rule. Body rows share continuous column bars but
-        # carry no inter-row horizontals (readable, and cheap to virtualize). The
-        # role picks the corner/tee/cross glyphs where the bars cross each rule.
-        rows: list[_Row] = [hline("top"), text_row(header_spans), hline("mid")]
-        for r in body_spans:
-            rows.append(text_row(r))
+        # The header always takes a distinct fill. Body rows: a vector backend
+        # rules a cheap hairline between them; a grid backend zebra-stripes them
+        # (a rule would cost a whole extra text row there).
+        header_bg = theme.control_bg
+        stripe_bg = theme.hover_bg
+        rows: list[_Row] = [
+            hline("top"),
+            band_row(tbl.header, replace(hdr, bg=header_bg), header_bg),
+            hline("mid"),
+        ]
+        for i, r in enumerate(tbl.rows):
+            if i > 0 and vector:
+                rows.append(hline("mid"))
+            band = None if vector else (stripe_bg if i % 2 == 1 else None)
+            rows.append(band_row(r, replace(base, bg=band), band))
         rows.append(hline("bottom"))
         return rows
 
@@ -1307,6 +1327,17 @@ class MarkdownView(Widget):
                     if gap > 0:
                         ctx.draw_text(col + 1, row, "─" * gap, stroke)
             return
+        # The row band (header fill or zebra stripe) is painted per cell up to the
+        # column lines but never over them, so the lines keep the surface color and
+        # the bars stay a plain stroke. A vector line is a thin stroke centered on
+        # the edge, so the fill runs to that centerline (no gap); a grid line is a
+        # whole column, so the fill stops one column short of it.
+        if tr.bg is not None:
+            inset = _TABLE_BORDER / 2.0 if ctx.vector_shapes else _TABLE_BORDER
+            end = _TABLE_BORDER / 2.0 if ctx.vector_shapes else 0.0
+            for j in range(len(tr.edges) - 1):
+                x0 = tr.edges[j] + inset
+                ctx.fill_rect(x0, y, tr.edges[j + 1] + end - x0, height, Style(bg=tr.bg))
         for text_x, w, align, lines in tr.cells:
             for li, line in enumerate(lines):
                 lw = sum(ctx.measure_text(t, st) for t, st, _ in line if t)

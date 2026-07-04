@@ -682,6 +682,67 @@ def test_table_cell_has_vertical_inner_margin_on_gui():
     assert margin_units * base_h >= 1.0  # at least one device pixel of clearance
 
 
+def test_table_rows_are_distinguished_by_background_banding(backend):
+    # Instead of an inter-row rule, the header takes a distinct fill and body
+    # rows zebra-stripe, so rows read apart without extra vertical lines.
+    panel = Panel(backend)
+    doc = "| H |\n|-|\n| r0 |\n| r1 |\n| r2 |\n"
+    panel.add(MarkdownView(doc), x=0, y=0, w=16, h=12)
+    panel.render()
+    snap = backend.snapshot()
+
+    def row_bg(needle):
+        y = next(i for i, r in enumerate(snap) if needle in r)
+        return backend.style_at(snap[y].index(needle), y).bg
+
+    assert row_bg("H") == DEFAULT_THEME.control_bg      # header band
+    assert row_bg("r0") is None                          # first body row: surface
+    assert row_bg("r1") == DEFAULT_THEME.hover_bg        # zebra stripe
+    assert row_bg("r2") is None                          # back to surface
+
+
+def test_table_uses_inter_row_lines_not_zebra_on_gui():
+    # On a vector backend rows are separated by a cheap hairline between each one
+    # (not zebra bands); only the header keeps a fill.
+    backend = _VectorBackend(width=30, height=20)
+    hrules: set[float] = set()
+    bands: list[tuple] = []
+    orig = backend.fill_rect
+
+    def spy(x, y, w, h, style=None):
+        bg = style.bg if style else None
+        if w > 1 and h < 0.5:
+            hrules.add(round(y, 2))
+        if bg in (DEFAULT_THEME.control_bg, DEFAULT_THEME.hover_bg) and w > 1:
+            bands.append(bg)
+        return orig(x, y, w, h) if style is None else orig(x, y, w, h, style)
+
+    backend.fill_rect = spy
+    panel = Panel(backend)
+    panel.add(MarkdownView("| N |\n|-|\n| a |\n| b |\n| c |\n"), x=0, y=0, w=30, h=20)
+    panel.render()
+    # top, header/body, two between the three body rows, bottom = five rules.
+    assert len(hrules) == 5
+    # Header fills; body rows do not zebra-stripe on GUI.
+    assert DEFAULT_THEME.control_bg in bands
+    assert DEFAULT_THEME.hover_bg not in bands
+
+
+def test_table_band_fill_stays_inside_the_border_columns_on_tui():
+    # The header/stripe fill must not paint over the column rules — a border
+    # column keeps the surface background.
+    backend = MemoryBackend(width=20, height=10, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+    panel.add(MarkdownView("| H | K |\n|-|-|\n| a | b |\n"), x=0, y=0, w=20, h=10)
+    panel.render()
+    snap = backend.snapshot()
+    hy = next(i for i, r in enumerate(snap) if "H" in r)
+    row = snap[hy]
+    bar_col = row.index("│")
+    assert backend.style_at(bar_col, hy).bg is None                 # rule: surface
+    assert backend.style_at(row.index("H"), hy).bg == DEFAULT_THEME.control_bg  # cell: filled
+
+
 def test_table_right_alignment(backend):
     panel = Panel(backend)
     doc = "| N |\n| --: |\n| 7 |\n"
