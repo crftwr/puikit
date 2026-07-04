@@ -86,6 +86,11 @@ class LayoutContext:
         """Width of ``text`` in base units. Falls back to the column count when the
         backend supplies no measurer (whole-unit backends: one column/char)."""
         if self.measure is not None:
+            # A caller measuring in the default font (font=None grid glyph)
+            # passes no style; let the backend apply its own default rather than
+            # forwarding None, which a font-measuring backend would dereference.
+            if style is None:
+                return self.measure(text)
             return self.measure(text, style)
         return float(len(text))
 
@@ -93,6 +98,8 @@ class LayoutContext:
         """Row pitch of ``style``'s font in base units (1.0 with no measurer or
         the base grid font), so a stacked-text widget reserves the right height."""
         if self.line_height is not None:
+            if style is None:
+                return self.line_height()
             return self.line_height(style)
         return 1.0
 
