@@ -207,3 +207,79 @@ def test_animation_kinds_carry_their_hints():
     backend.present()
     assert backend._front[0] == ("group_begin", id(scale_w), rect)
     backend.close()
+
+
+class _FakeTimer:
+    """Stand-in for NSTimer that records its interval and invalidation."""
+
+    def __init__(self, interval):
+        self.interval = interval
+        self.invalidated = False
+
+    def invalidate(self):
+        self.invalidated = True
+
+
+def _patch_nstimer(monkeypatch):
+    """Replace NSTimer so the frame timer can be exercised without a run loop."""
+    from puikit.backends import macos_backend as mb
+
+    created = []
+
+    class _FakeNSTimer:
+        @staticmethod
+        def scheduledTimerWithTimeInterval_repeats_block_(interval, repeats, block):
+            timer = _FakeTimer(interval)
+            created.append(timer)
+            return timer
+
+    monkeypatch.setattr(mb, "NSTimer", _FakeNSTimer)
+    return created
+
+
+def test_frame_timer_runs_slow_for_idle_pump_only(monkeypatch):
+    # A permanent tick callback (e.g. TFM's filesystem pump) with no animation
+    # keeps the timer alive but at the slow idle rate, not 60fps.
+    _patch_nstimer(monkeypatch)
+    backend = MacOSBackend()
+    backend.request_animation_ticks(lambda: True)
+    assert backend._anim_timer.interval == pytest.approx(MacOSBackend._IDLE_TICK_INTERVAL)
+
+
+def test_frame_timer_speeds_up_for_animation_then_slows_back(monkeypatch):
+    _patch_nstimer(monkeypatch)
+    backend = MacOSBackend()
+
+    # Idle pump established at the slow rate.
+    backend.request_animation_ticks(lambda: True)
+    idle_timer = backend._anim_timer
+    assert idle_timer.interval == pytest.approx(MacOSBackend._IDLE_TICK_INTERVAL)
+
+    # An animation starts: recreate at 60fps, retiring the slow timer.
+    backend.animate(object(), {"duration_ms": 200})
+    assert backend._anim_timer is not idle_timer
+    assert idle_timer.invalidated
+    assert backend._anim_timer.interval == pytest.approx(MacOSBackend._ANIM_INTERVAL)
+
+    # Animation finishes but the pump remains: drop back to the slow rate.
+    fast_timer = backend._anim_timer
+    backend._animations.clear()
+    backend._on_animation_tick(fast_timer)
+    assert fast_timer.invalidated
+    assert backend._anim_timer.interval == pytest.approx(MacOSBackend._IDLE_TICK_INTERVAL)
+
+
+def test_frame_timer_stops_when_nothing_left(monkeypatch):
+    _patch_nstimer(monkeypatch)
+    backend = MacOSBackend()
+
+    # Register a callback that unregisters itself on the next tick.
+    backend._tick_callbacks = [lambda: False]
+    backend._ensure_animation_timer()
+    timer = backend._anim_timer
+    assert timer is not None
+
+    backend._on_animation_tick(timer)
+    assert timer.invalidated
+    assert backend._anim_timer is None
+    assert backend._anim_timer_interval is None

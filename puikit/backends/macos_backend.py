@@ -722,6 +722,7 @@ class MacOSBackend(Backend):
         self._image_cache: dict[str, Any] = {}
         self._animations: dict[int, Animation] = {}  # keyed by id(widget)
         self._anim_timer = None
+        self._anim_timer_interval: float | None = None  # rate of the live timer
         self._tick_callbacks: list[Any] = []
         # On-screen caret position (base units) reported by the focused text
         # widget; positions the IME candidate window.
@@ -785,6 +786,7 @@ class MacOSBackend(Backend):
         if self._anim_timer is not None:
             self._anim_timer.invalidate()
             self._anim_timer = None
+        self._anim_timer_interval = None
         self._animations.clear()
         self._tick_callbacks.clear()
         if self._window is not None:
@@ -1040,11 +1042,29 @@ class MacOSBackend(Backend):
             self._tick_callbacks.append(callback)
         self._ensure_animation_timer()
 
+    #: Frame-timer rates. A live animation wants smooth 60fps; a permanent tick
+    #: callback with no animation (e.g. TFM's idle filesystem-monitoring pump)
+    #: only polls queues, so it runs far slower — 10Hz keeps reload/loading
+    #: latency imperceptible while cutting idle CPU wakeups 6x, letting macOS
+    #: coalesce timers and nap.
+    _ANIM_INTERVAL = 1 / 60.0
+    _IDLE_TICK_INTERVAL = 1 / 10.0
+
     def _ensure_animation_timer(self) -> None:
-        if self._anim_timer is not None:
+        """(Re)create the frame timer at the rate the current work needs: 60fps
+        while any animation is live, the slow idle-poll rate when only permanent
+        tick callbacks remain. Recreates the NSTimer only when the required rate
+        actually changes, so steady state costs nothing."""
+        if not self._animations and not self._tick_callbacks:
             return
+        interval = self._ANIM_INTERVAL if self._animations else self._IDLE_TICK_INTERVAL
+        if self._anim_timer is not None and self._anim_timer_interval == interval:
+            return
+        if self._anim_timer is not None:
+            self._anim_timer.invalidate()
+        self._anim_timer_interval = interval
         self._anim_timer = NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
-            1 / 60.0, True, self._on_animation_tick
+            interval, True, self._on_animation_tick
         )
 
     def _on_animation_tick(self, timer) -> None:
@@ -1076,6 +1096,12 @@ class MacOSBackend(Backend):
             # One last redraw at the final state has been requested above.
             timer.invalidate()
             self._anim_timer = None
+            self._anim_timer_interval = None
+        else:
+            # Animations that just finished leave only the idle pump behind; drop
+            # back to the slow rate so we stop waking at 60fps to poll empty
+            # queues. No-op (same rate) in steady state.
+            self._ensure_animation_timer()
 
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float,
