@@ -1425,9 +1425,17 @@ class Panel:
         # "corners" hints so the shadow silhouette matches the rounding.
         if slot.hints.get("shadow"):
             if self.backend.capabilities.supports("shadow"):
+                # The caster silhouette must be filled with the layer's own
+                # surface color so any sub-unit sliver of it left uncovered by
+                # the layer's whole-unit content fill blends in, rather than
+                # showing the backend's window-dark default as a hard fringe. A
+                # bare shadowed modal carries no surface hint, so fall back to
+                # the popup surface (what such modals paint).
+                caster_bg = self._pane_background(slot.hints) or self.theme.popup_bg
                 self.backend.draw_shadow(
                     rect.x, rect.y, rect.w, rect.h,
                     slot.hints.get("radius"), slot.hints.get("corners"),
+                    caster_bg,
                 )
             else:
                 # No real compositing: the backend darkens a one-cell halo around

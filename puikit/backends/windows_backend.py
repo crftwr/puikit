@@ -518,8 +518,9 @@ class WindowsBackend(Backend):
         h: int,
         radius: float | None = None,
         corners: tuple[str, ...] | None = None,
+        bg: tuple[int, ...] | None = None,
     ) -> None:
-        self._back.append(("shadow", x, y, w, h, radius, corners))
+        self._back.append(("shadow", x, y, w, h, radius, corners, bg))
 
     def begin_group(self, key: Any, rect: Any = None) -> None:
         self._back.append(("group_begin", id(key), rect))
@@ -807,7 +808,8 @@ class WindowsBackend(Backend):
         native.rt_fill_rectangle(self._render_target, self._unit_rect(x, y, w, h), self._brush)
 
     def _render_shadow(
-        self, x: int, y: int, w: int, h: int, radius: float | None = None, corners: tuple[str, ...] | None = None
+        self, x: int, y: int, w: int, h: int, radius: float | None = None,
+        corners: tuple[str, ...] | None = None, bg: tuple[int, ...] | None = None,
     ) -> None:
         # Approximate a blurred drop shadow with concentric, increasingly
         # transparent rect fills offset down-right — Direct2D's real Gaussian
@@ -831,9 +833,11 @@ class WindowsBackend(Backend):
                 native.rt_fill_rounded_rectangle(self._render_target, native.D2D1_ROUNDED_RECT(shadow_rect, r, r), self._brush)
             else:
                 native.rt_fill_rectangle(self._render_target, shadow_rect, self._brush)
-        # Re-fill the layer's own silhouette with the window background so the
-        # shadow only shows around its edges, not through translucent content.
-        self._set_brush(_DEFAULT_BG)
+        # Re-fill the layer's own silhouette with its surface color so the shadow
+        # only shows around its edges, not through translucent content. Use the
+        # layer's ``bg`` (not the window-dark default) so a sub-unit sliver left
+        # exposed by whole-unit content does not read as a hard dark fringe.
+        self._set_brush(bg if bg is not None else _DEFAULT_BG)
         if radius:
             r = max(0.0, min(radius, (rect.right - rect.left) / 2.0, (rect.bottom - rect.top) / 2.0))
             native.rt_fill_rounded_rectangle(self._render_target, native.D2D1_ROUNDED_RECT(rect, r, r), self._brush)

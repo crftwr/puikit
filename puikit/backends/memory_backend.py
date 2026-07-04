@@ -290,8 +290,9 @@ class MemoryBackend(Backend):
         h: int,
         radius: float | None = None,
         corners: tuple[str, ...] | None = None,
+        bg: tuple[int, ...] | None = None,
     ) -> None:
-        self.shadow_calls.append((x, y, w, h, radius, corners))
+        self.shadow_calls.append((x, y, w, h, radius, corners, bg))
 
     def animate(self, widget: Any, hints: dict[str, Any] | None = None) -> None:
         hints = hints or {}

@@ -1007,8 +1007,9 @@ class MacOSBackend(Backend):
         h: int,
         radius: float | None = None,
         corners: tuple[str, ...] | None = None,
+        bg: tuple[int, ...] | None = None,
     ) -> None:
-        self._back.append(("shadow", x, y, w, h, radius, corners))
+        self._back.append(("shadow", x, y, w, h, radius, corners, bg))
 
     def begin_group(self, key: Any, rect: Any = None) -> None:
         self._back.append(("group_begin", id(key), rect))
@@ -1418,11 +1419,17 @@ class MacOSBackend(Backend):
     def _render_shadow(
         self, x: int, y: int, w: int, h: int,
         radius: float | None = None, corners: tuple[str, ...] | None = None,
+        bg: tuple[int, ...] | None = None,
     ) -> None:
-        # Fill the layer's silhouette with the window background while an
-        # NSShadow is active; the blurred shadow remains visible around the
-        # layer content drawn on top. A rounded panel (a Drawer) passes a radius
-        # and a corner subset so the shadow follows the rounded outline.
+        # Fill the layer's silhouette while an NSShadow is active; the blurred
+        # shadow remains visible around the layer content drawn on top. A rounded
+        # panel (a Drawer) passes a radius and a corner subset so the shadow
+        # follows the rounded outline. The caster is filled with the layer's own
+        # surface color (``bg``), not the window-dark default: the content on top
+        # snaps to whole base units and can leave a sub-unit sliver of the caster
+        # exposed at the edge, which reads as a hard dark fringe (a "TUI" shadow)
+        # if the caster does not match the surface. ``bg`` is None only for a
+        # backend/caller that predates the themed caster; keep the old default.
         NSGraphicsContext.saveGraphicsState()
         shadow = NSShadow.alloc().init()
         # The view is flipped (top-left origin), so a positive Y offset casts the
@@ -1433,7 +1440,7 @@ class MacOSBackend(Backend):
         shadow.setShadowBlurRadius_(24.0)
         shadow.setShadowColor_(_ns_color((0, 0, 0), 0.33))
         shadow.set()
-        _ns_color(_DEFAULT_BG).setFill()
+        _ns_color(bg if bg is not None else _DEFAULT_BG).setFill()
         rect = self._unit_rect(x, y, w, h)
         if radius:
             r = max(0.0, min(radius, rect.size.width / 2.0, rect.size.height / 2.0))

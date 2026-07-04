@@ -256,11 +256,20 @@ class Backend(ABC):
         h: int,
         radius: float | None = None,
         corners: "tuple[str, ...] | None" = None,
+        bg: "Color | None" = None,
     ) -> None:
         """Cast a drop shadow from the layer's silhouette. ``radius`` (device
         pixels) and ``corners`` (a subset of ``"tl"``/``"tr"``/``"br"``/``"bl"``)
         round the silhouette so the shadow matches a rounded panel; ``None``
-        means a square rect / all four corners."""
+        means a square rect / all four corners.
+
+        ``bg`` is the layer's own surface color, used to fill the opaque caster
+        silhouette the shadow is cast from. It must match the color the layer
+        paints on top: the caster is only meant to be hidden behind the content,
+        but content that fills a whole-unit-snapped rect can leave a sub-unit
+        sliver of the caster exposed at the layer edge, so a mismatched (e.g.
+        hardcoded window-dark) caster reads there as a hard TUI-style fringe
+        rather than a soft shadow. ``None`` falls back to the window background."""
         raise CapabilityNotSupported("shadow")
 
     def shadow_rect(

@@ -262,7 +262,7 @@ def test_shadow_silhouette_matches_rounded_corners(side):
     show_drawer(panel, Label("x"), side=side, radius=10)
     panel.render()
     assert backend.shadow_calls, "no shadow drawn"
-    *_, radius, corners = backend.shadow_calls[0]
+    *_, radius, corners, _bg = backend.shadow_calls[0]
     assert radius == 10
     assert corners == ROUNDED_CORNERS[side]
 

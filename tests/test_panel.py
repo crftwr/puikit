@@ -204,7 +204,9 @@ def test_shadow_hint_respects_capability():
     panel = Panel(backend)
     panel.push_layer(BoxWidget(), z=10, hints={"shadow": True, "w": 8, "h": 4})
     panel.render()
-    assert backend.shadow_calls == [(6, 3, 8, 4, None, None)]
+    # The trailing element is the caster fill color: a bare modal has no surface
+    # hint, so the Panel passes the theme popup surface (see draw_shadow).
+    assert backend.shadow_calls == [(6, 3, 8, 4, None, None, panel.theme.popup_bg)]
     assert backend.shadow_rect_calls == []
 
 
