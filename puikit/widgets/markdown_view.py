@@ -184,15 +184,31 @@ class _Row:
 
 @dataclass
 class _TableRow:
-    """A laid-out table row. A ``hline`` row is a pure horizontal border (the top,
-    the header/body separator, the bottom) drawn as one rule across the table
-    width; a text row carries per-cell ``(x, width, align, wrapped_lines)`` and a
-    vertical bar at each of the shared border ``edges``. Keeping horizontals and
-    verticals on separate rows means they never collide on a character grid."""
+    """A laid-out table row. A ``hline`` row is a pure horizontal border whose
+    ``role`` (``top`` / ``mid`` / ``bottom``) picks the box-drawing junctions where
+    the column bars cross it; a text row carries per-cell ``(x, width, align,
+    wrapped_lines)`` and a vertical bar at each of the shared border ``edges``.
+    Keeping horizontals and verticals on separate grid rows means the ``│`` from a
+    text row sits directly above/below the ``┼`` of a border row and connects."""
 
     cells: list[tuple[float, float, str, list[list[Span]]]]
     edges: list[float]
     hline: bool = False
+    role: str = ""
+
+
+# Box-drawing glyph for a junction by which of its four arms carry a line. Used
+# to stroke a connected table grid on a character backend (a vector backend just
+# overlaps real strokes, so it needs none of these).
+_BOX = {
+    (0, 1, 0, 1): "┌", (0, 1, 1, 0): "┐", (1, 0, 0, 1): "└", (1, 0, 1, 0): "┘",
+    (1, 1, 0, 1): "├", (1, 1, 1, 0): "┤", (0, 1, 1, 1): "┬", (1, 0, 1, 1): "┴",
+    (1, 1, 1, 1): "┼", (0, 0, 1, 1): "─", (1, 1, 0, 0): "│",
+}
+
+
+def _box_glyph(up: bool, down: bool, left: bool, right: bool) -> str:
+    return _BOX.get((int(up), int(down), int(left), int(right)), "─")
 
 
 # --- inline parsing -----------------------------------------------------------
@@ -888,8 +904,13 @@ class MarkdownView(Widget):
                 rows.append(_Row(0.0, [], self._line_pitch, rule=True, quote=qd))
                 continue
             if sem.block == "table" and sem.table is not None:
+                # A vector backend overlaps real strokes, so its border rows need
+                # no grid cell of their own (near-zero height keeps the vertical
+                # bars of adjacent text rows touching the horizontals); a grid
+                # backend gives each border its own one-cell row for the glyphs.
+                border_h = (1.0 / max(1, ctx.base_size[1])) if ctx.vector_shapes else self._line_pitch
                 rows.extend(
-                    self._layout_table(sem.table, width - qind, measure, line_height, theme, qd)
+                    self._layout_table(sem.table, width - qind, measure, theme, qd, border_h)
                 )
                 continue
             if sem.block == "image":
@@ -956,12 +977,14 @@ class MarkdownView(Widget):
         return rows
 
     def _layout_table(
-        self, tbl: _Table, width: float, measure, line_height, theme: Theme, qd: int
+        self, tbl: _Table, width: float, measure, theme: Theme, qd: int, border_h: float
     ) -> list[_Row]:
         """Lay a GFM table out as one ``_Row`` per grid row. Columns take their
         natural content width, scaled down proportionally (with a floor) when the
         table would overflow ``width``; each cell then wraps to its column and the
-        row is as tall as its tallest cell. Border edges are shared by every row."""
+        row is as tall as its tallest cell. Border edges are shared by every row;
+        ``border_h`` is the height a horizontal-rule row reserves (thin on a
+        vector backend, a full grid cell on a character one)."""
         ncol = len(tbl.aligns)
         if ncol == 0:
             return []
@@ -1005,8 +1028,8 @@ class MarkdownView(Widget):
             x = text_x + content_w[j] + _TABLE_PAD
         edges.append(x)
 
-        def hline() -> _Row:
-            return _Row(qind, [], self._line_pitch, quote=qd, table=_TableRow([], edges, hline=True))
+        def hline(role: str) -> _Row:
+            return _Row(qind, [], border_h, quote=qd, table=_TableRow([], edges, hline=True, role=role))
 
         def text_row(row_spans: list[list[Span]]) -> _Row:
             cells: list[tuple[float, float, str, list[list[Span]]]] = []
@@ -1020,11 +1043,12 @@ class MarkdownView(Widget):
 
         # A boxed table: a top rule, the header, a header/body separator, each
         # body row, then a bottom rule. Body rows share continuous column bars but
-        # carry no inter-row horizontals (readable, and cheap to virtualize).
-        rows: list[_Row] = [hline(), text_row(header_spans), hline()]
+        # carry no inter-row horizontals (readable, and cheap to virtualize). The
+        # role picks the corner/tee/cross glyphs where the bars cross each rule.
+        rows: list[_Row] = [hline("top"), text_row(header_spans), hline("mid")]
         for r in body_spans:
             rows.append(text_row(r))
-        rows.append(hline())
+        rows.append(hline("bottom"))
         return rows
 
     # --- drawing --------------------------------------------------------------
@@ -1114,8 +1138,30 @@ class MarkdownView(Widget):
         column, then a vertical bar at every column edge."""
         stroke = Style(fg=theme.muted_text)
         if tr.hline:
-            left, right = tr.edges[0], tr.edges[-1] + _TABLE_BORDER
-            ctx.draw_hairline(left, y + height / 2.0, right - left, style=stroke)
+            cy = y + height / 2.0
+            if ctx.vector_shapes:
+                # One stroke spanning the column-bar centerlines; the (also-stroked)
+                # bars of the neighboring text rows cross it, so the frame connects
+                # with no junction glyphs of its own.
+                x0 = tr.edges[0] + _TABLE_BORDER / 2.0
+                x1 = tr.edges[-1] + _TABLE_BORDER / 2.0
+                ctx.draw_hairline(x0, cy, x1 - x0, style=stroke)
+                return
+            # Character grid: a box-drawing junction where each bar crosses this
+            # rule (top → corners/tees, mid → tees/cross, bottom → corners/tees)
+            # and a ── run filling the cells between them, so the ``│`` of the
+            # text rows above and below join into a real frame.
+            up = tr.role != "top"
+            down = tr.role != "bottom"
+            row = int(cy)
+            cols = [int(e + _TABLE_BORDER / 2.0) for e in tr.edges]
+            for j, col in enumerate(cols):
+                glyph = _box_glyph(up, down, j > 0, j < len(cols) - 1)
+                ctx.draw_text(col, row, glyph, stroke)
+                if j < len(cols) - 1:
+                    gap = cols[j + 1] - col - 1
+                    if gap > 0:
+                        ctx.draw_text(col + 1, row, "─" * gap, stroke)
             return
         for text_x, w, align, lines in tr.cells:
             for li, line in enumerate(lines):

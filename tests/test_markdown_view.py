@@ -575,6 +575,43 @@ def test_table_renders_cells_and_borders(backend):
     assert "─" in joined and "│" in joined  # boxed grid
 
 
+def test_table_uses_box_drawing_junctions_on_tui():
+    backend = MemoryBackend(width=24, height=10, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+    panel.add(MarkdownView("| A | B |\n|-|-|\n| 1 | 2 |\n"), x=0, y=0, w=24, h=10)
+    panel.render()
+    joined = "".join(backend.snapshot())
+    # A connected grid: real corners, tees, and a cross where the bars meet.
+    assert "┌" in joined and "┐" in joined  # top corners
+    assert "└" in joined and "┘" in joined  # bottom corners
+    assert "┼" in joined  # the header/body separator crossing a column bar
+
+
+def test_table_borders_are_strokes_not_glyphs_on_gui():
+    # On a vector backend the whole frame is device-thin strokes; no box glyphs.
+    backend = _VectorBackend(width=30, height=16)
+    texts: list[str] = []
+    fills: list[tuple] = []
+    orig_text, orig_fill = backend.draw_text, backend.fill_rect
+
+    def text_spy(x, y, text, style=None):
+        texts.append(text)
+        return orig_text(x, y, text) if style is None else orig_text(x, y, text, style)
+
+    def fill_spy(x, y, w, h, style=None):
+        fills.append((x, y, w, h))
+        return orig_fill(x, y, w, h) if style is None else orig_fill(x, y, w, h, style)
+
+    backend.draw_text, backend.fill_rect = text_spy, fill_spy
+    panel = Panel(backend)
+    panel.add(MarkdownView("| A | B |\n|-|-|\n| 1 | 2 |\n"), x=0, y=0, w=30, h=16)
+    panel.render()
+    joined = "".join(texts)
+    assert not any(g in joined for g in "─│┼┌┐└┘┬┴├┤")  # no box glyphs on GUI
+    assert all(cell in joined for cell in "AB12")  # cells still drawn
+    assert any(0 < w < 1.0 or 0 < h < 1.0 for _, _, w, h in fills)  # thin strokes
+
+
 def test_table_right_alignment(backend):
     panel = Panel(backend)
     doc = "| N |\n| --: |\n| 7 |\n"

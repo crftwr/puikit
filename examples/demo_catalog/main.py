@@ -786,7 +786,8 @@ same heading as `##`.
 | `Table`      |   any   |    12 |
 
 Columns take their natural width and align by the `:` markers in the delimiter
-row; the grid strokes as hairlines on GUI, box glyphs on a terminal.
+row; the frame connects — crossing hairline strokes on GUI, box-drawing corners
+and joints (`┌ ┬ ┼ ┤ ┘`) on a terminal.
 
 ## Block quotes
 
