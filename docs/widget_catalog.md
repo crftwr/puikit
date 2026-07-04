@@ -178,9 +178,10 @@ Inline mixed styles, links, flowing content.
   styles + link hrefs). `MarkdownView` introduces it and uses it to render
   Markdown: proportional prose vs. monospace code, per-level sized headings,
   block quotes/lists/rules, fenced code, **clickable hyperlinks**
-  (`Panel.open_url`, new `os_open` capability, clipboard fallback on TUI), and
-  **block images** (sized to aspect ratio via `aspect_extent`, alt glyph on
-  TUI). Virtualized over variable row heights.
+  (`Panel.open_url`, new `os_open` capability, clipboard fallback on TUI, a
+  `pointer` cursor over a link's hit rect), and **block images** (sized to aspect
+  ratio via `aspect_extent`, alt glyph on TUI). Virtualized over variable row
+  heights.
 - **Outcome:** the styled-run model now lives in `markdown_view.py`; if a second
   consumer appears, lift it (span list + wrap) into a shared helper and let
   `TextBlock` opt in, rather than duplicating it.
@@ -189,19 +190,27 @@ Inline mixed styles, links, flowing content.
 1. **Selection + copy.** `MarkdownView` cannot select text yet, unlike
    `LogView` / `TextBlock` (`_selection.py`: drag-select + `Cmd`/`Ctrl`+`C`).
    Reuse that machinery so a reader can copy passages. *(Highest-value gap.)*
-2. **Link hover affordance.** Use the `hover` capability to tint a link / show a
-   hand cursor over its hit rect. Needs a small cursor-shape hook on the backend
-   (none today) — a new, narrow capability-fallback path.
-3. **Inline images.** Only standalone `![alt](url)` lines are blocks today;
+2. **GitHub-flavored blocks.** Tables (`| a | b |`) and task lists (`- [ ]`) —
+   tables likely reuse a future `Table`/`ListView` column helper (§3.2).
+3. **More inline runs.** Strikethrough (`~~text~~`, GFM), autolinks (`<url>` and
+   bare `https://…`), and reference-style links (`[text][ref]` + `[ref]: url`
+   defs) — only inline `[text](url)` is parsed today. Small, self-contained
+   additions to `_scan_inline` / `parse_markdown`.
+4. **Inline images.** Only standalone `![alt](url)` lines are blocks today;
    support an image *run* inside a wrapped paragraph (a row whose height is the
    tallest run, image or text).
-4. **GitHub-flavored blocks.** Tables (`| a | b |`) and task lists (`- [ ]`) —
-   tables likely reuse a future `Table`/`ListView` column helper (§3.2).
 5. **Code-block polish.** A continuous background fill behind the whole block
    (not just per-glyph `bg`), and optional syntax highlighting.
-6. **More block nesting.** Nested block quotes, lists inside quotes, and setext
-   headings (`===` / `---` underline form).
-7. **Intra-document anchors.** `[jump](#section)` scrolls the view to a heading.
+6. **More block nesting.** Nested block quotes, multi-line blockquote flow (each
+   `>` line is its own semantic line today, so a quoted paragraph doesn't
+   reflow), lists inside quotes, and setext headings (`===` / `---` underline
+   form).
+7. **Hard line breaks.** A trailing two-spaces or `\` should force a break;
+   paragraph lines are always joined with a single space today.
+8. **Intra-document anchors.** `[jump](#section)` scrolls the view to a heading.
+
+*Done since the initial ship:* link hover affordance — a `pointer` cursor is set
+over a link's hit rect (`MarkdownView.draw`, `set_cursor`).
 
 #### Accordion / collapsible panel
 - **Existing flexibility?** **Yes** — `Tree` (disclosure) and `Tabs` (swapping)
