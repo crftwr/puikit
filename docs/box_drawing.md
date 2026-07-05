@@ -173,6 +173,46 @@ how a character grid fakes sub-cell shapes — and the details differ from what 
 Colors default to `_SCROLLBAR_THUMB = (150,150,150)` / `_SCROLLBAR_TRACK =
 (60,60,60)`, overridable via the passed `Style`.
 
+#### Idea: sub-cell thumb precision (not yet implemented — revisit later)
+
+Today the vertical thumb snaps to whole cells (`thumb_off` / `thumb_len` are
+`round()`ed), so on a tall list it jumps a full row at a time even though `pos` /
+`ratio` come in as floats. The lower-eighth block glyphs could land the thumb's
+two **end caps** on 1/8-cell boundaries — ~8× finer — while the thumb *body*
+stays the seamless background fill:
+
+```
+▁ ▂ ▃ ▄ ▅ ▆ ▇ █   ← LOWER {1..8}/8 BLOCK, filling from the bottom up
+```
+
+The snag: Unicode has a full *lower*-eighth set but only two *upper* blocks (`▀`
+half, `▔` one-eighth), so a thumb whose **bottom** edge lands mid-cell has no
+matching upper-fill glyph. The fix is foreground/background inversion — the same
+trick `shadow_rect` already uses for its `"top"` cell (a `▄` with the halves
+swapped by color):
+
+| Thumb boundary | Glyph | fg | bg | Result |
+|---|---|---|---|---|
+| **Top** cap (thumb covers the lower part of the cell) | lower-eighth of the *thumb* fraction | thumb | track | thumb fills the lower portion |
+| **Bottom** cap (thumb covers the upper part of the cell) | lower-eighth of the *track* remainder | track | thumb | thumb fills the upper portion |
+
+The horizontal bar has the same option with the **left**-eighth set
+(`▉▊▋▌▍▎▏`) for sub-cell position/length, orthogonal to the `▄` it uses for
+thickness.
+
+Caveats to weigh when we pick this up:
+
+- **Ambiguous width.** Block glyphs are East-Asian *Ambiguous*, so a terminal
+  that renders them at 2 cells would make a 1-column bar's cap **overflow into
+  the client area**. The current space-fill is immune (a space is unambiguous);
+  this trades that immunity for smoothness (see
+  [the ambiguous-width hazard](#the-ambiguous-width-hazard)).
+- **No color → no inversion.** The bottom-cap trick needs color; fall back to
+  whole-cell rounding on a mono terminal.
+- **Very short thumbs.** If both edges fall in the same cell you'd need a
+  mid-cell-only fill (no such glyph); the existing `max(1, …)` minimum thumb
+  length already avoids that case.
+
 ### Drop shadow (`shadow_rect`)
 
 The Panel calls `shadow_rect` for a layer carrying a "shadow" hint on a backend
