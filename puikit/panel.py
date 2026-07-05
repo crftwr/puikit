@@ -1375,7 +1375,15 @@ class Panel:
             self._draw_slot(slot)
         for divider in self._dividers:
             self._draw_divider(divider)
-        for slot in self._layers:
+        for i, slot in enumerate(self._layers):
+            # The topmost layer is modal — it owns events exclusively (see
+            # dispatch_event), so it must own the pointer shape too. Discard any
+            # cursor a widget *beneath* it requested right before it draws, so a
+            # resize/text cursor can't leak out from under the modal (including
+            # the area a non-fullscreen dialog does not cover). Only the modal's
+            # own request, gated on its hover, then survives.
+            if i == len(self._layers) - 1:
+                self._pointer_shape = None
             self._render_layer(slot)
         # Push the resolved shape to the backend once per frame. Gated on the
         # capability so the intent is a silent no-op everywhere else.

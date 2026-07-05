@@ -747,6 +747,37 @@ def test_cursor_intent_is_not_pushed_without_capability():
     assert calls == []
 
 
+class _AlwaysCursorWidget(Widget):
+    """An underlying widget that claims a cursor on every frame regardless of
+    the pointer (e.g. a pane splitter's resize affordance)."""
+
+    def draw(self, ctx):
+        ctx.set_cursor("col-resize")
+
+
+def test_modal_layer_owns_cursor_no_leak_from_beneath():
+    # A modal layer owns events exclusively, so it must own the pointer shape
+    # too: a cursor requested by a widget *underneath* it (even where a
+    # non-fullscreen dialog does not cover) must not leak through.
+    backend = _CursorBackend(width=40, height=12)
+    panel = Panel(backend)
+    panel.add(_AlwaysCursorWidget(), x=0, y=0, w=40, h=12)
+    # A small, centered (non-fullscreen) modal that only claims a cursor while
+    # hovered over itself.
+    panel.push_layer(_CursorWidget(), z=10, hints={"x": 15, "y": 4, "w": 10, "h": 4})
+
+    # Pointer outside the dialog, over the underlying always-cursor widget: the
+    # modal owns the frame, so the leaked "col-resize" is discarded.
+    panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=2.0, y=1.0))
+    panel.render()
+    assert backend.shapes[-1] is None
+
+    # Pointer inside the dialog: its own hovered request applies.
+    panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=18.0, y=5.0))
+    panel.render()
+    assert backend.shapes[-1] == "text"
+
+
 class _HairlineBackend(MemoryBackend):
     """A grid backend that keeps ``vector_shapes`` on (the base MemoryBackend
     forces it off) and records fill_rect / draw_text, so ``draw_hairline``'s
