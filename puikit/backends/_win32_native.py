@@ -1034,6 +1034,8 @@ user32.LoadCursorW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 user32.SetCursor.argtypes = [ctypes.c_void_p]
 
 user32.GetClientRect.argtypes = [HWND, ctypes.POINTER(wintypes.RECT)]
+user32.GetWindowRect.argtypes = [HWND, ctypes.POINTER(wintypes.RECT)]
+user32.GetWindowRect.restype = wintypes.BOOL
 user32.ValidateRect.argtypes = [HWND, ctypes.c_void_p]
 user32.InvalidateRect.argtypes = [HWND, ctypes.c_void_p, wintypes.BOOL]
 user32.DestroyWindow.argtypes = [HWND]

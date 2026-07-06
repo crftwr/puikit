@@ -169,6 +169,29 @@ def _register_window_class() -> None:
     _class_registered = True
 
 
+_AUTOSAVE_REGISTRY_ROOT = r"Software\PuiKit\FrameAutosave"
+
+
+def _load_autosave_rect(name: str) -> tuple[int, int, int, int] | None:
+    """Read back a frame saved by `_save_autosave_rect`, or None if unset/invalid."""
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, f"{_AUTOSAVE_REGISTRY_ROOT}\\{name}") as key:
+            value, _ = winreg.QueryValueEx(key, "Frame")
+        x, y, w, h = (int(part) for part in value.split(","))
+        return x, y, w, h
+    except (OSError, ValueError):
+        return None
+
+
+def _save_autosave_rect(name: str, x: int, y: int, w: int, h: int) -> None:
+    import winreg
+
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, f"{_AUTOSAVE_REGISTRY_ROOT}\\{name}") as key:
+        winreg.SetValueEx(key, "Frame", 0, winreg.REG_SZ, f"{x},{y},{w},{h}")
+
+
 class WindowsBackend(Backend):
     """Windows GUI backend (ctypes + Direct2D/DirectWrite). Coordinates stay
     base unit-based; this backend owns the base unit size and converts to
@@ -195,9 +218,15 @@ class WindowsBackend(Backend):
         height: int = 30,
         title: str = "PuiKit",
         base_font: Font | None = None,
+        frame_autosave_name: str | None = None,
     ):
         self._initial_size = (width, height)
         self._title = title
+        # Windows has no built-in analogue of AppKit's NSWindow frame-autosave,
+        # so this is emulated with a registry value under this name: the frame
+        # is restored from it on open() and written back to it in close().
+        # None (the default) keeps opening at the initial size with no restore.
+        self._frame_autosave_name = frame_autosave_name
         # The base font is the monospaced grid font, named with the same Font
         # descriptor a text widget uses. The base unit (the layout's length
         # unit) is derived from this font's glyph box on open.
@@ -246,15 +275,20 @@ class WindowsBackend(Backend):
         # the *client* area starts near the requested size. Layouts re-resolve
         # from the live size on each render, so this only affects the initial
         # frame the user sees before any resize.
+        x, y, w, h = 100, 100, w_px + 16, h_px + 39
+        if self._frame_autosave_name:
+            saved = _load_autosave_rect(self._frame_autosave_name)
+            if saved is not None:
+                x, y, w, h = saved
         self._hwnd = native.user32.CreateWindowExW(
             0,
             _CLASS_NAME,
             self._title,
             native.WS_OVERLAPPEDWINDOW,
-            100,
-            100,
-            w_px + 16,
-            h_px + 39,
+            x,
+            y,
+            w,
+            h,
             None,
             None,
             native.get_module_handle(),
@@ -272,6 +306,16 @@ class WindowsBackend(Backend):
         native.user32.UpdateWindow(self._hwnd)
 
     def close(self) -> None:
+        if self._frame_autosave_name and self._hwnd:
+            rect = wintypes.RECT()
+            if native.user32.GetWindowRect(self._hwnd, ctypes.byref(rect)):
+                _save_autosave_rect(
+                    self._frame_autosave_name,
+                    rect.left,
+                    rect.top,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top,
+                )
         if self._anim_timer_running and self._hwnd:
             native.user32.KillTimer(self._hwnd, _TIMER_ID)
         self._anim_timer_running = False
