@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import ctypes
 import math
+import threading
 import time
 from ctypes import wintypes
 from collections.abc import Callable
@@ -139,6 +140,11 @@ _class_registered = False
 _ERROR_CLASS_ALREADY_EXISTS = 1410
 _hwnd_backends: dict[int, "WindowsBackend"] = {}
 
+# Custom message used to wake the UI thread's GetMessage loop when a worker
+# thread schedules a callback via call_on_main_thread; PostMessageW queues it
+# on the window-owning thread regardless of what that thread is blocked on.
+_WM_CALL_ON_MAIN_THREAD = native.WM_APP + 1
+
 
 def _global_wndproc(hwnd: int, msg: int, wparam: int, lparam: int) -> int:
     backend = _hwnd_backends.get(hwnd)
@@ -240,6 +246,8 @@ class WindowsBackend(Backend):
         self._brush: Any = None
         self._handler: EventHandler | None = None
         self._quit_requested = False
+        self._main_thread_lock = threading.Lock()
+        self._main_thread_callbacks: list[Callable[[], None]] = []
         # Display list double buffer: widgets fill `_back`, WM_PAINT reads `_front`.
         self._back: list[tuple] = []
         self._front: list[tuple] = []
@@ -1201,6 +1209,9 @@ class WindowsBackend(Backend):
         if msg == native.WM_TIMER:
             self._on_animation_tick()
             return 0
+        if msg == _WM_CALL_ON_MAIN_THREAD:
+            self._drain_main_thread_callbacks()
+            return 0
         if msg == native.WM_COMMAND:
             if self._menu_responder is not None:
                 self._menu_responder.fire(native.loword(wparam))
@@ -1261,3 +1272,19 @@ class WindowsBackend(Backend):
     def quit(self) -> None:
         self._quit_requested = True
         native.user32.PostQuitMessage(0)
+
+    def call_on_main_thread(self, callback: Callable[[], None]) -> None:
+        # Queue the callback and post a message to wake GetMessageW/PeekMessageW
+        # on the window-owning (UI) thread, which drains the queue from
+        # _handle_message — the Windows analogue of macOS's performSelector-
+        # OnMainThread / AppHelper.callAfter.
+        with self._main_thread_lock:
+            self._main_thread_callbacks.append(callback)
+        if self._hwnd:
+            native.user32.PostMessageW(self._hwnd, _WM_CALL_ON_MAIN_THREAD, 0, 0)
+
+    def _drain_main_thread_callbacks(self) -> None:
+        with self._main_thread_lock:
+            callbacks, self._main_thread_callbacks = self._main_thread_callbacks, []
+        for callback in callbacks:
+            callback()
