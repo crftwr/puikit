@@ -12,8 +12,9 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from .backend import Backend, DEFAULT_STYLE, Style, TextAttribute
+from .backend import Backend, Color, DEFAULT_STYLE, Style, TextAttribute, is_transparent
 from .capability import CapabilityProfile
+from .color import LC_BODY, LC_LARGE, LC_MIN_NONTEXT, legible_ink
 from .event import Event, EventType
 from .focus import FocusContainer, focus_on_click, move_focus
 from .font import Font, FontSlant, FontWeight
@@ -103,6 +104,18 @@ def _intersect(a: Rect, b: Rect) -> Rect | None:
     return Rect(x0, y0, x1 - x0, y1 - y0)
 
 
+def _auto_ink_target(attr: TextAttribute) -> float:
+    """The legibility floor auto-ink holds a text run to, read from its weight:
+    dimmed text is deliberately de-emphasized (a low floor keeps it faint but not
+    invisible), bold/large text needs less contrast to read than body, and
+    everything else is body text."""
+    if attr & TextAttribute.DIM:
+        return LC_MIN_NONTEXT
+    if attr & TextAttribute.BOLD:
+        return LC_LARGE
+    return LC_BODY
+
+
 class DrawContext:
     """Drawing surface handed to a widget, translated to the widget's origin
     and clipped to its rectangle. Capability fallbacks live here."""
@@ -143,7 +156,7 @@ class DrawContext:
         # interior clip); the Panel pops them when the widget's draw returns.
         self._pushed_clips = 0
 
-    def _text_style(self, style: Style) -> Style:
+    def _text_style(self, style: Style, ink: bool = True) -> Style:
         """Resolve a Style for drawing/measuring *text*: the shared `_resolve`
         seam, plus a theme-driven default foreground. A text run that names no
         color inherits the theme's text color, the same way it inherits the
@@ -154,7 +167,21 @@ class DrawContext:
         selects the backend's own default) keep using `_resolve` directly."""
         if style.fg is None and self._panel is not None and self._panel.theme is not None:
             style = Style(self._panel.theme.text, style.bg, style.attr, style.font)
-        return self._resolve(style)
+        resolved = self._resolve(style)
+        # Opt-in auto-ink: with the final foreground and its opaque background both
+        # known, lift the foreground to a weight-aware legibility floor. Floor-only
+        # (a color that already reads is returned unchanged) and skipped when there
+        # is no concrete background to contrast against — including a transparent
+        # fill, where the glyphs land on whatever a widget painted underneath and
+        # that widget owns the contrast (e.g. a cursor row that strokes an outline
+        # over its own fill).
+        if (ink and self._panel is not None and getattr(self._panel, "auto_ink", False)
+                and resolved.fg is not None and resolved.bg is not None
+                and not is_transparent(resolved.fg) and not is_transparent(resolved.bg)):
+            inked = legible_ink(resolved.fg, resolved.bg, _auto_ink_target(resolved.attr))
+            if inked != resolved.fg:
+                resolved = Style(inked, resolved.bg, resolved.attr, resolved.font)
+        return resolved
 
     def _resolve(self, style: Style) -> Style:
         """The single seam every Style crosses before the backend sees it:
@@ -359,6 +386,23 @@ class DrawContext:
         default shows through)."""
         return self._background
 
+    def ink(self, color: Color, *, on: Color | None = None, target: float = LC_BODY) -> Color:
+        """Return ``color`` adjusted to stay legible on the surface it will paint
+        on — ``on`` if given, else this pane's :attr:`background`. Floor-only: a
+        color that already meets the APCA ``target`` (Lc) is returned unchanged,
+        so a theme's designed hues are preserved wherever they already read and
+        only lifted — hue kept, chroma spent minimally — where they would not.
+
+        A widget that paints its own local fill (a selection tint, a highlight)
+        passes that fill as ``on`` so its text contrasts against what is actually
+        behind it, not the pane default. Pass ``target=LC_LARGE`` for large/bold
+        chrome, ``LC_BODY`` for body text. See :func:`puikit.color.legible_ink`.
+        """
+        bg = on if on is not None else self._background
+        if bg is None:
+            return color  # no known background to contrast against; leave as-is
+        return legible_ink(color, bg, target)
+
     def layout_context(self) -> "Any":
         """Build a LayoutContext matching this backend's capabilities, so a
         widget can resolve a nested puikit.layout Split against its own rect
@@ -400,7 +444,12 @@ class DrawContext:
         columns; the font is folded first, matching what draw_text will draw."""
         return self._backend.measure_text(text, self._resolve(style))
 
-    def draw_text(self, x: float, y: float, text: str, style: Style = DEFAULT_STYLE) -> None:
+    def draw_text(self, x: float, y: float, text: str, style: Style = DEFAULT_STYLE,
+                  *, ink: bool = True) -> None:
+        # ``ink=False`` opts this run out of auto-ink (see Panel.auto_ink): the
+        # color is drawn exactly as given, for text whose palette a widget owns
+        # deliberately — syntax highlighting, a color legend — and does not want
+        # normalized to a contrast floor.
         # Gate on the exact (possibly fractional) extent and let the
         # backend's clip rect cut the overflow: a pane squeezed to 0.97
         # base units by pixel rounding must still render its row 0, clipped at
@@ -411,7 +460,7 @@ class DrawContext:
         # the slice math is taken in whole cells so truncation stays grid-safe.
         if not -1 < y < self._rect.h:
             return
-        resolved = self._text_style(style)
+        resolved = self._text_style(style, ink=ink)
         if resolved.font is not None:
             # Proportional / sized flow text: a character is not one base unit
             # wide, so slicing by ceil(width) columns would chop trailing glyphs
@@ -1085,6 +1134,13 @@ class Panel:
         # themes separate surfaces with hairlines, TUI themes with
         # background contrast (a line would cost a whole base unit row/column).
         self.theme = theme if theme is not None else theme_for(backend.capabilities)
+        # Opt-in legibility guarantee (off by default so existing apps render
+        # byte-for-byte as before). When set, every text run is passed through
+        # legible_ink against its own resolved background at draw time, with a
+        # weight-aware target — so a widget states the color it *wants* and the
+        # draw layer keeps it readable on any theme. See DrawContext._text_style
+        # and docs/color_system.md.
+        self.auto_ink: bool = False
         self._children: list[_Slot] = []
         self._layers: list[_Slot] = []
         self._dividers: list[Any] = []

@@ -20,6 +20,7 @@ from typing import Any
 
 from .backend import Color
 from .capability import CapabilityProfile
+from .color import LC_LARGE, ensure_text_headroom
 
 
 @dataclass(frozen=True)
@@ -206,7 +207,12 @@ def derive_theme(
             "content": background,
             "sidebar": surface,
             "header": lift(surface, 0.12),
-            "status": accent,
+            # The status bar is the accent, but a mid-luminance accent (e.g.
+            # Dracula's light purple) can't bear legible text — deepen it toward
+            # the background just enough to clear the chrome contrast floor. Vivid
+            # accents that already have the headroom are untouched. See the recipe
+            # layer in docs/color_system.md §7.
+            "status": ensure_text_headroom(accent, background, LC_LARGE),
         },
         divider_color=_mix(surface, muted, 0.5),
         accent=accent,

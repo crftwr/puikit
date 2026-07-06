@@ -439,7 +439,8 @@ puikit/
 │   ├── panel.py          # Panel / Layout / Layer management
 │   ├── backend.py        # Backend interface definition
 │   ├── capability.py     # CapabilityProfile definitions
-│   ├── theme.py          # surface roles → per-backend colors
+│   ├── theme.py          # surface roles → per-backend colors; headroom recipe (docs/color_system.md)
+│   ├── color.py          # APCA/OKLab legibility math: legible_ink, ensure_text_headroom (docs/color_system.md)
 │   ├── event.py          # Event model
 │   ├── widgets/          # Shared widget library
 │   │   ├── __init__.py
