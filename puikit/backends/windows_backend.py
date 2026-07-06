@@ -224,6 +224,7 @@ class WindowsBackend(Backend):
         height: int = 30,
         title: str = "PuiKit",
         base_font: Font | None = None,
+        ui_font: Font | None = None,
         frame_autosave_name: str | None = None,
     ):
         self._initial_size = (width, height)
@@ -237,6 +238,10 @@ class WindowsBackend(Backend):
         # descriptor a text widget uses. The base unit (the layout's length
         # unit) is derived from this font's glyph box on open.
         self._base_font = base_font or Font(size=14.0, monospace=True)
+        # Default *proportional* face for an unnamed non-monospace Font() (see
+        # _font_params). None keeps the OS UI font (Segoe UI). Only its family is
+        # read; size comes from the base font.
+        self._ui_font = ui_font
         self._base_w = 1.0
         self._base_h = 1.0
         self._hwnd = 0
@@ -380,12 +385,17 @@ class WindowsBackend(Backend):
         size = float(font.size) if font.size is not None else self._base_size_pt()
         weight = int(font.weight)
         italic = font.italic
-        if font.family:
-            family = font.family
-        elif font.monospace:
-            family = "Consolas"
-        else:
-            family = "Segoe UI"
+        # A Style that names no family falls back to the backend's configured
+        # default face for its role — the base (mono/grid) font for a monospace
+        # request, the ui_font for a proportional one — so widgets share one
+        # configurable pair. A default that itself names no family drops to the
+        # OS system monospaced / UI face.
+        family = font.family
+        if family is None:
+            default = self._base_font if font.monospace else self._ui_font
+            family = default.family if default is not None else None
+        if family is None:
+            family = "Consolas" if font.monospace else "Segoe UI"
         return family, weight, italic, size
 
     def _create_text_format(self, font: Font, bold: bool = False, italic: bool = False) -> Any:

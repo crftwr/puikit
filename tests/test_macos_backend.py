@@ -41,6 +41,23 @@ def test_resolve_font_honors_monospace_and_proportional():
     assert not prop.isFixedPitch()
 
 
+def test_resolve_font_uses_configured_default_faces():
+    # An unnamed Font() resolves to the configured ui_font family, and an unnamed
+    # Font(monospace=True) to the base (mono) font family — so widgets share one
+    # configurable pair of faces instead of each hardcoding the OS system font.
+    backend = MacOSBackend(
+        base_font=Font(family="Menlo", size=13, monospace=True),
+        ui_font=Font(family="Helvetica Neue"),
+    )
+    assert backend.resolve_font(Font()).familyName() == "Helvetica Neue"
+    assert backend.resolve_font(Font(monospace=True)).familyName() == "Menlo"
+    # An explicit family still wins over the defaults.
+    assert backend.resolve_font(Font(family="Georgia")).familyName() == "Georgia"
+    # ui_font=None keeps the OS system UI font (still proportional).
+    b2 = MacOSBackend(base_font=Font(family="Menlo", size=13, monospace=True))
+    assert not b2.resolve_font(Font()).isFixedPitch()
+
+
 def test_resolve_font_applies_weight_and_slant():
     backend = MacOSBackend()
     bold = backend.resolve_font(Font(weight=FontWeight.BOLD))

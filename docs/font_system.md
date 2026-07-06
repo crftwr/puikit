@@ -119,14 +119,24 @@ Field semantics per backend:
 | `slant`     | real italic / oblique                  | `ITALIC` → italic attribute        |
 | `monospace` | choose monospaced vs. proportional UI font | ignored (always monospaced)    |
 
-`Font()` with all defaults means "the backend's default UI font" — which is
-**proportional** on GUI. The framework's *base* font is the monospaced grid
-font that **defines** the base unit on GUI (§3); it is named with the same
-`Font` descriptor and set on the backend constructor:
+`Font()` with all defaults means "the backend's default **proportional** UI
+font"; an unnamed `Font(monospace=True)` means "the backend's default **mono**
+face". Both defaults are **configurable** on the backend constructor: `base_font`
+is the monospaced grid font that also **defines** the base unit on GUI (§3), and
+`ui_font` is the default proportional face. A default that itself names no family
+drops to the OS system face (SF Mono / San Francisco on macOS):
 
 ```python
-MacOSBackend(base_font=Font(family="SF Mono", size=14, monospace=True))
+MacOSBackend(
+    base_font=Font(family="Menlo", size=14, monospace=True),  # default mono + grid
+    ui_font=Font(family="Helvetica Neue"),                    # default proportional
+)
 ```
+
+So an unnamed `Font()` resolves to `ui_font`, and an unnamed `Font(monospace=True)`
+to `base_font`'s family — every widget shares one configurable pair of faces
+instead of hardcoding the OS system font. Only the family is taken from the
+defaults; the size is the shared base size, so both still scale together.
 
 **The GUI default.** A Style that carries **no** font (`font=None`) does *not*
 render in the monospaced base font on GUI — the Panel substitutes the

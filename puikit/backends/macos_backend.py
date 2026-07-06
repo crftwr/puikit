@@ -677,7 +677,8 @@ class MacOSBackend(Backend):
         return CapabilityProfile({**self.PROFILE, "animation": False})
 
     def __init__(self, width: int = 100, height: int = 30, title: str = "PuiKit",
-                 base_font: Font | None = None, frame_autosave_name: str | None = None):
+                 base_font: Font | None = None, ui_font: Font | None = None,
+                 frame_autosave_name: str | None = None):
         self._initial_size = (width, height)
         self._title = title
         # When set, AppKit persists this window's frame (position + size) to the
@@ -690,6 +691,13 @@ class MacOSBackend(Backend):
         # unit) is derived from this font's glyph box on open (base font ->
         # base unit); per-Style proportional fonts never affect it.
         self._base_font = base_font or Font(size=14.0, monospace=True)
+        # The UI font is the default *proportional* face: what an unnamed,
+        # non-monospace Font() resolves to (markdown prose, message-box text, a
+        # plain label). None keeps the OS system UI font. Only its family is read
+        # — size comes from the base font (both share one size), so a Font() still
+        # scales with base_font. (base_font above is likewise the default mono
+        # face an unnamed Font(monospace=True) resolves to.)
+        self._ui_font = ui_font
         self._base_w = 1.0
         self._base_h = 1.0
         self._window = None
@@ -806,11 +814,14 @@ class MacOSBackend(Backend):
         """Turn a Font descriptor into a native NSFont. Shared by the base font
         and per-Style widget fonts, so both name fonts the same way.
 
-        ``family`` is honored if installed. With no family, ``monospace``
-        chooses between the system monospaced face (the base grid font, which
-        must stay fixed-advance to tile the grid) and the proportional system
-        UI font (``Font()`` defaults). ``bold``/``italic`` force those traits
-        on top of the descriptor.
+        ``family`` is honored if installed. With no family, the request falls
+        back to the backend's configured **default face** for its role: the base
+        (mono/grid) font for a ``monospace`` request, the ``ui_font`` for a
+        proportional one — so widgets share one configurable pair of fonts
+        instead of each hardcoding the OS system face. When that default itself
+        names no family, it drops to the OS system monospaced / UI font (the base
+        grid font must stay fixed-advance to tile the grid). ``bold``/``italic``
+        force those traits on top of the descriptor.
 
         A font that names no size inherits the **base font's** size — the same
         size the base grid unit is derived from — so an unsized ``Font()`` (the
@@ -819,9 +830,13 @@ class MacOSBackend(Backend):
         size = float(font.size) if font.size is not None else self._base_size_pt()
         want_bold = bold or font.bold
         weight = NSFontWeightBold if want_bold else NSFontWeightRegular
+        family = font.family
+        if family is None:
+            default = self._base_font if font.monospace else self._ui_font
+            family = default.family if default is not None else None
         ns = None
-        if font.family:
-            ns = NSFont.fontWithName_size_(font.family, size)
+        if family:
+            ns = NSFont.fontWithName_size_(family, size)
         if ns is None:
             if font.monospace:
                 ns = (
