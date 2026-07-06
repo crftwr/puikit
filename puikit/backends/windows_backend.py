@@ -313,7 +313,7 @@ class WindowsBackend(Backend):
         native.user32.ShowWindow(self._hwnd, native.SW_SHOW)
         native.user32.UpdateWindow(self._hwnd)
 
-    def close(self) -> None:
+    def _save_autosave_frame(self) -> None:
         if self._frame_autosave_name and self._hwnd:
             rect = wintypes.RECT()
             if native.user32.GetWindowRect(self._hwnd, ctypes.byref(rect)):
@@ -324,6 +324,9 @@ class WindowsBackend(Backend):
                     rect.right - rect.left,
                     rect.bottom - rect.top,
                 )
+
+    def close(self) -> None:
+        self._save_autosave_frame()
         if self._anim_timer_running and self._hwnd:
             native.user32.KillTimer(self._hwnd, _TIMER_ID)
         self._anim_timer_running = False
@@ -1201,6 +1204,10 @@ class WindowsBackend(Backend):
             self._dispatch(Event(type=EventType.RESIZE, hints={"w": sw, "h": sh}))
             return 0
         if msg == native.WM_CLOSE:
+            # DestroyWindow tears the window down synchronously (WM_DESTROY
+            # fires before it returns), so the frame must be captured now —
+            # by the time close() runs, GetWindowRect on this hwnd fails.
+            self._save_autosave_frame()
             native.user32.DestroyWindow(hwnd)
             return 0
         if msg == native.WM_DESTROY:
