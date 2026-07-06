@@ -69,3 +69,35 @@ def test_per_draw_ink_false_opts_out():
     # (syntax highlighting, color legends); ink=True on the same color is lifted.
     assert _render(DIM_FG, ink=False) == DIM_FG
     assert _render(DIM_FG, ink=True) != DIM_FG
+
+
+def test_frame_divider_matches_box_border_under_auto_ink():
+    # A frame divider (a dialog's title-bar rule) is a structural line, not text:
+    # with auto_ink on it must render the exact popup_border color, identical to
+    # the box frame it joins — not get lifted to a text floor, which showed the
+    # rule in a different color than the surrounding frame.
+    from puikit.color import LC_BODY, apca_lc, legible_ink
+    from puikit.theme import THEME_TUI
+
+    border, bg = THEME_TUI.popup_border, THEME_TUI.popup_bg
+    # Meaningful only if the border would otherwise be lifted (it's a dim line).
+    assert abs(apca_lc(border, bg)) < LC_BODY
+    assert legible_ink(border, bg, LC_BODY) != border
+
+    class _Frame(Widget):
+        def draw(self, ctx):
+            ctx.draw_box(0, 0, ctx.width, ctx.height,
+                         Style(bg=bg, fg=border), hints={"fill": True})
+            ctx.draw_frame_divider(2, Style(fg=border, bg=bg))
+
+    backend = MemoryBackend(width=12, height=5)
+    panel = Panel(backend, theme=THEME_TUI)
+    panel.auto_ink = True
+    panel.set_layout(VSplit(Item(_Frame(), hints={"surface": "content"})))
+    panel.render()
+
+    box_line = backend.style_at(2, 0).fg     # a '─' in the box top border
+    rule_line = backend.style_at(2, 2).fg    # a '─' in the frame divider
+    assert box_line == border                # frame border not lifted
+    assert rule_line == border               # divider not lifted (the fix)
+    assert rule_line == box_line             # …so the two match

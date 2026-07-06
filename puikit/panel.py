@@ -685,14 +685,17 @@ class DrawContext:
                 lh = 1.0 / max(1, bh)
                 self.fill_rect(x, y - lh / 2.0, length, lh, Style(bg=color))
             return
-        # Grid: the box-drawing run, in the cell the centerline falls in.
+        # Grid: the box-drawing run, in the cell the centerline falls in. Drawn
+        # with ink=False — a divider is a structural line, not text; its color is
+        # a deliberate subtle line color and must render exactly (and match the box
+        # frame, which resolves without auto-ink), not be lifted to a text floor.
         n = max(1, int(round(length)))
         if vertical:
             col = int(x)
             for row in range(n):
-                self.draw_text(col, int(y) + row, "│", style)
+                self.draw_text(col, int(y) + row, "│", style, ink=False)
         else:
-            self.draw_text(x, int(y), "─" * n, style)
+            self.draw_text(x, int(y), "─" * n, style, ink=False)
 
     def draw_frame_divider(self, y: float, style: Style = DEFAULT_STYLE) -> None:
         """A horizontal rule spanning this context edge to edge that **connects
@@ -729,10 +732,13 @@ class DrawContext:
         # Grid: box-drawing run with tee ends so it fuses with the single-line
         # frame. Carry style.bg so the glyphs sit on the dialog surface, not the
         # layer's default fill (an fg-only style would paint a dark band on TUI).
+        # ink=False: the rule is part of the frame — a structural line whose color
+        # must match the box border exactly, not be lifted to a text contrast floor
+        # (the box border resolves without auto-ink, so the rule must too).
         w = self.width
         if w < 2:
             return
-        self.draw_text(0, int(y), "├" + "─" * (w - 2) + "┤", Style(fg=color, bg=style.bg))
+        self.draw_text(0, int(y), "├" + "─" * (w - 2) + "┤", Style(fg=color, bg=style.bg), ink=False)
 
     def draw_focus_brackets(
         self,

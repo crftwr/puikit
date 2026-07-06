@@ -192,28 +192,48 @@ Two explicit escape hatches sit alongside the automatic path:
 
 ## 7. The recipe layer — `derive_theme`
 
-`derive_theme` builds a full `Theme` from six base colors (background,
-foreground, muted, accent, surface, selection); every other color is a
-lighten/darken/blend of these. The legibility-relevant recipe is the **status
-surface**:
+`derive_theme` builds a full `Theme` from a small palette — background,
+foreground, muted, accent, surface, selection, and an optional **`accent2`**
+(a secondary hue, defaulting to the accent); every other color is a
+lighten/darken/blend of these. This is the **recipe seam**: a theme keeps the
+defaults it likes and re-derives any field with its own expression over the
+palette. `mix` and `lift` are exported for exactly that.
+
+The two chrome bars are separate surface roles — a global **`status`** bar and a
+per-pane **`footer`** — and both *default* to the accent. A theme overrides
+either through a `surfaces=` override, so its bars can be anything expressible
+over the palette:
 
 ```python
-"status": ensure_text_headroom(accent, background, LC_LARGE),
+# accent status bar, but a neutral gray footer
+derive_theme(**palette, surfaces={"footer": mix(background, foreground, 0.16)})
+
+# both bars an 80/20 blend of the background and the secondary accent
+derive_theme(**palette, accent2=cyan,
+             surfaces={"status": mix(background, accent2, 0.20),
+                       "footer": mix(background, accent2, 0.20)})
 ```
 
-The status bar *is* the accent — but a mid-luminance accent (a light purple, a
-pale cyan) cannot bear legible text at any polarity. `ensure_text_headroom`
-deepens such an accent toward the background just enough to clear the chrome
-floor, and leaves a vivid accent (which already has the headroom) exactly as the
-accent. So the status bar stays the recognizable accent on the themes where that
-works and becomes a slightly deeper accent only where it must.
+Whatever recipe a theme names, `derive_theme` runs a **headroom pass last** over
+the text-bearing bars:
 
-An app can apply the same primitive to any background it derives itself. A file
-manager's selection fill, for instance — the pane background tinted toward the
-accent — lands mid-luminance on a light theme and can't carry a row's body text;
-running it back through `ensure_text_headroom(tint, background, LC_BODY)` nudges
-it toward the background just enough, a no-op on the dark themes where the tint
-already has headroom.
+```python
+for role in ("status", "footer"):
+    surfaces[role] = ensure_text_headroom(surfaces[role], background, LC_LARGE)
+```
+
+So a bar that lands mid-luminance — a light-purple accent, or an accent2 blend —
+is deepened toward the background just enough to bear chrome text, while a bar
+that already has the headroom (a vivid accent, a dark blend) is left exactly as
+the recipe drew it. **A theme picks the look; the recipe layer guarantees it's
+legible** — the recipe author never has to check contrast by hand.
+
+The same primitive applies to any background an *app* derives itself. A file
+manager's selection fill — the pane background tinted toward the accent — lands
+mid-luminance on a light theme and can't carry a row's body text; running it back
+through `ensure_text_headroom(tint, background, LC_BODY)` nudges it toward the
+background just enough, a no-op on the dark themes where the tint already has
+headroom.
 
 ---
 

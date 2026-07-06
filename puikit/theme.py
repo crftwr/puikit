@@ -38,6 +38,11 @@ class Theme:
 
     # --- control palette (VS Code Dark+) -------------------------------------
     accent: Color = (0, 122, 204)          # focus ring / primary accent #007ACC
+    # A secondary accent, available to theme recipes for a chrome bar that a
+    # theme wants tinted off a *different* hue than the primary accent (see
+    # docs/color_system.md §7). Defaults to the primary accent, so a theme that
+    # names no second accent behaves exactly as before.
+    accent2: Color = (0, 122, 204)
     text: Color = (212, 212, 212)          # default control foreground  #D4D4D4
     muted_text: Color = (157, 157, 157)    # secondary text              #9D9D9D
     # Text field / dropdown / combo face. Lifted well above the base content
@@ -156,6 +161,11 @@ def _mix(a: Color, b: Color, t: float) -> Color:
     )
 
 
+#: Public alias: theme recipes blend palette colors with ``mix`` / ``lift``
+#: (e.g. ``mix(background, accent2, 0.2)`` for an 80/20 chrome bar).
+mix = _mix
+
+
 def lift(c: Color, amt: float, *, dark: bool | None = None) -> Color:
     """Raise a color away from its background toward the contrast pole: lighter on
     a dark surface (which has the headroom), darker — and only half as far, so
@@ -176,25 +186,35 @@ def derive_theme(
     accent: Color,
     surface: Color,
     selection: Color,
+    accent2: Color | None = None,
     **overrides: Any,
 ) -> Theme:
-    """Build a full :class:`Theme` from six base colors.
+    """Build a full :class:`Theme` from six base colors (plus an optional second
+    accent).
 
     - ``background`` — the content surface; its luminance also picks the lift
       *direction* (a dark theme raises elements lighter, a light theme darker).
     - ``foreground`` — primary text.
     - ``muted`` — secondary text / dividers (its own base because several themes
       use a designed "comment" gray that is not a plain fg↔bg blend).
-    - ``accent`` — focus rings, primary button, status bar.
+    - ``accent`` — focus rings, primary button, and the default status/footer bar.
     - ``surface`` — the raised panel shade (sidebar / header / popup / inputs
       derive from it).
     - ``selection`` — the active list/text selection fill.
+    - ``accent2`` — an optional secondary accent for chrome recipes (a theme that
+      tints its footer off a different hue); defaults to ``accent``.
 
     Every other color is a lighten/darken/blend of these. Pass any concrete
     :class:`Theme` field name as a keyword to override its derived value; a
     ``surfaces`` override merges per-role rather than replacing the whole dict.
+    This is the recipe seam: a theme keeps the defaults it likes and re-derives
+    the ``status`` / ``footer`` surfaces (or any field) with its own expression
+    over the palette — ``mix`` / ``lift`` are exported for exactly that. Whatever
+    a theme names for a text-bearing chrome bar, the headroom pass below keeps it
+    legible. See docs/color_system.md §7.
     """
     dark = _lum(background) < 128
+    accent2 = accent if accent2 is None else accent2
 
     def lift(c: Color, amt: float) -> Color:
         # Raise an element away from the background toward the contrast pole:
@@ -207,15 +227,19 @@ def derive_theme(
             "content": background,
             "sidebar": surface,
             "header": lift(surface, 0.12),
-            # The status bar is the accent, but a mid-luminance accent (e.g.
-            # Dracula's light purple) can't bear legible text — deepen it toward
-            # the background just enough to clear the chrome contrast floor. Vivid
-            # accents that already have the headroom are untouched. See the recipe
-            # layer in docs/color_system.md §7.
-            "status": ensure_text_headroom(accent, background, LC_LARGE),
+            # Both chrome bars default to the accent; a theme overrides "status"
+            # and/or "footer" with its own recipe (a neutral gray, an accent2
+            # blend, …) via a `surfaces=` override. The headroom pass below runs
+            # last, so whatever a theme names for a text-bearing bar is guaranteed
+            # enough contrast — a mid-luminance accent (Dracula's light purple) or
+            # an accent2 blend is deepened toward the background just enough to
+            # clear the chrome floor; a vivid accent is left untouched.
+            "status": accent,
+            "footer": accent,
         },
         divider_color=_mix(surface, muted, 0.5),
         accent=accent,
+        accent2=accent2,
         text=foreground,
         muted_text=muted,
         control_bg=lift(background, 0.18),
@@ -253,6 +277,13 @@ def derive_theme(
     if "surfaces" in overrides:
         derived["surfaces"] = {**derived["surfaces"], **overrides.pop("surfaces")}
     derived.update(overrides)
+    # Headroom pass, last: whatever recipe produced the status/footer bars — the
+    # default accent or a theme's own blend — deepen it toward the background if
+    # it can't bear chrome text, so a theme can pick any recipe and still get a
+    # legible bar for free (floor-only; a bar with headroom is untouched).
+    for role in ("status", "footer"):
+        derived["surfaces"][role] = ensure_text_headroom(
+            derived["surfaces"][role], background, LC_LARGE)
     return Theme(**derived)
 
 
