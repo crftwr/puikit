@@ -98,7 +98,8 @@ class LayoutView(FocusContainer, Widget):
     def handle_event(self, event: Event) -> bool:
         if event.type in (
             EventType.MOUSE_DOWN, EventType.MOUSE_UP,
-            EventType.MOUSE_CLICK, EventType.MOUSE_DRAG, EventType.MOUSE_SCROLL
+            EventType.MOUSE_CLICK, EventType.MOUSE_DRAG, EventType.MOUSE_SCROLL,
+            EventType.FILE_DROP,
         ):
             for widget, rect in reversed(self._placements):
                 if event.x is not None and rect.contains(event.x, event.y):

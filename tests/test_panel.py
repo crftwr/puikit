@@ -140,6 +140,23 @@ def test_topmost_layer_receives_events_exclusively():
     assert dialog.events and not below.events
 
 
+def test_file_drop_is_routed_to_widget_under_pointer():
+    # A FILE_DROP is a positioned event: it routes to the widget under its point
+    # like a mouse event, translated to widget-local coordinates, carrying the
+    # dropped paths in hints.
+    backend = MemoryBackend(width=20, height=10)
+    panel = Panel(backend)
+    recorder = Recorder()
+    panel.add(recorder, x=5, y=2, w=10, h=5)
+    consumed = panel.dispatch_event(
+        Event(type=EventType.FILE_DROP, x=7, y=4, hints={"paths": ["/a/b.txt"]})
+    )
+    assert consumed
+    assert recorder.events[0].type is EventType.FILE_DROP
+    assert recorder.events[0].x == 2 and recorder.events[0].y == 2
+    assert recorder.events[0].hints["paths"] == ["/a/b.txt"]
+
+
 class BoxWidget(Widget):
     def draw(self, ctx):
         ctx.draw_box(0, 0, ctx.width, ctx.height, hints={"fill": True})

@@ -25,6 +25,12 @@ class EventType(str, Enum):
     MOUSE_DRAG = "mouse_drag"
     MOUSE_MOVE = "mouse_move"
     MOUSE_SCROLL = "mouse_scroll"
+    # Files were dropped onto the window from another app (drop-IN, the
+    # ``drag_and_drop`` capability). Positioned like a mouse event (``x``/``y`` in
+    # base units, at the drop point); the dropped filesystem paths travel in
+    # ``hints["paths"]`` (a list of str). Backends without the capability never
+    # emit it.
+    FILE_DROP = "file_drop"
     IME_COMPOSITION = "ime_composition"
     RESIZE = "resize"
 

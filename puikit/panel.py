@@ -1948,6 +1948,7 @@ class Panel:
         if event.x is not None and event.type in (
             EventType.MOUSE_CLICK, EventType.MOUSE_DOWN, EventType.MOUSE_UP,
             EventType.MOUSE_DRAG, EventType.MOUSE_MOVE, EventType.MOUSE_SCROLL,
+            EventType.FILE_DROP,
         ):
             self._pointer = (event.x, event.y)
         # Plain hover movement updates the pointer but is not delivered to a
@@ -1970,7 +1971,7 @@ class Panel:
 
         if event.type in (
             EventType.MOUSE_CLICK, EventType.MOUSE_DOWN, EventType.MOUSE_UP,
-            EventType.MOUSE_DRAG, EventType.MOUSE_SCROLL,
+            EventType.MOUSE_DRAG, EventType.MOUSE_SCROLL, EventType.FILE_DROP,
         ):
             # A drag/release belongs to the slot the press began on, so a gesture
             # that wanders off its origin (a button drag-off, a selection drag

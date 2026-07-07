@@ -47,6 +47,7 @@ from AppKit import (
     NSEventModifierFlagShift,
     NSEventTypeApplicationDefined,
     NSPasteboard,
+    NSPasteboardTypeFileURL,
     NSPasteboardTypeString,
     NSTimer,
     NSBoldFontMask,
@@ -607,6 +608,47 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
         if callback is not None:
             callback(_drag_op_name(operation))
 
+    # NSDraggingDestination: accept files dropped onto the view from other apps
+    # (drop-IN). The view was registered for file-URL drags in open(); a drop is
+    # turned into a positioned FILE_DROP event carrying the dropped paths, which
+    # the Panel routes to the widget under the drop point (e.g. a file pane).
+
+    def _dropped_paths(self, sender) -> list:
+        """The local filesystem paths a dragging session carries, in order (empty
+        if it holds no file URLs — a text-only or unsupported drag)."""
+        urls = sender.draggingPasteboard().readObjectsForClasses_options_([NSURL], None)
+        paths = []
+        for url in urls or ():
+            if url.isFileURL() and url.path():
+                paths.append(str(url.path()))
+        return paths
+
+    def _drop_unit(self, sender) -> tuple[float, float]:
+        point = self.convertPoint_fromView_(sender.draggingLocation(), None)
+        cw, ch = self.backend.base_size
+        return (point.x / cw, point.y / ch)
+
+    def draggingEntered_(self, sender):
+        # Offer a copy (the green "+" badge) only for a drag that carries files;
+        # reject anything else so the cursor shows it won't be accepted.
+        return NSDragOperationCopy if self._dropped_paths(sender) else NSDragOperationNone
+
+    def draggingUpdated_(self, sender):
+        return NSDragOperationCopy if self._dropped_paths(sender) else NSDragOperationNone
+
+    def prepareForDragOperation_(self, sender):
+        return bool(self._dropped_paths(sender))
+
+    def performDragOperation_(self, sender) -> bool:
+        paths = self._dropped_paths(sender)
+        if not paths:
+            return False
+        x, y = self._drop_unit(sender)
+        self.backend._dispatch(
+            Event(type=EventType.FILE_DROP, x=x, y=y, hints={"paths": paths})
+        )
+        return True
+
     def scrollWheel_(self, ns_event):
         delta = ns_event.scrollingDeltaY()
         delta_x = ns_event.scrollingDeltaX()
@@ -657,7 +699,7 @@ class MacOSBackend(Backend):
         {
             **PROFILE_GUI_DESKTOP,
             # Not implemented yet in the MVP; flip these on as features land.
-            "drag_and_drop": False,  # drop-IN not wired up yet
+            "drag_and_drop": True,   # drop-IN: NSDraggingDestination (FILE_DROP)
             "os_drag_drop": True,    # drag-OUT: native NSDraggingSource (below)
             "ime": True,
             "clipboard_rich": False,
@@ -775,6 +817,10 @@ class MacOSBackend(Backend):
         self._window.setContentView_(self._view)
         self._window.setAcceptsMouseMovedEvents_(True)
         self._window.makeFirstResponder_(self._view)
+        # Accept files dropped onto the window from other apps (drop-IN): the view
+        # becomes an NSDraggingDestination for file URLs and turns a drop into a
+        # FILE_DROP event (see the NSDraggingDestination methods on _PuiKitView).
+        self._view.registerForDraggedTypes_([NSPasteboardTypeFileURL])
 
         # Restore the saved frame (if any) and enable ongoing autosave. Setting
         # the frame from the saved name resizes the content view, which size()
