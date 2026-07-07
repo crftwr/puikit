@@ -320,3 +320,59 @@ def test_call_on_main_thread_posts_via_apphelper(monkeypatch):
 def test_macos_backend_advertises_main_thread_dispatch():
     backend = MacOSBackend()
     assert backend.capabilities.supports("main_thread_dispatch")
+
+
+def test_menu_shortcut_parsed_to_key_equivalent():
+    # A puikit shortcut hint parses into (keyEquivalent char, modifier mask) for
+    # native NSMenuItem rendering: letters lowercased (Shift lives in the mask),
+    # named keys mapped to their control/function chars, punctuation kept.
+    from AppKit import (
+        NSEventModifierFlagCommand,
+        NSEventModifierFlagOption,
+        NSEventModifierFlagShift,
+    )
+    from puikit.backends._macos_menu import _key_equivalent
+
+    assert _key_equivalent("V") == ("v", 0)
+    assert _key_equivalent("Enter") == ("\r", 0)
+    assert _key_equivalent("Backspace") == ("\x08", 0)
+    assert _key_equivalent("Tab") == ("\t", 0)
+    assert _key_equivalent("Shift-X") == ("x", NSEventModifierFlagShift)
+    assert _key_equivalent("Cmd-Enter") == ("\r", NSEventModifierFlagCommand)
+    assert _key_equivalent("Alt-Enter") == ("\r", NSEventModifierFlagOption)
+    assert _key_equivalent("Cmd-Shift-C") == (
+        "c", NSEventModifierFlagCommand | NSEventModifierFlagShift)
+    assert _key_equivalent("Shift-=") == ("=", NSEventModifierFlagShift)
+    assert _key_equivalent(";") == (";", 0)
+    # An unknown modifier makes the whole hint unrepresentable (no wrong glyph).
+    assert _key_equivalent("Hyper-Z") is None
+
+
+def test_menu_sets_display_only_key_equivalent_and_does_not_fire():
+    # The content menu shows accelerators (keyEquivalent set) but is a
+    # _NonFiringMenu whose performKeyEquivalent: declines, so the keystroke is
+    # never swallowed by the menu — it falls through to the app's key handling.
+    from AppKit import NSEventModifierFlagCommand, NSMenu
+    from puikit.backends import _macos_menu as mm
+    from puikit.menu import Menu, MenuItem
+
+    menu = Menu(
+        MenuItem("Copy Name(s)", on_select=lambda: None, shortcut="Cmd-Shift-C"),
+        MenuItem("View File", on_select=lambda: None, shortcut="V"),
+        MenuItem("Reverse Sort", on_select=lambda: None),          # unbound
+        MenuItem("Sort By", submenu=Menu(title="Sort By"), shortcut="S"),  # parent
+    )
+    responder = mm._MenuResponder.alloc().init()
+    ns_menu = mm._build_menu(menu, responder)
+
+    assert isinstance(ns_menu, mm._NonFiringMenu)
+    assert isinstance(ns_menu, NSMenu)
+    assert ns_menu.performKeyEquivalent_(None) is False  # declines -> no hijack
+
+    copy, view, reverse, sort_by = (ns_menu.itemAtIndex_(i) for i in range(4))
+    assert copy.keyEquivalent() == "c"
+    assert copy.keyEquivalentModifierMask() & NSEventModifierFlagCommand
+    assert view.keyEquivalent() == "v"
+    assert reverse.keyEquivalent() == ""    # unbound -> no accelerator
+    assert sort_by.keyEquivalent() == ""    # parents carry no accelerator
+    assert sort_by.hasSubmenu()

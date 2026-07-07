@@ -18,6 +18,9 @@ from typing import Any
 from AppKit import (
     NSApp,
     NSEventModifierFlagCommand,
+    NSEventModifierFlagControl,
+    NSEventModifierFlagOption,
+    NSEventModifierFlagShift,
     NSMenu,
     NSMenuItem,
 )
@@ -63,8 +66,78 @@ def _register(responder: _MenuResponder, item: MenuItem) -> int:
     return tag
 
 
+class _NonFiringMenu(NSMenu):
+    """An ``NSMenu`` that *displays* its items' key-equivalents (so macOS draws
+    native accelerator glyphs — right-aligned, greyed, auto-dimmed when the item
+    is disabled) but never *fires* them: ``performKeyEquivalent:`` always
+    declines, so the keystroke is not consumed and falls through to the app's
+    own key handling.
+
+    This is deliberate. A puikit ``MenuItem.shortcut`` is only a hint, and the
+    app owns key dispatch (its bindings are mostly modifier-less letters). If the
+    menu fired the equivalent, macOS would swallow that plain keystroke before it
+    reached the view — including while a text field is focused — breaking typing
+    in dialogs. Declining here keeps the native look without the hijack. Genuine
+    accelerators that *should* fire (e.g. the ⌘Q in the application menu) live in
+    a standard ``NSMenu`` and are unaffected."""
+
+    def performKeyEquivalent_(self, event) -> bool:
+        return False
+
+
+# Modifier token (as it appears in a puikit shortcut hint) -> NSEvent mask.
+_EQUIV_MOD = {
+    "CMD": NSEventModifierFlagCommand, "COMMAND": NSEventModifierFlagCommand,
+    "CTRL": NSEventModifierFlagControl, "CONTROL": NSEventModifierFlagControl,
+    "ALT": NSEventModifierFlagOption, "OPT": NSEventModifierFlagOption,
+    "OPTION": NSEventModifierFlagOption,
+    "SHIFT": NSEventModifierFlagShift,
+}
+
+# Named base key -> the character macOS uses as that key's keyEquivalent
+# (function-key private-use area for the navigation keys). Any base not listed
+# that is a single character is used literally (letters lowercased).
+_EQUIV_CHAR = {
+    "ENTER": "\r", "RETURN": "\r",
+    "TAB": "\t",
+    "SPACE": " ",
+    "BACKSPACE": "",
+    "DELETE": "",
+    "ESC": "", "ESCAPE": "",
+    "UP": "", "↑": "",
+    "DOWN": "", "↓": "",
+    "LEFT": "", "←": "",
+    "RIGHT": "", "→": "",
+    "HOME": "",
+    "END": "",
+    "PGUP": "", "PAGE_UP": "",
+    "PGDN": "", "PAGE_DOWN": "",
+}
+
+
+def _key_equivalent(shortcut: str) -> tuple[str, int] | None:
+    """Parse a puikit shortcut hint (``"Cmd-Shift-C"``, ``"Enter"``, ``"="``)
+    into ``(keyEquivalent_char, modifier_mask)`` for native NSMenuItem display,
+    or ``None`` when it can't be represented — so an item shows no accelerator
+    rather than a wrong one."""
+    parts = shortcut.split("-")
+    base, mod_parts = parts[-1], parts[:-1]
+    mask = 0
+    for part in mod_parts:
+        flag = _EQUIV_MOD.get(part.upper())
+        if flag is None:
+            return None
+        mask |= flag
+    char = _EQUIV_CHAR.get(base.upper())
+    if char is None:
+        if len(base) != 1:
+            return None
+        char = base.lower()  # macOS shows Shift via the mask, not an upper char
+    return char, mask
+
+
 def _build_menu(menu: Menu, responder: _MenuResponder) -> Any:
-    ns_menu = NSMenu.alloc().initWithTitle_(menu.title or "")
+    ns_menu = _NonFiringMenu.alloc().initWithTitle_(menu.title or "")
     ns_menu.setAutoenablesItems_(True)  # consult validateMenuItem:
     for entry in menu.items:
         if isinstance(entry, MenuSeparator):
@@ -72,10 +145,16 @@ def _build_menu(menu: Menu, responder: _MenuResponder) -> Any:
             continue
         if not isinstance(entry, MenuItem):
             continue
-        key = ""
         ns_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            entry.label, None, key
+            entry.label, None, ""
         )
+        # Display-only accelerator: set the key-equivalent so macOS renders it
+        # natively; _NonFiringMenu keeps it from actually firing.
+        if entry.shortcut and entry.submenu is None:
+            equiv = _key_equivalent(entry.shortcut)
+            if equiv is not None:
+                ns_item.setKeyEquivalent_(equiv[0])
+                ns_item.setKeyEquivalentModifierMask_(equiv[1])
         if entry.submenu is not None:
             ns_item.setSubmenu_(_build_menu(entry.submenu, responder))
         else:
