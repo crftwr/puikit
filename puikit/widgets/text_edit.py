@@ -238,7 +238,7 @@ class TextEdit(Widget):
         if self._panel is not None:
             self._panel.reset_caret_blink()
 
-    def _notify_input_position(self, ctx: DrawContext, caret_col: int, field_h: float) -> None:
+    def _notify_input_position(self, ctx: DrawContext, caret_col: float, field_h: float) -> None:
         if ctx.panel is None:
             return
         sx, sy, _sw, _sh = ctx.screen_rect
@@ -246,7 +246,13 @@ class TextEdit(Widget):
         # bottom row, so the backend's caret rect bottom-edge lands on the field
         # bottom and the UI opens just *under* the field — not on top of the
         # composed text, which a tall (padded) field would otherwise overlap.
-        ctx.panel.request_text_input(int(sx + 1 + caret_col), int(sy + field_h - 1), {})
+        #
+        # Pass the FRACTIONAL position through (no int() truncation): a field laid
+        # out at a fractional base-unit origin — a dialog nudges its field by a
+        # fraction of a row for vertical centering — would otherwise round to the
+        # row above, so the candidate window opens misaligned with the field's
+        # bottom edge. The backend maps these base-unit coordinates to pixels.
+        ctx.panel.request_text_input(sx + 1 + caret_col, sy + field_h - 1, {})
 
     def _scroll_into_view(self, ctx: DrawContext, caret: int, field_w: int) -> None:
         # Keep the start (a character index) such that the caret stays inside the

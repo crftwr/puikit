@@ -250,6 +250,24 @@ def test_textedit_requests_input_position_when_focused(backend):
     assert calls  # at least one caret report from the focused field
 
 
+def test_textedit_input_position_keeps_fractional_row():
+    # A field laid out at a fractional row origin (a dialog centers it by a
+    # fraction of a row on a pixel backend) must report a fractional caret y, so
+    # the IME candidate window aligns with the field's bottom edge rather than
+    # rounding down a whole row. Drives _notify_input_position directly with a
+    # fractional screen_rect so no pixel-layout backend is needed.
+    from types import SimpleNamespace
+
+    calls = []
+    ctx = SimpleNamespace(
+        panel=SimpleNamespace(request_text_input=lambda x, y, hints: calls.append((x, y))),
+        screen_rect=(2.0, 3.25, 12.0, 1.0),
+    )
+    TextEdit("hi")._notify_input_position(ctx, caret_col=0.0, field_h=1.0)
+    (_x, y), = calls
+    assert y == 3.25  # sy + field_h - 1, not int() -> 3
+
+
 def test_textedit_shift_arrow_selects_and_typing_replaces(backend):
     panel = Panel(backend)
     field = TextEdit("hello")

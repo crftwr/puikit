@@ -1682,9 +1682,11 @@ class MacOSBackend(Backend):
                 ctx.discardMarkedText()
             self._view._sync_input_context()  # flag False -> deactivate
 
-    def request_text_input(self, x: int, y: int, hints: dict[str, Any] | None = None) -> None:
-        """Record where the focused text widget's caret is (base units), so the
-        IME candidate window (firstRectForCharacterRange) appears next to it."""
+    def request_text_input(self, x: float, y: float, hints: dict[str, Any] | None = None) -> None:
+        """Record where the focused text widget's caret is (base units, possibly
+        fractional), so the IME candidate window (firstRectForCharacterRange)
+        appears next to it — aligned with the field's bottom edge even when the
+        field sits at a fractional row origin."""
         self._input_caret = (float(x), float(y))
         if self._view is not None:
             ctx = self._view.inputContext()

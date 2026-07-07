@@ -1820,7 +1820,7 @@ class Panel:
 
     # --- text input -----------------------------------------------------------------
 
-    def request_text_input(self, x: int, y: int, hints: dict[str, Any] | None = None) -> None:
+    def request_text_input(self, x: float, y: float, hints: dict[str, Any] | None = None) -> None:
         request = getattr(self.backend, "request_text_input", None)
         if request is not None:
             request(x, y, hints or {})
