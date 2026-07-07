@@ -392,14 +392,42 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
         self.interpretKeyEvents_([ns_event])
 
     def inputContext(self):
+        # Expose the input context ONLY while a text widget holds focus; return
+        # nil in command mode. This is the canonical Cocoa way to disable text
+        # input for a view, and — unlike becomeFirstResponder — the system queries
+        # inputContext on app/window *activation* and when the IME hotkey is
+        # pressed. becomeFirstResponder fires only on a responder *change*, so on
+        # a plain app reactivation (the sole view is already first responder) it
+        # never runs; macOS would then auto-activate the context and inline the
+        # IME/input-source UI on our window. Gating here keeps the IME truly
+        # disengaged in command mode (system-centered switcher), consistently —
+        # at launch, on reactivation, and after a text field closes.
+        if self.backend is not None and not self.backend._text_input_active:
+            return None
         return getattr(self, "_input_context", None)
+
+    def _sync_input_context(self) -> None:
+        """Mirror the OS input context to the backend's text-input flag: engage
+        the IME only while a text widget holds focus, disengage it otherwise.
+        Reads the context directly (not via ``inputContext``, which reports nil in
+        command mode) so it can *deactivate* on the way out. ``begin_text_input`` /
+        ``end_text_input`` flip the flag on focus and call this to apply the
+        transition immediately; ``becomeFirstResponder`` calls it too so the state
+        is re-established when the view regains first responder. The nil-gating in
+        ``inputContext`` is what covers plain app reactivation (no responder
+        change); this handles the immediate, explicit transitions."""
+        ctx = getattr(self, "_input_context", None)
+        if ctx is None:
+            return
+        if self.backend is not None and self.backend._text_input_active:
+            ctx.activate()
+        else:
+            ctx.deactivate()
 
     def becomeFirstResponder(self):
         result = objc.super(_PuiKitView, self).becomeFirstResponder()
         if result:
-            ctx = self.inputContext()
-            if ctx is not None:
-                ctx.activate()
+            self._sync_input_context()
         return result
 
     def resignFirstResponder(self):
@@ -1637,9 +1665,7 @@ class MacOSBackend(Backend):
         (keyDown reads this flag) and activate the input context so IME works."""
         self._text_input_active = True
         if self._view is not None:
-            ctx = self._view.inputContext()
-            if ctx is not None:
-                ctx.activate()
+            self._view._sync_input_context()  # flag True -> activate
 
     def end_text_input(self) -> None:
         """Focus left the text widget: drop back to plain command KEY events and
@@ -1649,10 +1675,12 @@ class MacOSBackend(Backend):
         if self._view is not None:
             if self._view.hasMarkedText():
                 self._view.unmarkText()
-            ctx = self._view.inputContext()
+            # Read the context directly: inputContext() now reports nil (the flag
+            # just went False), but we still need to tear down any composition.
+            ctx = getattr(self._view, "_input_context", None)
             if ctx is not None:
                 ctx.discardMarkedText()
-                ctx.deactivate()
+            self._view._sync_input_context()  # flag False -> deactivate
 
     def request_text_input(self, x: int, y: int, hints: dict[str, Any] | None = None) -> None:
         """Record where the focused text widget's caret is (base units), so the

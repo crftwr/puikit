@@ -12,6 +12,7 @@ pytest.importorskip("AppKit", reason="pyobjc not installed")
 from puikit import Font, FontSlant, FontWeight, Style, TextAttribute  # noqa: E402
 from puikit.backends.macos_backend import (  # noqa: E402
     MacOSBackend,
+    _PuiKitView,
     translate_key,
 )
 from puikit.event import EventType  # noqa: E402
@@ -376,3 +377,81 @@ def test_menu_sets_display_only_key_equivalent_and_does_not_fire():
     assert reverse.keyEquivalent() == ""    # unbound -> no accelerator
     assert sort_by.keyEquivalent() == ""    # parents carry no accelerator
     assert sort_by.hasSubmenu()
+
+
+# --- IME context gating --------------------------------------------------------
+
+class _SpyContext:
+    """Stand-in for the NSTextInputContext, recording activate/deactivate so the
+    focus-gated IME engagement can be checked without a key window."""
+
+    def __init__(self):
+        self.calls = []
+
+    def activate(self):
+        self.calls.append("activate")
+
+    def deactivate(self):
+        self.calls.append("deactivate")
+
+    def discardMarkedText(self):
+        pass
+
+
+class _FakeBackend:
+    _text_input_active = False
+
+
+def _view_with_spy():
+    from Foundation import NSMakeRect
+    view = _PuiKitView.alloc().initWithFrame_(NSMakeRect(0, 0, 10, 10))
+    view.backend = _FakeBackend()
+    view._input_context = _SpyContext()
+    return view, view._input_context
+
+
+def test_input_context_hidden_in_command_mode():
+    # inputContext() reports nil in command mode so the system treats the view as
+    # not a text-input client — no inline IME UI on the window, even on app
+    # reactivation (which the system re-queries, unlike becomeFirstResponder). It
+    # exposes the real context once a text widget holds focus.
+    view, spy = _view_with_spy()
+    view.backend._text_input_active = False
+    assert view.inputContext() is None
+    view.backend._text_input_active = True
+    assert view.inputContext() is spy
+
+
+def test_input_context_disengaged_in_command_mode():
+    # No text widget focused: the context is deactivated, so a CJK input source
+    # is not left armed while navigating (its input-mode indicator won't show).
+    view, spy = _view_with_spy()
+    view.backend._text_input_active = False
+    view._sync_input_context()
+    assert spy.calls == ["deactivate"]
+
+
+def test_input_context_engaged_when_text_focused():
+    # A text widget holds focus: the context is activated so IME composition works.
+    view, spy = _view_with_spy()
+    view.backend._text_input_active = True
+    view._sync_input_context()
+    assert spy.calls == ["activate"]
+
+
+def test_begin_end_text_input_toggle_the_context():
+    # begin/end_text_input flip the flag and mirror it onto the context, and
+    # end_text_input tears down any composition first.
+    backend = MacOSBackend()
+    view, spy = _view_with_spy()
+    backend._view = view
+    view.backend = backend
+
+    backend.begin_text_input()
+    assert backend._text_input_active is True
+    assert spy.calls == ["activate"]
+
+    spy.calls.clear()
+    backend.end_text_input()
+    assert backend._text_input_active is False
+    assert spy.calls == ["deactivate"]
