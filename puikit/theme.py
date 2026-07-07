@@ -97,6 +97,15 @@ class Theme:
     scrollbar_track: Color = (48, 48, 48)   # track (near background)
     scrollbar_thumb: Color = (140, 140, 140)  # knob (opposite brightness)
 
+    # App-specific themed values that are not part of the general control palette.
+    # A host app stashes its own semantic colors here — keyed by name — so a widget
+    # can read them off ``ctx.theme`` and they travel and re-derive with the theme
+    # like every other field (e.g. TFM keeps its file-pane ``directory`` foreground,
+    # its i-search ``isearch_match`` base hue, and its text-viewer ``syntax`` token
+    # palette here). Empty for a theme that names none; ``derive_theme`` passes an
+    # ``extras=`` keyword straight through.
+    extras: dict[str, Any] = field(default_factory=dict)
+
     def surface_bg(self, role: str) -> Color | None:
         return self.surfaces.get(role)
 
