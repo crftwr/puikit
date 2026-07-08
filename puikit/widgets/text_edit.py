@@ -223,13 +223,25 @@ class TextEdit(Widget):
             )
 
     def _blink_tick(self) -> bool:
-        # Unregister once focus has left (or the panel is gone); otherwise
-        # re-render so the caret's blink phase advances on screen — the tick is
-        # the only thing that rebuilds the display list.
+        # Unregister once focus has left, the panel is gone, or the field has left
+        # the widget tree; otherwise re-render so the caret's blink phase advances
+        # on screen — the tick is the only thing that rebuilds the display list.
+        #
+        # Tree-exit is the important case: when the field's dialog closes, draw
+        # (which sets _focused_now) stops running, so _focused_now would stay a
+        # stale True and this tick would re-render *forever* — a permanent
+        # CPU-burning render loop leaked on every dialog open/close. So clear the
+        # flag first; render re-runs draw only if the field is still on screen,
+        # which re-sets it. If it wasn't drawn, _focused_now stays False and the
+        # tick retires.
         if not self._focused_now or self._panel is None:
             self._blinking = False
             return False
+        self._focused_now = False
         self._panel.render()
+        if not self._focused_now:
+            self._blinking = False
+            return False
         return True
 
     def _reset_blink(self) -> None:

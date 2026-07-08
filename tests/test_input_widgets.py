@@ -268,6 +268,31 @@ def test_textedit_input_position_keeps_fractional_row():
     assert y == 3.25  # sy + field_h - 1, not int() -> 3
 
 
+def test_blink_tick_retires_when_field_leaves_the_tree():
+    # The caret-blink tick re-renders to advance the blink phase. When the field
+    # leaves the widget tree (its dialog closed) draw stops running, so a stale
+    # _focused_now would keep the tick re-rendering forever — a CPU-burning loop
+    # leaked per dialog open/close. The tick must retire instead. (Driven directly:
+    # the blink only *registers* on a vector backend, but the retire logic — clear
+    # _focused_now, render, keep only if draw re-set it — is backend-independent.)
+    backend = MemoryBackend(width=20, height=6)
+    panel = Panel(backend)
+    field = TextEdit("hi")
+    panel.add(field, x=1, y=1, w=10, h=1)
+    panel.render()  # draws the field focused -> _focused_now True
+    assert field._focused_now is True
+    field._blinking = True  # simulate the registered blink
+
+    # Still in the tree: the tick re-renders, draw re-sets the flag, keeps ticking.
+    assert field._blink_tick() is True
+    assert field._focused_now is True
+
+    # Dialog closes — the field is no longer drawn: the tick retires.
+    panel.remove(field)
+    assert field._blink_tick() is False
+    assert field._blinking is False
+
+
 def test_textedit_shift_arrow_selects_and_typing_replaces(backend):
     panel = Panel(backend)
     field = TextEdit("hello")
