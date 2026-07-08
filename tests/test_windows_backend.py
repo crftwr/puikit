@@ -301,6 +301,57 @@ def test_ime_mode_gating_round_trips_context():
         backend.close()
 
 
+def test_ime_commit_dispatches_committed_characters_as_key_events():
+    """WM_IME_COMPOSITION carrying a GCS_RESULTSTR must deliver the committed
+    text as KEY events directly (see _win32_ime's module docstring) — Windows
+    does not synthesize WM_CHAR for it since DefWindowProc is never invoked
+    for this message."""
+    from puikit.backends import _win32_ime
+    from puikit.event import EventType
+
+    backend = WindowsBackend()
+    events = []
+    backend._handler = events.append
+    backend._hwnd = 12345  # any nonzero placeholder; read_composition is mocked
+    try:
+        original = _win32_ime.read_composition
+        _win32_ime.read_composition = lambda hwnd, lparam: (None, 0, "あい")  # "あい"
+        try:
+            backend._on_ime_composition(0)
+        finally:
+            _win32_ime.read_composition = original
+
+        assert len(events) == 3
+        assert events[0].type == EventType.IME_COMPOSITION
+        assert events[0].hints == {"preedit": "", "caret": 0}
+        assert [e.char for e in events[1:]] == ["あ", "い"]
+    finally:
+        backend.close()
+
+
+def test_ime_composition_update_without_result_does_not_dispatch_commit():
+    from puikit.backends import _win32_ime
+    from puikit.event import EventType
+
+    backend = WindowsBackend()
+    events = []
+    backend._handler = events.append
+    backend._hwnd = 12345
+    try:
+        original = _win32_ime.read_composition
+        _win32_ime.read_composition = lambda hwnd, lparam: ("あ", 1, None)
+        try:
+            backend._on_ime_composition(0)
+        finally:
+            _win32_ime.read_composition = original
+
+        assert len(events) == 1
+        assert events[0].type == EventType.IME_COMPOSITION
+        assert events[0].hints == {"preedit": "あ", "caret": 1}
+    finally:
+        backend.close()
+
+
 def test_surrogate_pair_combines_into_one_astral_character():
     backend = WindowsBackend()
     events = []

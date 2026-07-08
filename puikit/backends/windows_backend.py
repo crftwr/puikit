@@ -1229,14 +1229,19 @@ class WindowsBackend(Backend):
             self._dispatch(char_key_event(ch, mods))
 
     def _on_ime_composition(self, lparam: int) -> None:
-        preedit, cursor, has_result = _win32_ime.read_composition(self._hwnd, lparam)
+        preedit, cursor, result_text = _win32_ime.read_composition(self._hwnd, lparam)
         if preedit is not None:
             self._dispatch(Event(type=EventType.IME_COMPOSITION, hints={"preedit": preedit, "caret": cursor}))
-        if has_result:
-            # The committed characters arrive via the WM_CHAR messages Windows
-            # posts right after this one (see _win32_ime's module docstring) —
-            # this only clears the preedit, it does not insert text itself.
+        if result_text is not None:
+            # A commit ends composition; clear any lingering preedit in the
+            # widget, then deliver each committed character as a KEY event —
+            # the same contract WM_CHAR uses (see _on_char) and the same thing
+            # macOS's insertText: does — since Windows never synthesizes
+            # WM_CHAR for this message itself (see _win32_ime's docstring).
             self._dispatch(Event(type=EventType.IME_COMPOSITION, hints={"preedit": "", "caret": 0}))
+            mods = _key_modifiers()
+            for ch in result_text:
+                self._dispatch(char_key_event(ch, mods))
 
     def _dispatch_file_drop(self, paths: list[str], point: tuple[int, int]) -> None:
         """The IDropTarget callback (_win32_dragdrop.register_drop_target):

@@ -21,19 +21,25 @@ module was wired into ``WindowsBackend``:
   it round-trips ``ImmGetContext`` back to the original handle), so one saved
   handle suffices for the window's lifetime.
 - **Position (A2).** ``ImmSetCompositionWindow`` with ``CFS_POINT`` moves the
-  candidate/composition anchor to the live caret (in pixels) instead of the
-  window corner.
+  (suppressed) inline composition anchor to the live caret, in pixels. That
+  alone does *not* move the candidate/conversion list — IMM32 treats it as a
+  separate window, positioned via ``ImmSetCandidateWindow`` with
+  ``CFS_CANDIDATEPOS`` — which is why both are set together here; skipping the
+  second call leaves the candidate popup pinned at its IME-chosen default
+  (observed: the bottom-right of the screen).
 - **Inline preedit (A4).** ``WM_IME_SETCONTEXT`` is intercepted to clear the
   ``ISC_SHOWUICOMPOSITIONWINDOW`` bit (suppressing the OS's own floating
   composition box — the candidate/conversion popup is deliberately left alone,
   since a widget only draws the composition *string* inline, not a conversion
   list). ``WM_IME_COMPOSITION``'s ``GCS_COMPSTR``/``GCS_CURSORPOS`` are read via
   ``ImmGetCompositionStringW`` and turned into an ``IME_COMPOSITION`` event the
-  same way ``setMarkedText:`` does on macOS. A commit (``GCS_RESULTSTR``) only
-  clears the preedit here — the committed characters themselves still arrive
-  through the existing ``WM_CHAR`` path (unlike macOS, which has no separate
-  commit message), so they are not re-dispatched from this module or every
-  IME-committed character would be inserted twice.
+  same way ``setMarkedText:`` does on macOS. The handler for this message
+  returns 0 (see ``WindowsBackend._handle_message``) instead of forwarding to
+  ``DefWindowProc`` — which means Windows never gets the chance to synthesize
+  ``WM_CHAR`` for a commit (``GCS_RESULTSTR``) the way it would for an
+  untouched window. So a commit's result string is read here too and
+  dispatched directly as key events, the same way macOS's ``insertText:``
+  delivers committed characters.
 """
 
 from __future__ import annotations
@@ -83,6 +89,7 @@ NI_COMPOSITIONSTR = 0x0015
 CPS_CANCEL = 0x0004
 
 CFS_POINT = 0x0002
+CFS_CANDIDATEPOS = 0x0040
 
 
 class POINT(ctypes.Structure):
@@ -97,7 +104,18 @@ class COMPOSITIONFORM(ctypes.Structure):
     ]
 
 
+class CANDIDATEFORM(ctypes.Structure):
+    _fields_ = [
+        ("dwIndex", ctypes.c_uint32),
+        ("dwStyle", ctypes.c_uint32),
+        ("ptCurrentPosition", POINT),
+        ("rcArea", wintypes.RECT),
+    ]
+
+
 imm32.ImmSetCompositionWindow.argtypes = [HIMC, ctypes.POINTER(COMPOSITIONFORM)]
+imm32.ImmSetCandidateWindow.restype = wintypes.BOOL
+imm32.ImmSetCandidateWindow.argtypes = [HIMC, ctypes.POINTER(CANDIDATEFORM)]
 
 
 def disable_ime(hwnd: int) -> int:
@@ -125,14 +143,19 @@ def cancel_composition(hwnd: int) -> None:
 
 
 def set_composition_position(hwnd: int, x_px: int, y_px: int) -> None:
-    """Move the candidate/composition anchor to the live caret position, in
-    client-area pixels."""
+    """Move the composition anchor AND the candidate list to the live caret
+    position, in client-area pixels. Both calls are needed: ImmSetCompositionWindow
+    alone only repositions the (suppressed) inline composition box, not the
+    separate candidate/conversion popup — without ImmSetCandidateWindow the
+    IME leaves that window at its own default position."""
     himc = imm32.ImmGetContext(hwnd)
     if not himc:
         return
     try:
         cf = COMPOSITIONFORM(CFS_POINT, POINT(x_px, y_px), wintypes.RECT(0, 0, 0, 0))
         imm32.ImmSetCompositionWindow(himc, ctypes.byref(cf))
+        candf = CANDIDATEFORM(0, CFS_CANDIDATEPOS, POINT(x_px, y_px), wintypes.RECT(0, 0, 0, 0))
+        imm32.ImmSetCandidateWindow(himc, ctypes.byref(candf))
     finally:
         imm32.ImmReleaseContext(hwnd, himc)
 
@@ -152,27 +175,28 @@ def _get_composition_string(himc: int, index: int) -> str:
     return buf.value
 
 
-def read_composition(hwnd: int, lparam: int) -> tuple[str | None, int, bool]:
+def read_composition(hwnd: int, lparam: int) -> tuple[str | None, int, str | None]:
     """Parse a ``WM_IME_COMPOSITION`` message: returns
-    ``(preedit_text_or_None, cursor, has_result)``.
+    ``(preedit_text_or_None, cursor, result_text_or_None)``.
 
     ``preedit_text_or_None`` is the in-progress ``GCS_COMPSTR`` text (``None``
     if this message didn't carry one — the flag bit wasn't set, so any
-    existing preedit the widget is showing should be left as-is). ``has_result``
-    is True when a ``GCS_RESULTSTR`` (commit) accompanied this message; the
-    committed characters themselves are not returned here — they arrive
-    through the ordinary ``WM_CHAR`` messages Windows posts right after this
-    one, so the caller only needs to know to clear the preedit, not to insert
-    text itself (see the module docstring)."""
+    existing preedit the widget is showing should be left as-is).
+    ``result_text_or_None`` is the committed ``GCS_RESULTSTR`` text when this
+    message carried a commit (``None`` if it didn't, ``""`` if it did but the
+    commit was empty). The caller must dispatch this text itself — Windows
+    does not post ``WM_CHAR`` for it here, since ``DefWindowProc`` (the code
+    path that would normally synthesize those) is never called for this
+    message (see the module docstring)."""
     himc = imm32.ImmGetContext(hwnd)
     if not himc:
-        return None, 0, False
+        return None, 0, None
     try:
-        has_result = bool(lparam & GCS_RESULTSTR)
+        result_text = _get_composition_string(himc, GCS_RESULTSTR) if (lparam & GCS_RESULTSTR) else None
         if not (lparam & GCS_COMPSTR):
-            return None, 0, has_result
+            return None, 0, result_text
         text = _get_composition_string(himc, GCS_COMPSTR)
         cursor = imm32.ImmGetCompositionStringW(himc, GCS_CURSORPOS, None, 0)
-        return text, max(cursor, 0), has_result
+        return text, max(cursor, 0), result_text
     finally:
         imm32.ImmReleaseContext(hwnd, himc)
