@@ -135,10 +135,15 @@ def test_profile_declares_gui_capabilities():
     assert profile.supports("vector_shapes")
     assert profile.supports("native_menus")
     assert profile.supports("images")  # WIC-decoded ID2D1Bitmap, see _render_image
-    # Not implemented yet in the MVP:
-    assert not profile.supports("ime")
-    assert not profile.supports("os_drag_drop")
+    # IME + both drag-and-drop directions (_win32_ime.py / _win32_dragdrop.py):
+    assert profile.supports("ime")
+    assert profile.supports("drag_and_drop")
+    assert profile.supports("os_drag_drop")
+    # Unused by any PuiKit app to date (see MacOSBackend.PROFILE, same four False):
+    assert not profile.supports("clipboard_rich")
+    assert not profile.supports("native_file_dialog")
     assert not profile.supports("system_tray")
+    assert not profile.supports("media_keys")
 
 
 def test_vector_primitives_record_display_list_commands():
@@ -277,6 +282,61 @@ def test_draw_image_renders_without_error(tmp_path):
 
 def test_profile_supports_images():
     assert WindowsBackend.PROFILE.supports("images")
+
+
+# --- IME (mode gating + surrogate pairs) ------------------------------------
+
+
+def test_ime_mode_gating_round_trips_context():
+    backend = WindowsBackend(width=20, height=10, title="puikit-ime-test")
+    backend.open()
+    try:
+        assert backend._text_input_active is False
+        assert backend._default_himc != 0  # captured by disable_ime() in open()
+        backend.begin_text_input()
+        assert backend._text_input_active is True
+        backend.end_text_input()
+        assert backend._text_input_active is False
+    finally:
+        backend.close()
+
+
+def test_surrogate_pair_combines_into_one_astral_character():
+    backend = WindowsBackend()
+    events = []
+    backend._handler = events.append
+    try:
+        backend._on_char(0xD83D)  # high surrogate half of U+1F600
+        assert events == []  # buffered, nothing dispatched until the pair completes
+        backend._on_char(0xDE00)  # low surrogate half
+        assert len(events) == 1
+        assert events[0].char == "\U0001F600"
+        assert events[0].key == "\U0001F600"
+        assert backend._pending_high_surrogate is None
+    finally:
+        backend.close()
+
+
+def test_lone_low_surrogate_without_pending_high_is_dropped():
+    backend = WindowsBackend()
+    events = []
+    backend._handler = events.append
+    try:
+        backend._on_char(0xDE00)  # low surrogate with no preceding high half
+        assert events == []
+    finally:
+        backend.close()
+
+
+# --- drag-out (begin_file_drag) ---------------------------------------------
+
+
+def test_begin_file_drag_returns_false_for_empty_paths():
+    backend = WindowsBackend()  # not opened: no window, no OLE calls needed
+    try:
+        assert backend.begin_file_drag([]) is False
+    finally:
+        backend.close()
 
 
 def test_premultiply_bgra_matches_reference():

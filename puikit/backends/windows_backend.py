@@ -14,10 +14,12 @@ clear() and present(); a dispatcher renders the list in pixels on each
 WM_PAINT, so the same widget code that runs on curses and macOS gets real
 rectangles, color text, and emoji icons here too.
 
-A few capabilities that would need substantially more COM surface (real
-drag-and-drop via IDropSource/DoDragDrop, WIC-based images, live IME preedit
-display via WM_IME_*/Imm32) are deferred — see the PROFILE override below and
-CLAUDE.md's Windows backend notes for what's left.
+IME (mode-gated, inline preedit — see ``_win32_ime.py``) and both drag-and-drop
+directions (hand-built ``IDropTarget``/``IDropSource``/``IDataObject`` COM
+objects — see ``_win32_dragdrop.py``) are implemented; a few capabilities
+unused by any PuiKit app so far
+(``clipboard_rich``, ``native_file_dialog``, ``system_tray``, ``media_keys``)
+remain deferred — see the PROFILE override below.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import _win32_dragdrop, _win32_ime
 from . import _win32_native as native
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
@@ -206,11 +209,11 @@ class WindowsBackend(Backend):
     PROFILE = CapabilityProfile(
         {
             **PROFILE_GUI_DESKTOP,
-            # Not implemented yet in the MVP; flip these on as features land
-            # (mirrors MacOSBackend's own incremental capability flags).
-            "drag_and_drop": False,  # drop-IN not wired up yet
-            "os_drag_drop": False,  # drag-OUT needs IDropSource/DoDragDrop
-            "ime": False,  # plain WM_CHAR input works; no preedit display yet
+            "drag_and_drop": True,  # drop-IN: IDropTarget + RegisterDragDrop (_win32_dragdrop.py)
+            "os_drag_drop": True,  # drag-OUT: IDropSource + DoDragDrop (_win32_dragdrop.py)
+            "ime": True,  # mode-gated, inline preedit (_win32_ime.py)
+            # Unused by any PuiKit app to date (see MacOSBackend.PROFILE, which
+            # leaves the same four False) — not on this backend's punch list.
             "clipboard_rich": False,
             "native_file_dialog": False,
             "system_tray": False,
@@ -267,6 +270,16 @@ class WindowsBackend(Backend):
         self._transform_stack: list[Any] = [native.D2D1_MATRIX_3X2_F.identity()]
         self._group_alpha_stack: list[float] = [1.0]
         self._input_caret: tuple[float, float] = (0.0, 0.0)
+        # IME mode-gating (see _win32_ime.py): the window's default input
+        # context, detached in command mode and re-attached in text mode.
+        self._text_input_active = False
+        self._default_himc = 0
+        # WM_CHAR delivers one UTF-16 code unit per message; a non-BMP
+        # character (astral emoji, some CJK) arrives as a high surrogate then
+        # a low one across two messages — this holds the high half while
+        # waiting for its pair (see _on_char).
+        self._pending_high_surrogate: int | None = None
+        self._drop_target: Any = None  # the live IDropTarget (_win32_dragdrop.DropTarget), once open()
         self._menu_responder: Any = None
         self._menu_bar_hmenu = 0
         self._tracking_mouse = False
@@ -314,6 +327,14 @@ class WindowsBackend(Backend):
         cw, ch = self._client_size_px()
         self._render_target = native.create_hwnd_render_target(self._d2d_factory, self._hwnd, cw, ch)
         self._brush = native.rt_create_solid_color_brush(self._render_target, native.D2D1_COLOR_F(1, 1, 1, 1))
+
+        # Command mode is the default focus state (no text widget starts
+        # focused), so the IME starts disabled; begin_text_input re-attaches
+        # the saved default context. See _win32_ime.py.
+        self._default_himc = _win32_ime.disable_ime(self._hwnd)
+        # OLE must be initialized on this thread before RegisterDragDrop.
+        _win32_dragdrop.ensure_ole_initialized()
+        self._drop_target = _win32_dragdrop.register_drop_target(self._hwnd, self._dispatch_file_drop)
 
         native.user32.ShowWindow(self._hwnd, native.SW_SHOW)
         native.user32.UpdateWindow(self._hwnd)
@@ -368,6 +389,9 @@ class WindowsBackend(Backend):
             self._d2d_factory.release()
             self._d2d_factory = None
         if self._hwnd:
+            if self._drop_target is not None:
+                _win32_dragdrop.revoke_drop_target(self._hwnd, self._drop_target)
+                self._drop_target = None
             _hwnd_backends.pop(self._hwnd, None)
             native.user32.DestroyWindow(self._hwnd)
             self._hwnd = 0
@@ -1052,10 +1076,28 @@ class WindowsBackend(Backend):
                 self._set_brush(color, alpha)
                 native.rt_fill_rectangle(self._render_target, self._unit_rect(rect.x, rect.y, rect.w, rect.h), self._brush)
 
-    # --- text input (IME caret hint; no preedit display yet — see PROFILE) ---
+    # --- text input / IME (see _win32_ime.py) ---------------------------------
+
+    def begin_text_input(self) -> None:
+        """A text widget took focus: re-attach the window's IME context so
+        composition can engage (mirrors MacOSBackend.begin_text_input)."""
+        self._text_input_active = True
+        if self._hwnd:
+            _win32_ime.enable_ime(self._hwnd, self._default_himc)
+
+    def end_text_input(self) -> None:
+        """Focus left the text widget: detach the IME context again (plain
+        command keys must not be swallowed into composition) and cancel any
+        in-progress composition so it can't leak into the next field."""
+        self._text_input_active = False
+        if self._hwnd:
+            _win32_ime.cancel_composition(self._hwnd)
+            _win32_ime.disable_ime(self._hwnd)
 
     def request_text_input(self, x: int, y: int, hints: dict[str, Any] | None = None) -> None:
         self._input_caret = (float(x), float(y))
+        if self._text_input_active and self._hwnd:
+            _win32_ime.set_composition_position(self._hwnd, int(x * self._base_w), int(y * self._base_h))
 
     # --- clipboard -----------------------------------------------------------
 
@@ -1067,6 +1109,32 @@ class WindowsBackend(Backend):
 
     def open_url(self, url: str) -> bool:
         return native.shell_open(url)
+
+    # --- drag source (capability "os_drag_drop") ------------------------------
+
+    def begin_file_drag(
+        self,
+        paths: list[str],
+        event: Event | None = None,
+        operations: tuple[str, ...] = ("copy",),
+        on_complete: Callable[[str], None] | None = None,
+    ) -> bool:
+        """Begin a native OLE drag session exporting ``paths`` as real files
+        (CF_HDROP, via a hand-built IDataObject — see _win32_dragdrop.py).
+
+        Must be called synchronously from within the WM_MOUSEMOVE handling of
+        an active left-button drag (the mouse button still down, as Panel's
+        drag-threshold logic does): DoDragDrop blocks, pumping the window's own
+        message loop internally, and returns once the button is released or
+        Escape cancels it."""
+        data_object = _win32_dragdrop.create_file_data_object([str(p) for p in paths])
+        if data_object is None:
+            return False
+        _win32_dragdrop.ensure_ole_initialized()
+        op = _win32_dragdrop.do_drag_drop(data_object, operations)
+        if on_complete is not None:
+            on_complete(op)
+        return True
 
     # --- native menus --------------------------------------------------------
 
@@ -1128,6 +1196,23 @@ class WindowsBackend(Backend):
 
     def _on_char(self, wparam: int) -> None:
         code = wparam & 0xFFFF
+        # WM_CHAR carries one UTF-16 code unit; a non-BMP character (emoji
+        # above U+FFFF, some CJK) is delivered as a high surrogate followed by
+        # a low one across two messages. chr() of a lone surrogate is not
+        # isprintable(), so without combining them here the character would
+        # silently vanish instead of typing.
+        if 0xD800 <= code <= 0xDBFF:
+            self._pending_high_surrogate = code
+            return
+        if 0xDC00 <= code <= 0xDFFF:
+            high = self._pending_high_surrogate
+            self._pending_high_surrogate = None
+            if high is None:
+                return  # an unpaired low surrogate: nothing sensible to combine with
+            combined = 0x10000 + (high - 0xD800) * 0x400 + (code - 0xDC00)
+            self._dispatch(char_key_event(chr(combined), _key_modifiers()))
+            return
+        self._pending_high_surrogate = None
         ch = chr(code)
         mods = _key_modifiers()
         name = _CONTROL_KEYS.get(ch)
@@ -1142,6 +1227,25 @@ class WindowsBackend(Backend):
             # Shift from a shifted glyph so Shift+1 reads as ('!', {}) like every
             # other backend — not ('!', {shift}). Ctrl/Alt survive.
             self._dispatch(char_key_event(ch, mods))
+
+    def _on_ime_composition(self, lparam: int) -> None:
+        preedit, cursor, has_result = _win32_ime.read_composition(self._hwnd, lparam)
+        if preedit is not None:
+            self._dispatch(Event(type=EventType.IME_COMPOSITION, hints={"preedit": preedit, "caret": cursor}))
+        if has_result:
+            # The committed characters arrive via the WM_CHAR messages Windows
+            # posts right after this one (see _win32_ime's module docstring) —
+            # this only clears the preedit, it does not insert text itself.
+            self._dispatch(Event(type=EventType.IME_COMPOSITION, hints={"preedit": "", "caret": 0}))
+
+    def _dispatch_file_drop(self, paths: list[str], point: tuple[int, int]) -> None:
+        """The IDropTarget callback (_win32_dragdrop.register_drop_target):
+        ``point`` is already client-area pixels. Runs on this window's own UI
+        thread — OLE delivers IDropTarget calls on the thread that registered
+        it, same as every other message here."""
+        px, py = point
+        x, y = px / self._base_w, py / self._base_h
+        self._dispatch(Event(type=EventType.FILE_DROP, x=x, y=y, hints={"paths": paths}))
 
     def _on_mouse_down(self, msg: int, lparam: int) -> int:
         button = _BUTTON_BY_MSG[msg]
@@ -1257,6 +1361,22 @@ class WindowsBackend(Backend):
         if msg == native.WM_CHAR:
             self._on_char(wparam)
             return 0
+        if msg == _win32_ime.WM_IME_SETCONTEXT:
+            # Clear ISC_SHOWUICOMPOSITIONWINDOW so the OS doesn't draw its own
+            # floating composition box; the widget renders preedit inline
+            # from the IME_COMPOSITION events _on_ime_composition dispatches.
+            lparam = _win32_ime.strip_show_composition_window(lparam)
+            return native.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+        if msg == _win32_ime.WM_IME_STARTCOMPOSITION:
+            cx, cy = self._input_caret
+            _win32_ime.set_composition_position(hwnd, int(cx * self._base_w), int(cy * self._base_h))
+            return native.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+        if msg == _win32_ime.WM_IME_COMPOSITION:
+            self._on_ime_composition(lparam)
+            return 0
+        if msg == _win32_ime.WM_IME_ENDCOMPOSITION:
+            self._dispatch(Event(type=EventType.IME_COMPOSITION, hints={"preedit": "", "caret": 0}))
+            return native.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
         return native.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
     # --- event loop ----------------------------------------------------------
