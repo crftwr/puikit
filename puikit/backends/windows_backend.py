@@ -1229,9 +1229,14 @@ class WindowsBackend(Backend):
             self._dispatch(char_key_event(ch, mods))
 
     def _on_ime_composition(self, lparam: int) -> None:
-        preedit, cursor, result_text = _win32_ime.read_composition(self._hwnd, lparam)
+        preedit, cursor, target_start, result_text = _win32_ime.read_composition(self._hwnd, lparam)
         if preedit is not None:
-            self._dispatch(Event(type=EventType.IME_COMPOSITION, hints={"preedit": preedit, "caret": cursor}))
+            self._dispatch(
+                Event(
+                    type=EventType.IME_COMPOSITION,
+                    hints={"preedit": preedit, "caret": cursor, "target_start": target_start},
+                )
+            )
         if result_text is not None:
             # A commit ends composition; clear any lingering preedit in the
             # widget, then deliver each committed character as a KEY event —

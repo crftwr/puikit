@@ -40,6 +40,20 @@ module was wired into ``WindowsBackend``:
   untouched window. So a commit's result string is read here too and
   dispatched directly as key events, the same way macOS's ``insertText:``
   delivers committed characters.
+
+The widget (``TextEdit``) re-asserts the composition window's position on
+every draw, from wherever it currently thinks the caret is (A2). Two things
+that position must NOT track are (a) the raw input cursor while typing kana
+with nothing converted yet — it advances every keystroke, which would make
+the window visibly crawl rightward as a word gets longer — and (b) must
+track is the currently-selected *clause* once the user has converted a
+multi-clause phrase and is cycling between clauses with left/right — each
+clause has its own candidate list, so the window has to follow it. Both are
+resolved by ``_target_clause_start``, which reads ``GCS_COMPATTR`` (one
+attribute byte per composition character) for a run flagged
+``ATTR_TARGET_CONVERTED``/``ATTR_TARGET_NOTCONVERTED``: absent during raw
+typing (falls back to a fixed anchor at the composition's start — no
+jitter), present and moving once a clause becomes the conversion target.
 """
 
 from __future__ import annotations
@@ -74,7 +88,17 @@ WM_IME_ENDCOMPOSITION = 0x010E
 # GCS_* composition-string attribute flags (ImmGetCompositionStringW's dwIndex).
 GCS_COMPSTR = 0x0008
 GCS_CURSORPOS = 0x0080
+GCS_COMPATTR = 0x0010
 GCS_RESULTSTR = 0x0800
+
+# ATTR_* composition-character attributes (one byte per GCS_COMPSTR character,
+# read via GCS_COMPATTR): which clause a character belongs to, and whether
+# that clause is the one currently selected for conversion (the "target"
+# clause a user cycles between with left/right during multi-segment
+# conversion — Kanji conversion of a long phrase splits into several
+# clauses, only one of which is being edited/converted at a time).
+ATTR_TARGET_CONVERTED = 0x01
+ATTR_TARGET_NOTCONVERTED = 0x03
 
 # ISC_SHOWUICOMPOSITIONWINDOW (WM_IME_SETCONTEXT's lParam, the ISC_* family):
 # cleared so the OS does not draw its own floating composition box — the
@@ -175,13 +199,40 @@ def _get_composition_string(himc: int, index: int) -> str:
     return buf.value
 
 
-def read_composition(hwnd: int, lparam: int) -> tuple[str | None, int, str | None]:
+def _get_composition_attrs(himc: int) -> bytes:
+    length = imm32.ImmGetCompositionStringW(himc, GCS_COMPATTR, None, 0)
+    if length <= 0:
+        return b""
+    buf = ctypes.create_string_buffer(length)
+    imm32.ImmGetCompositionStringW(himc, GCS_COMPATTR, buf, length)
+    return buf.raw
+
+
+def _target_clause_start(himc: int) -> int:
+    """The character offset (into ``GCS_COMPSTR``) where the clause currently
+    selected for conversion begins, or 0 if no clause is marked as the target
+    — i.e. composition hasn't been converted yet and is just raw kana input,
+    which has no distinguished clause (see ``read_composition``'s docstring)."""
+    attrs = _get_composition_attrs(himc)
+    for i, attr in enumerate(attrs):
+        if attr in (ATTR_TARGET_CONVERTED, ATTR_TARGET_NOTCONVERTED):
+            return i
+    return 0
+
+
+def read_composition(hwnd: int, lparam: int) -> tuple[str | None, int, int, str | None]:
     """Parse a ``WM_IME_COMPOSITION`` message: returns
-    ``(preedit_text_or_None, cursor, result_text_or_None)``.
+    ``(preedit_text_or_None, cursor, target_start, result_text_or_None)``.
 
     ``preedit_text_or_None`` is the in-progress ``GCS_COMPSTR`` text (``None``
     if this message didn't carry one — the flag bit wasn't set, so any
     existing preedit the widget is showing should be left as-is).
+    ``target_start`` is where the currently-selected clause begins (0 while
+    there's no multi-clause conversion in progress) — see
+    ``_target_clause_start``; the IME candidate window should anchor there,
+    not to the (possibly still-advancing) input cursor, or it would jitter
+    rightward as raw kana is typed instead of only moving when the user
+    changes which clause they're converting.
     ``result_text_or_None`` is the committed ``GCS_RESULTSTR`` text when this
     message carried a commit (``None`` if it didn't, ``""`` if it did but the
     commit was empty). The caller must dispatch this text itself — Windows
@@ -190,13 +241,14 @@ def read_composition(hwnd: int, lparam: int) -> tuple[str | None, int, str | Non
     message (see the module docstring)."""
     himc = imm32.ImmGetContext(hwnd)
     if not himc:
-        return None, 0, None
+        return None, 0, 0, None
     try:
         result_text = _get_composition_string(himc, GCS_RESULTSTR) if (lparam & GCS_RESULTSTR) else None
         if not (lparam & GCS_COMPSTR):
-            return None, 0, result_text
+            return None, 0, 0, result_text
         text = _get_composition_string(himc, GCS_COMPSTR)
         cursor = imm32.ImmGetCompositionStringW(himc, GCS_CURSORPOS, None, 0)
-        return text, max(cursor, 0), result_text
+        target_start = _target_clause_start(himc)
+        return text, max(cursor, 0), target_start, result_text
     finally:
         imm32.ImmReleaseContext(hwnd, himc)

@@ -301,6 +301,33 @@ def test_ime_mode_gating_round_trips_context():
         backend.close()
 
 
+def test_target_clause_start_finds_first_target_attribute():
+    from puikit.backends import _win32_ime
+
+    # "input input TARGET TARGET input" — 0 = ATTR_INPUT, ATTR_TARGET_CONVERTED marks the clause under conversion.
+    attrs = bytes([0, 0, _win32_ime.ATTR_TARGET_CONVERTED, _win32_ime.ATTR_TARGET_CONVERTED, 0])
+    original = _win32_ime._get_composition_attrs
+    _win32_ime._get_composition_attrs = lambda himc: attrs
+    try:
+        assert _win32_ime._target_clause_start(0) == 2
+    finally:
+        _win32_ime._get_composition_attrs = original
+
+
+def test_target_clause_start_defaults_to_zero_without_a_target_run():
+    # Raw kana input before any conversion: every character is ATTR_INPUT, no
+    # ATTR_TARGET_* run exists yet, so the anchor stays at the composition
+    # start (no jitter while typing — see _win32_ime's module docstring).
+    from puikit.backends import _win32_ime
+
+    original = _win32_ime._get_composition_attrs
+    _win32_ime._get_composition_attrs = lambda himc: bytes([0, 0, 0])
+    try:
+        assert _win32_ime._target_clause_start(0) == 0
+    finally:
+        _win32_ime._get_composition_attrs = original
+
+
 def test_ime_commit_dispatches_committed_characters_as_key_events():
     """WM_IME_COMPOSITION carrying a GCS_RESULTSTR must deliver the committed
     text as KEY events directly (see _win32_ime's module docstring) — Windows
@@ -315,7 +342,7 @@ def test_ime_commit_dispatches_committed_characters_as_key_events():
     backend._hwnd = 12345  # any nonzero placeholder; read_composition is mocked
     try:
         original = _win32_ime.read_composition
-        _win32_ime.read_composition = lambda hwnd, lparam: (None, 0, "あい")  # "あい"
+        _win32_ime.read_composition = lambda hwnd, lparam: (None, 0, 0, "あい")  # "あい"
         try:
             backend._on_ime_composition(0)
         finally:
@@ -339,7 +366,7 @@ def test_ime_composition_update_without_result_does_not_dispatch_commit():
     backend._hwnd = 12345
     try:
         original = _win32_ime.read_composition
-        _win32_ime.read_composition = lambda hwnd, lparam: ("あ", 1, None)
+        _win32_ime.read_composition = lambda hwnd, lparam: ("あ", 1, 0, None)
         try:
             backend._on_ime_composition(0)
         finally:
@@ -347,7 +374,7 @@ def test_ime_composition_update_without_result_does_not_dispatch_commit():
 
         assert len(events) == 1
         assert events[0].type == EventType.IME_COMPOSITION
-        assert events[0].hints == {"preedit": "あ", "caret": 1}
+        assert events[0].hints == {"preedit": "あ", "caret": 1, "target_start": 0}
     finally:
         backend.close()
 

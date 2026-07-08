@@ -468,10 +468,18 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
         self.selected_range = selected_range
         # Tell the widget about the in-progress composition (preedit).
         caret = selected_range.location if selected_range.location != NSNotFound else len(text)
+        # A nonzero-length selectedRange is Cocoa's signal that this is a real
+        # highlighted *clause* (multi-segment kanji conversion, cycled with
+        # left/right) rather than just the raw input cursor advancing as kana
+        # is typed (selectedRange.length == 0 then) — mirrors Windows'
+        # GCS_COMPATTR target-run check (see _win32_ime's module docstring).
+        # The candidate window should track the former and ignore the latter,
+        # or it would crawl rightward on every keystroke of untouched input.
+        target_start = int(selected_range.location) if selected_range.length > 0 else 0
         self.backend._dispatch(
             Event(
                 type=EventType.IME_COMPOSITION,
-                hints={"preedit": text, "caret": int(caret)},
+                hints={"preedit": text, "caret": int(caret), "target_start": target_start},
             )
         )
 

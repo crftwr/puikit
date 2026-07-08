@@ -263,9 +263,67 @@ def test_textedit_input_position_keeps_fractional_row():
         panel=SimpleNamespace(request_text_input=lambda x, y, hints: calls.append((x, y))),
         screen_rect=(2.0, 3.25, 12.0, 1.0),
     )
-    TextEdit("hi")._notify_input_position(ctx, caret_col=0.0, field_h=1.0)
+    TextEdit("hi")._notify_input_position(ctx, anchor_col=0.0, field_h=1.0)
     (_x, y), = calls
     assert y == 3.25  # sy + field_h - 1, not int() -> 3
+
+
+def test_textedit_input_position_stays_fixed_while_composition_grows(backend):
+    # The IME candidate window must anchor to where composition *started*, not
+    # chase the in-progress preedit caret — native apps (Notepad, VS Code) keep
+    # the candidate window stationary for the duration of one composition;
+    # feeding the backend the moving caret instead makes the window visibly
+    # jitter rightward as a word gets longer.
+    calls = []
+    backend.request_text_input = lambda x, y, hints: calls.append((x, y))
+    panel = Panel(backend)
+    field = TextEdit("")
+    panel.add(field, x=2, y=1, w=16, h=1)
+    panel.render()  # draw() is what reports the caret position, via _notify_input_position
+    panel.dispatch_event(
+        Event(type=EventType.IME_COMPOSITION, hints={"preedit": "に", "caret": 1})
+    )
+    panel.render()
+    panel.dispatch_event(
+        Event(type=EventType.IME_COMPOSITION, hints={"preedit": "にほ", "caret": 2})
+    )
+    panel.render()
+    panel.dispatch_event(
+        Event(type=EventType.IME_COMPOSITION, hints={"preedit": "にほん", "caret": 3})
+    )
+    panel.render()
+    xs = {x for x, _y in calls}
+    assert len(xs) == 1  # the anchor never moved as the preedit grew
+
+
+def test_textedit_input_position_follows_target_clause(backend):
+    # Once a multi-clause conversion is underway (space pressed, then the user
+    # cycles clauses with left/right), the candidate window must follow the
+    # clause currently selected for conversion — carried as "target_start" in
+    # the IME_COMPOSITION hints (GCS_COMPATTR on Windows, a nonzero-length
+    # selectedRange on macOS).
+    calls = []
+    backend.request_text_input = lambda x, y, hints: calls.append((x, y))
+    panel = Panel(backend)
+    field = TextEdit("")
+    panel.add(field, x=2, y=1, w=16, h=1)
+    panel.dispatch_event(
+        Event(
+            type=EventType.IME_COMPOSITION,
+            hints={"preedit": "にほんご", "caret": 2, "target_start": 0},
+        )
+    )
+    panel.render()
+    first_call = calls[-1]
+    panel.dispatch_event(
+        Event(
+            type=EventType.IME_COMPOSITION,
+            hints={"preedit": "にほんご", "caret": 4, "target_start": 2},
+        )
+    )
+    panel.render()
+    second_call = calls[-1]
+    assert first_call != second_call  # the anchor moved to the new target clause
 
 
 def test_blink_tick_retires_when_field_leaves_the_tree():

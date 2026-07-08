@@ -70,6 +70,7 @@ class TextEdit(Widget):
         self._view = 0          # first visible index into the displayed string
         self._preedit = ""      # IME marked (composition) text, not yet committed
         self._preedit_caret = 0  # caret offset within the preedit
+        self._target_start = 0  # offset of the clause selected for conversion (0 = none)
         self._panel = None
         self._field_w = float("inf")  # field width; set at draw (permissive until then)
         self._focused_now = False  # last-drawn focus state, read by the blink tick
@@ -137,6 +138,10 @@ class TextEdit(Widget):
         disp = self.text[: self.cursor] + self._preedit + self.text[self.cursor :]
         pre_start, pre_end = self.cursor, self.cursor + len(self._preedit)
         caret = self.cursor + (self._preedit_caret if self._preedit else 0)
+        # Where the IME candidate window should anchor: the clause currently
+        # selected for conversion, or the composition's start while there's no
+        # such clause yet (raw kana input) — see _notify_input_position.
+        anchor_idx = pre_start + min(self._target_start, len(self._preedit))
         # Selection indices address self.text directly, so they only line up
         # with the display string while no preedit is spliced in.
         sel = self._selection() if not self._preedit else None
@@ -166,10 +171,13 @@ class TextEdit(Widget):
         sel_bg = theme.text_selection_bg if ctx.focused else theme.text_selection_inactive_bg
         col = 0.0          # measured offset of the prefix already drawn
         caret_col = None
+        anchor_col = None
         prefix = ""        # disp[view:idx], the run measured for the next offset
         for idx in range(view, len(disp)):
             if idx == caret:
                 caret_col = col
+            if idx == anchor_idx:
+                anchor_col = col
             ch = disp[idx]
             nxt = ctx.measure_text(prefix + ch)
             if nxt > field_w:  # this glyph would cross the field edge
@@ -187,6 +195,8 @@ class TextEdit(Widget):
             col = nxt
         if caret_col is None:  # caret sits at/after the last visible glyph
             caret_col = col
+        if anchor_col is None:  # anchor sits at/after the last visible glyph
+            anchor_col = col
 
         self._focused_now = ctx.focused
         if ctx.focused:
@@ -199,7 +209,7 @@ class TextEdit(Widget):
             if ctx.vector_shapes and ctx.animated and not self._blinking and ctx.panel is not None:
                 self._blinking = ctx.panel.request_animation_ticks(self._blink_tick)
             self._draw_caret(ctx, theme, disp, caret, caret_col, field_w, bg, ty)
-            self._notify_input_position(ctx, caret_col, field_h)
+            self._notify_input_position(ctx, anchor_col, field_h)
 
         # Border stroked last so the glyph/caret backgrounds above cannot paint
         # over it; accent while focused, a subtle outline otherwise.
@@ -250,7 +260,7 @@ class TextEdit(Widget):
         if self._panel is not None:
             self._panel.reset_caret_blink()
 
-    def _notify_input_position(self, ctx: DrawContext, caret_col: float, field_h: float) -> None:
+    def _notify_input_position(self, ctx: DrawContext, anchor_col: float, field_h: float) -> None:
         if ctx.panel is None:
             return
         sx, sy, _sw, _sh = ctx.screen_rect
@@ -259,12 +269,22 @@ class TextEdit(Widget):
         # bottom and the UI opens just *under* the field — not on top of the
         # composed text, which a tall (padded) field would otherwise overlap.
         #
+        # `anchor_col` is the column of the currently-selected clause (see
+        # `_target_start`) — the composition's start while there's no such
+        # clause yet, i.e. raw kana input with nothing converted. It is
+        # deliberately NOT the in-progress preedit caret, which moves right as
+        # more characters are typed: native IME candidate windows (Notepad,
+        # VS Code, ...) stay put while typing and only jump when the target
+        # clause changes (converting, or cycling clauses with left/right);
+        # feeding them the moving caret instead makes the window visibly
+        # jitter rightward as a word gets longer.
+        #
         # Pass the FRACTIONAL position through (no int() truncation): a field laid
         # out at a fractional base-unit origin — a dialog nudges its field by a
         # fraction of a row for vertical centering — would otherwise round to the
         # row above, so the candidate window opens misaligned with the field's
         # bottom edge. The backend maps these base-unit coordinates to pixels.
-        ctx.panel.request_text_input(sx + 1 + caret_col, sy + field_h - 1, {})
+        ctx.panel.request_text_input(sx + 1 + anchor_col, sy + field_h - 1, {})
 
     def _scroll_into_view(self, ctx: DrawContext, caret: int, field_w: int) -> None:
         # Keep the start (a character index) such that the caret stays inside the
@@ -296,6 +316,7 @@ class TextEdit(Widget):
                 self._delete_selection()
             self._preedit = event.hints.get("preedit", "")
             self._preedit_caret = event.hints.get("caret", len(self._preedit))
+            self._target_start = event.hints.get("target_start", 0)
             return True
         if event.type is EventType.MOUSE_DOWN:
             # Only the field is clickable, not the empty slot to its right.
@@ -427,6 +448,7 @@ class TextEdit(Widget):
             return
         self._preedit = ""
         self._preedit_caret = 0
+        self._target_start = 0
         self._delete_selection()
         self.text = self.text[: self.cursor] + text + self.text[self.cursor :]
         self.cursor += len(text)
@@ -482,6 +504,7 @@ class TextEdit(Widget):
         # A committed character ends any composition and replaces any selection.
         self._preedit = ""
         self._preedit_caret = 0
+        self._target_start = 0
         self._delete_selection()
         self.text = self.text[: self.cursor] + ch + self.text[self.cursor :]
         self.cursor += 1
