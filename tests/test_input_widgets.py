@@ -262,8 +262,11 @@ def test_textedit_input_position_keeps_fractional_row():
     ctx = SimpleNamespace(
         panel=SimpleNamespace(request_text_input=lambda x, y, hints: calls.append((x, y))),
         screen_rect=(2.0, 3.25, 12.0, 1.0),
+        measure_text=lambda s: float(len(s)),
     )
-    TextEdit("hi")._notify_input_position(ctx, anchor_col=0.0, field_h=1.0)
+    TextEdit("hi")._notify_input_position(
+        ctx, anchor_col=0.0, field_h=1.0, disp="hi", view=0, pre_start=2,
+    )
     (_x, y), = calls
     assert y == 3.25  # sy + field_h - 1, not int() -> 3
 
@@ -324,6 +327,52 @@ def test_textedit_input_position_follows_target_clause(backend):
     panel.render()
     second_call = calls[-1]
     assert first_call != second_call  # the anchor moved to the new target clause
+
+
+def test_textedit_reports_composition_character_positions(backend):
+    # The field reports the base-unit x of every composition-character boundary
+    # so a per-character IME (macOS firstRectForCharacterRange:) can anchor its
+    # candidate window under the exact clause being converted, not just a single
+    # fixed point.
+    seen = []
+    backend.request_text_input = lambda x, y, hints: seen.append(hints)
+    panel = Panel(backend)
+    field = TextEdit("")
+    panel.add(field, x=0, y=0, w=16, h=1)
+    panel.dispatch_event(
+        Event(
+            type=EventType.IME_COMPOSITION,
+            hints={"preedit": "abcd", "caret": 4, "target_start": 0, "target_end": 0},
+        )
+    )
+    panel.render()
+    # Field at x=0 draws its glyphs from column 1; one boundary per character plus
+    # the end position, each a whole column on the grid.
+    assert seen[-1]["ime_char_xs"] == [1, 2, 3, 4, 5]
+
+
+def test_textedit_marks_selected_clause_with_thick_underline(backend):
+    # The whole composition carries a thin underline; the clause selected for
+    # conversion (target_start..target_end, cycled with left/right) adds a thick
+    # underline on top so the user can see which segment is active. A backend
+    # without a thick rule keeps just the plain underline from the UNDERLINE bit.
+    panel = Panel(backend)
+    field = TextEdit("")
+    panel.add(field, x=0, y=0, w=16, h=1)
+    panel.dispatch_event(
+        Event(
+            type=EventType.IME_COMPOSITION,
+            hints={"preedit": "abcd", "caret": 4, "target_start": 1, "target_end": 3},
+        )
+    )
+    panel.render()
+    # Field at x=0 draws its glyphs from column 1 (one column of padding); the
+    # selected clause is "bc" (indices 1..2).
+    attrs = [backend.style_at(col, 0).attr for col in (1, 2, 3, 4)]
+    for attr in attrs:
+        assert attr & TextAttribute.UNDERLINE       # every composed glyph underlined
+    thick = [bool(attr & TextAttribute.UNDERLINE_THICK) for attr in attrs]
+    assert thick == [False, True, True, False]       # only the selected clause
 
 
 def test_blink_tick_retires_when_field_leaves_the_tree():

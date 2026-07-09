@@ -71,6 +71,7 @@ class TextEdit(Widget):
         self._preedit = ""      # IME marked (composition) text, not yet committed
         self._preedit_caret = 0  # caret offset within the preedit
         self._target_start = 0  # offset of the clause selected for conversion (0 = none)
+        self._target_end = 0    # end of that clause (== start when none is selected)
         self._panel = None
         self._field_w = float("inf")  # field width; set at draw (permissive until then)
         self._focused_now = False  # last-drawn focus state, read by the blink tick
@@ -138,10 +139,15 @@ class TextEdit(Widget):
         disp = self.text[: self.cursor] + self._preedit + self.text[self.cursor :]
         pre_start, pre_end = self.cursor, self.cursor + len(self._preedit)
         caret = self.cursor + (self._preedit_caret if self._preedit else 0)
-        # Where the IME candidate window should anchor: the clause currently
-        # selected for conversion, or the composition's start while there's no
-        # such clause yet (raw kana input) — see _notify_input_position.
-        anchor_idx = pre_start + min(self._target_start, len(self._preedit))
+        # Display range of the clause currently selected for conversion (the
+        # composition's start while there's no such clause yet, i.e. raw kana
+        # input). Its start is where the IME candidate window anchors (see
+        # _notify_input_position); the whole range is drawn with a heavier
+        # underline so the user can see which segment left/right is cycling
+        # (empty while nothing is selected, so nothing is thickened).
+        target_lo = pre_start + min(self._target_start, len(self._preedit))
+        target_hi = pre_start + min(self._target_end, len(self._preedit))
+        anchor_idx = target_lo
         # Selection indices address self.text directly, so they only line up
         # with the display string while no preedit is spliced in.
         sel = self._selection() if not self._preedit else None
@@ -185,6 +191,11 @@ class TextEdit(Widget):
             marked = pre_start <= idx < pre_end
             selected = sel is not None and sel[0] <= idx < sel[1]
             attr = TextAttribute.UNDERLINE if marked else TextAttribute.NORMAL
+            # The selected conversion clause gets a thick underline on top of the
+            # composition's thin one (backends without a thick rule ignore the
+            # extra bit and still draw the plain underline).
+            if marked and target_lo <= idx < target_hi:
+                attr |= TextAttribute.UNDERLINE_THICK
             # The selection reads as active only while the field holds focus: a
             # visible blue when focused, a muted neutral otherwise
             # (docs/interaction_states.md §5).
@@ -209,7 +220,7 @@ class TextEdit(Widget):
             if ctx.vector_shapes and ctx.animated and not self._blinking and ctx.panel is not None:
                 self._blinking = ctx.panel.request_animation_ticks(self._blink_tick)
             self._draw_caret(ctx, theme, disp, caret, caret_col, field_w, bg, ty)
-            self._notify_input_position(ctx, anchor_col, field_h)
+            self._notify_input_position(ctx, anchor_col, field_h, disp, view, pre_start)
 
         # Border stroked last so the glyph/caret backgrounds above cannot paint
         # over it; accent while focused, a subtle outline otherwise.
@@ -260,7 +271,10 @@ class TextEdit(Widget):
         if self._panel is not None:
             self._panel.reset_caret_blink()
 
-    def _notify_input_position(self, ctx: DrawContext, anchor_col: float, field_h: float) -> None:
+    def _notify_input_position(
+        self, ctx: DrawContext, anchor_col: float, field_h: float,
+        disp: str, view: int, pre_start: int,
+    ) -> None:
         if ctx.panel is None:
             return
         sx, sy, _sw, _sh = ctx.screen_rect
@@ -284,7 +298,19 @@ class TextEdit(Widget):
         # fraction of a row for vertical centering — would otherwise round to the
         # row above, so the candidate window opens misaligned with the field's
         # bottom edge. The backend maps these base-unit coordinates to pixels.
-        ctx.panel.request_text_input(sx + 1 + anchor_col, sy + field_h - 1, {})
+        y = sy + field_h - 1
+        # Also report the x of every composition-character boundary (base units,
+        # absolute). A platform whose IME positions its candidate window per
+        # character range (macOS firstRectForCharacterRange:) can then answer for
+        # the *exact* clause it is converting — which is what makes the window
+        # follow left/right clause changes. The composition's glyph layout does
+        # not move while cycling clauses (only the highlight does), so this list
+        # stays valid even between the keystroke and the platform's next query.
+        char_xs = [
+            sx + 1 + (ctx.measure_text(disp[view:pre_start + k]) if pre_start + k >= view else 0.0)
+            for k in range(len(self._preedit) + 1)
+        ]
+        ctx.panel.request_text_input(sx + 1 + anchor_col, y, {"ime_char_xs": char_xs})
 
     def _scroll_into_view(self, ctx: DrawContext, caret: int, field_w: int) -> None:
         # Keep the start (a character index) such that the caret stays inside the
@@ -317,6 +343,7 @@ class TextEdit(Widget):
             self._preedit = event.hints.get("preedit", "")
             self._preedit_caret = event.hints.get("caret", len(self._preedit))
             self._target_start = event.hints.get("target_start", 0)
+            self._target_end = event.hints.get("target_end", 0)
             return True
         if event.type is EventType.MOUSE_DOWN:
             # Only the field is clickable, not the empty slot to its right.
@@ -449,6 +476,7 @@ class TextEdit(Widget):
         self._preedit = ""
         self._preedit_caret = 0
         self._target_start = 0
+        self._target_end = 0
         self._delete_selection()
         self.text = self.text[: self.cursor] + text + self.text[self.cursor :]
         self.cursor += len(text)
@@ -505,6 +533,7 @@ class TextEdit(Widget):
         self._preedit = ""
         self._preedit_caret = 0
         self._target_start = 0
+        self._target_end = 0
         self._delete_selection()
         self.text = self.text[: self.cursor] + ch + self.text[self.cursor :]
         self.cursor += 1

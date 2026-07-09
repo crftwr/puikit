@@ -29,6 +29,13 @@ class TextAttribute(IntFlag):
     BLINK = 16
     ITALIC = 32
     STRIKETHROUGH = 64
+    # A heavier underline, used to mark the IME conversion clause currently
+    # selected for editing (the "target clause" cycled with left/right) apart
+    # from the rest of the composition's thin underline. Callers set it
+    # alongside UNDERLINE, so backends that can't draw a thick rule (the text
+    # grid) still render a plain underline from the UNDERLINE bit and simply
+    # ignore this one.
+    UNDERLINE_THICK = 128
 
 
 # RGB, or RGBA with a 4th alpha channel (0-255 per channel; alpha 255 = opaque,

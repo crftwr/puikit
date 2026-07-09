@@ -394,6 +394,9 @@ class _SpyContext:
     def deactivate(self):
         self.calls.append("deactivate")
 
+    def invalidateCharacterCoordinates(self):
+        self.calls.append("invalidate")
+
     def discardMarkedText(self):
         pass
 
@@ -437,6 +440,77 @@ def test_input_context_engaged_when_text_focused():
     view.backend._text_input_active = True
     view._sync_input_context()
     assert spy.calls == ["activate"]
+
+
+def test_request_text_input_defers_reinvalidate_on_move(monkeypatch):
+    # macOS pulls the IME caret rect (firstRectForCharacterRange): an invalidate
+    # issued from inside the setMarkedText: callback — the widget re-reporting its
+    # caret as the user cycles conversion clauses with left/right — is swallowed
+    # while the IME is mid-update. So request_text_input re-issues it on the next
+    # run-loop turn, but ONLY when the anchor actually moved, so the per-frame
+    # caret re-assertion (blink, raw kana typing) schedules nothing.
+    from puikit.backends import macos_backend as mb
+
+    posted = []
+    monkeypatch.setattr(mb.AppHelper, "callAfter", lambda fn, *a, **k: posted.append(fn))
+
+    backend = MacOSBackend()
+    view, spy = _view_with_spy()
+    backend._view = view
+    view.backend = backend
+    backend._text_input_active = True
+
+    # First move off the origin: invalidate now + a deferred re-query scheduled.
+    backend.request_text_input(3.0, 5.0)
+    assert spy.calls == ["invalidate"]
+    assert posted == [backend._reinvalidate_ime_coordinates]
+
+    # Same position (a blink re-assertion): invalidate again, but nothing new
+    # deferred — the clause anchor didn't move.
+    spy.calls.clear()
+    backend.request_text_input(3.0, 5.0)
+    assert spy.calls == ["invalidate"]
+    assert len(posted) == 1
+
+    # A new position (the selected clause moved): schedule another re-query.
+    backend.request_text_input(7.0, 5.0)
+    assert len(posted) == 2
+
+    # The deferred callback re-invalidates while the view is alive, and is a safe
+    # no-op after teardown (it runs a turn later, possibly after the field closed).
+    spy.calls.clear()
+    backend._reinvalidate_ime_coordinates()
+    assert spy.calls == ["invalidate"]
+    backend._view = None
+    backend._reinvalidate_ime_coordinates()  # must not raise
+
+
+def test_ime_caret_x_indexes_reported_character_layout():
+    # firstRectForCharacterRange: positions the candidate window under the exact
+    # composition character the IME asks about. _ime_caret_x maps that char offset
+    # to the base-unit x the widget reported for each character boundary, so the
+    # window follows the selected clause; out-of-range offsets clamp to the ends.
+    from AppKit import NSNotFound
+
+    backend = MacOSBackend()
+    backend._input_caret = (99.0, 5.0)  # the single-anchor fallback
+
+    # No composition reported yet: fall back to the anchor x for any offset.
+    assert backend._ime_caret_x(0) == 99.0
+    assert backend._ime_caret_x(3) == 99.0
+
+    # A composition of 4 chars → 5 boundary positions.
+    backend.request_text_input(10.0, 5.0, {"ime_char_xs": [10.0, 12.0, 14.0, 16.0, 18.0]})
+    assert backend._ime_caret_x(0) == 10.0     # composition start
+    assert backend._ime_caret_x(2) == 14.0     # the clause starting at char 2
+    assert backend._ime_caret_x(4) == 18.0     # past the last char (end boundary)
+    assert backend._ime_caret_x(9) == 18.0     # beyond the layout clamps to the end
+    assert backend._ime_caret_x(NSNotFound) == 10.0  # unknown range -> reported anchor
+
+    # Composition ends: layout is cleared, back to the single anchor.
+    backend.request_text_input(20.0, 5.0)
+    assert backend._input_char_xs is None
+    assert backend._ime_caret_x(2) == 20.0
 
 
 def test_begin_end_text_input_toggle_the_context():

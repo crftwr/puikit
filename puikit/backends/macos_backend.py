@@ -76,6 +76,7 @@ from AppKit import (
     NSStrikethroughStyleAttributeName,
     NSUnderlineStyleAttributeName,
     NSUnderlineStyleSingle,
+    NSUnderlineStyleThick,
     NSView,
     NSWorkspace,
     NSWindow,
@@ -475,11 +476,23 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
         # GCS_COMPATTR target-run check (see _win32_ime's module docstring).
         # The candidate window should track the former and ignore the latter,
         # or it would crawl rightward on every keystroke of untouched input.
-        target_start = int(selected_range.location) if selected_range.length > 0 else 0
+        # ``target_end`` bounds that clause so the widget can underline it thickly
+        # (native IMEs mark the selected clause with a heavier rule); it collapses
+        # onto the start while there's no highlighted clause, so nothing is marked.
+        if selected_range.length > 0:
+            target_start = int(selected_range.location)
+            target_end = int(selected_range.location + selected_range.length)
+        else:
+            target_start = target_end = 0
         self.backend._dispatch(
             Event(
                 type=EventType.IME_COMPOSITION,
-                hints={"preedit": text, "caret": int(caret), "target_start": target_start},
+                hints={
+                    "preedit": text,
+                    "caret": int(caret),
+                    "target_start": target_start,
+                    "target_end": target_end,
+                },
             )
         )
 
@@ -532,7 +545,12 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
         # composition session (and macOS logs "Exception raised accessing first
         # rect"), so the whole body is defensive and always returns a rect.
         try:
-            cx, cy = self.backend._input_caret
+            # Position for the exact character the IME asks about (char_range),
+            # not just the single reported anchor: the composition's glyph layout
+            # is known, so the candidate window follows the clause being converted
+            # even when the platform re-queries with a stale caret.
+            cx = self.backend._ime_caret_x(char_range.location)
+            cy = self.backend._input_caret[1]
             bw, bh = self.backend._base_w, self.backend._base_h
             rect = NSMakeRect(cx * bw, cy * bh, bw, bh)
             window = self.window()
@@ -814,6 +832,10 @@ class MacOSBackend(Backend):
         # On-screen caret position (base units) reported by the focused text
         # widget; positions the IME candidate window.
         self._input_caret: tuple[float, float] = (0.0, 0.0)
+        # Base-unit x of each composition-character boundary (absolute), reported
+        # alongside the caret so firstRectForCharacterRange: can answer for the
+        # exact clause the IME is converting. None while there's no composition.
+        self._input_char_xs: list[float] | None = None
         # Whether a text widget holds focus. While False, keyDown delivers plain
         # command KEY events and never engages the IME (so single-letter
         # bindings work under any input source); while True it routes through
@@ -1367,6 +1389,7 @@ class MacOSBackend(Backend):
             return
 
         underline = bool(style.attr & TextAttribute.UNDERLINE)
+        thick = bool(style.attr & TextAttribute.UNDERLINE_THICK)
         strike = bool(style.attr & TextAttribute.STRIKETHROUGH)
         # font=None uses the prebuilt NORMAL/BOLD base faces; a grid-aligned
         # per-Style monospace font resolves to the same face honoring its own
@@ -1384,7 +1407,9 @@ class MacOSBackend(Backend):
             NSForegroundColorAttributeName: _ns_color(fg, alpha),
         }
         if underline:
-            attrs[NSUnderlineStyleAttributeName] = NSUnderlineStyleSingle
+            attrs[NSUnderlineStyleAttributeName] = (
+                NSUnderlineStyleThick if thick else NSUnderlineStyleSingle
+            )
         if strike:
             attrs[NSStrikethroughStyleAttributeName] = NSUnderlineStyleSingle
 
@@ -1409,7 +1434,7 @@ class MacOSBackend(Backend):
         kerned[NSKernAttributeName] = self._grid_kern
         # id(ns_font) keys the cache by the exact resolved face, covering both
         # the NORMAL/BOLD base faces and any grid-aligned per-Style monospace.
-        sig = (id(ns_font), fg, alpha, underline, strike)
+        sig = (id(ns_font), fg, alpha, underline, thick, strike)
         col = 0
         i = 0
         n = len(runs)
@@ -1440,16 +1465,19 @@ class MacOSBackend(Backend):
         overflow. This is the GUI "no text grid" path (docs/font_system.md §9)."""
         ns_font = self._resolve_style_font(style)
         underline = bool(style.attr & TextAttribute.UNDERLINE)
+        thick = bool(style.attr & TextAttribute.UNDERLINE_THICK)
         strike = bool(style.attr & TextAttribute.STRIKETHROUGH)
         attrs = {
             NSFontAttributeName: ns_font,
             NSForegroundColorAttributeName: _ns_color(fg, alpha),
         }
         if underline:
-            attrs[NSUnderlineStyleAttributeName] = NSUnderlineStyleSingle
+            attrs[NSUnderlineStyleAttributeName] = (
+                NSUnderlineStyleThick if thick else NSUnderlineStyleSingle
+            )
         if strike:
             attrs[NSStrikethroughStyleAttributeName] = NSUnderlineStyleSingle
-        key = ("f", text, id(ns_font), tuple(fg) if fg else None, alpha, underline, strike)
+        key = ("f", text, id(ns_font), tuple(fg) if fg else None, alpha, underline, thick, strike)
         ns_text = self._cached_attr_string(key, text, attrs)
         origin = self._unit_rect(x, y, 1, 1).origin
         if bg is not None and not is_transparent(bg):
@@ -1695,11 +1723,52 @@ class MacOSBackend(Backend):
         fractional), so the IME candidate window (firstRectForCharacterRange)
         appears next to it — aligned with the field's bottom edge even when the
         field sits at a fractional row origin."""
+        moved = (float(x), float(y)) != self._input_caret
         self._input_caret = (float(x), float(y))
+        char_xs = (hints or {}).get("ime_char_xs")
+        self._input_char_xs = [float(v) for v in char_xs] if char_xs else None
         if self._view is not None:
             ctx = self._view.inputContext()
             if ctx is not None:
                 ctx.invalidateCharacterCoordinates()
+                # macOS is a *pull* model: the IME re-reads firstRectForCharacterRange
+                # only when it decides its coordinates are stale. When the anchor
+                # moves mid-composition — the user cycles conversion clauses with
+                # left/right, so the widget re-reports the caret from *inside* the
+                # setMarkedText: callback that is delivering that change — the
+                # invalidate above lands while the IME is still mid-update and is
+                # swallowed: it has already positioned its candidate panel for this
+                # keystroke and won't re-query until its own geometry next changes
+                # (pressing space to cycle candidates resizes the list, which does).
+                # So the panel lags a keystroke behind the selected clause. Re-issue
+                # the invalidate once the callback has unwound, on the next run-loop
+                # turn, so the panel follows the clause immediately. Gated on an
+                # actual move so the per-frame caret re-assertion (caret blink,
+                # raw kana typing with a fixed anchor) schedules no needless work.
+                if moved:
+                    AppHelper.callAfter(self._reinvalidate_ime_coordinates)
+
+    def _ime_caret_x(self, location: int) -> float:
+        """Base-unit x of the caret rect for composition offset ``location`` (the
+        location of a firstRectForCharacterRange: query). Uses the per-character
+        layout the widget reported when it's available — so the candidate window
+        anchors under the exact clause the IME is converting — and falls back to
+        the single reported caret x otherwise (no composition, or a location the
+        IME never gave a layout for)."""
+        xs = self._input_char_xs
+        if xs and location != NSNotFound:
+            return xs[max(0, min(int(location), len(xs) - 1))]
+        return self._input_caret[0]
+
+    def _reinvalidate_ime_coordinates(self) -> None:
+        """Deferred companion to ``request_text_input``'s invalidate (see there):
+        forces the IME to re-query the caret rect on a later run-loop turn. Runs
+        after the composition callback has unwound, so guard against teardown."""
+        if self._view is None:
+            return
+        ctx = self._view.inputContext()
+        if ctx is not None:
+            ctx.invalidateCharacterCoordinates()
 
     # --- clipboard -----------------------------------------------------------
 
