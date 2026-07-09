@@ -1433,8 +1433,26 @@ class Panel:
         # Reset the per-frame cursor request; widgets re-declare it via
         # request_pointer_shape while drawing, topmost (last) wins.
         self._pointer_shape = None
+        # A widget's draw() can have the side effect of resizing the window —
+        # notably MenuBar installing a native OS menu bar the first time it
+        # draws (WindowsBackend.set_menu_bar -> SetMenu), which synchronously
+        # shrinks the client area to make room for it. That first draw pass
+        # already laid out every widget against the taller, menu-less size, so
+        # once the menu lands, the bottom-most fixed item (e.g. the status
+        # bar) overflows past the new client edge and is clipped — until the
+        # next render() recomputes against the corrected size. Detect the
+        # change here and redo layout + drawing once against the corrected
+        # size, so the first frame is already right (MenuBar only installs
+        # once, so this can only recurse one level deep).
+        size_before = self.backend.size_units
         for slot in self._children:
             self._draw_slot(slot)
+        if self._layout is not None and self.backend.size_units != size_before:
+            self._apply_layout()
+            self.backend.clear()
+            self._pointer_shape = None
+            for slot in self._children:
+                self._draw_slot(slot)
         for divider in self._dividers:
             self._draw_divider(divider)
         for i, slot in enumerate(self._layers):
