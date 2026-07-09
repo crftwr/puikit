@@ -1130,6 +1130,17 @@ class WindowsBackend(Backend):
         data_object = _win32_dragdrop.create_file_data_object([str(p) for p in paths])
         if data_object is None:
             return False
+        # DoDragDrop manages mouse capture itself to hit-test which window is
+        # under the cursor as it moves outside our own window/process. This is
+        # called from the MOUSE_DRAG handler while the button is still down,
+        # so our own _on_mouse_down capture (see native.user32.SetCapture
+        # there) is still held — leaving it in place breaks DoDragDrop's
+        # cross-window hit-testing, so drops onto foreign windows (e.g.
+        # Explorer) always show the "no drop" cursor even though same-process
+        # drops still work. Release it first, matching the well-known OLE
+        # requirement (see Raymond Chen, "Why do I need to call ReleaseCapture
+        # before starting a drag operation?").
+        native.user32.ReleaseCapture()
         _win32_dragdrop.ensure_ole_initialized()
         op = _win32_dragdrop.do_drag_drop(data_object, operations)
         if on_complete is not None:

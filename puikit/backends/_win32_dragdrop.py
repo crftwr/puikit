@@ -66,6 +66,7 @@ IID_IUnknown = GUID.from_str("00000000-0000-0000-C000-000000000046")
 IID_IDropSource = GUID.from_str("00000121-0000-0000-C000-000000000046")
 IID_IDropTarget = GUID.from_str("00000122-0000-0000-C000-000000000046")
 IID_IDataObject = GUID.from_str("0000010e-0000-0000-C000-000000000046")
+IID_IMarshal = GUID.from_str("00000003-0000-0000-C000-000000000046")
 
 E_NOINTERFACE = -2147467262  # 0x80004002 as a signed HRESULT
 
@@ -102,6 +103,8 @@ ole32.RegisterDragDrop.argtypes = [wintypes.HWND, ctypes.c_void_p]
 ole32.RevokeDragDrop.restype = ctypes.c_int32
 ole32.RevokeDragDrop.argtypes = [wintypes.HWND]
 ole32.ReleaseStgMedium.argtypes = [ctypes.c_void_p]
+ole32.CoCreateFreeThreadedMarshaler.restype = ctypes.c_int32
+ole32.CoCreateFreeThreadedMarshaler.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
 
 shell32.DragQueryFileW.restype = ctypes.c_uint32
 shell32.DragQueryFileW.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_wchar_p, ctypes.c_uint32]
@@ -480,6 +483,114 @@ def _matches_hdrop(fmt: "FORMATETC") -> bool:
     return fmt.cfFormat == CF_HDROP and fmt.dwAspect == DVASPECT_CONTENT and bool(fmt.tymed & TYMED_HGLOBAL)
 
 
+# --- IEnumFORMATETC (hand-built vtable): lets EnumFormatEtc discover CF_HDROP -
+
+IID_IEnumFORMATETC = GUID.from_str("00000103-0000-0000-C000-000000000046")
+DATADIR_GET = 1
+
+_NEXT_FUNC = ctypes.WINFUNCTYPE(
+    ctypes.c_int32, ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(FORMATETC), ctypes.POINTER(ctypes.c_uint32)
+)
+_SKIP_FUNC = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_uint32)
+_RESET_FUNC = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p)
+_CLONE_FUNC = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))
+
+
+class _IEnumFormatEtcVtbl(ctypes.Structure):
+    _fields_ = [
+        ("QueryInterface", _QI_FUNC),
+        ("AddRef", _ADDREF_FUNC),
+        ("Release", _RELEASE_FUNC),
+        ("Next", _NEXT_FUNC),
+        ("Skip", _SKIP_FUNC),
+        ("Reset", _RESET_FUNC),
+        ("Clone", _CLONE_FUNC),
+    ]
+
+
+class _IEnumFormatEtcObj(ctypes.Structure):
+    _fields_ = [("lpVtbl", ctypes.POINTER(_IEnumFormatEtcVtbl))]
+
+
+class _HdropFormatEnumerator:
+    """A single-entry ``IEnumFORMATETC`` yielding just CF_HDROP.
+
+    Windows Explorer's shell drop target discovers what formats a *foreign*
+    (non-shell) drag source offers by calling ``IDataObject::EnumFormatEtc``
+    rather than probing ``QueryGetData``/``GetData`` for CF_HDROP directly —
+    verified live: with ``EnumFormatEtc`` returning ``E_NOTIMPL`` (as every
+    other unsupported ``IDataObject`` method here does), Explorer's
+    DragEnter/DragOver never once attempted CF_HDROP itself and always
+    settled on DROPEFFECT_NONE, while a same-process/single-thread consumer
+    (an Electron app's drop target) that only ever calls QueryGetData/GetData
+    directly worked fine regardless. Returning a real enumerator here — even
+    a minimal one listing just the one format this data object actually
+    supports — is what lets Explorer discover CF_HDROP at all."""
+
+    def __init__(self) -> None:
+        self._refcount = 1
+        self._index = 0
+        self._vtbl = _IEnumFormatEtcVtbl(
+            _QI_FUNC(self._query_interface),
+            _ADDREF_FUNC(self._add_ref),
+            _RELEASE_FUNC(self._release),
+            _NEXT_FUNC(self._next),
+            _SKIP_FUNC(self._skip),
+            _RESET_FUNC(self._reset),
+            _CLONE_FUNC(self._clone),
+        )
+        self._obj = _IEnumFormatEtcObj(ctypes.pointer(self._vtbl))
+        self.addr = ctypes.addressof(self._obj)
+
+    def _query_interface(self, this: int, riid, ppv) -> int:
+        iid = riid[0]
+        if _guid_eq(iid, IID_IUnknown) or _guid_eq(iid, IID_IEnumFORMATETC):
+            ppv[0] = this
+            self._refcount += 1
+            return 0
+        ppv[0] = None
+        return E_NOINTERFACE
+
+    def _add_ref(self, this: int) -> int:
+        self._refcount += 1
+        return self._refcount
+
+    def _release(self, this: int) -> int:
+        self._refcount -= 1
+        return max(self._refcount, 0)
+
+    def _next(self, this: int, celt: int, rgelt, pceltFetched) -> int:
+        fetched = 0
+        while fetched < celt and self._index < 1:
+            rgelt[fetched] = _hdrop_formatetc()
+            self._index += 1
+            fetched += 1
+        if pceltFetched:
+            pceltFetched[0] = fetched
+        return 0 if fetched == celt else 1  # S_OK / S_FALSE
+
+    def _skip(self, this: int, celt: int) -> int:
+        self._index = min(self._index + celt, 1)
+        return 0
+
+    def _reset(self, this: int) -> int:
+        self._index = 0
+        return 0
+
+    def _clone(self, this: int, ppenum) -> int:
+        clone = _HdropFormatEnumerator()
+        clone._index = self._index
+        _live_enumerators.append(clone)
+        ppenum[0] = clone.addr
+        return 0
+
+
+# Keeps every enumerator (and its clones) alive for the life of the process —
+# OLE holds the raw pointer, not a Python reference, and a drag session is
+# short-lived enough that this never accumulates meaningfully.
+_live_enumerators: list["_HdropFormatEnumerator"] = []
+
+
 class FileDataObject:
     """A minimal, hand-built ``IDataObject`` exposing exactly one format —
     CF_HDROP over the given paths — as a real ``DoDragDrop`` data source.
@@ -524,6 +635,20 @@ class FileDataObject:
         )
         self._obj = _IDataObjectObj(ctypes.pointer(self._vtbl))
         self.addr = ctypes.addressof(self._obj)
+        # Shell drop targets (verified live: Explorer's DragEnter) query this
+        # object for IID_IMarshal — plausibly because their drag-drop handling
+        # can touch the source's IDataObject from a different apartment/thread
+        # than the one that started the drag. Aggregating the free-threaded
+        # marshaler answers that so any apartment can reach the object
+        # directly rather than needing a full proxy/stub round trip. (The
+        # actual Explorer-drop-always-fails bug this project hit turned out to
+        # be EnumFormatEtc returning E_NOTIMPL, not this — see
+        # _HdropFormatEnumerator's docstring — but responding to IID_IMarshal
+        # is correct COM practice for a drag source regardless.)
+        self._marshal_unk = ctypes.c_void_p()
+        hr = ole32.CoCreateFreeThreadedMarshaler(self.addr, ctypes.byref(self._marshal_unk))
+        if hr != 0 or not self._marshal_unk:
+            self._marshal_unk = None
 
     def _query_interface(self, this: int, riid, ppv) -> int:
         iid = riid[0]
@@ -531,6 +656,11 @@ class FileDataObject:
             ppv[0] = this
             self._refcount += 1
             return 0
+        if _guid_eq(iid, IID_IMarshal) and self._marshal_unk is not None:
+            inner = ComPtr(self._marshal_unk.value)
+            return inner.call(
+                0, ctypes.c_int32, [ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)], ctypes.byref(IID_IMarshal), ppv
+            )
         ppv[0] = None
         return E_NOINTERFACE
 
@@ -564,8 +694,13 @@ class FileDataObject:
         return E_NOTIMPL
 
     def _enum_format_etc(self, this: int, direction: int, ppenum) -> int:
-        ppenum[0] = None
-        return E_NOTIMPL
+        if direction != DATADIR_GET:
+            ppenum[0] = None
+            return E_NOTIMPL
+        enumerator = _HdropFormatEnumerator()
+        _live_enumerators.append(enumerator)
+        ppenum[0] = enumerator.addr
+        return 0
 
     def _d_advise(self, this: int, pformatetc, advf: int, p_advise_sink, pdw_connection) -> int:
         return OLE_E_ADVISENOTSUPPORTED
