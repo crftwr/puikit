@@ -44,6 +44,15 @@ from ..text import display_width, glyph_runs as _glyph_runs
 _DEFAULT_FG = (230, 230, 230)
 _DEFAULT_BG = (24, 24, 24)
 
+# Drop-shadow tuning (see _render_shadow): matched to macOS's NSShadow values
+# in macos_backend.py (offset (0, -8), blur radius 24, black @ 0.33 alpha).
+# Direct2D's Gaussian Blur "standard deviation" isn't the same unit as Core
+# Graphics' blur radius (roughly radius ~= 2-3x sigma), so this starts near
+# blur_radius/3 rather than copying the number directly.
+_SHADOW_Y_OFFSET = 8.0
+_SHADOW_BLUR_SIGMA = 8.0
+_SHADOW_ALPHA = 0.33
+
 # Icon names -> emoji glyphs, same MVP icon implementation as the macOS
 # backend (draw_icon just queues a "text" command for the glyph).
 _ICON_GLYPHS = {
@@ -250,7 +259,21 @@ class WindowsBackend(Backend):
         self._hwnd = 0
         self._d2d_factory: Any = None
         self._dwrite_factory: Any = None
+        # `_render_target` is an ID2D1DeviceContext (see _win32_native.py's
+        # D3D11/DXGI/Direct2D-1.1 section) bound to `_swap_chain`'s back
+        # buffer (`_target_bitmap`) -- everything else in this file keeps
+        # calling it through the plain ID2D1RenderTarget rt_* functions,
+        # since a device context is a strict superset of that vtable.
         self._render_target: Any = None
+        self._d3d_device: Any = None
+        self._d2d_device: Any = None
+        self._swap_chain: Any = None
+        self._target_bitmap: Any = None
+        # One reusable Gaussian Blur effect for draw_shadow (see
+        # _render_shadow) -- effects are meant to be persistent and
+        # reconfigured, not recreated every frame, same reasoning as the one
+        # reusable `_brush` below.
+        self._shadow_effect: Any = None
         self._brush: Any = None
         self._handler: EventHandler | None = None
         self._quit_requested = False
@@ -324,9 +347,7 @@ class WindowsBackend(Backend):
             raise OSError(f"CreateWindowExW failed: {ctypes.get_last_error()}")
         _hwnd_backends[self._hwnd] = self
 
-        cw, ch = self._client_size_px()
-        self._render_target = native.create_hwnd_render_target(self._d2d_factory, self._hwnd, cw, ch)
-        self._brush = native.rt_create_solid_color_brush(self._render_target, native.D2D1_COLOR_F(1, 1, 1, 1))
+        self._create_render_resources()
 
         # Command mode is the default focus state (no text widget starts
         # focused), so the IME starts disabled; begin_text_input re-attaches
@@ -338,6 +359,29 @@ class WindowsBackend(Backend):
 
         native.user32.ShowWindow(self._hwnd, native.SW_SHOW)
         native.user32.UpdateWindow(self._hwnd)
+
+    def _create_render_resources(self) -> None:
+        """Build the D3D11 device -> DXGI swap chain -> ID2D1DeviceContext
+        chain (see _win32_native.py) and the reusable brush/shadow-blur
+        effect that ride on top of it. Called from open() and, on device
+        loss, from _recreate_render_target()."""
+        cw, ch = self._client_size_px()
+        self._d3d_device = native.create_d3d11_device()
+        self._d2d_device, self._render_target = native.create_d2d_device_context(self._d2d_factory, self._d3d_device)
+        self._swap_chain = native.create_swapchain_for_hwnd(self._d3d_device, self._hwnd, cw, ch)
+        self._target_bitmap = native.swapchain_bind_target(self._render_target, self._swap_chain, cw, ch)
+        self._brush = native.rt_create_solid_color_brush(self._render_target, native.D2D1_COLOR_F(1, 1, 1, 1))
+        self._shadow_effect = native.dc_create_effect(self._render_target, native.CLSID_D2D1GaussianBlur)
+        native.effect_set_value_float(
+            self._shadow_effect, native.D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, _SHADOW_BLUR_SIGMA
+        )
+
+    def _release_render_resources(self) -> None:
+        for attr in ("_shadow_effect", "_target_bitmap", "_brush", "_render_target", "_d2d_device", "_swap_chain", "_d3d_device"):
+            obj = getattr(self, attr)
+            if obj is not None:
+                obj.release()
+                setattr(self, attr, None)
 
     def _save_autosave_frame(self) -> None:
         if self._frame_autosave_name and self._hwnd:
@@ -376,12 +420,7 @@ class WindowsBackend(Backend):
         if self._wic_factory is not None:
             self._wic_factory.release()
             self._wic_factory = None
-        if self._brush is not None:
-            self._brush.release()
-            self._brush = None
-        if self._render_target is not None:
-            self._render_target.release()
-            self._render_target = None
+        self._release_render_resources()
         if self._dwrite_factory is not None:
             self._dwrite_factory.release()
             self._dwrite_factory = None
@@ -755,17 +794,16 @@ class WindowsBackend(Backend):
             elif kind == "clip_pop":
                 native.rt_pop_axis_aligned_clip(rt)
         hr = native.rt_end_draw(rt)
-        if (hr & 0xFFFFFFFF) == 0x8899000C:  # D2DERR_RECREATE_TARGET (device lost)
+        device_lost = (hr & 0xFFFFFFFF) == 0x8899000C  # D2DERR_RECREATE_TARGET
+        if not device_lost:
+            present_hr = native.swapchain_present(self._swap_chain) & 0xFFFFFFFF
+            device_lost = present_hr in (0x887A0005, 0x887A0007)  # DXGI_ERROR_DEVICE_REMOVED / _RESET
+        if device_lost:
             self._recreate_render_target()
 
     def _recreate_render_target(self) -> None:
-        if self._brush is not None:
-            self._brush.release()
-        if self._render_target is not None:
-            self._render_target.release()
-        cw, ch = self._client_size_px()
-        self._render_target = native.create_hwnd_render_target(self._d2d_factory, self._hwnd, cw, ch)
-        self._brush = native.rt_create_solid_color_brush(self._render_target, native.D2D1_COLOR_F(1, 1, 1, 1))
+        self._release_render_resources()
+        self._create_render_resources()
 
     def _render_text(self, x: int, y: int, text: str, style: Style) -> None:
         fg = style.fg or _DEFAULT_FG
@@ -900,28 +938,45 @@ class WindowsBackend(Backend):
         self, x: int, y: int, w: int, h: int, radius: float | None = None,
         corners: tuple[str, ...] | None = None, bg: tuple[int, ...] | None = None,
     ) -> None:
-        # Approximate a blurred drop shadow with concentric, increasingly
-        # transparent rect fills offset down-right — Direct2D's real Gaussian
-        # blur needs a D3D11 device + effects pipeline, deferred (CLAUDE.md).
-        # `corners` (a rounded panel's subset of rounded corners) is not
+        # A real blurred drop shadow via ID2D1Effect (Gaussian Blur), not the
+        # old concentric-hard-rect approximation: draw the caster shape
+        # (shifted down by _SHADOW_Y_OFFSET, in the shadow's own color/alpha)
+        # into a command list, blur that command list's output, and composite
+        # it. `corners` (a rounded panel's subset of rounded corners) is not
         # honored; the shadow always uses a uniform radius.
+        #
+        # Retargeting the device context requires ending the frame's open
+        # BeginDraw/EndDraw batch first (confirmed live: retargeting to a
+        # command list while a batch is open raises D2DERR_WRONG_STATE,
+        # despite this being the MSDN-documented command-list recording
+        # sequence -- nesting a second Begin/EndDraw inside an already-open
+        # one is not actually legal on the same device context). BeginDraw is
+        # reopened once the retarget is done, resuming the same frame -- only
+        # Clear is a one-time-per-frame operation (already done once in
+        # _render()), so splitting one frame across multiple Begin/EndDraw
+        # pairs onto the same target is safe.
+        rt = self._render_target
         rect = self._unit_rect(x, y, w, h)
-        layers = 6
-        for i in range(layers, 0, -1):
-            spread = i * 1.6
-            alpha = 0.05 * (layers - i + 1)
-            shadow_rect = native.D2D1_RECT_F(
-                rect.left - spread + 4.0,
-                rect.top - spread + 6.0,
-                rect.right + spread + 4.0,
-                rect.bottom + spread + 6.0,
-            )
-            self._set_brush((0, 0, 0), alpha)
-            if radius:
-                r = max(0.0, min(radius + spread, (shadow_rect.right - shadow_rect.left) / 2.0, (shadow_rect.bottom - shadow_rect.top) / 2.0))
-                native.rt_fill_rounded_rectangle(self._render_target, native.D2D1_ROUNDED_RECT(shadow_rect, r, r), self._brush)
-            else:
-                native.rt_fill_rectangle(self._render_target, shadow_rect, self._brush)
+        shadow_rect = native.D2D1_RECT_F(rect.left, rect.top + _SHADOW_Y_OFFSET, rect.right, rect.bottom + _SHADOW_Y_OFFSET)
+        native.rt_end_draw(rt)
+        cmd_list = native.dc_create_command_list(rt)
+        native.dc_set_target(rt, cmd_list)
+        native.rt_begin_draw(rt)
+        self._set_brush((0, 0, 0), _SHADOW_ALPHA)
+        if radius:
+            r = max(0.0, min(radius, (shadow_rect.right - shadow_rect.left) / 2.0, (shadow_rect.bottom - shadow_rect.top) / 2.0))
+            native.rt_fill_rounded_rectangle(rt, native.D2D1_ROUNDED_RECT(shadow_rect, r, r), self._brush)
+        else:
+            native.rt_fill_rectangle(rt, shadow_rect, self._brush)
+        native.rt_end_draw(rt)
+        native.command_list_close(cmd_list)
+        native.dc_set_target(rt, self._target_bitmap)
+        native.rt_begin_draw(rt)
+        native.effect_set_input(self._shadow_effect, 0, cmd_list)
+        output_image = native.effect_get_output(self._shadow_effect)
+        native.dc_draw_image(rt, output_image)
+        output_image.release()
+        cmd_list.release()
         # Re-fill the layer's own silhouette with its surface color so the shadow
         # only shows around its edges, not through translucent content. Use the
         # layer's ``bg`` (not the window-dark default) so a sub-unit sliver left
@@ -929,9 +984,9 @@ class WindowsBackend(Backend):
         self._set_brush(bg if bg is not None else _DEFAULT_BG)
         if radius:
             r = max(0.0, min(radius, (rect.right - rect.left) / 2.0, (rect.bottom - rect.top) / 2.0))
-            native.rt_fill_rounded_rectangle(self._render_target, native.D2D1_ROUNDED_RECT(rect, r, r), self._brush)
+            native.rt_fill_rounded_rectangle(rt, native.D2D1_ROUNDED_RECT(rect, r, r), self._brush)
         else:
-            native.rt_fill_rectangle(self._render_target, rect, self._brush)
+            native.rt_fill_rectangle(rt, rect, self._brush)
 
     def _render_scrollbar(self, x: int, y: int, h: int, pos: float, ratio: float,
                           style: Style, orientation: str = "vertical") -> None:
@@ -1334,7 +1389,7 @@ class WindowsBackend(Backend):
         if msg == native.WM_SIZE:
             cw, ch = native.loword(lparam), native.hiword(lparam)
             if self._render_target is not None and cw and ch:
-                native.rt_resize(self._render_target, cw, ch)
+                self._target_bitmap = native.swapchain_resize(self._render_target, self._swap_chain, self._target_bitmap, cw, ch)
             sw, sh = self.size
             self._dispatch(Event(type=EventType.RESIZE, hints={"w": sw, "h": sh}))
             return 0

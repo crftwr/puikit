@@ -71,7 +71,6 @@ class GUID(ctypes.Structure):
         return cls(int(d1, 16), int(d2, 16), int(d3, 16), (ctypes.c_uint8 * 8)(*data4))
 
 
-IID_ID2D1Factory = GUID.from_str("06152247-6f50-465a-9245-118bfd3b6007")
 IID_IDWriteFactory = GUID.from_str("b859ee5a-d838-4b5b-a2e8-1adc7d93db48")
 
 
@@ -131,29 +130,11 @@ class D2D1_PIXEL_FORMAT(ctypes.Structure):
     _fields_ = [("format", ctypes.c_uint32), ("alphaMode", ctypes.c_uint32)]
 
 
-class D2D1_RENDER_TARGET_PROPERTIES(ctypes.Structure):
-    _fields_ = [
-        ("type", ctypes.c_uint32),
-        ("pixelFormat", D2D1_PIXEL_FORMAT),
-        ("dpiX", ctypes.c_float),
-        ("dpiY", ctypes.c_float),
-        ("usage", ctypes.c_uint32),
-        ("minLevel", ctypes.c_uint32),
-    ]
-
-
-class D2D1_HWND_RENDER_TARGET_PROPERTIES(ctypes.Structure):
-    _fields_ = [("hwnd", HWND), ("pixelSize", D2D1_SIZE_U), ("presentOptions", ctypes.c_uint32)]
-
-
 D2D1_DRAW_TEXT_OPTIONS_NONE = 0
 D2D1_DRAW_TEXT_OPTIONS_CLIP = 0x00000002
 DWRITE_MEASURING_MODE_NATURAL = 0
 DWRITE_WORD_WRAPPING_NO_WRAP = 1
 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE = 0
-D2D1_PRESENT_OPTIONS_NONE = 0
-D2D1_PRESENT_OPTIONS_RETAIN_CONTENTS = 1
-D2D1_PRESENT_OPTIONS_IMMEDIATELY = 2
 
 
 # --- generic COM vtable calling ----------------------------------------------
@@ -215,16 +196,6 @@ def hresult_ok(hr: int) -> bool:
     return hr >= 0
 
 
-# --- ID2D1Factory (vtable: IUnknown[0-2], ReloadSystemMetrics[3],
-#     GetDesktopDpi[4], CreateRectangleGeometry[5],
-#     CreateRoundedRectangleGeometry[6], CreateEllipseGeometry[7],
-#     CreateGeometryGroup[8], CreateTransformedGeometry[9],
-#     CreatePathGeometry[10], CreateStrokeStyle[11],
-#     CreateDrawingStateBlock[12], CreateWicBitmapRenderTarget[13],
-#     CreateHwndRenderTarget[14], ...) -----------------------------------------
-
-_IDX_FACTORY_CREATE_HWND_RT = 14
-
 # --- ID2D1RenderTarget (vtable: IUnknown[0-2], ID2D1Resource.GetFactory[3],
 #     CreateBitmap[4], CreateBitmapFromWicBitmap[5], CreateSharedBitmap[6],
 #     CreateBitmapBrush[7], CreateSolidColorBrush[8],
@@ -260,11 +231,6 @@ _IDX_RT_CLEAR = 47
 _IDX_RT_BEGIN_DRAW = 48
 _IDX_RT_END_DRAW = 49
 _IDX_RT_GET_SIZE = 53
-
-# --- ID2D1HwndRenderTarget adds (after ID2D1RenderTarget's 0-56):
-#     CheckWindowState[57], Resize[58], GetHwnd[59] ----------------------------
-
-_IDX_HWND_RT_RESIZE = 58
 
 # --- ID2D1Brush (vtable: IUnknown[0-2], GetFactory[3], SetOpacity[4],
 #     SetTransform[5], GetOpacity[6], GetTransform[7]) -----------------------
@@ -346,8 +312,13 @@ DWRITE_FACTORY_TYPE_SHARED = 0
 
 
 def create_d2d_factory() -> ComPtr:
+    """An ID2D1Factory1 (not the plain ID2D1Factory the IID name suggests):
+    everything this backend used the classic factory for still works
+    unchanged (Factory1 is a strict superset), and CreateDeviceContext's
+    device chain (create_d2d_device_context, below) additionally needs the
+    Factory1-only CreateDevice method on this same object."""
     out = ctypes.c_void_p()
-    hr = d2d1.D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, ctypes.byref(IID_ID2D1Factory), None, ctypes.byref(out))
+    hr = d2d1.D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, ctypes.byref(IID_ID2D1Factory1), None, ctypes.byref(out))
     if not hresult_ok(hr):
         raise OSError(f"D2D1CreateFactory failed: 0x{hr & 0xFFFFFFFF:08x}")
     return ComPtr(out.value or 0)
@@ -359,40 +330,6 @@ def create_dwrite_factory() -> ComPtr:
     if not hresult_ok(hr):
         raise OSError(f"DWriteCreateFactory failed: 0x{hr & 0xFFFFFFFF:08x}")
     return ComPtr(out.value or 0)
-
-
-def create_hwnd_render_target(factory: ComPtr, hwnd: int, width: int, height: int) -> ComPtr:
-    rt_props = D2D1_RENDER_TARGET_PROPERTIES()  # all-zero == D2D1::RenderTargetProperties() defaults
-    # IMMEDIATELY: present without waiting for the next vsync. The default
-    # (wait for vsync) measured ~16ms per EndDraw in a VMware guest — likely
-    # the virtual display's vsync timing being slow/unreliable to signal —
-    # vs. ~4ms with this flag; no observed downside (we already redraw only
-    # on demand via InvalidateRect, not continuously, so there's no tearing
-    # concern from racing ahead of the display).
-    hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES(
-        hwnd, D2D1_SIZE_U(max(width, 1), max(height, 1)), D2D1_PRESENT_OPTIONS_IMMEDIATELY
-    )
-    out = ctypes.c_void_p()
-    hr = factory.call(
-        _IDX_FACTORY_CREATE_HWND_RT,
-        ctypes.c_int32,
-        [
-            ctypes.POINTER(D2D1_RENDER_TARGET_PROPERTIES),
-            ctypes.POINTER(D2D1_HWND_RENDER_TARGET_PROPERTIES),
-            ctypes.POINTER(ctypes.c_void_p),
-        ],
-        ctypes.byref(rt_props),
-        ctypes.byref(hwnd_props),
-        ctypes.byref(out),
-    )
-    if not hresult_ok(hr):
-        raise OSError(f"CreateHwndRenderTarget failed: 0x{hr & 0xFFFFFFFF:08x}")
-    return ComPtr(out.value or 0)
-
-
-def rt_resize(rt: ComPtr, width: int, height: int) -> None:
-    size = D2D1_SIZE_U(max(width, 1), max(height, 1))
-    rt.call(_IDX_HWND_RT_RESIZE, ctypes.c_int32, [ctypes.POINTER(D2D1_SIZE_U)], ctypes.byref(size))
 
 
 def rt_begin_draw(rt: ComPtr) -> None:
@@ -887,6 +824,364 @@ def rt_draw_bitmap(
         opacity,
         D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
         ctypes.byref(source_rect) if source_rect is not None else None,
+    )
+
+
+# --- D3D11 + DXGI + Direct2D 1.1 device context ------------------------------
+#
+# A plain ID2D1HwndRenderTarget (above) has no blur/effects support -- that
+# only exists on ID2D1DeviceContext (Direct2D 1.1+), which has to be built by
+# wrapping a D3D11 device instead of attaching directly to an HWND. This
+# section builds that chain (D3D11 device -> DXGI swap chain -> ID2D1Device ->
+# ID2D1DeviceContext bound to the swap chain's back buffer) so a real drop
+# shadow can be rendered via ID2D1Effect (see effect_* below and
+# WindowsBackend._render_shadow). ID2D1DeviceContext is a strict superset of
+# ID2D1RenderTarget's vtable (same slots 0-56, new methods appended from 57
+# on), so every rt_* call above keeps working unchanged once the render
+# target holds a device context pointer instead of an HwndRenderTarget one.
+#
+# Every vtable index below was verified live (create the whole chain against
+# a real window, draw a blurred shape, resize, present) before being relied
+# on here -- see the throwaway verification script this was developed
+# against; a wrong index in raw vtable-index COM calling is a crash, not a
+# wrong-answer, so these aren't taken on faith from header order alone.
+
+d3d11 = ctypes.WinDLL("d3d11")
+dxgi = ctypes.WinDLL("dxgi")
+
+IID_ID3D11Device = GUID.from_str("db6f6ddb-ac77-4e88-8253-819df9bbf140")
+IID_IDXGIDevice = GUID.from_str("54ec77fa-1377-44e6-8c32-88fd5f44c84c")
+IID_IDXGIFactory2 = GUID.from_str("50c83a1c-e072-4c48-87b0-3630fa36a6d0")
+IID_IDXGISurface = GUID.from_str("cafcb56c-6ac3-4889-bf47-9e23bbd260ec")
+IID_ID2D1Factory1 = GUID.from_str("bb12d362-daee-4b9a-aa1d-14ba401cfa1f")
+# The purpose-built CLSID_D2D1Shadow effect (color+blur folded into one) was
+# tried first but its real CLSID could not be confirmed live (CreateEffect
+# returned "not found" for the commonly-cited GUID); CLSID_D2D1GaussianBlur
+# is confirmed working, so the shadow's color/alpha is baked into the caster
+# shape's own brush before blurring instead of into an effect property.
+CLSID_D2D1GaussianBlur = GUID.from_str("1feb6d69-2fe6-4ac9-8c58-1d7f93e7a6a5")
+
+D3D_DRIVER_TYPE_HARDWARE = 1
+D3D_DRIVER_TYPE_WARP = 5
+D3D11_SDK_VERSION = 7
+D3D11_CREATE_DEVICE_SINGLETHREADED = 0x1
+D3D11_CREATE_DEVICE_BGRA_SUPPORT = 0x20  # required for D2D interop
+
+DXGI_FORMAT_UNKNOWN = 0
+DXGI_USAGE_RENDER_TARGET_OUTPUT = 0x20
+DXGI_SCALING_NONE = 1
+DXGI_SWAP_EFFECT_FLIP_DISCARD = 4
+DXGI_ALPHA_MODE_IGNORE = 3
+
+D2D1_BITMAP_OPTIONS_TARGET = 1
+D2D1_BITMAP_OPTIONS_CANNOT_DRAW = 2
+D2D1_DEVICE_CONTEXT_OPTIONS_NONE = 0
+D2D1_INTERPOLATION_MODE_LINEAR = 1
+D2D1_COMPOSITE_MODE_SOURCE_OVER = 0
+D2D1_PROPERTY_TYPE_FLOAT = 5
+D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION = 0  # verified live: property[0] name == "StandardDeviation"
+
+d3d11.D3D11CreateDevice.restype = ctypes.c_int32
+d3d11.D3D11CreateDevice.argtypes = [
+    ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32,
+    ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+    ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_void_p,
+]
+
+dxgi.CreateDXGIFactory2.restype = ctypes.c_int32
+dxgi.CreateDXGIFactory2.argtypes = [ctypes.c_uint32, ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)]
+
+
+class DXGI_SAMPLE_DESC(ctypes.Structure):
+    _fields_ = [("Count", ctypes.c_uint32), ("Quality", ctypes.c_uint32)]
+
+
+class DXGI_SWAP_CHAIN_DESC1(ctypes.Structure):
+    _fields_ = [
+        ("Width", ctypes.c_uint32),
+        ("Height", ctypes.c_uint32),
+        ("Format", ctypes.c_uint32),
+        ("Stereo", wintypes.BOOL),
+        ("SampleDesc", DXGI_SAMPLE_DESC),
+        ("BufferUsage", ctypes.c_uint32),
+        ("BufferCount", ctypes.c_uint32),
+        ("Scaling", ctypes.c_uint32),
+        ("SwapEffect", ctypes.c_uint32),
+        ("AlphaMode", ctypes.c_uint32),
+        ("Flags", ctypes.c_uint32),
+    ]
+
+
+class D2D1_BITMAP_PROPERTIES1(ctypes.Structure):
+    _fields_ = [
+        ("pixelFormat", D2D1_PIXEL_FORMAT),
+        ("dpiX", ctypes.c_float),
+        ("dpiY", ctypes.c_float),
+        ("bitmapOptions", ctypes.c_uint32),
+        ("colorContext", ctypes.c_void_p),
+    ]
+
+
+# --- IUnknown::QueryInterface[0] (needed once: ID3D11Device -> IDXGIDevice,
+#     since that's the one interface here not handed back directly by a
+#     factory Create* call) ----------------------------------------------
+
+_IDX_UNKNOWN_QUERY_INTERFACE = 0
+
+
+def com_query_interface(ptr: ComPtr, iid: GUID) -> ComPtr:
+    out = ctypes.c_void_p()
+    hr = ptr.call(
+        _IDX_UNKNOWN_QUERY_INTERFACE, ctypes.c_int32,
+        [ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)], ctypes.byref(iid), ctypes.byref(out),
+    )
+    if not hresult_ok(hr):
+        raise OSError(f"QueryInterface failed: 0x{hr & 0xFFFFFFFF:08x}")
+    return ComPtr(out.value or 0)
+
+
+def create_d3d11_device() -> ComPtr:
+    """A hardware ID3D11Device with BGRA support (required for D2D interop),
+    falling back to the WARP software rasterizer if no real adapter is
+    available -- D3D11CreateDevice can fail to find one in some
+    virtualized/RDP environments (this project already special-cases VM
+    rendering behavior elsewhere, see swapchain_present below). Single-
+    threaded: this backend only ever renders from one thread."""
+    flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_SINGLETHREADED
+
+    def _try(driver_type: int) -> tuple[int, ctypes.c_void_p]:
+        dev = ctypes.c_void_p()
+        hr = d3d11.D3D11CreateDevice(
+            None, driver_type, None, flags, None, 0, D3D11_SDK_VERSION, ctypes.byref(dev), None, None
+        )
+        return hr, dev
+
+    hr, dev = _try(D3D_DRIVER_TYPE_HARDWARE)
+    if not hresult_ok(hr):
+        hr, dev = _try(D3D_DRIVER_TYPE_WARP)
+    if not hresult_ok(hr):
+        raise OSError(f"D3D11CreateDevice failed: 0x{hr & 0xFFFFFFFF:08x}")
+    return ComPtr(dev.value or 0)
+
+
+# --- ID2D1Factory1 : ID2D1Factory adds (after ID2D1Factory's own 0-16):
+#     CreateDevice[17], ... -----------------------------------------------
+
+_IDX_FACTORY1_CREATE_DEVICE = 17
+
+# --- ID2D1Device (vtable: IUnknown[0-2], ID2D1Resource.GetFactory[3],
+#     CreateDeviceContext[4], ...) -----------------------------------------
+
+_IDX_DEVICE_CREATE_DEVICE_CONTEXT = 4
+
+
+def create_d2d_device_context(factory1: ComPtr, d3d_device: ComPtr) -> tuple[ComPtr, ComPtr]:
+    """(d2d_device, device_context), wrapping ``d3d_device`` through the
+    already-created ID2D1Factory1 ``factory1`` (see create_d2d_factory,
+    which now requests the Factory1 IID for this)."""
+    dxgi_device = com_query_interface(d3d_device, IID_IDXGIDevice)
+    try:
+        out = ctypes.c_void_p()
+        hr = factory1.call(
+            _IDX_FACTORY1_CREATE_DEVICE, ctypes.c_int32,
+            [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)], dxgi_device.addr, ctypes.byref(out),
+        )
+        if not hresult_ok(hr):
+            raise OSError(f"ID2D1Factory1.CreateDevice failed: 0x{hr & 0xFFFFFFFF:08x}")
+        d2d_device = ComPtr(out.value or 0)
+        out = ctypes.c_void_p()
+        hr = d2d_device.call(
+            _IDX_DEVICE_CREATE_DEVICE_CONTEXT, ctypes.c_int32,
+            [ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)], D2D1_DEVICE_CONTEXT_OPTIONS_NONE, ctypes.byref(out),
+        )
+        if not hresult_ok(hr):
+            raise OSError(f"ID2D1Device.CreateDeviceContext failed: 0x{hr & 0xFFFFFFFF:08x}")
+        return d2d_device, ComPtr(out.value or 0)
+    finally:
+        dxgi_device.release()
+
+
+# --- IDXGIFactory2 (adds, after IDXGIObject[0-6]/IDXGIFactory[7-11]/
+#     IDXGIFactory1[12-13]): ... CreateSwapChainForHwnd[15], ... -----------
+# --- IDXGISwapChain1 (adds, after IDXGIObject[0-6]/IDXGIDeviceSubObject.
+#     GetDevice[7]/IDXGISwapChain's own[8-17]): ... Present[8] and
+#     GetBuffer[9] are inherited from IDXGISwapChain itself, ResizeBuffers[13]
+#     likewise -- IDXGISwapChain1 only *adds* GetDesc1[18] on) -------------
+
+_IDX_FACTORY2_CREATE_SWAPCHAIN_FOR_HWND = 15
+_IDX_SWAPCHAIN_PRESENT = 8
+_IDX_SWAPCHAIN_GET_BUFFER = 9
+_IDX_SWAPCHAIN_RESIZE_BUFFERS = 13
+
+# --- ID2D1DeviceContext adds (after ID2D1RenderTarget's 0-56):
+#     ... CreateBitmapFromDxgiSurface[62], CreateEffect[63], ...
+#     CreateCommandList[67], ... SetTarget[74], ... DrawImage[83], ... ------
+
+_IDX_DC_CREATE_BITMAP_FROM_DXGI_SURFACE = 62
+_IDX_DC_CREATE_EFFECT = 63
+_IDX_DC_CREATE_COMMAND_LIST = 67
+_IDX_DC_SET_TARGET = 74
+_IDX_DC_DRAW_IMAGE = 83
+
+# --- ID2D1CommandList (vtable: IUnknown[0-2], GetFactory[3], Stream[4],
+#     Close[5]) --------------------------------------------------------------
+
+_IDX_COMMAND_LIST_CLOSE = 5
+
+# --- ID2D1Properties (vtable: IUnknown[0-2], GetPropertyCount[3],
+#     GetPropertyName[4], ..., SetValue[9], ...); ID2D1Effect : ID2D1Properties
+#     adds SetInput[14], ..., GetOutput[18] -- both confirmed live: SetValue
+#     against property[0] ("StandardDeviation"), GetOutput returns void (not
+#     HRESULT), unlike every other Create/Get* call in this module. -----------
+
+_IDX_EFFECT_SET_VALUE = 9
+_IDX_EFFECT_SET_INPUT = 14
+_IDX_EFFECT_GET_OUTPUT = 18
+
+
+def create_swapchain_for_hwnd(d3d_device: ComPtr, hwnd: int, width: int, height: int) -> ComPtr:
+    out = ctypes.c_void_p()
+    hr = dxgi.CreateDXGIFactory2(0, ctypes.byref(IID_IDXGIFactory2), ctypes.byref(out))
+    if not hresult_ok(hr):
+        raise OSError(f"CreateDXGIFactory2 failed: 0x{hr & 0xFFFFFFFF:08x}")
+    factory = ComPtr(out.value or 0)
+    try:
+        desc = DXGI_SWAP_CHAIN_DESC1(
+            max(width, 1), max(height, 1), DXGI_FORMAT_B8G8R8A8_UNORM, False, DXGI_SAMPLE_DESC(1, 0),
+            DXGI_USAGE_RENDER_TARGET_OUTPUT, 2, DXGI_SCALING_NONE,
+            DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_ALPHA_MODE_IGNORE, 0,
+        )
+        out = ctypes.c_void_p()
+        hr = factory.call(
+            _IDX_FACTORY2_CREATE_SWAPCHAIN_FOR_HWND, ctypes.c_int32,
+            [
+                ctypes.c_void_p, HWND, ctypes.POINTER(DXGI_SWAP_CHAIN_DESC1),
+                ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+            ],
+            d3d_device.addr, hwnd, ctypes.byref(desc), None, None, ctypes.byref(out),
+        )
+        if not hresult_ok(hr):
+            raise OSError(f"CreateSwapChainForHwnd failed: 0x{hr & 0xFFFFFFFF:08x}")
+        return ComPtr(out.value or 0)
+    finally:
+        factory.release()
+
+
+def dc_set_target(dc: ComPtr, image: ComPtr | None) -> None:
+    dc.call(_IDX_DC_SET_TARGET, None, [ctypes.c_void_p], image.addr if image is not None else None)
+
+
+def swapchain_bind_target(dc: ComPtr, swap_chain: ComPtr, width: int, height: int) -> ComPtr:
+    """Fetch the swap chain's back buffer, wrap it as an ID2D1Bitmap1, and
+    SetTarget the device context at it. Returns the bitmap: the caller must
+    release it (and unbind via dc_set_target(dc, None)) before ever calling
+    ResizeBuffers -- a live back-buffer reference makes that fail (see
+    swapchain_resize)."""
+    out = ctypes.c_void_p()
+    hr = swap_chain.call(
+        _IDX_SWAPCHAIN_GET_BUFFER, ctypes.c_int32,
+        [ctypes.c_uint32, ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)],
+        0, ctypes.byref(IID_IDXGISurface), ctypes.byref(out),
+    )
+    if not hresult_ok(hr):
+        raise OSError(f"IDXGISwapChain1.GetBuffer failed: 0x{hr & 0xFFFFFFFF:08x}")
+    surface = ComPtr(out.value or 0)
+    try:
+        props = D2D1_BITMAP_PROPERTIES1(
+            D2D1_PIXEL_FORMAT(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+            96.0, 96.0, D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW, None,
+        )
+        out = ctypes.c_void_p()
+        hr = dc.call(
+            _IDX_DC_CREATE_BITMAP_FROM_DXGI_SURFACE, ctypes.c_int32,
+            [ctypes.c_void_p, ctypes.POINTER(D2D1_BITMAP_PROPERTIES1), ctypes.POINTER(ctypes.c_void_p)],
+            surface.addr, ctypes.byref(props), ctypes.byref(out),
+        )
+        if not hresult_ok(hr):
+            raise OSError(f"CreateBitmapFromDxgiSurface failed: 0x{hr & 0xFFFFFFFF:08x}")
+        bitmap = ComPtr(out.value or 0)
+    finally:
+        surface.release()
+    dc_set_target(dc, bitmap)
+    return bitmap
+
+
+def swapchain_resize(dc: ComPtr, swap_chain: ComPtr, target_bitmap: ComPtr, width: int, height: int) -> ComPtr:
+    dc_set_target(dc, None)
+    target_bitmap.release()
+    hr = swap_chain.call(
+        _IDX_SWAPCHAIN_RESIZE_BUFFERS, ctypes.c_int32,
+        [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32],
+        0, max(width, 1), max(height, 1), DXGI_FORMAT_UNKNOWN, 0,
+    )
+    if not hresult_ok(hr):
+        raise OSError(f"IDXGISwapChain1.ResizeBuffers failed: 0x{hr & 0xFFFFFFFF:08x}")
+    return swapchain_bind_target(dc, swap_chain, width, height)
+
+
+def swapchain_present(swap_chain: ComPtr) -> int:
+    """Sync interval 0: present without waiting for the next vsync. Waiting
+    (interval 1) measured ~16ms per present in a VMware guest -- likely the
+    virtual display's vsync timing being slow/unreliable to signal -- vs.
+    ~4ms with interval 0; no observed downside (this backend only redraws on
+    demand via InvalidateRect, not continuously, so there's no tearing
+    concern from racing ahead of the display)."""
+    return swap_chain.call(_IDX_SWAPCHAIN_PRESENT, ctypes.c_int32, [ctypes.c_uint32, ctypes.c_uint32], 0, 0)
+
+
+def dc_create_command_list(dc: ComPtr) -> ComPtr:
+    out = ctypes.c_void_p()
+    hr = dc.call(_IDX_DC_CREATE_COMMAND_LIST, ctypes.c_int32, [ctypes.POINTER(ctypes.c_void_p)], ctypes.byref(out))
+    if not hresult_ok(hr):
+        raise OSError(f"CreateCommandList failed: 0x{hr & 0xFFFFFFFF:08x}")
+    return ComPtr(out.value or 0)
+
+
+def command_list_close(command_list: ComPtr) -> None:
+    hr = command_list.call(_IDX_COMMAND_LIST_CLOSE, ctypes.c_int32, [])
+    if not hresult_ok(hr):
+        raise OSError(f"ID2D1CommandList.Close failed: 0x{hr & 0xFFFFFFFF:08x}")
+
+
+def dc_create_effect(dc: ComPtr, clsid: GUID) -> ComPtr:
+    out = ctypes.c_void_p()
+    hr = dc.call(
+        _IDX_DC_CREATE_EFFECT, ctypes.c_int32,
+        [ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)], ctypes.byref(clsid), ctypes.byref(out),
+    )
+    if not hresult_ok(hr):
+        raise OSError(f"CreateEffect failed: 0x{hr & 0xFFFFFFFF:08x}")
+    return ComPtr(out.value or 0)
+
+
+def effect_set_input(effect: ComPtr, index: int, image: ComPtr) -> None:
+    effect.call(
+        _IDX_EFFECT_SET_INPUT, None, [ctypes.c_uint32, ctypes.c_void_p, wintypes.BOOL], index, image.addr, True
+    )
+
+
+def effect_set_value_float(effect: ComPtr, index: int, value: float) -> None:
+    v = ctypes.c_float(value)
+    hr = effect.call(
+        _IDX_EFFECT_SET_VALUE, ctypes.c_int32,
+        [ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32],
+        index, D2D1_PROPERTY_TYPE_FLOAT, ctypes.cast(ctypes.byref(v), ctypes.POINTER(ctypes.c_uint8)), 4,
+    )
+    if not hresult_ok(hr):
+        raise OSError(f"ID2D1Effect.SetValue(float) failed: 0x{hr & 0xFFFFFFFF:08x}")
+
+
+def effect_get_output(effect: ComPtr) -> ComPtr:
+    out = ctypes.c_void_p()
+    effect.call(_IDX_EFFECT_GET_OUTPUT, None, [ctypes.POINTER(ctypes.c_void_p)], ctypes.byref(out))  # returns void
+    return ComPtr(out.value or 0)
+
+
+def dc_draw_image(dc: ComPtr, image: ComPtr) -> None:
+    dc.call(
+        _IDX_DC_DRAW_IMAGE, None,
+        [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32],
+        image.addr, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER,
     )
 
 

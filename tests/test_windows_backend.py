@@ -16,6 +16,7 @@ from puikit import Rect  # noqa: E402
 from puikit.backend import Style, TextAttribute  # noqa: E402
 from puikit.font import Font, FontWeight  # noqa: E402
 from puikit.backends.windows_backend import Animation, WindowsBackend  # noqa: E402
+from puikit.backends import _win32_native as native  # noqa: E402
 
 
 def _png(path, w, h):
@@ -227,6 +228,40 @@ def test_open_close_roundtrip_creates_real_window():
     finally:
         backend.close()
     assert backend._hwnd == 0
+
+
+def test_draw_shadow_renders_with_blur_effect():
+    """Exercises the D3D11/DXGI/ID2D1DeviceContext + ID2D1Effect(Gaussian
+    Blur) path directly: command-list capture, effect retarget, DrawImage
+    compositing (see WindowsBackend._render_shadow)."""
+    backend = WindowsBackend(width=40, height=20, title="puikit-shadow-test")
+    backend.open()
+    try:
+        assert backend._shadow_effect is not None
+        backend.draw_shadow(5, 5, 20, 10, radius=4.0, bg=(40, 40, 40))
+        backend.draw_box(5, 5, 20, 10, hints={"fill": True}, style=Style(bg=(40, 40, 40)))
+        backend.present()
+        backend._render()
+    finally:
+        backend.close()
+
+
+def test_resize_rebinds_swapchain_target():
+    """WM_SIZE must unbind, ResizeBuffers, and rebind a fresh target bitmap
+    (native.swapchain_resize) rather than the old single-call rt_resize."""
+    backend = WindowsBackend(width=40, height=20, title="puikit-resize-test")
+    backend.open()
+    try:
+        original_bitmap = backend._target_bitmap
+        lparam = (60 << 16) | 320
+        backend._handle_message(backend._hwnd, native.WM_SIZE, 0, lparam)
+        assert backend._target_bitmap is not None
+        assert backend._target_bitmap is not original_bitmap
+        backend.draw_text(1, 1, "resized")
+        backend.present()
+        backend._render()  # target bitmap must still be drawable post-resize
+    finally:
+        backend.close()
 
 
 def test_clipboard_roundtrip():
