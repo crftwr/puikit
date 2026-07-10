@@ -268,6 +268,7 @@ _IDX_TEXT_FORMAT_SET_WORD_WRAPPING = 5
 #     GetLineMetrics[59], GetMetrics[60], ...) — verified live against a real
 #     IDWriteTextLayout (see windows_backend measure_text/measure_line_height).
 
+_IDX_TEXT_LAYOUT_GET_LINE_METRICS = 59
 _IDX_TEXT_LAYOUT_GET_METRICS = 60
 
 
@@ -282,6 +283,21 @@ class DWRITE_TEXT_METRICS(ctypes.Structure):
         ("layoutHeight", ctypes.c_float),
         ("maxBidiReorderingDepth", ctypes.c_uint32),
         ("lineCount", ctypes.c_uint32),
+    ]
+
+
+class DWRITE_LINE_METRICS(ctypes.Structure):
+    # Per-line metrics from IDWriteTextLayout.GetLineMetrics. ``baseline`` is
+    # the distance from the top of the line to the baseline (i.e. the ascent);
+    # ``height`` is the full line height, so descent = height - baseline. The
+    # length/whitespace fields describe the run and are unused here.
+    _fields_ = [
+        ("length", ctypes.c_uint32),
+        ("trailingWhitespaceLength", ctypes.c_uint32),
+        ("newlineLength", ctypes.c_uint32),
+        ("height", ctypes.c_float),
+        ("baseline", ctypes.c_float),
+        ("isTrailingWhitespace", ctypes.c_int32),  # BOOL
     ]
 
 
@@ -553,6 +569,42 @@ def text_layout_get_metrics(layout: ComPtr) -> DWRITE_TEXT_METRICS:
     if not hresult_ok(hr):
         raise OSError(f"GetMetrics failed: 0x{hr & 0xFFFFFFFF:08x}")
     return metrics
+
+
+def text_layout_get_line_metrics(layout: ComPtr) -> DWRITE_LINE_METRICS:
+    """First line's metrics — the caller lays out a single line (NO_WRAP), so
+    one DWRITE_LINE_METRICS is all there is. GetLineMetrics fills up to
+    ``maxCount`` entries and reports how many lines exist via ``actualCount``;
+    request one and read it back."""
+    metrics = (DWRITE_LINE_METRICS * 1)()
+    actual = ctypes.c_uint32()
+    hr = layout.call(
+        _IDX_TEXT_LAYOUT_GET_LINE_METRICS,
+        ctypes.c_int32,
+        [ctypes.POINTER(DWRITE_LINE_METRICS), ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32)],
+        metrics,
+        1,
+        ctypes.byref(actual),
+    )
+    # E_NOT_SUFFICIENT_BUFFER (0x8007007A) would mean >1 line, impossible for a
+    # single NO_WRAP line; any other failure is a real error. The single entry
+    # is already written on success.
+    if not hresult_ok(hr):
+        raise OSError(f"GetLineMetrics failed: 0x{hr & 0xFFFFFFFF:08x}")
+    return metrics[0]
+
+
+def font_line_metrics_dwrite(factory: ComPtr, text_format: ComPtr) -> tuple[float, float]:
+    """(ascent, descent) in pixels for ``text_format``'s font, from a probe
+    layout's first line: ``baseline`` is the ascent (top→baseline), ``height -
+    baseline`` the descent. Works for any font (mono, UI, custom) since it
+    reads the laid-out line, not a font-collection lookup."""
+    layout = dwrite_create_text_layout(factory, "Mg", text_format)
+    try:
+        lm = text_layout_get_line_metrics(layout)
+        return lm.baseline, lm.height - lm.baseline
+    finally:
+        layout.release()
 
 
 def measure_text_dwrite(factory: ComPtr, text: str, text_format: ComPtr) -> tuple[float, float]:

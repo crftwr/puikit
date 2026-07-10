@@ -73,3 +73,24 @@ def test_measure_text_counts_columns_on_whole_unit_backend():
     assert backend.measure_text("hello") == 5.0
     # A font request does not change the column count on a whole-unit backend.
     assert backend.measure_text("hello", Style(font=Font(size=28))) == 5.0
+
+
+def test_font_metrics_grid_default_on_whole_unit_backend():
+    # The ABC default (whole-unit backends): one base unit of ascent, no
+    # descent — so ascent+descent == 1.0 line, matching measure_line_height.
+    backend = MemoryBackend(width=20, height=2, capabilities=PROFILE_TUI)
+    fm = backend.font_metrics(Style())
+    assert (fm.ascent, fm.descent) == (1.0, 0.0)
+    assert fm.line_height == 1.0
+
+
+def test_draw_text_baseline_default_delegates_to_draw_text():
+    # The ABC default converts baseline_y to a top-of-box y (baseline - ascent)
+    # then draws normally; on a whole-unit backend ascent is 1.0, so a baseline
+    # at row 3 lands the text's box top on row 2.
+    backend = MemoryBackend(width=20, height=4, capabilities=PROFILE_TUI)
+    backend.clear()
+    backend.draw_text_baseline(0, 3, "Ag")
+    rows = backend.snapshot()
+    assert rows[2].startswith("Ag")  # box top at baseline_y(3) - ascent(1.0)
+    assert rows[3].strip() == ""

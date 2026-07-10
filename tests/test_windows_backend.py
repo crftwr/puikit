@@ -84,6 +84,59 @@ def test_measure_text_proportional_is_not_column_count():
         backend.close()
 
 
+def test_measure_line_height_default_font_measures_ui_font():
+    # font=None is DRAWN as the UI font (Panel._resolve substitutes it), so it
+    # must be MEASURED as the UI font too — not the old 1.0 grid shortcut, which
+    # under-sized content panes and clipped the taller UI font's descenders.
+    backend = WindowsBackend(base_font=Font(size=30.0, monospace=True))
+    backend._init_fonts()
+    try:
+        default_h = backend.measure_line_height(Style())  # font=None
+        grid_h = backend.measure_line_height(Style(font=Font(monospace=True)))
+        assert grid_h == 1.0  # a genuine grid font is still exactly one row
+        assert default_h > 1.0  # the UI font is taller than one mono row
+    finally:
+        backend.close()
+
+
+def test_font_metrics_split_sums_to_line_height():
+    backend = WindowsBackend(base_font=Font(size=30.0, monospace=True))
+    backend._init_fonts()
+    try:
+        fm = backend.font_metrics(Style())  # font=None -> UI font
+        assert fm.ascent > 0 and fm.descent > 0
+        # ascent+descent is one line box; matches measure_line_height (which
+        # ceils to the pixel grid, so allow a small rounding slack).
+        assert abs(fm.line_height - backend.measure_line_height(Style())) < 0.05
+        # A larger explicit font has a proportionally taller box.
+        big = backend.font_metrics(Style(font=Font(size=60)))
+        assert big.line_height > fm.line_height * 1.5
+    finally:
+        backend.close()
+
+
+def test_draw_text_baseline_offsets_by_ascent():
+    # The default draw_text_baseline puts the top of the box one ascent above
+    # the baseline. Two fonts drawn at the same baseline_y therefore share a
+    # baseline even though their box tops differ.
+    backend = WindowsBackend(base_font=Font(size=30.0, monospace=True))
+    backend.open()
+    try:
+        drawn = []
+        original = backend.draw_text
+        backend.draw_text = lambda x, y, text, style=Style(): drawn.append((y, style))
+        backend.draw_text_baseline(0, 5.0, "Ag", Style(font=Font()))
+        backend.draw_text_baseline(0, 5.0, "Ag", Style(font=Font(size=60)))
+        backend.draw_text = original
+        (y_small, s_small), (y_big, s_big) = drawn
+        # baseline - ascent: the bigger font (bigger ascent) starts higher up.
+        assert y_big < y_small
+        assert abs((5.0 - y_small) - backend.font_metrics(s_small).ascent) < 1e-6
+        assert abs((5.0 - y_big) - backend.font_metrics(s_big).ascent) < 1e-6
+    finally:
+        backend.close()
+
+
 def test_font_params_resolves_family_by_monospace():
     backend = WindowsBackend()
     try:

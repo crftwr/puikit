@@ -38,7 +38,7 @@ from . import _win32_native as native
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..event import Event, EventType, char_key_event
-from ..font import Font
+from ..font import Font, FontMetrics
 from ..text import display_width, glyph_runs as _glyph_runs
 
 _DEFAULT_FG = (230, 230, 230)
@@ -286,6 +286,7 @@ class WindowsBackend(Backend):
         # Per-Style text formats cached by (Font, bold, italic).
         self._style_fonts: dict[tuple, Any] = {}
         self._line_height_cache: dict[int, float] = {}
+        self._font_metrics_cache: dict[int, tuple[float, float]] = {}
         self._width_cache: dict[tuple, float] = {}
         self._animations: dict[int, Animation] = {}
         self._anim_timer_running = False
@@ -530,12 +531,21 @@ class WindowsBackend(Backend):
         return width / self._base_w if self._base_w else float(len(text))
 
     def measure_line_height(self, style: Style = DEFAULT_STYLE) -> float:
-        if style.font is None or not self._base_h:
+        if not self._base_h:
             return 1.0
+        # font=None does NOT mean "one grid row" here: Panel's _resolve()
+        # substitutes it with the proportional UI font (_DEFAULT_UI_FONT) before
+        # it is ever drawn, so a content-sized default-font widget (e.g. the
+        # title bar) must be MEASURED as that UI font too — measuring it as one
+        # mono row under-sizes the pane and the container clip then trims the
+        # taller UI font's descenders. Measure the same font that will draw.
+        # (An explicit font measures itself; the base grid font naturally
+        # measures to exactly 1.0, since base_h was derived from it.)
+        measured = style if style.font is not None else Style(attr=style.attr, font=Font())
         # Same DirectWrite-vs-GDI mismatch as measure_text (above): probe a
         # representative string ("Mg", ascender+descender) through the actual
         # renderer rather than GDI's (disagreeing) line metrics.
-        text_format = self._resolve_style_font(style)
+        text_format = self._resolve_style_font(measured)
         key = id(text_format)
         height = self._line_height_cache.get(key)
         if height is None:
@@ -550,6 +560,25 @@ class WindowsBackend(Backend):
         if font is None or font.size is None:
             return self._base_size_pt()
         return float(font.size)
+
+    def font_metrics(self, style: Style = DEFAULT_STYLE) -> FontMetrics:
+        if not self._base_h:
+            return FontMetrics(ascent=1.0, descent=0.0)
+        # font=None is drawn as the UI font (see measure_line_height), so its
+        # metrics are that font's. ascent + descent here equals the value
+        # measure_line_height returns (both are one line's box), just split at
+        # the baseline so a caller can align mixed fonts (draw_text_baseline).
+        measured = style if style.font is not None else Style(attr=style.attr, font=Font())
+        text_format = self._resolve_style_font(measured)
+        key = id(text_format)
+        cached = self._font_metrics_cache.get(key)
+        if cached is None:
+            if self._dwrite_factory is None:
+                self._dwrite_factory = native.create_dwrite_factory()
+            cached = native.font_line_metrics_dwrite(self._dwrite_factory, text_format)
+            self._font_metrics_cache[key] = cached
+        ascent_px, descent_px = cached
+        return FontMetrics(ascent=ascent_px / self._base_h, descent=descent_px / self._base_h)
 
     # --- geometry ----------------------------------------------------------
 
@@ -837,10 +866,15 @@ class WindowsBackend(Backend):
         self._set_brush(fg, alpha)
         col = 0
         for glyph, width in zip(runs, widths):
+            # Each glyph is absolutely placed at its own column origin, so
+            # columns stay aligned with no cumulative drift — no per-glyph clip
+            # is needed or wanted. Clipping is the container's job (Panel pushes
+            # one axis-aligned clip per widget slot); a per-cell DrawText CLIP
+            # here only ever *harmed* — its 1-base-unit height flat-cut
+            # descenders (g/j/p/q/y). Matches the macOS grid path, which draws
+            # each glyph via drawAtPoint_ with no clip.
             rect = self._unit_rect(x + col, y, width, 1)
-            native.rt_draw_text(
-                self._render_target, glyph, text_format, rect, self._brush, options=native.D2D1_DRAW_TEXT_OPTIONS_CLIP
-            )
+            native.rt_draw_text(self._render_target, glyph, text_format, rect, self._brush)
             col += width
         if underline or strike:
             full = self._unit_rect(x, y, total, 1)
@@ -865,8 +899,19 @@ class WindowsBackend(Backend):
         width = self.measure_text(text, style) * self._base_w
         if bg is not None:
             self._set_brush(bg)
+            # Exactly one row (_base_h), not the font's own natural line
+            # height (line_h, used below only for underline/strike position):
+            # a UI font's measured line height can exceed one row's pitch
+            # (confirmed live: ~40px vs. a 36px row at one real font/size),
+            # and consecutive same-styled rows (e.g. a ListView) draw their
+            # backgrounds in top-to-bottom order, so a taller-than-row-pitch
+            # fill here bleeds into the next row and gets erased by *its*
+            # background fill in turn -- reading as the row above having its
+            # text (most visibly descenders: g/j/p/q/y) cut off. Matches
+            # MacOSBackend._render_flow_text's NSRectFill, which always fills
+            # exactly self._base_h for the same reason.
             native.rt_fill_rectangle(
-                self._render_target, native.D2D1_RECT_F(origin_x, origin_y, origin_x + width, origin_y + line_h), self._brush
+                self._render_target, native.D2D1_RECT_F(origin_x, origin_y, origin_x + width, origin_y + self._base_h), self._brush
             )
         self._set_brush(fg, alpha)
         # A generously large layout rect: the outer pane clip (push_clip)

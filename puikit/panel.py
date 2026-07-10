@@ -17,7 +17,7 @@ from .capability import CapabilityProfile
 from .color import LC_BODY, LC_LARGE, LC_MIN_NONTEXT, legible_ink
 from .event import Event, EventType
 from .focus import FocusContainer, focus_on_click, move_focus
-from .font import Font, FontSlant, FontWeight
+from .font import Font, FontMetrics, FontSlant, FontWeight
 from .theme import Theme, theme_for
 
 # Caret blink half-period (seconds); only matters on animation-capable backends.
@@ -437,6 +437,14 @@ class DrawContext:
         nominal base size and the same relative math runs everywhere."""
         return self._backend.measure_font_size(self._resolve(style))
 
+    def font_metrics(self, style: Style = DEFAULT_STYLE) -> FontMetrics:
+        """Ascent/descent of ``style``'s font in this pane's unit (base units).
+        A widget that lays several fonts on one row sizes the row to
+        ``max(ascent)+max(descent)`` and draws each run with ``draw_text_baseline``
+        at ``row_top + max(ascent)`` so their baselines line up. The font is
+        folded first, matching what draw_text will draw."""
+        return self._backend.font_metrics(self._resolve(style))
+
     def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
         """Displayed width of ``text`` in this pane's unit (base units;
         fractional on GUI), so a widget can center, right-align, or wrap
@@ -476,6 +484,21 @@ class DrawContext:
         if not text:
             return
         self._backend.draw_text(self._rect.x + x, self._rect.y + y, text, resolved)
+
+    def draw_text_baseline(self, x: float, baseline_y: float, text: str,
+                           style: Style = DEFAULT_STYLE, *, ink: bool = True) -> None:
+        """Draw ``text`` with its baseline at ``baseline_y`` (this pane's unit)
+        instead of positioning by the top of the line box. A widget that mixes
+        fonts on one row reads each font's ``font_metrics``, sizes the row, and
+        draws every run at the same baseline so they align. Whole-run, unsliced
+        (the pane clip trims overflow) — the proportional/mixed-font path, not
+        the grid path. ``ink`` matches ``draw_text``."""
+        if not text:
+            return
+        resolved = self._text_style(style, ink=ink)
+        self._backend.draw_text_baseline(
+            self._rect.x + x, self._rect.y + baseline_y, text, resolved
+        )
 
     def draw_box(
         self,
@@ -1256,6 +1279,7 @@ class Panel:
             native_menus=self.backend.capabilities.supports("native_menus"),
             measure=self.backend.measure_text,
             line_height=self.backend.measure_line_height,
+            metrics=self.backend.font_metrics,
             scrollbar_units=self.backend.scrollbar_units,
             image_size=self.backend.image_size,
         )

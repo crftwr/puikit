@@ -73,6 +73,10 @@ class LayoutContext:
     # a widget that stacks text lines can reserve a taller font's height without
     # the layout itself reading a font. Falls back to 1.0 when unset.
     line_height: Callable[[Any], float] | None = None
+    # Ascent/descent of a style's font in base units, for a widget that sizes a
+    # mixed-font row to max(ascent)+max(descent). Returns a FontMetrics; falls
+    # back to (1.0, 0.0) when unset.
+    metrics: Callable[[Any], Any] | None = None
     scrollbar_units: float = 1.0
     # How a widget measures an image: its natural pixel size, supplied by the
     # backend so an ImageView can size itself to the aspect ratio without ever
@@ -102,6 +106,16 @@ class LayoutContext:
                 return self.line_height()
             return self.line_height(style)
         return 1.0
+
+    def measure_font_metrics(self, style: Any = None):
+        """Ascent/descent (``FontMetrics``, base units) of ``style``'s font, so a
+        widget can size a row that mixes fonts to max(ascent)+max(descent).
+        Falls back to (1.0, 0.0) — one grid row — with no measurer."""
+        from .font import FontMetrics
+
+        if self.metrics is not None:
+            return self.metrics() if style is None else self.metrics(style)
+        return FontMetrics(ascent=1.0, descent=0.0)
 
     def measure_image(self, path: str) -> tuple[int, int] | None:
         """Natural ``(width, height)`` of the image in pixels, or None when no

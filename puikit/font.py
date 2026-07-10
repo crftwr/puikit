@@ -55,3 +55,21 @@ class Font:
     @property
     def italic(self) -> bool:
         return self.slant is FontSlant.ITALIC
+
+
+@dataclass(frozen=True)
+class FontMetrics:
+    """Vertical metrics of a resolved font, in **base units** (like
+    ``measure_text`` / ``measure_line_height``, so the whole coordinate system
+    stays in one unit). ``ascent`` is the distance from the top of the line box
+    down to the baseline; ``descent`` is baseline down to the bottom. Their sum
+    is the line height. A widget mixing several fonts on one row sizes the row
+    to ``max(ascent) + max(descent)`` across them and places each run's baseline
+    at ``row_top + max(ascent)`` (see ``Backend.draw_text_baseline``)."""
+
+    ascent: float
+    descent: float
+
+    @property
+    def line_height(self) -> float:
+        return self.ascent + self.descent

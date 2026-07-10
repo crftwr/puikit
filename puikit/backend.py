@@ -17,7 +17,7 @@ from typing import Any
 
 from .capability import CapabilityProfile
 from .event import Event
-from .font import Font
+from .font import Font, FontMetrics
 
 
 class TextAttribute(IntFlag):
@@ -172,6 +172,27 @@ class Backend(ABC):
         if font is not None and font.size is not None:
             return float(font.size)
         return self.BASE_FONT_SIZE
+
+    def font_metrics(self, style: Style = DEFAULT_STYLE) -> FontMetrics:
+        """Ascent/descent of ``style``'s resolved font, in base units (their
+        sum is ``measure_line_height``). A widget mixing fonts on one row uses
+        these to size the row and to place each run's baseline consistently (see
+        ``draw_text_baseline``). Whole-unit backends fold the font away: one
+        whole base unit of ascent, no descent — like ``measure_line_height``
+        answering 1.0, so the same widget code runs on every backend."""
+        return FontMetrics(ascent=1.0, descent=0.0)
+
+    def draw_text_baseline(
+        self, x: float, baseline_y: float, text: str, style: Style = DEFAULT_STYLE
+    ) -> None:
+        """Draw ``text`` so its baseline sits at ``baseline_y`` (base units),
+        rather than positioning by the top of the line box like ``draw_text``.
+        Lets a widget align runs of different fonts on a shared baseline. The
+        default expresses it in terms of the existing primitives — top of box =
+        baseline minus the font's ascent — so a backend only overrides this if
+        it can place a baseline more directly."""
+        top = baseline_y - self.font_metrics(style).ascent
+        self.draw_text(x, top, text, style)
 
     # --- core drawing primitives (all backends implement) -------------------
 

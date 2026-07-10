@@ -101,7 +101,7 @@ from PyObjCTools import AppHelper
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, is_transparent
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..event import Event, EventType, char_key_event
-from ..font import Font, FontWeight
+from ..font import Font, FontMetrics, FontWeight
 from ..text import display_width, glyph_runs as _glyph_runs
 
 try:
@@ -1031,10 +1031,20 @@ class MacOSBackend(Backend):
         """Row pitch in base units. A grid font is exactly one base unit (that
         is how the unit was derived in _init_fonts); a real per-Style font
         reports its own line height, rounded up to whole pixels so successive
-        rows land on the device-pixel grid, then expressed in base units."""
-        if _is_grid_font(style.font) or not self._base_h:
+        rows land on the device-pixel grid, then expressed in base units.
+
+        font=None is NOT a grid font here: Panel's _resolve() draws it as the
+        proportional UI font (_DEFAULT_UI_FONT), so it is measured as that font
+        too — measuring it as one mono row under-sizes a content-sized
+        default-font container and its clip trims the taller UI font's
+        descenders. Only an explicit unsized/unnamed monospace request stays a
+        true grid row."""
+        if not self._base_h:
             return 1.0
-        ns_font = self._resolve_style_font(style)
+        font = style.font if style.font is not None else Font()
+        if _is_grid_font(font):
+            return 1.0
+        ns_font = self._resolve_style_font(Style(attr=style.attr, font=font))
         line_px = ns_font.ascender() - ns_font.descender() + ns_font.leading()
         return math.ceil(line_px) / self._base_h
 
@@ -1046,6 +1056,19 @@ class MacOSBackend(Backend):
         if font is None or font.size is None:
             return self._base_size_pt()
         return float(font.size)
+
+    def font_metrics(self, style: Style = DEFAULT_STYLE) -> FontMetrics:
+        if not self._base_h:
+            return FontMetrics(ascent=1.0, descent=0.0)
+        # font=None is drawn as the UI font (see measure_line_height); measure
+        # that. NSFont's descender is negative (below the baseline), so negate
+        # it. ascent + descent matches measure_line_height's line box, split at
+        # the baseline for mixed-font alignment (draw_text_baseline).
+        font = style.font if style.font is not None else Font()
+        ns_font = self._resolve_style_font(Style(attr=style.attr, font=font))
+        ascent_px = ns_font.ascender() + ns_font.leading()
+        descent_px = -ns_font.descender()
+        return FontMetrics(ascent=ascent_px / self._base_h, descent=descent_px / self._base_h)
 
     # --- geometry ----------------------------------------------------------
 
