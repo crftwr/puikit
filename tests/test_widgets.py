@@ -257,8 +257,11 @@ def test_listview_row_factory_routes_click_to_inner_widget(backend):
     )
     panel.add(listview, x=0, y=0, w=12, h=3)
     panel.render()
-    # A click on row 1 selects it and toggles that row's checkbox.
-    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=1, y=1, button="left"))
+    # A click on row 1 selects it and toggles that row's checkbox. Rows are
+    # content-sized (a Checkbox is taller than one base unit on a pixel
+    # backend), so aim inside row 1 by the measured row pitch, not a fixed y=1.
+    click_y = listview._row_h + 0.4
+    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=1, y=click_y, button="left"))
     assert listview.selected == 1
     assert listview.row_widget(1).checked is True
     assert toggled == [True]

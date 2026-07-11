@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from .backend import Backend, Color, DEFAULT_STYLE, Style, TextAttribute, is_transparent
+from .backend import Backend, Color, DEFAULT_STYLE, Style, TextAttribute, TRANSPARENT, is_transparent
 from .capability import CapabilityProfile
 from .color import LC_BODY, LC_LARGE, LC_MIN_NONTEXT, legible_ink
 from .event import Event, EventType
@@ -181,6 +181,21 @@ class DrawContext:
             inked = legible_ink(resolved.fg, resolved.bg, _auto_ink_target(resolved.attr))
             if inked != resolved.fg:
                 resolved = Style(inked, resolved.bg, resolved.attr, resolved.font)
+        # Don't repaint a background the pane already filled: on a compositing
+        # backend, draw the glyphs over it transparently. Repainting it would
+        # (1) double-blend under a fading layer — the pane's fill and this one
+        # compound to 1-(1-a)^2 instead of a, so text backgrounds bloom to ~0.75
+        # while the pane is at 0.5 — and (2), being one base-unit tall, clip a
+        # taller font's descender under the next stacked element. Auto-ink above
+        # already read the concrete bg for contrast, so nothing is lost. A grid
+        # backend can't composite (each cell has one bg), so it keeps the fill.
+        # REVERSE is excluded: it *swaps* fg/bg in the backend, so a transparent
+        # bg would become a transparent foreground — invisible glyphs on the
+        # reversed fill (the "Reverse label" showing as a blank rectangle).
+        if (resolved.bg is not None and resolved.bg == self._background
+                and not (resolved.attr & TextAttribute.REVERSE)
+                and self._caps.supports("transparency")):
+            resolved = replace(resolved, bg=TRANSPARENT)
         return resolved
 
     def _resolve(self, style: Style) -> Style:

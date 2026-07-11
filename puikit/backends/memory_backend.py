@@ -8,9 +8,10 @@ terminal or a window system.
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import replace
 from typing import Any
 
-from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute
+from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, is_transparent
 from ..capability import PROFILE_TUI, CapabilityProfile
 from ..event import Event
 
@@ -151,11 +152,18 @@ class MemoryBackend(Backend):
         x, y = round(x), round(y)
         if not 0 <= y < self._height:
             return
+        # A transparent text bg reaches this backend only on a transparency-
+        # capable profile (the Panel resolver flattens it to the pane colour
+        # otherwise); model per-pixel compositing by keeping whatever bg was
+        # already in the cell (e.g. a selection fill drawn just before) rather
+        # than overwriting it, so "fill once + transparent glyphs" reads the same
+        # here as on a real compositing backend.
+        keep_bg = is_transparent(style.bg)
         for i, ch in enumerate(text):
             cx = x + i
             if 0 <= cx < self._width and self._unit_visible(cx, y):
                 self._grid[y][cx] = ch
-                self._styles[y][cx] = style
+                self._styles[y][cx] = replace(style, bg=self._styles[y][cx].bg) if keep_bg else style
 
     def draw_box(
         self,

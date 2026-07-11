@@ -85,41 +85,72 @@ def test_is_transparent_only_true_for_alpha_zero_rgba():
 
 
 class _Text(Widget):
-    def __init__(self, bg):
+    def __init__(self, bg, fill=None):
         self.bg = bg
+        self.fill = fill
 
     def draw(self, ctx):
+        if self.fill is not None:
+            ctx.fill_rect(0, 0, 4, 1, Style(bg=self.fill))
         ctx.draw_text(0, 0, "x", Style(fg=(255, 255, 255), bg=self.bg))
 
 
 @pytest.mark.parametrize(
     "profile,expected",
     [
-        # TUI cannot skip a per-cell fill, so a transparent bg flattens to the
-        # pane background (fully-transparent over base == base).
+        # TUI cannot composite: a transparent text bg flattens to the *pane*
+        # background (fully-transparent over base == base), ignoring the red
+        # fill just painted into the cell — so the cell reads the pane colour.
         (PROFILE_TUI, (0, 0, 40)),
-        # A transparency-capable backend keeps the alpha-0 bg, so the text
-        # renderer can recognize it and paint no background fill at all.
-        (PROFILE_GUI_DESKTOP, TRANSPARENT),
+        # A transparency-capable backend keeps the alpha-0 bg, so the glyph
+        # paints no background and the red fill beneath it shows through — the
+        # cell reads the fill, not the pane colour. (This is what lets a list row
+        # fill its selection once and draw glyphs transparently on top.)
+        (PROFILE_GUI_DESKTOP, (200, 0, 0)),
     ],
     ids=["tui-flattens-to-pane-bg", "gui-keeps-transparent"],
 )
 def test_transparent_text_bg_resolves_per_capability(profile, expected):
     backend = MemoryBackend(width=4, height=2, capabilities=profile)
     panel = Panel(backend)
-    panel.add(_Text(TRANSPARENT), x=0, y=0, w=4, h=2, hints={"bg": (0, 0, 40)})
+    panel.add(_Text(TRANSPARENT, fill=(200, 0, 0)), x=0, y=0, w=4, h=2, hints={"bg": (0, 0, 40)})
     panel.render()
     assert backend.style_at(0, 0).bg == expected
 
 
-def test_none_text_bg_still_inherits_pane_background():
-    # A None bg (the default) must keep inheriting the pane background — the
-    # transparent path is opt-in and must not change this.
+def test_none_text_bg_reads_as_pane_background():
+    # A None bg (the default) still reads as the pane background: on a grid it
+    # inherits it opaquely; on a compositing backend the glyphs draw
+    # transparently over the pane's already-painted fill, which is the same
+    # colour — so the cell shows the pane colour either way.
     backend = MemoryBackend(width=4, height=2, capabilities=PROFILE_GUI_DESKTOP)
     panel = Panel(backend)
     panel.add(_Text(None), x=0, y=0, w=4, h=2, hints={"bg": (0, 0, 40)})
     panel.render()
     assert backend.style_at(0, 0).bg == (0, 0, 40)
+
+
+@pytest.mark.parametrize(
+    "profile,expected",
+    [
+        # Compositing backend: a default (None) text bg equals the pane's
+        # already-painted background, so the glyphs draw transparently over it
+        # instead of re-filling — a red fill drawn just beneath shows through,
+        # proving there is no second fill (which would double-blend under a fade
+        # to ~0.75 and clip a taller font's descender).
+        (PROFILE_GUI_DESKTOP, (200, 0, 0)),
+        # Grid backend cannot composite, so the inherited pane colour is filled
+        # into the cell, covering the red.
+        (PROFILE_TUI, (0, 0, 40)),
+    ],
+    ids=["gui-composites-over-fill", "grid-refills"],
+)
+def test_default_bg_text_does_not_refill_pane_background(profile, expected):
+    backend = MemoryBackend(width=4, height=2, capabilities=profile)
+    panel = Panel(backend)
+    panel.add(_Text(None, fill=(200, 0, 0)), x=0, y=0, w=4, h=2, hints={"bg": (0, 0, 40)})
+    panel.render()
+    assert backend.style_at(0, 0).bg == expected
 
 
 # --- image global opacity ---------------------------------------------------

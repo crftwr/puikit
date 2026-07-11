@@ -35,7 +35,7 @@ from typing import Any
 
 from . import _win32_dragdrop, _win32_ime
 from . import _win32_native as native
-from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute
+from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, is_transparent
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..event import Event, EventType, char_key_event
 from ..font import Font, FontMetrics
@@ -859,7 +859,7 @@ class WindowsBackend(Backend):
         runs = _glyph_runs(text)
         widths = [max(1, display_width(glyph)) for glyph in runs]
         total = sum(widths)
-        if bg is not None:
+        if bg is not None and not is_transparent(bg):
             self._set_brush(bg)
             native.rt_fill_rectangle(self._render_target, self._unit_rect(x, y, total, 1), self._brush)
 
@@ -897,7 +897,7 @@ class WindowsBackend(Backend):
         origin_y = y * self._base_h
         line_h = self._base_h * self.measure_line_height(style)
         width = self.measure_text(text, style) * self._base_w
-        if bg is not None:
+        if bg is not None and not is_transparent(bg):
             self._set_brush(bg)
             # Exactly one row (_base_h), not the font's own natural line
             # height (line_h, used below only for underline/strike position):

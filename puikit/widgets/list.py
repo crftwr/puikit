@@ -49,9 +49,16 @@ class ListView(Widget):
         self.on_select = on_select  # enter or mouse click
         self.on_change = on_change  # whenever the selection moves
         self.row_factory = row_factory
-        # Row pitch in base units. Text rows are always one unit; widget rows
-        # use the requested height (a row with an image/control usually wants
-        # more than one line).
+        # Row pitch in base units, set in draw() where the backend is known.
+        # Text rows are one *line* tall (re-measured from the row font, since a
+        # proportional GUI font's line box exceeds one base unit — a fixed 1.0
+        # would clip descenders and pack rows too tightly). Widget rows are
+        # sized to the row widget's own measured height (so a composed row with
+        # proportional-font children reserves the room they need), floored at
+        # ``row_height`` for a caller that wants taller rows. Seed at the floor
+        # for any event that fires before the first draw.
+        self._row_h_floor: float = float(row_height)
+        self._measured_row_h: float | None = None  # widget-row height, measured lazily
         self._row_h: float = float(row_height) if row_factory is not None else 1.0
         # Lazily built row widgets, parallel to items; only used with a factory.
         self._rows: list[Widget | None] = [None] * len(self.items)
@@ -66,6 +73,7 @@ class ListView(Widget):
         row_factory is set, so the cached widgets stay in sync."""
         self.items = list(items)
         self._rows = [None] * len(self.items)
+        self._measured_row_h = None  # re-measure the (possibly new) row widget
         self.selected = max(0, min(self.selected, len(self.items) - 1)) if self.items else 0
         self.offset = 0
 
@@ -79,9 +87,29 @@ class ListView(Widget):
             self._rows[index] = widget
         return widget
 
+    def _resolve_widget_row_h(self, ctx: DrawContext) -> float:
+        """Row pitch for a widget-row list: the row widget's own measured
+        height (so a composed row reserves the room its proportional-font
+        children need), floored at the requested ``row_height``. Measured once
+        against a real LayoutContext — every row is the same factory widget, so
+        one measurement sets the uniform pitch; re-measured after set_items."""
+        if self._measured_row_h is None and self.items:
+            lc = ctx.layout_context()
+            preferred = self.row_widget(0).measure(lc, "y", ctx.size_units[0]).preferred
+            self._measured_row_h = max(preferred, self._row_h_floor)
+        return self._measured_row_h if self._measured_row_h is not None else self._row_h_floor
+
     # --- drawing -------------------------------------------------------------
 
     def draw(self, ctx: DrawContext) -> None:
+        # Row pitch: text rows are one line tall (re-measured, since a
+        # proportional GUI font's line box exceeds one base unit); widget rows
+        # are sized to the row widget's own measured height, floored at the
+        # requested row_height. Both need the backend, so they are resolved here.
+        if self.row_factory is None:
+            self._row_h = ctx.line_height(self.style)
+        else:
+            self._row_h = self._resolve_widget_row_h(ctx)
         # Use the exact (possibly fractional) extent so the last partial row
         # and the scroll bounds line up with the pane edge at pixel
         # granularity, not at whole base units.
@@ -133,24 +161,22 @@ class ListView(Widget):
     def _draw_text_rows(
         self, ctx: DrawContext, view_h: float, text_w: int, fill_w: float
     ) -> None:
-        # offset is non-negative, so int() floors it: the first row is drawn at
-        # y = -frac, sliding partially off the top edge (the pane clip trims it),
-        # and one extra row is drawn at the bottom for the same reason.
-        content_h = len(self.items)
-        first = int(self.offset)
-        frac = self.offset - first
+        # offset is in base units; the row pitch is one line (row_h, a taller
+        # fraction than 1.0 for a proportional font). The first visible row may
+        # start just above the top edge (top < 0), the pane clip trims it, and
+        # one extra row is drawn past the bottom for the same reason.
+        row_h = self._row_h
         # Measure by the row font's real rendered width, so a proportional GUI
         # font clips where it actually reaches the edge, not by column count. On
         # a grid backend measure_text returns the column width, so this is the
         # same result as the monospace path.
         measure = lambda t: ctx.measure_text(t, self.style)
-        row = 0
-        while True:
-            index = first + row
-            y = row - frac
-            if y >= view_h or index >= content_h:
+        index = int(self.offset / row_h)
+        while index < len(self.items):
+            top = index * row_h - self.offset
+            if top >= view_h:
                 break
-            if index >= 0:
+            if index >= 0 and top + row_h > 0:
                 # Truncate by display width, not character count: an item with a
                 # wide glyph (CJK, emoji) is fewer characters than columns, so a
                 # length-based clip would let the row overflow the pane by a
@@ -162,8 +188,8 @@ class ListView(Widget):
                     style = selected_row_style(
                         style, ctx.theme, ctx.focused, ctx.vector_shapes
                     )
-                draw_list_row(ctx, y, clipped, text_w, style, fill_w=fill_w)
-            row += 1
+                draw_list_row(ctx, top, clipped, text_w, style, fill_w=fill_w, row_h=row_h)
+            index += 1
 
     def _draw_widget_rows(self, ctx: DrawContext, view_h: float, inner_w: int) -> None:
         row_h = self._row_h
