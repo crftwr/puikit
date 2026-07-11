@@ -348,6 +348,80 @@ def create_dwrite_factory() -> ComPtr:
     return ComPtr(out.value or 0)
 
 
+# --- app-bundled fonts: a custom IDWriteFontCollection built from font FILES,
+# so the GUI renders a shipped font (Noto) without it being installed. Every
+# index below was verified live loading and rendering the bundled Noto faces.
+#
+# IDWriteFactory5 (QI'd from the base factory; Windows 10 1709+) exposes the
+# clean font-set path: CreateFontFileReference[7] (base IDWriteFactory; also
+# validates the file) -> CreateFontSetBuilder[43] -> IDWriteFontSetBuilder1.
+# AddFontFile[7] -> IDWriteFontSetBuilder.CreateFontSet[6] -> IDWriteFactory3.
+# CreateFontCollectionFromFontSet[37] (inherited). The returned collection is
+# passed to CreateTextFormat (its fontCollection parameter, otherwise NULL for
+# the system collection), and the font's own family name resolves within it.
+
+IID_IDWriteFactory5 = GUID.from_str("958DB99A-BE2A-4F09-AF7D-65189803D1D3")
+
+_IDX_DWRITE_FACTORY_CREATE_FONT_FILE_REFERENCE = 7    # IDWriteFactory
+_IDX_DWRITE_FACTORY3_CREATE_FONT_COLLECTION_FROM_SET = 37
+_IDX_DWRITE_FACTORY5_CREATE_FONT_SET_BUILDER = 43
+_IDX_DWRITE_FONT_SET_BUILDER_CREATE_FONT_SET = 6
+_IDX_DWRITE_FONT_SET_BUILDER1_ADD_FONT_FILE = 7
+
+
+def create_font_collection_from_files(factory: ComPtr, paths: list[str]) -> ComPtr:
+    """An IDWriteFontCollection containing the fonts in ``paths`` (e.g. the
+    bundled Noto faces), so CreateTextFormat can select them by family name
+    without the fonts being installed. All faces go in one collection, so a
+    single collection covers both bundled families (Sans + Mono) and their
+    weights."""
+    factory5 = com_query_interface(factory, IID_IDWriteFactory5)
+    try:
+        out = ctypes.c_void_p()
+        hr = factory5.call(
+            _IDX_DWRITE_FACTORY5_CREATE_FONT_SET_BUILDER, ctypes.c_int32,
+            [ctypes.POINTER(ctypes.c_void_p)], ctypes.byref(out),
+        )
+        if not hresult_ok(hr):
+            raise OSError(f"CreateFontSetBuilder failed: 0x{hr & 0xFFFFFFFF:08x}")
+        builder = ComPtr(out.value or 0)
+        try:
+            for path in paths:
+                out = ctypes.c_void_p()
+                hr = factory5.call(
+                    _IDX_DWRITE_FACTORY_CREATE_FONT_FILE_REFERENCE, ctypes.c_int32,
+                    [ctypes.c_wchar_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)],
+                    path, None, ctypes.byref(out),
+                )
+                if not hresult_ok(hr):
+                    raise OSError(f"CreateFontFileReference({path!r}) failed: 0x{hr & 0xFFFFFFFF:08x}")
+                font_file = ComPtr(out.value or 0)
+                hr = builder.call(_IDX_DWRITE_FONT_SET_BUILDER1_ADD_FONT_FILE, ctypes.c_int32, [ctypes.c_void_p], font_file.addr)
+                font_file.release()
+                if not hresult_ok(hr):
+                    raise OSError(f"AddFontFile({path!r}) failed: 0x{hr & 0xFFFFFFFF:08x}")
+            out = ctypes.c_void_p()
+            hr = builder.call(_IDX_DWRITE_FONT_SET_BUILDER_CREATE_FONT_SET, ctypes.c_int32, [ctypes.POINTER(ctypes.c_void_p)], ctypes.byref(out))
+            if not hresult_ok(hr):
+                raise OSError(f"CreateFontSet failed: 0x{hr & 0xFFFFFFFF:08x}")
+            font_set = ComPtr(out.value or 0)
+            try:
+                out = ctypes.c_void_p()
+                hr = factory5.call(
+                    _IDX_DWRITE_FACTORY3_CREATE_FONT_COLLECTION_FROM_SET, ctypes.c_int32,
+                    [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)], font_set.addr, ctypes.byref(out),
+                )
+                if not hresult_ok(hr):
+                    raise OSError(f"CreateFontCollectionFromFontSet failed: 0x{hr & 0xFFFFFFFF:08x}")
+                return ComPtr(out.value or 0)
+            finally:
+                font_set.release()
+        finally:
+            builder.release()
+    finally:
+        factory5.release()
+
+
 def rt_begin_draw(rt: ComPtr) -> None:
     rt.call(_IDX_RT_BEGIN_DRAW, None, [])
 
@@ -501,8 +575,12 @@ def rt_pop_axis_aligned_clip(rt: ComPtr) -> None:
 
 
 def dwrite_create_text_format(
-    factory: ComPtr, family: str, weight: int, style: int, size: float, stretch: int = 5
+    factory: ComPtr, family: str, weight: int, style: int, size: float, stretch: int = 5,
+    collection: "ComPtr | None" = None,
 ) -> ComPtr:
+    # ``collection`` (an IDWriteFontCollection from create_font_collection_from_
+    # files) resolves ``family`` from a bundled font; None uses the system
+    # collection.
     out = ctypes.c_void_p()
     locale = ctypes.create_unicode_buffer("en-us")
     hr = factory.call(
@@ -519,7 +597,7 @@ def dwrite_create_text_format(
             ctypes.POINTER(ctypes.c_void_p),
         ],
         family,
-        None,
+        collection.addr if collection is not None else None,
         weight,
         style,
         stretch,

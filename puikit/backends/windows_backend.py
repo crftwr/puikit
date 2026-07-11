@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import ctypes
 import math
+import os
 import threading
 import time
 from ctypes import wintypes
@@ -35,11 +36,26 @@ from typing import Any
 
 from . import _win32_dragdrop, _win32_ime
 from . import _win32_native as native
-from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute
+from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, is_transparent
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..event import Event, EventType, char_key_event
 from ..font import Font, FontMetrics
 from ..text import display_width, glyph_runs as _glyph_runs
+
+# Bundled default fonts (puikit/fonts): Noto Sans + Noto Sans Mono, a
+# designed-together superfamily whose proportional and monospace faces share
+# metrics, so the base unit (derived from the mono face) fits the UI face and
+# text does not clip. Loaded into a DirectWrite custom font collection so they
+# render without being installed; a missing-files fallback to the OS fonts keeps
+# the backend working if the package data is absent.
+_FONT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "fonts")
+_BUNDLED_MONO = "Noto Sans Mono"
+_BUNDLED_UI = "Noto Sans"
+_BUNDLED_FAMILIES = frozenset({_BUNDLED_MONO, _BUNDLED_UI})
+_BUNDLED_FONT_FILES = (
+    "NotoSans-Regular.ttf", "NotoSans-Bold.ttf",
+    "NotoSansMono-Regular.ttf", "NotoSansMono-Bold.ttf",
+)
 
 _DEFAULT_FG = (230, 230, 230)
 _DEFAULT_BG = (24, 24, 24)
@@ -259,6 +275,11 @@ class WindowsBackend(Backend):
         self._hwnd = 0
         self._d2d_factory: Any = None
         self._dwrite_factory: Any = None
+        # Custom DirectWrite collection of the bundled Noto faces, loaded once
+        # (lazily); None once loading has been attempted and failed/skipped, so
+        # the backend falls back to the OS fonts.
+        self._font_collection: Any = None
+        self._font_collection_loaded = False
         # `_render_target` is an ID2D1DeviceContext (see _win32_native.py's
         # D3D11/DXGI/Direct2D-1.1 section) bound to `_swap_chain`'s back
         # buffer (`_target_bitmap`) -- everything else in this file keeps
@@ -422,6 +443,10 @@ class WindowsBackend(Backend):
             self._wic_factory.release()
             self._wic_factory = None
         self._release_render_resources()
+        if self._font_collection is not None:
+            self._font_collection.release()
+            self._font_collection = None
+        self._font_collection_loaded = False
         if self._dwrite_factory is not None:
             self._dwrite_factory.release()
             self._dwrite_factory = None
@@ -441,6 +466,21 @@ class WindowsBackend(Backend):
     def _base_size_pt(self) -> float:
         return float(self._base_font.size) if self._base_font.size is not None else 14.0
 
+    def _ensure_font_collection(self) -> Any:
+        """The bundled-Noto DirectWrite collection, loaded on first use; None if
+        the font files are absent (then the backend falls back to OS fonts)."""
+        if not self._font_collection_loaded:
+            self._font_collection_loaded = True
+            if self._dwrite_factory is None:
+                self._dwrite_factory = native.create_dwrite_factory()
+            paths = [os.path.join(_FONT_DIR, f) for f in _BUNDLED_FONT_FILES]
+            if all(os.path.exists(p) for p in paths):
+                try:
+                    self._font_collection = native.create_font_collection_from_files(self._dwrite_factory, paths)
+                except OSError:
+                    self._font_collection = None
+        return self._font_collection
+
     def _font_params(self, font: Font) -> tuple[str, int, bool, float]:
         """Map a Font descriptor to (family, weight, italic, size-in-points).
         DirectWrite's DWRITE_FONT_WEIGHT uses the same 100..900 CSS-like
@@ -453,13 +493,17 @@ class WindowsBackend(Backend):
         # default face for its role — the base (mono/grid) font for a monospace
         # request, the ui_font for a proportional one — so widgets share one
         # configurable pair. A default that itself names no family drops to the
-        # OS system monospaced / UI face.
+        # bundled Noto pair (metrics-matched, so text does not clip), or the OS
+        # mono/UI face if the bundled fonts are unavailable.
         family = font.family
         if family is None:
             default = self._base_font if font.monospace else self._ui_font
             family = default.family if default is not None else None
         if family is None:
-            family = "Consolas" if font.monospace else "Segoe UI"
+            if self._ensure_font_collection() is not None:
+                family = _BUNDLED_MONO if font.monospace else _BUNDLED_UI
+            else:
+                family = "Consolas" if font.monospace else "Segoe UI"
         return family, weight, italic, size
 
     def _create_text_format(self, font: Font, bold: bool = False, italic: bool = False) -> Any:
@@ -472,7 +516,10 @@ class WindowsBackend(Backend):
         if bold:
             weight = max(weight, 700)
         style = 2 if (italic or font_italic) else 0  # DWRITE_FONT_STYLE_ITALIC
-        return native.dwrite_create_text_format(self._dwrite_factory, family, weight, style, size)
+        # A bundled family resolves from our custom collection; anything else
+        # (an OS font, or an app-named family) uses the system collection.
+        collection = self._ensure_font_collection() if family in _BUNDLED_FAMILIES else None
+        return native.dwrite_create_text_format(self._dwrite_factory, family, weight, style, size, collection=collection)
 
     def _init_fonts(self) -> None:
         if self._d2d_factory is None:
@@ -859,7 +906,7 @@ class WindowsBackend(Backend):
         runs = _glyph_runs(text)
         widths = [max(1, display_width(glyph)) for glyph in runs]
         total = sum(widths)
-        if bg is not None:
+        if bg is not None and not is_transparent(bg):
             self._set_brush(bg)
             native.rt_fill_rectangle(self._render_target, self._unit_rect(x, y, total, 1), self._brush)
 
@@ -897,7 +944,7 @@ class WindowsBackend(Backend):
         origin_y = y * self._base_h
         line_h = self._base_h * self.measure_line_height(style)
         width = self.measure_text(text, style) * self._base_w
-        if bg is not None:
+        if bg is not None and not is_transparent(bg):
             self._set_brush(bg)
             # Exactly one row (_base_h), not the font's own natural line
             # height (line_h, used below only for underline/strike position):

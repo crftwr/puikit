@@ -21,7 +21,10 @@ classifiers = [
 dependencies = ["numpy"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-timeout>=2"]
+# windows-curses backports the _curses C extension CPython omits on Windows, so
+# the curses (TUI) backend and its tests run there; the marker keeps it off
+# macOS/Linux, which already ship _curses.
+dev = ["pytest>=8", "pytest-timeout>=2", "windows-curses>=2.4; sys_platform == 'win32'"]
 macos = ["pyobjc-framework-Cocoa>=10", "pyobjc-framework-Quartz>=10"]
 
 [project.urls]
@@ -29,6 +32,13 @@ Homepage = "https://github.com/crftwr/puikit"
 
 [tool.setuptools.packages.find]
 include = ["puikit*"]
+
+[tool.setuptools.package-data]
+# Bundled default fonts (Noto Sans / Noto Sans Mono — a designed-together
+# superfamily whose mono and proportional faces share metrics, so the base unit
+# fits both and text does not clip). Shipped so the GUI backends render the same
+# on any machine without the fonts installed; OFL.txt is their SIL OFL license.
+puikit = ["fonts/*.ttf", "fonts/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

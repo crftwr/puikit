@@ -23,6 +23,7 @@ import argparse
 import colorsys
 import math
 import os
+from dataclasses import replace
 
 from puikit import (
     SEPARATOR,
@@ -605,24 +606,51 @@ def build_widgets_page(panel: Panel) -> VSplit:
 
 
 # Each row is two base units tall: a primary line and a dim details line. The
-# ListView reserves this height per row (row_height=ROW_H) and scrolls in base
-# units, so the taller rows page correctly on every backend.
+# A floor for the custom row height (row_height=ROW_H): the row widget measures
+# its own taller, font-height-based size (two proportional-font lines), and this
+# only guarantees a minimum. Rows scroll in base units, so they page correctly
+# on every backend.
 ROW_H = 2
 
 
-def _make_file_row(item: tuple[str, str, str, str]) -> Container:
+class _FileRow(Container):
     """A custom, multi-line list row composed from ordinary widgets: a checkbox
-    and an icon+name on the first line, a dim "size · modified" details line
-    below it. The row is taller than one line, so it shows that a list item is
-    not limited to a single row. ListView routes clicks into this Container, so
-    the checkbox toggles where it is hit; the same row runs on every backend."""
-    name, icon, size, modified = item
-    row = Container()
-    row.add(Checkbox(""), x=0, y=0, w=3, h=1)
-    row.add(Label(f"{icon} {name}", BOLD), x=4, y=0, w=26, h=1)
-    # Second line: secondary detail, indented under the name and dimmed.
-    row.add(Label(f"{size}  ·  {modified}", DIM), x=4, y=1, w=26, h=1)
-    return row
+    and an icon+name on the first line, a dim "size · modified" line below it.
+
+    It reports its own height — two lines of the row font — through ``measure``,
+    so ListView reserves the right room per row (content-sized, not a fixed grid
+    height), and lays its two lines out by the font's *line height* rather than
+    one base unit so a descender is not clipped. That "size by font height, not
+    grid height" is the application's responsibility for a hand-composed widget;
+    this is the demonstration of it. ListView routes clicks into this Container,
+    so the checkbox toggles where it is hit; the same row runs on every backend."""
+
+    def __init__(self, item: tuple[str, str, str, str]):
+        super().__init__()
+        name, icon, size, modified = item
+        self._detail = Label(f"{size}  ·  {modified}", DIM)
+        self.add(Checkbox(""), x=0, y=0, w=3, h=1)
+        self.add(Label(f"{icon} {name}", BOLD), x=4, y=0, w=26, h=1)
+        self.add(self._detail, x=4, y=1, w=26, h=1)
+
+    def measure(self, ctx, axis, available):
+        if axis == "y":
+            two_lines = 2.0 * ctx.measure_line_height()
+            return SizeRequest(min=two_lines, preferred=two_lines, max=two_lines)
+        return super().measure(ctx, axis, available)
+
+    def draw(self, ctx) -> None:
+        # Lay the two lines out by the font's line height (a taller fraction than
+        # one base unit for a proportional font), each line one line-height tall
+        # so its descenders are not clipped by the child box.
+        line_h = ctx.line_height()
+        for slot in self._children:
+            slot.rect = replace(slot.rect, y=line_h if slot.widget is self._detail else 0.0, h=line_h)
+        super().draw(ctx)
+
+
+def _make_file_row(item: tuple[str, str, str, str]) -> Container:
+    return _FileRow(item)
 
 
 def build_list_page(panel: Panel) -> VSplit:
@@ -879,6 +907,15 @@ class AnimTarget(Container):
         self.last_label.style = Style(
             fg=(21, 128, 61) if bg is not None and _luminance(bg) > 140 else (13, 188, 121)
         )
+        # Reserve each hand-placed child's box to the font's line height, so a
+        # taller proportional font's descender is not clipped by its box (base_h
+        # is the mono grid unit; the UI font's line box is taller). Sizing a
+        # widget by font height rather than grid height is the application's job
+        # under puikit's model — this is the demonstration of it.
+        line_h = ctx.line_height()
+        for slot in self._children:
+            if slot.rect.h < line_h:
+                slot.rect = replace(slot.rect, h=line_h)
         ctx.draw_border(Style(fg=border))
         ctx.draw_icon(2, 1, "check")
         super().draw(ctx)  # children, each clipped to the card

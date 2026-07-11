@@ -63,6 +63,7 @@ def draw_list_row(
     style: Style,
     x: float = 0.0,
     fill_w: float | None = None,
+    row_h: float = 1.0,
 ) -> None:
     """Draw one full-width row of a list-like widget (ListView, TreeView).
 
@@ -84,11 +85,22 @@ def draw_list_row(
     ``fill_w`` is the background width in base units, defaulting to ``text_w``.
     Callers pass the *fractional* pane extent (up to a scrollbar's left edge) so
     the fill reaches the real edge, not the whole-unit-truncated ``ctx.width`` —
-    otherwise the sub-unit remainder shows as a gap before the scrollbar."""
+    otherwise the sub-unit remainder shows as a gap before the scrollbar.
+
+    ``row_h`` is the row pitch in base units (the caller sizes text rows to the
+    font's line height); the selection fill spans it so the highlight covers the
+    whole row rather than a single base unit.
+
+    A non-selected row draws no fill of its own: its ``bg`` is ``None``, which
+    ``DrawContext`` draws transparently over the pane's already-painted surface
+    on a compositing backend (so a taller font's descender is not clipped by a
+    redundant fill, and a fade does not double-blend it), and inherits the pane
+    colour opaquely on a character grid. A row pitch sized to the font's line
+    height keeps rows from overlapping in the first place."""
     if fill_w is None:
         fill_w = text_w
     if style.bg is not None and not (style.attr & TextAttribute.REVERSE):
-        ctx.fill_rect(0, y, fill_w, 1.0, Style(bg=style.bg))
+        ctx.fill_rect(0, y, fill_w, row_h, Style(bg=style.bg))
         ctx.draw_text(x, y, clipped, style)
     else:
         text = clipped + " " * (text_w - display_width(clipped))

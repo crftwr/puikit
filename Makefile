@@ -57,12 +57,19 @@ FONT_SIZE_ARG := $(if $(FONT_SIZE),--font-size $(FONT_SIZE))
 # target fails with `ModuleNotFoundError: No module named 'puikit'`.
 VENV_STAMP := $(VENV)/.installed
 
-.PHONY: help venv install test hello demo layout hello-gui demo-gui layout-gui clean
+# Bundled default fonts (Noto), fetched at build time rather than committed
+# (large binaries under their own license). One fetched file stands in for all;
+# fetch_fonts.py is idempotent and fills in any that are missing. The install
+# stamp depends on this so `make venv` / any run target populates the fonts.
+FONTS := puikit/fonts/NotoSans-Regular.ttf
+
+.PHONY: help venv install test fonts hello demo layout hello-gui demo-gui layout-gui clean
 
 help:
 	@echo "PuiKit utility commands:"
 	@echo "  make venv      - create the virtualenv and install puikit ($(VENV)/, $(PYTHON))"
 	@echo "  make install   - (re)install puikit into the venv (editable, with dev deps; +macos on macOS)"
+	@echo "  make fonts     - download the bundled default fonts into puikit/fonts/"
 	@echo "  make test      - run the test suite"
 	@echo "  make hello     - run the hello_world example (TUI)"
 	@echo "  make demo      - run the demo_catalog example (TUI)"
@@ -75,10 +82,15 @@ help:
 	@echo "  Run/test targets create the venv and install puikit automatically"
 	@echo "  if needed. GUI targets accept FONT_SIZE, e.g. make demo-gui FONT_SIZE=18"
 
-$(VENV_STAMP): pyproject.toml
+$(VENV_STAMP): pyproject.toml $(FONTS)
 	$(PYTHON) -m venv $(VENV)
 	$(VENV_PIP) install -e ".[$(EXTRAS)]"
 	@touch $(VENV_STAMP)
+
+$(FONTS): scripts/fetch_fonts.py
+	$(PYTHON) scripts/fetch_fonts.py
+
+fonts: $(FONTS)
 
 venv: $(VENV_STAMP)
 
