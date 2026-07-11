@@ -88,13 +88,19 @@ def test_measure_line_height_default_font_measures_ui_font():
     # font=None is DRAWN as the UI font (Panel._resolve substitutes it), so it
     # must be MEASURED as the UI font too — not the old 1.0 grid shortcut, which
     # under-sized content panes and clipped the taller UI font's descenders.
-    backend = WindowsBackend(base_font=Font(size=30.0, monospace=True))
+    # Use a deliberately mismatched pair (short mono base, taller proportional
+    # UI face) so the effect is observable; the bundled Noto default matches by
+    # design, which is exactly why it doesn't clip.
+    backend = WindowsBackend(
+        base_font=Font(family="Consolas", size=30.0, monospace=True),
+        ui_font=Font(family="Segoe UI"),
+    )
     backend._init_fonts()
     try:
-        default_h = backend.measure_line_height(Style())  # font=None
+        default_h = backend.measure_line_height(Style())  # font=None -> UI font
         grid_h = backend.measure_line_height(Style(font=Font(monospace=True)))
         assert grid_h == 1.0  # a genuine grid font is still exactly one row
-        assert default_h > 1.0  # the UI font is taller than one mono row
+        assert default_h > 1.0  # the taller UI font measures past one mono row
     finally:
         backend.close()
 
@@ -137,13 +143,29 @@ def test_draw_text_baseline_offsets_by_ascent():
         backend.close()
 
 
-def test_font_params_resolves_family_by_monospace():
+def test_font_params_resolves_default_fonts():
+    # The default mono/proportional pair is the bundled Noto superfamily (whose
+    # matched metrics keep text from clipping), loaded from a custom DirectWrite
+    # collection. The font files are fetched at build time, not committed, so
+    # both outcomes are valid: Noto when present, the OS pair when not.
     backend = WindowsBackend()
     try:
-        mono_family, _, _, _ = backend._font_params(Font(monospace=True))
-        prop_family, _, _, _ = backend._font_params(Font())
-        assert mono_family == "Consolas"
-        assert prop_family == "Segoe UI"
+        mono = backend._font_params(Font(monospace=True))[0]
+        prop = backend._font_params(Font())[0]
+        if backend._ensure_font_collection() is not None:
+            assert (mono, prop) == ("Noto Sans Mono", "Noto Sans")
+        else:
+            assert (mono, prop) == ("Consolas", "Segoe UI")
+    finally:
+        backend.close()
+
+
+def test_explicit_family_overrides_bundled_default():
+    # An app that names a family still gets it (via the system collection).
+    backend = WindowsBackend()
+    try:
+        assert backend._font_params(Font(family="Consolas", monospace=True))[0] == "Consolas"
+        assert backend._font_params(Font(family="Segoe UI"))[0] == "Segoe UI"
     finally:
         backend.close()
 
