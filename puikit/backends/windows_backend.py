@@ -324,6 +324,13 @@ class WindowsBackend(Backend):
         self._ui_font = ui_font
         self._base_w = 1.0
         self._base_h = 1.0
+        # Physical pixels per DIP for the window's current monitor (1.0 == 96
+        # DPI / 100% scaling). Set from the real monitor DPI on open() and on
+        # WM_DPICHANGED. Font point sizes are multiplied by it (see
+        # _font_params) so glyphs rasterize at the display's true pixel
+        # density; the base unit, derived from the scaled base font, scales
+        # with it, so all base-unit layout stays resolution-independent.
+        self._dpi_scale = 1.0
         self._hwnd = 0
         self._d2d_factory: Any = None
         self._dwrite_factory: Any = None
@@ -388,29 +395,26 @@ class WindowsBackend(Backend):
     # --- lifecycle -----------------------------------------------------------
 
     def open(self) -> None:
+        # Per-monitor DPI awareness must be set before the first window is
+        # created; otherwise Windows bitmap-stretches a 96-DPI surface and text
+        # blurs on any display scaled above 100%. Setting it here (rather than
+        # in a manifest) covers both the bundled app and plain `python tfm.py`.
+        native.set_process_dpi_awareness()
         _register_window_class()
-        self._init_fonts()
 
-        w_px = int(self._initial_size[0] * self._base_w)
-        h_px = int(self._initial_size[1] * self._base_h)
-        # CreateWindowExW's (w, h) include the non-client frame; pad a bit so
-        # the *client* area starts near the requested size. Layouts re-resolve
-        # from the live size on each render, so this only affects the initial
-        # frame the user sees before any resize.
-        x, y, w, h = 100, 100, w_px + 16, h_px + 39
-        if self._frame_autosave_name:
-            saved = _load_autosave_rect(self._frame_autosave_name)
-            if saved is not None:
-                x, y, w, h = saved
+        # Create the window at a provisional size first so its monitor DPI can
+        # be read (per-monitor aware), then derive the base unit and correct the
+        # frame to the requested base-unit size. Layouts re-resolve from the
+        # live size each render, so the provisional size is never shown.
         self._hwnd = native.user32.CreateWindowExW(
             0,
             _CLASS_NAME,
             self._title,
             native.WS_OVERLAPPEDWINDOW,
-            x,
-            y,
-            w,
-            h,
+            100,
+            100,
+            800,
+            600,
             None,
             None,
             native.get_module_handle(),
@@ -419,6 +423,10 @@ class WindowsBackend(Backend):
         if not self._hwnd:
             raise OSError(f"CreateWindowExW failed: {ctypes.get_last_error()}")
         _hwnd_backends[self._hwnd] = self
+
+        self._dpi_scale = native.get_dpi_for_window(self._hwnd) / 96.0
+        self._init_fonts()
+        self._apply_initial_frame()
 
         self._create_render_resources()
 
@@ -432,6 +440,40 @@ class WindowsBackend(Backend):
 
         native.user32.ShowWindow(self._hwnd, native.SW_SHOW)
         native.user32.UpdateWindow(self._hwnd)
+
+    def _apply_initial_frame(self) -> None:
+        """Size (and optionally position) the window to the requested base-unit
+        size in physical pixels, or restore the saved autosave frame. Called
+        once from open(), after the base unit is known for this monitor's DPI."""
+        flags = native.SWP_NOZORDER | native.SWP_NOACTIVATE
+        if self._frame_autosave_name:
+            saved = _load_autosave_rect(self._frame_autosave_name)
+            if saved is not None:
+                x, y, w, h = saved
+                native.user32.SetWindowPos(self._hwnd, None, x, y, w, h, flags)
+                return
+        w_px = int(self._initial_size[0] * self._base_w)
+        h_px = int(self._initial_size[1] * self._base_h)
+        # (w, h) include the non-client frame; pad a bit so the *client* area
+        # starts near the requested size (matches the old CreateWindow sizing).
+        native.user32.SetWindowPos(self._hwnd, None, 100, 100, w_px + 16, h_px + 39, flags)
+
+    def _rebuild_fonts(self) -> None:
+        """Recreate every cached text format at the current DPI scale and
+        re-derive the base unit from the rescaled base font. Called on
+        WM_DPICHANGED so glyphs re-rasterize at the new pixel density. Safe
+        between frames: the display list stores Style objects and resolves them
+        to text formats at paint time, never holding a format across frames."""
+        for fmt in self._fonts.values():
+            fmt.release()
+        self._fonts.clear()
+        for fmt in self._style_fonts.values():
+            fmt.release()
+        self._style_fonts.clear()
+        self._width_cache.clear()
+        self._line_height_cache.clear()
+        self._font_metrics_cache.clear()
+        self._init_fonts()
 
     def _create_render_resources(self) -> None:
         """Build the D3D11 device -> DXGI swap chain -> ID2D1DeviceContext
@@ -537,7 +579,13 @@ class WindowsBackend(Backend):
         DirectWrite's DWRITE_FONT_WEIGHT uses the same 100..900 CSS-like
         scale as puikit.font.FontWeight, so the same integer drives it
         directly with no remapping."""
+        # Scale the point size to physical pixels: the render target draws in
+        # raw device pixels (no ID2D1DeviceContext::SetDpi), so a HiDPI display
+        # needs the glyphs rasterized larger to hit its true pixel density. The
+        # base unit and every measure_* result are derived from this scaled
+        # size, so they stay in resolution-independent base units regardless.
         size = float(font.size) if font.size is not None else self._base_size_pt()
+        size *= self._dpi_scale
         weight = int(font.weight)
         italic = font.italic
         # A Style that names no family falls back to the backend's configured
@@ -1561,6 +1609,22 @@ class WindowsBackend(Backend):
                 self._target_bitmap = native.swapchain_resize(self._render_target, self._swap_chain, self._target_bitmap, cw, ch)
             sw, sh = self.size
             self._dispatch(Event(type=EventType.RESIZE, hints={"w": sw, "h": sh}))
+            return 0
+        if msg == native.WM_DPICHANGED:
+            # The window moved to a monitor with a different scale (or the
+            # user changed it). wParam's low word is the new DPI; lParam is a
+            # RECT* with the suggested new window frame. Rescale the fonts and
+            # accept the suggested frame — the resulting WM_SIZE resizes the
+            # swap chain and re-resolves the layout at the new base unit.
+            self._dpi_scale = native.loword(wparam) / 96.0
+            self._rebuild_fonts()
+            rect = ctypes.cast(lparam, ctypes.POINTER(wintypes.RECT)).contents
+            native.user32.SetWindowPos(
+                hwnd, None, rect.left, rect.top,
+                rect.right - rect.left, rect.bottom - rect.top,
+                native.SWP_NOZORDER | native.SWP_NOACTIVATE,
+            )
+            native.user32.InvalidateRect(hwnd, None, False)
             return 0
         if msg == native.WM_CLOSE:
             # DestroyWindow tears the window down synchronously (WM_DESTROY

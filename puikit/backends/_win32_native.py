@@ -1441,7 +1441,13 @@ WM_SETCURSOR = 0x0020
 WM_INITMENUPOPUP = 0x0117
 WM_NCDESTROY = 0x0082
 WM_GETMINMAXINFO = 0x0024
+WM_DPICHANGED = 0x02E0
 WM_APP = 0x8000
+
+# SetWindowPos flags.
+SWP_NOMOVE = 0x0002
+SWP_NOZORDER = 0x0004
+SWP_NOACTIVATE = 0x0010
 
 TME_LEAVE = 0x00000002
 HTCLIENT = 1
@@ -1541,12 +1547,60 @@ user32.ClientToScreen.argtypes = [HWND, ctypes.POINTER(wintypes.POINT)]
 user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
 user32.ScreenToClient.argtypes = [HWND, ctypes.POINTER(wintypes.POINT)]
 
+user32.SetWindowPos.restype = wintypes.BOOL
+user32.SetWindowPos.argtypes = [HWND, HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+
 kernel32.GetModuleHandleW.restype = ctypes.c_void_p
 kernel32.GetModuleHandleW.argtypes = [ctypes.c_wchar_p]
 
 
 def get_module_handle() -> int:
     return kernel32.GetModuleHandleW(None) or 0
+
+
+_dpi_awareness_set = False
+
+
+def set_process_dpi_awareness() -> None:
+    """Make the process Per-Monitor-DPI-Aware (v2) so Windows renders the
+    window at the display's true pixel density instead of bitmap-stretching a
+    96-DPI surface. Idempotent, and a no-op if awareness was already fixed by a
+    manifest (the calls then fail harmlessly). Degrades across Windows
+    versions: PerMonitorV2 (Win10 1703+) -> Per-Monitor (Win8.1+) -> System."""
+    global _dpi_awareness_set
+    if _dpi_awareness_set:
+        return
+    _dpi_awareness_set = True
+    fn = getattr(user32, "SetProcessDpiAwarenessContext", None)
+    if fn is not None:
+        fn.restype = wintypes.BOOL
+        fn.argtypes = [ctypes.c_void_p]
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == (HANDLE)-4.
+        if fn(ctypes.c_void_p(-4)):
+            return
+    try:
+        shcore = ctypes.WinDLL("shcore")
+        shcore.SetProcessDpiAwareness.argtypes = [ctypes.c_int]
+        if shcore.SetProcessDpiAwareness(2) == 0:  # PROCESS_PER_MONITOR_DPI_AWARE, S_OK
+            return
+    except (OSError, AttributeError):
+        pass
+    fn2 = getattr(user32, "SetProcessDPIAware", None)
+    if fn2 is not None:
+        fn2()
+
+
+def get_dpi_for_window(hwnd: int) -> int:
+    """The window's monitor DPI (96 == 100% scaling). Falls back to 96 on
+    Windows older than 10 (1607), where GetDpiForWindow is unavailable."""
+    fn = getattr(user32, "GetDpiForWindow", None)
+    if fn is not None:
+        fn.restype = ctypes.c_uint
+        fn.argtypes = [HWND]
+        dpi = fn(hwnd)
+        if dpi:
+            return int(dpi)
+    return 96
 
 
 def loword(value: int) -> int:
