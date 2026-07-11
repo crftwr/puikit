@@ -58,7 +58,11 @@ class TreeView(Widget):
         self.on_activate = on_activate  # enter / double-purpose activate
         self.style = style
         self.selected = 0
+        # First visible position in base units; the row pitch is one line
+        # (row_h, a taller fraction than 1.0 for a proportional font), set from
+        # the row font in draw().
         self.offset: float = 0.0
+        self._row_h: float = 1.0
         self._viewport_h = 1
         self._view_h = 1.0
 
@@ -82,7 +86,11 @@ class TreeView(Widget):
     def draw(self, ctx: DrawContext) -> None:
         view_h = ctx.size_units[1]
         self._view_h = view_h
-        self._viewport_h = max(1, int(view_h))
+        # Row pitch is one line of the row font (one base unit on a grid, a
+        # taller fraction for a proportional font) so descenders are not clipped
+        # and rows are not packed too tightly.
+        row_h = self._row_h = ctx.line_height(self.style)
+        self._viewport_h = max(1, int(view_h / row_h))
         rows = self._visible()
         if rows:
             self.selected = max(0, min(self.selected, len(rows) - 1))
@@ -90,7 +98,8 @@ class TreeView(Widget):
             self.selected = 0
         self._clamp_offset(len(rows), view_h)
 
-        show_bar = len(rows) > view_h
+        content_h = len(rows) * row_h
+        show_bar = content_h > view_h
         text_w = ctx.width - (1 if show_bar else 0)
         # Exact (fractional) extent so a row background reaches the real pane edge
         # — up to the scrollbar's left edge — instead of the whole-unit-truncated
@@ -101,23 +110,20 @@ class TreeView(Widget):
         if ctx.panel is not None and ctx.panel.pointer is not None and rows:
             sx, sy, _sw, _sh = ctx.screen_rect
             lx, ly = ctx.panel.pointer[0] - sx, ctx.panel.pointer[1] - sy
-            row_index = int(self.offset + ly)
+            row_index = int((self.offset + ly) / row_h)
             if 0 <= lx < fill_w and 0 <= ly < view_h and 0 <= row_index < len(rows):
                 ctx.set_cursor("pointer")
         theme = ctx.theme
-        first = int(self.offset)
-        frac = self.offset - first
         # Clip by the row font's real width so a proportional GUI font fits at
         # the edge, not by column count; on a grid backend measure_text returns
         # the column width, so the monospace result is unchanged.
         measure = lambda t: ctx.measure_text(t, self.style)
-        row = 0
-        while True:
-            index = first + row
-            y = row - frac
-            if y >= view_h or index >= len(rows):
+        index = int(self.offset / row_h)
+        while index < len(rows):
+            top = index * row_h - self.offset
+            if top >= view_h:
                 break
-            if index >= 0:
+            if index >= 0 and top + row_h > 0:
                 node, depth = rows[index]
                 marker = _LEAF if node.is_leaf else (_EXPANDED if node.expanded else _COLLAPSED)
                 indent = depth * _INDENT
@@ -138,12 +144,12 @@ class TreeView(Widget):
                     style = selected_row_style(
                         style, theme, ctx.focused, ctx.vector_shapes
                     )
-                draw_list_row(ctx, y, clipped, text_w, style, text_x, fill_w)
-            row += 1
+                draw_list_row(ctx, top, clipped, text_w, style, text_x, fill_w, row_h=row_h)
+            index += 1
 
         if show_bar:
-            ratio = view_h / len(rows)
-            denom = len(rows) - view_h
+            ratio = view_h / content_h
+            denom = content_h - view_h
             pos = self.offset / denom if denom > 0 else 0.0
             # Fractional width keeps the bar flush to the right edge at pixel
             # granularity; ctx.width is truncated to whole base units.
@@ -152,13 +158,14 @@ class TreeView(Widget):
             )
 
     def _clamp_offset(self, count: int, viewport_h: float) -> None:
-        self.offset = max(0.0, min(self.offset, max(0.0, count - viewport_h)))
+        self.offset = max(0.0, min(self.offset, max(0.0, count * self._row_h - viewport_h)))
 
     def _ensure_visible(self) -> None:
-        if self.selected < self.offset:
-            self.offset = self.selected
-        elif self.selected >= self.offset + self._viewport_h:
-            self.offset = self.selected - self._viewport_h + 1
+        top = self.selected * self._row_h
+        if top < self.offset:
+            self.offset = top
+        elif top + self._row_h > self.offset + self._view_h:
+            self.offset = top + self._row_h - self._view_h
 
     # --- events --------------------------------------------------------------
 
@@ -238,7 +245,7 @@ class TreeView(Widget):
 
     def _handle_click(self, event: Event) -> bool:
         rows = self._visible()
-        index = int(self.offset + (event.y or 0))
+        index = int((self.offset + (event.y or 0)) / self._row_h)
         if not (0 <= index < len(rows)):
             return False
         before = self.selected
