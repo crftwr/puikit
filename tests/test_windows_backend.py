@@ -12,11 +12,17 @@ import pytest
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows-only backend")
 pytest.importorskip("ctypes.wintypes", reason="Windows-only backend")
 
-from puikit import Rect  # noqa: E402
+from puikit import CRT, PostEffect, Rect  # noqa: E402
 from puikit.backend import Style, TextAttribute  # noqa: E402
 from puikit.font import Font, FontWeight  # noqa: E402
-from puikit.backends.windows_backend import Animation, WindowsBackend  # noqa: E402
+from puikit.backends.windows_backend import (  # noqa: E402
+    Animation, WindowsBackend, _glow_matrix, _roll_band_top, _roll_falloff, _tint_matrix,
+)
 from puikit.backends import _win32_native as native  # noqa: E402
+
+# A tinted, strongly-rolling effect for the tint / roll coverage (no named preset
+# ships a tint). Mirrors tests/test_posteffect.py's TINTED.
+_TINTED = PostEffect(tint=(70, 240, 130), bloom=0.28, scanline=0.42, vignette=0.4, glow=0.32, roll=0.45)
 
 
 def _png(path, w, h):
@@ -595,3 +601,248 @@ def test_premultiply_bgra_matches_reference():
         assert result[i + 1] == (g * a) // 255
         assert result[i + 2] == (r * a) // 255
         assert result[i + 3] == a
+
+
+# --- CRT post-effect (see WindowsBackend.set_post_effect / _composite_post_effect) ---
+
+
+def test_profile_declares_post_effects():
+    # The Direct2D-effects CRT composite is implemented, so the capability is on
+    # (a terminal backend leaves it off and set_post_effect no-ops).
+    assert WindowsBackend.PROFILE.supports("post_effects")
+
+
+def test_tint_matrix_maps_luminance_to_hue():
+    # A green tint: white maps to full green (its luma sums the Rec.601 weights),
+    # black stays black, and no input channel bleeds into red or blue outputs.
+    m = _tint_matrix((0, 255, 0))
+    assert m._12 == pytest.approx(0.299)   # R-in -> G-out (luma weight * tg=1)
+    assert m._22 == pytest.approx(0.587)   # G-in -> G-out
+    assert m._32 == pytest.approx(0.114)   # B-in -> G-out
+    assert (m._11, m._13) == (0.0, 0.0)    # nothing lands in R or B out
+    assert m._44 == pytest.approx(1.0)     # alpha passes through
+
+
+def test_glow_matrix_is_identity_at_zero_and_lifts_above():
+    ident = _glow_matrix(0.0)
+    assert ident._11 == pytest.approx(1.0) and ident._51 == pytest.approx(0.0)
+    lifted = _glow_matrix(1.0)
+    assert lifted._11 == pytest.approx(1.15)                       # contrast up
+    assert lifted._51 == pytest.approx((0.5 - 0.5 * 1.15) + 0.12)  # brightness lift
+
+
+def test_roll_helpers_sweep_and_fall_off():
+    # Pure geometry, mirroring test_posteffect.py's macOS coverage.
+    h, bh = 600.0, 48.0
+    assert _roll_band_top(0.0, h, bh) == -bh          # starts just above the top
+    assert _roll_band_top(1.0, h, bh) == h            # ends just below the bottom
+    assert 0 < _roll_band_top(0.5, h, bh) < h         # mid-sweep is on screen
+    assert _roll_falloff(0.0) == 0.0                  # transparent at the trailing edge
+    assert _roll_falloff(1.0) == pytest.approx(0.0)   # and the leading edge
+    assert _roll_falloff(0.85) == pytest.approx(1.0)  # brightest at _ROLL_PEAK
+
+
+def test_roll_scheduling_lifecycle():
+    # No window needed: set_post_effect wires the roll ticker; the chain build
+    # no-ops without a render target. Mirrors the macOS roll lifecycle test.
+    import time
+
+    be = WindowsBackend()
+    be.set_post_effect(CRT)                               # roll > 0
+    be._window_active = True
+    be._last_input_time = time.monotonic()               # pretend the app is in use
+    assert be._crt_roll is not None
+    assert be._crt_roll_tick in be._tick_callbacks
+    assert not be._roll_active()                          # waits before the first roll
+
+    be._crt_roll["next"] = time.monotonic() - 1          # due now
+    be._crt_roll_tick()
+    assert be._roll_active()                              # a roll started
+
+    be._crt_roll["start"] = time.monotonic() - 999       # past its duration
+    be._crt_roll_tick()
+    assert not be._roll_active()                          # and ended
+    assert be._roll_needs_clear                           # a final clean frame is forced
+
+    be.set_post_effect(None)                              # clearing stops it
+    assert be._crt_roll is None
+    assert be._crt_roll_tick() is False                   # tick unregisters itself
+
+
+def test_roll_gated_on_active_use():
+    import time
+
+    be = WindowsBackend()
+    be.set_post_effect(CRT)
+    now = time.monotonic()
+    be._crt_roll["next"] = now - 1                        # a roll is due
+    # Inactive window -> not in use: the due roll must NOT start and the ticker
+    # parks itself (returns False) so it stops consuming frames.
+    be._window_active = False
+    assert be._roll_user_active(now) is False
+    assert be._crt_roll_tick() is False
+    assert not be._roll_active()
+    # Actively used -> the due roll starts.
+    be._window_active = True
+    be._last_input_time = now
+    assert be._crt_roll_tick() is True
+    assert be._roll_active()
+    # An in-flight roll keeps going to completion even once the app goes inactive.
+    be._window_active = False
+    assert be._crt_roll_tick() is True
+    assert be._roll_active()
+
+
+def test_dispatch_records_input_and_rearms_parked_roll():
+    from puikit import Event, EventType
+
+    be = WindowsBackend()
+    be.set_post_effect(CRT)
+    be._tick_callbacks = []                               # simulate a parked ticker
+    be._last_input_time = 0.0
+    be._dispatch(Event(type=EventType.MOUSE_MOVE, x=1.0, y=1.0))
+    assert be._last_input_time > 0.0                      # activity stamped
+    assert be._crt_roll_tick in be._tick_callbacks        # ticker re-armed
+
+
+def test_render_with_crt_effect_composites():
+    """The full composite path against a real swap chain: the frame is captured
+    into a command list, run through the ColorMatrix/GaussianBlur/Opacity chain,
+    and the scanline/vignette overlays are painted. A wrong effect graph, matrix
+    blob, or gradient-brush vtable slot would fault or fail EndDraw here."""
+    backend = WindowsBackend(width=40, height=16, title="puikit-crt-test")
+    backend.open()
+    try:
+        backend.set_post_effect(CRT)
+        assert backend._post_effect is not None and backend._crt is not None
+        backend.draw_text(1, 1, "phosphor")
+        backend.draw_box(0, 0, 12, 6, hints={"fill": True}, style=Style(bg=(4, 15, 7)))
+        backend.present()
+        backend._render()  # captures the frame + runs the effect composite
+    finally:
+        backend.close()
+
+
+def test_crt_chain_composition_matches_effect():
+    backend = WindowsBackend(width=40, height=16, title="puikit-crt-chain")
+    backend.open()
+    try:
+        backend.set_post_effect(CRT)                       # no tint, glow + bloom
+        assert len(backend._crt["color_chain"]) == 1       # glow only
+        assert backend._crt["blur"] is not None            # bloom present
+        backend.set_post_effect(_TINTED)                   # tint + glow
+        assert len(backend._crt["color_chain"]) == 2
+        backend.set_post_effect(None)                      # cleared
+        assert backend._crt is None
+    finally:
+        backend.close()
+
+
+def test_render_with_active_roll_band_draws():
+    """Forces a roll on and renders it: exercises the linear-gradient-brush band
+    fill inside the real composite pass."""
+    import time
+
+    backend = WindowsBackend(width=40, height=20, title="puikit-crt-roll")
+    backend.open()
+    try:
+        backend.set_post_effect(_TINTED)
+        backend._crt_roll.update(active=True, start=time.monotonic(), duration=1.0)
+        assert backend._roll_active()
+        backend.draw_box(0, 0, 20, 10, hints={"fill": True}, style=Style(bg=(4, 15, 7)))
+        backend.present()
+        backend._render()
+    finally:
+        backend.close()
+
+
+def _crt_readback_bright_band(effect):
+    """Render a bright phosphor band through the real CRT composite into an
+    offscreen target, copy it to a CPU-readable bitmap, and return the mean green
+    value of the band. No window; needs only a D2D device (WARP-capable). Used to
+    assert the bloom composite *brightens* rather than darkens — a wrong composite
+    mode (e.g. DESTINATION_IN vs PLUS) silently crushes brightness ~3.5x and no
+    HRESULT check would catch it."""
+    import ctypes
+
+    from puikit.backends._win32_native import (
+        ComPtr, D2D1_COLOR_F, D2D1_RECT_F, D2D1_SIZE_U, D2D1_PIXEL_FORMAT,
+        D2D1_BITMAP_PROPERTIES1, hresult_ok, DXGI_FORMAT_B8G8R8A8_UNORM,
+        D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BITMAP_OPTIONS_TARGET,
+    )
+
+    class _MappedRect(ctypes.Structure):
+        _fields_ = [("pitch", ctypes.c_uint32), ("bits", ctypes.POINTER(ctypes.c_uint8))]
+
+    w, h = 128, 96
+    try:
+        factory = native.create_d2d_factory()
+        d3d = native.create_d3d11_device()
+        _, dc = native.create_d2d_device_context(factory, d3d)
+    except OSError:
+        pytest.skip("no D2D device available")
+
+    def make(options):
+        props = D2D1_BITMAP_PROPERTIES1(
+            D2D1_PIXEL_FORMAT(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+            96.0, 96.0, options, None)
+        out = ctypes.c_void_p()
+        hr = dc.call(57, ctypes.c_int32,
+                     [D2D1_SIZE_U, ctypes.c_void_p, ctypes.c_uint32,
+                      ctypes.POINTER(D2D1_BITMAP_PROPERTIES1), ctypes.POINTER(ctypes.c_void_p)],
+                     D2D1_SIZE_U(w, h), None, 0, ctypes.byref(props), ctypes.byref(out))
+        assert hresult_ok(hr), hex(hr & 0xFFFFFFFF)
+        return ComPtr(out.value or 0)
+
+    target, staging = make(D2D1_BITMAP_OPTIONS_TARGET), make(2 | 4)  # target; CANNOT_DRAW|CPU_READ
+    be = WindowsBackend.__new__(WindowsBackend)
+    for name, val in dict(
+        _render_target=dc, _target_bitmap=target, _frame_target=target, _dpi_scale=1.0,
+        _hwnd=0, _post_effect=None, _crt=None, _crt_roll=None, _tick_callbacks=[],
+        _animations={}, _anim_timer_running=False, _last_input_time=0.0, _window_active=True,
+    ).items():
+        setattr(be, name, val)
+    be._brush = native.rt_create_solid_color_brush(dc, D2D1_COLOR_F(1, 1, 1, 1))
+    be._client_size_px = lambda: (w, h)
+    be.set_post_effect(effect)
+
+    native.dc_set_target(dc, target)
+    frame = native.dc_create_command_list(dc)
+    native.dc_set_target(dc, frame)
+    native.rt_begin_draw(dc)
+    native.rt_clear(dc, D2D1_COLOR_F(4 / 255, 15 / 255, 7 / 255, 1.0))  # phosphor bg
+    native.brush_set_color(be._brush, D2D1_COLOR_F(51 / 255, 245 / 255, 121 / 255, 1.0))
+    native.rt_fill_rectangle(dc, D2D1_RECT_F(8, 30, w - 8, 66), be._brush)  # bright band
+    native.rt_end_draw(dc)
+    native.command_list_close(frame)
+
+    native.dc_set_target(dc, target)
+    native.rt_begin_draw(dc)
+    native.rt_clear(dc, D2D1_COLOR_F(0, 0, 0, 1))
+    be._composite_post_effect(frame, 0.0)
+    assert hresult_ok(native.rt_end_draw(dc))
+    frame.release()
+
+    hr = staging.call(8, ctypes.c_int32, [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p], None, target.addr, None)
+    assert hresult_ok(hr), "CopyFromBitmap " + hex(hr & 0xFFFFFFFF)
+    mapped = _MappedRect()
+    hr = staging.call(14, ctypes.c_int32, [ctypes.c_uint32, ctypes.POINTER(_MappedRect)], 1, ctypes.byref(mapped))
+    assert hresult_ok(hr), "Map " + hex(hr & 0xFFFFFFFF)
+    buf = ctypes.cast(mapped.bits, ctypes.POINTER(ctypes.c_uint8 * (mapped.pitch * h)))[0]
+    tot = n = 0
+    for y in range(40, 56):          # inside the bright band
+        for x in range(16, w - 16):
+            tot += buf[y * mapped.pitch + x * 4 + 1]  # BGRA -> green
+            n += 1
+    staging.call(15, None, [])       # Unmap
+    return tot / n
+
+
+def test_crt_bloom_composite_is_additive_not_darkening():
+    # The bloom stage draws a blurred copy with PLUS (additive) compositing; a
+    # bright phosphor band (green 245) must stay bright, not get crushed. Guards
+    # the composite-mode enum value: DESTINATION_IN (3) instead of PLUS (9) here
+    # silently reads ~74 (=245*0.3) and the whole theme goes "too dark".
+    assert native.D2D1_COMPOSITE_MODE_PLUS == 9
+    bright = _crt_readback_bright_band(PostEffect(bloom=0.30))
+    assert bright > 220, f"bloom crushed the band to {bright:.0f} (expected it to stay bright)"

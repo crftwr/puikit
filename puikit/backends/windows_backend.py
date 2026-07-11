@@ -27,6 +27,7 @@ from __future__ import annotations
 import ctypes
 import math
 import os
+import random
 import threading
 import time
 from ctypes import wintypes
@@ -68,6 +69,79 @@ _DEFAULT_BG = (24, 24, 24)
 _SHADOW_Y_OFFSET = 8.0
 _SHADOW_BLUR_SIGMA = 8.0
 _SHADOW_ALPHA = 0.33
+
+# --- CRT post-effect (see set_post_effect / _composite_post_effect) -----------
+# The pixel-space constants below are quoted at 96 dpi (device scale 1.0) and
+# multiplied by self._dpi_scale at use, so the look holds its physical size on a
+# hi-dpi display. The mapping mirrors MacOSBackend's Core Image / render-pass
+# split, so both platforms read the same PostEffect the same way.
+#
+# Scanline pitch (one dark + one light row) in dip. Kept above the bloom blur
+# sigma so the additive bloom pass doesn't wash the painted lines out.
+_SCANLINE_PERIOD = 4.0
+# Vignette falloff, as a fraction of the window half-extent: the gradient is
+# clear until _INNER and reaches full corner darkness at _OUTER. Edge midpoints
+# sit at 1.0 and corners at ~1.41, so _OUTER just past the corners dims them most
+# while leaving the mid-edges only partly darkened (matches the macOS values).
+_VIGNETTE_INNER = 0.55
+_VIGNETTE_OUTER = 1.45
+# Rolling "vertical hold" band: fires every _ROLL_GAP s (randomized) and sweeps a
+# band _ROLL_BAND_H dip tall down the screen over _ROLL_DUR s. Rolls only start
+# while the app is actively used (key window + input within _ROLL_IDLE_TIMEOUT);
+# an in-flight roll always finishes. _ROLL_PEAK is where the band is brightest,
+# as a fraction from its top (0) to its leading bottom edge (1).
+_ROLL_GAP = (5.0, 13.0)
+_ROLL_DUR = (1.6, 3.2)
+_ROLL_BAND_H = 144.0
+_ROLL_IDLE_TIMEOUT = 60.0
+_ROLL_PEAK = 0.85
+
+
+def _roll_band_top(progress: float, view_h: float, band_h: float) -> float:
+    """Top-edge y (0 = screen top) of the rolling band at ``progress`` 0..1. At 0
+    the band sits just above the top; at 1 just below the bottom — so it sweeps
+    fully through the screen. Pure, for unit tests. Mirrors the macOS helper."""
+    return progress * (view_h + band_h) - band_h
+
+
+def _roll_falloff(pos: float) -> float:
+    """Bottom-weighted intensity across the band at fractional position ``pos``
+    (0 = band top / trailing, 1 = leading/bottom edge): ramps up to a peak at
+    ``_ROLL_PEAK``, then a short fade to the leading edge. Pure. Mirrors macOS."""
+    if pos <= _ROLL_PEAK:
+        return pos / _ROLL_PEAK
+    return (1.0 - pos) / (1.0 - _ROLL_PEAK)
+
+
+def _tint_matrix(tint: tuple) -> "native.D2D1_MATRIX_5X4_F":
+    """A 5x4 color matrix remapping luminance onto ``tint`` (the D2D analogue of
+    macOS's CIColorMonochrome): every pixel becomes ``tint`` scaled by its own
+    Rec.601 luma, so black stays black and white becomes the full tint. Pure."""
+    tr, tg, tb = (c / 255.0 for c in tint[:3])
+    lr, lg, lb = 0.299, 0.587, 0.114  # Rec.601 luma weights
+    return native.D2D1_MATRIX_5X4_F(
+        lr * tr, lr * tg, lr * tb, 0.0,
+        lg * tr, lg * tg, lg * tb, 0.0,
+        lb * tr, lb * tg, lb * tb, 0.0,
+        0.0,     0.0,     0.0,     1.0,
+        0.0,     0.0,     0.0,     0.0,
+    )
+
+
+def _glow_matrix(glow: float) -> "native.D2D1_MATRIX_5X4_F":
+    """A 5x4 color matrix that lifts brightness and contrast (the D2D analogue of
+    macOS's CIColorControls glow stage), making the phosphor feel emissive.
+    ``glow`` 0..1 scales both. Contrast pivots around mid-gray. Pure."""
+    contrast = 1.0 + glow * 0.15
+    brightness = glow * 0.12
+    bias = (0.5 - 0.5 * contrast) + brightness  # keep the pivot at 0.5, then lift
+    return native.D2D1_MATRIX_5X4_F(
+        contrast, 0.0,      0.0,      0.0,
+        0.0,      contrast, 0.0,      0.0,
+        0.0,      0.0,      contrast, 0.0,
+        0.0,      0.0,      0.0,      1.0,
+        bias,     bias,     bias,     0.0,
+    )
 
 # Icon names -> emoji glyphs, same MVP icon implementation as the macOS
 # backend (draw_icon just queues a "text" command for the glyph).
@@ -124,6 +198,7 @@ WHEEL_DELTA = 120  # one notch of a classic wheel; Precision Touchpad gestures
 
 _WIDTH_CACHE_MAX = 8192
 _TIMER_ID = 1
+_WM_ACTIVATE = 0x0006  # wParam low word: 0 = WA_INACTIVE, nonzero = activated
 
 
 def _key_modifiers() -> frozenset[str]:
@@ -295,6 +370,7 @@ class WindowsBackend(Backend):
             "native_file_dialog": False,
             "system_tray": False,
             "media_keys": False,
+            "post_effects": True,  # Direct2D-effects CRT composite (set_post_effect)
         }
     )
 
@@ -354,10 +430,32 @@ class WindowsBackend(Backend):
         # reconfigured, not recreated every frame, same reasoning as the one
         # reusable `_brush` below.
         self._shadow_effect: Any = None
-        # Active post-processing effect (set_post_effect). Stored now; the
-        # Direct2D composite pass that consumes it is a TODO (see set_post_effect),
-        # so the post_effects capability stays off and the effect is inert here.
+        # Active CRT post-processing effect (set_post_effect), or None. When set,
+        # _render routes the frame through a Direct2D-effects composite pass
+        # (_composite_post_effect); a terminal backend has no such pass and this
+        # stays None. See puikit.posteffect.PostEffect.
         self._post_effect: Any | None = None
+        # The persistent effect graph consuming it, (re)built by _build_crt_chain
+        # whenever the effect or the render target changes; None while there's no
+        # effect (or before the target exists). Holds the ID2D1Effect objects
+        # (reconfigured, not recreated, each frame) — a dict of ComPtrs.
+        self._crt: dict[str, Any] | None = None
+        # The current frame's render target: the swap-chain bitmap normally, or a
+        # command list while the CRT pass captures the frame for compositing.
+        # _render_shadow restores to *this* (not the swap-chain bitmap) after its
+        # own retarget, so shadows land in the captured frame when the effect is on.
+        self._frame_target: Any = None
+        # Rolling "vertical hold" band animation state (None = no roll running);
+        # see _sync_roll / _crt_roll_tick.
+        self._crt_roll: dict[str, Any] | None = None
+        # Roll gating: last input time and whether our window is active. A roll
+        # only *starts* while the app is in use, so its 60fps sweep doesn't run
+        # (and redraw) while the user is away or in another app.
+        self._last_input_time = 0.0
+        self._window_active = True
+        # Set for the one frame a roll finishes so _on_animation_tick forces a
+        # final repaint to clear the band, even though the roll is no longer active.
+        self._roll_needs_clear = False
         self._brush: Any = None
         self._handler: EventHandler | None = None
         self._quit_requested = False
@@ -494,13 +592,20 @@ class WindowsBackend(Backend):
         native.effect_set_value_float(
             self._shadow_effect, native.D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, _SHADOW_BLUR_SIGMA
         )
+        self._frame_target = self._target_bitmap
+        # Effects are bound to this device context, so (re)build the CRT chain
+        # against the freshly created target — this also restores it after a
+        # device-loss recreate, not just at first open.
+        self._build_crt_chain()
 
     def _release_render_resources(self) -> None:
+        self._release_crt_chain()
         for attr in ("_shadow_effect", "_target_bitmap", "_brush", "_render_target", "_d2d_device", "_swap_chain", "_d3d_device"):
             obj = getattr(self, attr)
             if obj is not None:
                 obj.release()
                 setattr(self, attr, None)
+        self._frame_target = None
 
     def _save_autosave_frame(self) -> None:
         if self._frame_autosave_name and self._hwnd:
@@ -893,7 +998,19 @@ class WindowsBackend(Backend):
             on_complete = anim.hints.get("on_complete")
             if on_complete is not None:
                 on_complete()
-        if self._hwnd:
+        # Repaint if anything on-screen actually changed this tick. The CRT roll
+        # keeps its ticker registered through the multi-second gap between sweeps
+        # (polling for the next one) but only *animates* while a band is on screen;
+        # skipping the redraw in that gap keeps an idle CRT theme from repainting
+        # the whole composite at 60fps. Every other tick source (fades, cursor
+        # blink, busy spinner, splitter hover) still forces a redraw as before.
+        other_ticks = [cb for cb in self._tick_callbacks if cb is not self._crt_roll_tick]
+        needs_redraw = (
+            bool(self._animations) or bool(finished) or bool(other_ticks)
+            or self._roll_active() or self._roll_needs_clear
+        )
+        self._roll_needs_clear = False
+        if needs_redraw and self._hwnd:
             native.user32.InvalidateRect(self._hwnd, None, False)
         if not self._animations and not self._tick_callbacks and self._hwnd:
             native.user32.KillTimer(self._hwnd, _TIMER_ID)
@@ -908,26 +1025,256 @@ class WindowsBackend(Backend):
             native.user32.InvalidateRect(self._hwnd, None, False)
 
     def set_post_effect(self, effect: Any | None) -> None:
-        """Store a CRT / phosphor effect (``puikit.posteffect.PostEffect``) for a
-        Direct2D composite pass.
+        """Composite a CRT / phosphor effect over the whole window, or clear it
+        with ``None`` (see ``puikit.posteffect.PostEffect``).
 
-        NOT wired to the render target yet, so ``post_effects`` stays off in this
-        backend's PROFILE and the effect is inert — the call is accepted (an app
-        sets it from the active theme without branching on the backend) but has no
-        visible result until the pass below lands.
-
-        Implementation seam (the Direct2D-effects graph is already in use — see
-        ``_shadow_effect``/``dc_create_effect`` with ``CLSID_D2D1GaussianBlur``):
-        render the display list into an offscreen ID2D1Bitmap target instead of
-        straight to the swap chain (``_render``), then in ``present``/``_render``
-        run that bitmap through a persistent effect chain and DrawImage the
-        result to the back buffer. Map the ``PostEffect`` fields to built-in
-        effects: ``tint`` -> CLSID_D2D1ColorMatrix (luminance->tint), ``bloom`` ->
-        CLSID_D2D1GaussianBlur + CLSID_D2D1Composite (screen), ``vignette`` ->
-        CLSID_D2D1Vignette, ``scanline``/``curvature`` -> a small CLSID_D2D1PixelShader
-        (HLSL), ``flicker`` -> a per-frame ColorMatrix brightness tweak on the
-        WM_PAINT timer. Then flip ``post_effects`` True in this backend's PROFILE."""
+        The frame — with the ``scanline`` / ``vignette`` / ``roll`` overlays
+        painted into it (``_render_crt_overlays``) — is captured into an
+        ID2D1CommandList (``_render``) and run through a persistent
+        Direct2D-effects graph before it reaches the swap chain: ``tint`` and
+        ``glow`` become ColorMatrix stages and ``bloom`` a GaussianBlur added back
+        additively, so the color stages brighten and the bloom softens the
+        overlays too (the macOS render-pass-then-Core-Image ordering; painting the
+        overlays *after* the chain instead read far too dark). Cheap to toggle:
+        the app calls this once when a theme recommends an effect. The chain is
+        rebuilt here (and on device loss) and re-used every frame."""
         self._post_effect = None if (effect is None or effect.is_noop) else effect
+        self._build_crt_chain()
+        self._sync_roll()
+        if self._hwnd:
+            native.user32.InvalidateRect(self._hwnd, None, False)
+
+    # --- CRT effect chain (color side: tint / glow / bloom) ------------------
+
+    def _build_crt_chain(self) -> None:
+        """(Re)build the persistent Direct2D-effects graph for the active effect.
+        Safe with no effect or no render target (both leave ``_crt`` None). The
+        effect objects are device-bound, so this also runs after a device-loss
+        recreate (see _create_render_resources)."""
+        self._release_crt_chain()
+        effect = self._post_effect
+        if effect is None or self._render_target is None:
+            return
+        rt = self._render_target
+        crt: dict[str, Any] = {"color_chain": [], "blur": None, "opacity": None, "vignette": None}
+        if effect.tint is not None:
+            tint = native.dc_create_effect(rt, native.CLSID_D2D1ColorMatrix)
+            native.effect_set_value_matrix_5x4(
+                tint, native.D2D1_COLORMATRIX_PROP_COLOR_MATRIX, _tint_matrix(effect.tint))
+            crt["color_chain"].append(tint)
+        if effect.glow > 0:
+            glow = native.dc_create_effect(rt, native.CLSID_D2D1ColorMatrix)
+            native.effect_set_value_matrix_5x4(
+                glow, native.D2D1_COLORMATRIX_PROP_COLOR_MATRIX, _glow_matrix(effect.glow))
+            crt["color_chain"].append(glow)
+        if effect.bloom > 0:
+            blur = native.dc_create_effect(rt, native.CLSID_D2D1GaussianBlur)
+            # A TIGHT, DPI-scaled blur so the phosphor bloom hugs the glyph strokes
+            # and softens them into an emissive glow (matching macOS). A wide blur
+            # spreads a thin stroke's energy so thin it reads as a faint haze and
+            # the text stays crisp — the wrong look for mostly-text content. The
+            # bloom sees content only (scanlines are painted afterwards).
+            native.effect_set_value_float(
+                blur, native.D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
+                (2.0 + effect.bloom * 7.0) * self._dpi_scale)
+            opacity = native.dc_create_effect(rt, native.CLSID_D2D1Opacity)
+            # Strong additive intensity so the tight halo actually lifts the glyph
+            # edges; the preset's 0.30 lands near 0.9.
+            native.effect_set_value_float(
+                opacity, native.D2D1_OPACITY_PROP_OPACITY, min(1.0, 0.6 + effect.bloom))
+            crt["blur"], crt["opacity"] = blur, opacity
+        self._crt = crt
+
+    def _release_crt_chain(self) -> None:
+        if self._crt is None:
+            return
+        for eff in self._crt["color_chain"]:
+            eff.release()
+        for key in ("blur", "opacity"):
+            if self._crt[key] is not None:
+                self._crt[key].release()
+        cached = self._crt.get("vignette")
+        if cached is not None:
+            cached[1].release()  # (key, brush)
+        self._crt = None
+
+    def _composite_post_effect(self, frame_cl: Any, now: float) -> None:
+        """Draw the captured frame (``frame_cl``) to the swap-chain target through
+        the CRT chain — color stages + base, then the additive bloom halo — and
+        finally paint the scanline / vignette / roll overlays on top. Bloom blurs
+        the *content only* (the overlays aren't in ``frame_cl``), so the phosphor
+        glow reads as a clean halo and the scanlines stay crisp instead of being
+        washed out by the blur. Assumes an open BeginDraw on the swap-chain target;
+        transient effect-output handles are released here (the effect objects
+        themselves persist in ``_crt``)."""
+        rt = self._render_target
+        crt = self._crt
+        outs = []  # GetOutput handles to release once drawn
+        colored = frame_cl
+        for eff in crt["color_chain"]:
+            native.effect_set_input(eff, 0, colored)
+            colored = native.effect_get_output(eff)
+            outs.append(colored)
+        native.dc_draw_image(rt, colored)  # base, source-over onto the cleared target
+        if crt["blur"] is not None:
+            native.effect_set_input(crt["blur"], 0, colored)
+            blurred = native.effect_get_output(crt["blur"])
+            native.effect_set_input(crt["opacity"], 0, blurred)
+            bloom = native.effect_get_output(crt["opacity"])
+            outs += [blurred, bloom]
+            native.dc_draw_image(rt, bloom, native.D2D1_COMPOSITE_MODE_PLUS)  # additive glow
+        for handle in outs:
+            handle.release()
+        self._render_crt_overlays(now)
+
+    def _render_crt_overlays(self, now: float) -> None:
+        """Paint the scanline / vignette / roll overlays over the composited frame
+        on the swap-chain target. Drawn after the glow/bloom so the bloom (which
+        blurs content only) can't wash the scanlines out."""
+        effect = self._post_effect
+        if effect.scanline > 0:
+            self._render_scanlines(effect.scanline)
+        if effect.vignette > 0:
+            self._render_vignette(effect.vignette)
+        if effect.roll > 0 and self._roll_active():
+            self._render_roll_band(effect, now)
+
+    # --- CRT effect (render-pass overlays: scanlines / vignette / roll) ------
+
+    def _render_scanlines(self, strength: float) -> None:
+        """Paint dark rows every scanline pitch over the whole window — the CRT
+        scanline texture. ``strength`` (0..1) is used almost directly as the dark
+        rows' opacity: on a near-black phosphor background a low opacity is
+        invisible, so the line must genuinely dim the row for the banding to read.
+        Mirrors MacOSBackend._render_scanlines."""
+        w, h = self._client_size_px()
+        period = _SCANLINE_PERIOD * self._dpi_scale
+        line_h = period / 2.0  # half dark, half light
+        self._set_brush((0, 0, 0), min(strength, 0.7))
+        y = 0.0
+        while y < h:
+            native.rt_fill_rectangle(self._render_target, native.D2D1_RECT_F(0.0, y, w, y + line_h), self._brush)
+            y += period
+
+    def _render_vignette(self, strength: float) -> None:
+        """Darken the frame toward its edges with a radial falloff that fits the
+        live window bounds (an aspect-correct ellipse, so a wide/short window
+        doesn't porthole — the reason macOS draws its vignette by hand too).
+        ``strength`` (0..1) is the corner darkness. The brush is cached on ``_crt``
+        and only rebuilt when the size or strength changes."""
+        w, h = self._client_size_px()
+        if w <= 0 or h <= 0:
+            return
+        brush = self._vignette_brush(w, h, min(strength, 1.0))
+        native.rt_fill_rectangle(self._render_target, native.D2D1_RECT_F(0.0, 0.0, float(w), float(h)), brush)
+
+    def _vignette_brush(self, w: int, h: int, alpha: float) -> Any:
+        key = (w, h, round(alpha, 3))
+        cached = self._crt.get("vignette")
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        if cached is not None:
+            cached[1].release()
+        rt = self._render_target
+        # Clear until _INNER of the half-extent, full corner darkness at _OUTER;
+        # the brush's gradient position 1.0 sits at radii (w/2, h/2) * _OUTER, so
+        # the falloff is an ellipse fitting the window and CLAMP darkens beyond it.
+        stops = native.rt_create_gradient_stop_collection(rt, [
+            (_VIGNETTE_INNER / _VIGNETTE_OUTER, native.D2D1_COLOR_F(0.0, 0.0, 0.0, 0.0)),
+            (1.0, native.D2D1_COLOR_F(0.0, 0.0, 0.0, alpha)),
+        ])
+        brush = native.rt_create_radial_gradient_brush(
+            rt, w / 2.0, h / 2.0, w / 2.0 * _VIGNETTE_OUTER, h / 2.0 * _VIGNETTE_OUTER, stops)
+        stops.release()  # the brush holds its own reference to the stops
+        self._crt["vignette"] = (key, brush)
+        return brush
+
+    def _render_roll_band(self, effect: Any, now: float) -> None:
+        """Paint the rolling "vertical hold" band at its current sweep position: a
+        smooth bright vertical gradient whose opacity follows the bottom-weighted
+        ``_roll_falloff`` profile. Drawn source-over in a bright phosphor color so
+        it lifts the frame where it sits. Mirrors MacOSBackend._render_roll_band."""
+        roll = self._crt_roll
+        w, h = self._client_size_px()
+        if w <= 0 or h <= 0:
+            return
+        progress = (now - roll["start"]) / max(roll["duration"], 1e-6)
+        progress = 0.0 if progress < 0.0 else 1.0 if progress > 1.0 else progress
+        band_h = _ROLL_BAND_H * self._dpi_scale
+        top = _roll_band_top(progress, float(h), band_h)
+        # Bright, phosphor-leaning color derived from the tint (or a neutral bright
+        # default); a tinted effect keeps its band on-palette.
+        r, g, b = (min(255, c + 110) / 255.0 for c in (effect.tint or (170, 255, 185))[:3])
+        peak = effect.roll * 0.9
+        rt = self._render_target
+        stops = native.rt_create_gradient_stop_collection(rt, [
+            (0.0, native.D2D1_COLOR_F(r, g, b, 0.0)),
+            (_ROLL_PEAK, native.D2D1_COLOR_F(r, g, b, peak)),
+            (1.0, native.D2D1_COLOR_F(r, g, b, 0.0)),
+        ])
+        brush = native.rt_create_linear_gradient_brush(
+            rt, native.D2D1_POINT_2F(0.0, top), native.D2D1_POINT_2F(0.0, top + band_h), stops)
+        native.rt_fill_rectangle(rt, native.D2D1_RECT_F(0.0, top, float(w), top + band_h), brush)
+        brush.release()
+        stops.release()
+
+    # --- CRT effect (rolling-band animation) ---------------------------------
+
+    def _sync_roll(self) -> None:
+        """Start or stop the rolling-band animation to match the active effect.
+        The ticker (see _crt_roll_tick) schedules rolls and drives the per-frame
+        redraw while one sweeps; it parks itself when the app goes idle and is
+        re-armed from _dispatch on the next input (see _ensure_roll_ticker)."""
+        wants = self._post_effect is not None and self._post_effect.roll > 0
+        if wants:
+            if self._crt_roll is None:
+                self._crt_roll = {"active": False, "start": 0.0, "duration": 0.0, "next": 0.0}
+            self._ensure_roll_ticker()
+        else:
+            # The tick callback unregisters itself once _crt_roll is None; clearing
+            # it also stops _composite_post_effect from drawing the band.
+            self._crt_roll = None
+
+    def _ensure_roll_ticker(self) -> None:
+        """Register the roll frame-callback if the effect wants a roll and it's not
+        already running. Reschedules the next roll from now, so resuming after an
+        idle stretch doesn't fire one instantly. Cheap to call on every input."""
+        if self._crt_roll is None or self._crt_roll_tick in self._tick_callbacks:
+            return
+        self._crt_roll["next"] = time.monotonic() + random.uniform(*_ROLL_GAP)
+        self.request_animation_ticks(self._crt_roll_tick)
+
+    def _roll_user_active(self, now: float) -> bool:
+        """Whether the app is actively in use: its window is active AND the last
+        input was recent. Gates *starting* a roll, not finishing one."""
+        return self._window_active and (now - self._last_input_time) < _ROLL_IDLE_TIMEOUT
+
+    def _crt_roll_tick(self) -> bool:
+        """Frame callback: advance an in-flight roll to completion, else start one
+        only while the app is actively used. Returns False to unregister — when the
+        effect no longer wants a roll, or when idle (to drop the timer; _dispatch
+        re-arms on the next input). The per-frame redraw is driven by
+        _on_animation_tick, which repaints while a roll is active."""
+        roll = self._crt_roll
+        if roll is None:
+            return False
+        now = time.monotonic()
+        if roll["active"]:
+            if now - roll["start"] >= roll["duration"]:
+                roll["active"] = False
+                roll["next"] = now + random.uniform(*_ROLL_GAP)
+                self._roll_needs_clear = True  # force one clean frame without the band
+            return True  # keep polling for the next roll while in use
+        if not self._roll_user_active(now):
+            return False  # park the ticker while idle/inactive; _dispatch re-arms
+        if now >= roll["next"]:
+            roll["active"] = True
+            roll["start"] = now
+            roll["duration"] = random.uniform(*_ROLL_DUR)
+        return True
+
+    def _roll_active(self) -> bool:
+        return self._crt_roll is not None and self._crt_roll["active"]
 
     def _unit_rect(self, x: float, y: float, w_units: float, h_units: float) -> Any:
         return native.D2D1_RECT_F(
@@ -959,11 +1306,57 @@ class WindowsBackend(Backend):
         if self._render_target is None:
             return
         rt = self._render_target
+        now = time.monotonic()
+        # With a CRT effect active, the frame is drawn into a command list first
+        # so the composite pass (below) can run it through the Direct2D effect
+        # chain before it reaches the swap chain. Without one, the display list
+        # goes straight to the back buffer as before. _frame_target tells
+        # _render_shadow which target to restore to after its own retarget.
+        use_effect = self._post_effect is not None and self._crt is not None
+        frame_cl = None
+        if use_effect:
+            frame_cl = native.dc_create_command_list(rt)
+            native.dc_set_target(rt, frame_cl)
+            self._frame_target = frame_cl
+        else:
+            self._frame_target = self._target_bitmap
         native.rt_begin_draw(rt)
         native.rt_set_antialias_mode(rt, native.D2D1_ANTIALIAS_MODE_PER_PRIMITIVE)
         bg = native.D2D1_COLOR_F(_DEFAULT_BG[0] / 255, _DEFAULT_BG[1] / 255, _DEFAULT_BG[2] / 255, 1.0)
         native.rt_clear(rt, bg)
-        now = time.monotonic()
+        self._render_display_list(now)
+        hr = native.rt_end_draw(rt)
+        device_lost = (hr & 0xFFFFFFFF) == 0x8899000C  # D2DERR_RECREATE_TARGET
+        if use_effect and not device_lost:
+            try:
+                native.command_list_close(frame_cl)
+                native.dc_set_target(rt, self._target_bitmap)
+                self._frame_target = self._target_bitmap
+                native.rt_begin_draw(rt)
+                native.rt_clear(rt, native.D2D1_COLOR_F(0.0, 0.0, 0.0, 1.0))
+                self._composite_post_effect(frame_cl, now)
+                hr = native.rt_end_draw(rt)
+                device_lost = (hr & 0xFFFFFFFF) == 0x8899000C
+            except OSError:
+                device_lost = True  # a lost device surfaces mid-composite; recreate below
+        if frame_cl is not None:
+            # Re-bind the swap-chain target and drop the command list before any
+            # recreate, so a device-loss frame doesn't leak it or leave the DC
+            # pointed at freed memory.
+            native.dc_set_target(rt, self._target_bitmap)
+            self._frame_target = self._target_bitmap
+            frame_cl.release()
+        if not device_lost:
+            present_hr = native.swapchain_present(self._swap_chain) & 0xFFFFFFFF
+            device_lost = present_hr in (0x887A0005, 0x887A0007)  # DXGI_ERROR_DEVICE_REMOVED / _RESET
+        if device_lost:
+            self._recreate_render_target()
+
+    def _render_display_list(self, now: float) -> None:
+        """Rasterize the front display list to the current target (the swap-chain
+        bitmap, or the frame command list when a CRT effect is active). Assumes an
+        open BeginDraw and a cleared target."""
+        rt = self._render_target
         self._transform_stack = [native.D2D1_MATRIX_3X2_F.identity()]
         group_stack: list[tuple] = []
         for command in self._front:
@@ -995,13 +1388,6 @@ class WindowsBackend(Backend):
                 native.rt_push_axis_aligned_clip(rt, self._unit_rect(*command[1:]))
             elif kind == "clip_pop":
                 native.rt_pop_axis_aligned_clip(rt)
-        hr = native.rt_end_draw(rt)
-        device_lost = (hr & 0xFFFFFFFF) == 0x8899000C  # D2DERR_RECREATE_TARGET
-        if not device_lost:
-            present_hr = native.swapchain_present(self._swap_chain) & 0xFFFFFFFF
-            device_lost = present_hr in (0x887A0005, 0x887A0007)  # DXGI_ERROR_DEVICE_REMOVED / _RESET
-        if device_lost:
-            self._recreate_render_target()
 
     def _recreate_render_target(self) -> None:
         self._release_render_resources()
@@ -1188,7 +1574,10 @@ class WindowsBackend(Backend):
             native.rt_fill_rectangle(rt, shadow_rect, self._brush)
         native.rt_end_draw(rt)
         native.command_list_close(cmd_list)
-        native.dc_set_target(rt, self._target_bitmap)
+        # Restore the frame's own target — the swap-chain bitmap normally, or the
+        # frame command list while a CRT effect captures the frame — not always
+        # the swap chain, or the shadow would land outside the captured frame.
+        native.dc_set_target(rt, self._frame_target)
         native.rt_begin_draw(rt)
         native.effect_set_input(self._shadow_effect, 0, cmd_list)
         output_image = native.effect_get_output(self._shadow_effect)
@@ -1481,6 +1870,12 @@ class WindowsBackend(Backend):
     # --- message handling -------------------------------------------------
 
     def _dispatch(self, event: Event) -> None:
+        # Stamp activity and re-arm a parked roll ticker: a roll only starts while
+        # the app is in use, and the ticker drops itself after an idle stretch, so
+        # the next input has to wake it (see _crt_roll_tick / _ensure_roll_ticker).
+        self._last_input_time = time.monotonic()
+        if self._crt_roll is not None:
+            self._ensure_roll_ticker()
         if self._handler is not None:
             self._handler(event)
 
@@ -1664,6 +2059,14 @@ class WindowsBackend(Backend):
             return 0
         if msg == native.WM_TIMER:
             self._on_animation_tick()
+            return 0
+        if msg == _WM_ACTIVATE:
+            # Track focus so the CRT roll only fires while our window is active;
+            # re-arm the parked ticker when we regain focus (e.g. Alt-Tab back).
+            self._window_active = native.loword(wparam) != 0
+            if self._window_active and self._crt_roll is not None:
+                self._last_input_time = time.monotonic()
+                self._ensure_roll_ticker()
             return 0
         if msg == _WM_CALL_ON_MAIN_THREAD:
             self._drain_main_thread_callbacks()

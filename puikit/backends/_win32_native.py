@@ -130,6 +130,31 @@ class D2D1_PIXEL_FORMAT(ctypes.Structure):
     _fields_ = [("format", ctypes.c_uint32), ("alphaMode", ctypes.c_uint32)]
 
 
+class D2D1_MATRIX_5X4_F(ctypes.Structure):
+    """A 5x4 color transform (D2D1ColorMatrix's ColorMatrix property): rows are
+    the R,G,B,A inputs plus a 5th bias row, columns the R,G,B,A outputs, so
+    out_c = sum_in(in * m[in][c]) + m[bias][c]. Row-major, matching d2d1_1.h."""
+
+    _fields_ = [(f"_{r}{c}", ctypes.c_float) for r in range(1, 6) for c in range(1, 5)]
+
+
+class D2D1_GRADIENT_STOP(ctypes.Structure):
+    _fields_ = [("position", ctypes.c_float), ("color", D2D1_COLOR_F)]
+
+
+class D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES(ctypes.Structure):
+    _fields_ = [("startPoint", D2D1_POINT_2F), ("endPoint", D2D1_POINT_2F)]
+
+
+class D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES(ctypes.Structure):
+    _fields_ = [
+        ("center", D2D1_POINT_2F),
+        ("gradientOriginOffset", D2D1_POINT_2F),
+        ("radiusX", ctypes.c_float),
+        ("radiusY", ctypes.c_float),
+    ]
+
+
 D2D1_DRAW_TEXT_OPTIONS_NONE = 0
 D2D1_DRAW_TEXT_OPTIONS_CLIP = 0x00000002
 DWRITE_MEASURING_MODE_NATURAL = 0
@@ -246,6 +271,9 @@ def hresult_ok(hr: int) -> bool:
 #     GetPixelSize[54], GetMaximumBitmapSize[55], IsSupported[56]) -------------
 
 _IDX_RT_CREATE_SOLID_BRUSH = 8
+_IDX_RT_CREATE_GRADIENT_STOP_COLLECTION = 9
+_IDX_RT_CREATE_LINEAR_GRADIENT_BRUSH = 10
+_IDX_RT_CREATE_RADIAL_GRADIENT_BRUSH = 11
 _IDX_RT_DRAW_LINE = 15
 _IDX_RT_DRAW_RECTANGLE = 16
 _IDX_RT_FILL_RECTANGLE = 17
@@ -503,6 +531,56 @@ def brush_set_color(brush: ComPtr, color: D2D1_COLOR_F) -> None:
 
 def brush_set_opacity(brush: ComPtr, opacity: float) -> None:
     brush.call(_IDX_BRUSH_SET_OPACITY, None, [ctypes.c_float], opacity)
+
+
+def rt_create_gradient_stop_collection(rt: ComPtr, stops: "list[tuple[float, D2D1_COLOR_F]]") -> ComPtr:
+    """A gradient stop collection from (position 0..1, color) pairs. Gamma 2.2
+    and CLAMP extend mode (a position past the last stop keeps that stop's
+    color) -- the vignette relies on CLAMP to darken beyond the ellipse edge."""
+    arr = (D2D1_GRADIENT_STOP * len(stops))(*[D2D1_GRADIENT_STOP(p, c) for p, c in stops])
+    out = ctypes.c_void_p()
+    hr = rt.call(
+        _IDX_RT_CREATE_GRADIENT_STOP_COLLECTION, ctypes.c_int32,
+        [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)],
+        ctypes.cast(arr, ctypes.c_void_p), len(stops),
+        D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP, ctypes.byref(out),
+    )
+    if not hresult_ok(hr):
+        raise OSError(f"CreateGradientStopCollection failed: 0x{hr & 0xFFFFFFFF:08x}")
+    return ComPtr(out.value or 0)
+
+
+def rt_create_linear_gradient_brush(rt: ComPtr, p0: D2D1_POINT_2F, p1: D2D1_POINT_2F, stops: ComPtr) -> ComPtr:
+    props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES(p0, p1)
+    out = ctypes.c_void_p()
+    hr = rt.call(
+        _IDX_RT_CREATE_LINEAR_GRADIENT_BRUSH, ctypes.c_int32,
+        [ctypes.POINTER(D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES), ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)],
+        ctypes.byref(props), None, stops.addr, ctypes.byref(out),
+    )
+    if not hresult_ok(hr):
+        raise OSError(f"CreateLinearGradientBrush failed: 0x{hr & 0xFFFFFFFF:08x}")
+    return ComPtr(out.value or 0)
+
+
+def rt_create_radial_gradient_brush(
+    rt: ComPtr, cx: float, cy: float, rx: float, ry: float, stops: ComPtr
+) -> ComPtr:
+    """A radial brush centered at (cx, cy) whose gradient position 1.0 sits at
+    radii (rx, ry) -- an ellipse, so the falloff fits a non-square window
+    without portholing (the reason MacOSBackend draws its vignette this way)."""
+    props = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES(
+        D2D1_POINT_2F(cx, cy), D2D1_POINT_2F(0.0, 0.0), rx, ry
+    )
+    out = ctypes.c_void_p()
+    hr = rt.call(
+        _IDX_RT_CREATE_RADIAL_GRADIENT_BRUSH, ctypes.c_int32,
+        [ctypes.POINTER(D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES), ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)],
+        ctypes.byref(props), None, stops.addr, ctypes.byref(out),
+    )
+    if not hresult_ok(hr):
+        raise OSError(f"CreateRadialGradientBrush failed: 0x{hr & 0xFFFFFFFF:08x}")
+    return ComPtr(out.value or 0)
 
 
 def rt_fill_rectangle(rt: ComPtr, rect: D2D1_RECT_F, brush: ComPtr) -> None:
@@ -1045,6 +1123,12 @@ IID_ID2D1Factory1 = GUID.from_str("bb12d362-daee-4b9a-aa1d-14ba401cfa1f")
 # is confirmed working, so the shadow's color/alpha is baked into the caster
 # shape's own brush before blurring instead of into an effect property.
 CLSID_D2D1GaussianBlur = GUID.from_str("1feb6d69-2fe6-4ac9-8c58-1d7f93e7a6a5")
+# CRT post-effect color stages (WindowsBackend._render composite pass). Both
+# CLSIDs confirmed live via CreateEffect on this backend's device context.
+# ColorMatrix realizes tint (luminance->hue) and glow (brightness/contrast);
+# Opacity attenuates the blurred bloom before it's added back.
+CLSID_D2D1ColorMatrix = GUID.from_str("921F03D6-641C-47DF-852D-B4BB6153AE11")
+CLSID_D2D1Opacity = GUID.from_str("811d79a4-de28-4454-8094-c64685f8bd4c")
 
 D3D_DRIVER_TYPE_HARDWARE = 1
 D3D_DRIVER_TYPE_WARP = 5
@@ -1063,8 +1147,15 @@ D2D1_BITMAP_OPTIONS_CANNOT_DRAW = 2
 D2D1_DEVICE_CONTEXT_OPTIONS_NONE = 0
 D2D1_INTERPOLATION_MODE_LINEAR = 1
 D2D1_COMPOSITE_MODE_SOURCE_OVER = 0
+D2D1_COMPOSITE_MODE_PLUS = 9  # additive: dst + src, for the bloom halo lift (enum value 9, NOT 3=DESTINATION_IN)
 D2D1_PROPERTY_TYPE_FLOAT = 5
+D2D1_PROPERTY_TYPE_MATRIX_5X4 = 17
 D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION = 0  # verified live: property[0] name == "StandardDeviation"
+D2D1_COLORMATRIX_PROP_COLOR_MATRIX = 0
+D2D1_OPACITY_PROP_OPACITY = 0
+# CreateGradientStopCollection args (see rt_create_gradient_stop_collection).
+D2D1_GAMMA_2_2 = 0
+D2D1_EXTEND_MODE_CLAMP = 0
 
 d3d11.D3D11CreateDevice.restype = ctypes.c_int32
 d3d11.D3D11CreateDevice.argtypes = [
@@ -1356,17 +1447,28 @@ def effect_set_value_float(effect: ComPtr, index: int, value: float) -> None:
         raise OSError(f"ID2D1Effect.SetValue(float) failed: 0x{hr & 0xFFFFFFFF:08x}")
 
 
+def effect_set_value_matrix_5x4(effect: ComPtr, index: int, matrix: D2D1_MATRIX_5X4_F) -> None:
+    hr = effect.call(
+        _IDX_EFFECT_SET_VALUE, ctypes.c_int32,
+        [ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32],
+        index, D2D1_PROPERTY_TYPE_MATRIX_5X4,
+        ctypes.cast(ctypes.byref(matrix), ctypes.POINTER(ctypes.c_uint8)), ctypes.sizeof(matrix),
+    )
+    if not hresult_ok(hr):
+        raise OSError(f"ID2D1Effect.SetValue(matrix5x4) failed: 0x{hr & 0xFFFFFFFF:08x}")
+
+
 def effect_get_output(effect: ComPtr) -> ComPtr:
     out = ctypes.c_void_p()
     effect.call(_IDX_EFFECT_GET_OUTPUT, None, [ctypes.POINTER(ctypes.c_void_p)], ctypes.byref(out))  # returns void
     return ComPtr(out.value or 0)
 
 
-def dc_draw_image(dc: ComPtr, image: ComPtr) -> None:
+def dc_draw_image(dc: ComPtr, image: ComPtr, composite_mode: int = D2D1_COMPOSITE_MODE_SOURCE_OVER) -> None:
     dc.call(
         _IDX_DC_DRAW_IMAGE, None,
         [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32],
-        image.addr, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER,
+        image.addr, None, None, D2D1_INTERPOLATION_MODE_LINEAR, composite_mode,
     )
 
 
