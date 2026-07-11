@@ -13,11 +13,14 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import IntFlag
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .capability import CapabilityProfile
 from .event import Event
 from .font import Font, FontMetrics
+
+if TYPE_CHECKING:
+    from .posteffect import PostEffect
 
 
 class TextAttribute(IntFlag):
@@ -453,6 +456,21 @@ class Backend(ABC):
         Panel resolves the hovered region's ``cursor`` hint into one intent and
         never branches; the default no-ops, so backends without the capability
         need no override."""
+
+    # --- post-processing effect (capability "post_effects") ------------------
+
+    def set_post_effect(self, effect: "PostEffect | None") -> None:
+        """Composite a full-screen effect (a CRT / phosphor "look") over the
+        rendered frame, or clear it with ``None``. See ``puikit.posteffect``.
+
+        Only backends with the ``post_effects`` capability act on this: a
+        pixel-owning GUI backend runs the frame through an image-filter chain
+        (macOS Core Image, Windows Direct2D effects); a character-grid terminal
+        has no sub-cell pixels to filter, so the default no-ops and a monochrome
+        theme is the closest a TUI gets to the look. Apps set it once (typically
+        from the active theme's recommendation) and never branch on the backend —
+        the call is always safe. A backend that implements it must re-apply the
+        stored effect across window resizes on its own."""
 
     # --- text input / IME activation -----------------------------------------
 

@@ -67,6 +67,10 @@ PROFILE_TUI = CapabilityProfile(
     media_keys=False,
     icons=False,
     images=False,
+    post_effects=False,      # full-screen composited effect (CRT/phosphor look).
+                             # Needs real pixels to filter the rendered frame; a
+                             # character grid has none, so it stays off and
+                             # set_post_effect no-ops.
 )
 
 PROFILE_GUI_WEB = CapabilityProfile(
@@ -92,6 +96,9 @@ PROFILE_GUI_WEB = CapabilityProfile(
     media_keys=False,
     icons=True,
     images=True,
+    post_effects=False,    # off until a backend implements the composite pass;
+                           # each GUI backend flips it True in its own PROFILE as
+                           # the feature lands (macOS: Core Image content filters).
 )
 
 PROFILE_GUI_DESKTOP = CapabilityProfile(

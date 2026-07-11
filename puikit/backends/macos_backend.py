@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 import os
+import random
 import time
 import warnings
 from dataclasses import dataclass, field, replace
@@ -110,18 +111,86 @@ from ..text import display_width, glyph_runs as _glyph_runs
 
 try:
     from Quartz import (
+        CGColorSpaceCreateDeviceRGB,
         CGContextBeginTransparencyLayer,
+        CGContextDrawLinearGradient,
+        CGContextDrawRadialGradient,
         CGContextEndTransparencyLayer,
         CGContextRestoreGState,
         CGContextSaveGState,
         CGContextScaleCTM,
         CGContextSetAlpha,
         CGContextTranslateCTM,
+        CGGradientCreateWithColorComponents,
+        kCGGradientDrawsAfterEndLocation,
+        kCGGradientDrawsBeforeStartLocation,
     )
 
     _HAS_QUARTZ = True
+    _DEVICE_RGB = CGColorSpaceCreateDeviceRGB()
 except ImportError:  # animation gracefully degrades to immediate switches
     _HAS_QUARTZ = False
+    _DEVICE_RGB = None
+
+#: Vignette falloff, in units of the rect's half-extent after an aspect-correct
+#: CTM scale (see _render_vignette): clear out to _INNER, fully dark by _OUTER.
+#: Edge midpoints sit at radius 1.0, corners at ~1.41 — so _OUTER just past the
+#: corners darkens them most while leaving the mid-edges only partly dimmed.
+_VIGNETTE_INNER = 0.55
+_VIGNETTE_OUTER = 1.45
+
+#: Rolling "vertical hold" band (see _render_roll_band / _crt_roll_tick). A roll
+#: fires every _ROLL_GAP seconds (randomized in that range) and sweeps a band of
+#: height _ROLL_BAND_H points down the screen over _ROLL_DUR seconds.
+_ROLL_GAP = (5.0, 13.0)
+_ROLL_DUR = (1.6, 3.2)
+_ROLL_BAND_H = 144.0
+#: Rolls only fire while the app is being used: its window is key AND the last
+#: key/mouse input was within this many seconds. Keeps the 60fps sweep (and its
+#: redraw cost) off when the user is away or in another app. An in-flight roll
+#: always finishes regardless.
+_ROLL_IDLE_TIMEOUT = 60.0
+#: Where the band is brightest, as a fraction from its top (0) to bottom (1): the
+#: leading (lower) edge is the bright head, with the intensity ramping up from the
+#: weak upper trail to the peak, then a short fade over the final stretch.
+_ROLL_PEAK = 0.85
+
+
+def _roll_band_top(progress: float, view_h: float, band_h: float) -> float:
+    """Top-edge y (flipped coords: 0 = screen top) of the rolling band at
+    ``progress`` 0..1. At 0 the band sits just above the top; at 1 just below the
+    bottom — so it sweeps fully through the screen. Pure, for unit tests."""
+    return progress * (view_h + band_h) - band_h
+
+
+def _roll_falloff(pos: float) -> float:
+    """Bottom-weighted intensity across the band at fractional position ``pos``
+    (0 = band top / trailing, 1 = leading/bottom edge): ramps up from the weak top
+    to a peak at ``_ROLL_PEAK``, then a short fade to the leading edge. Pure."""
+    if pos <= _ROLL_PEAK:
+        return pos / _ROLL_PEAK
+    return (1.0 - pos) / (1.0 - _ROLL_PEAK)
+
+try:
+    # Core Image drives the color side of the post-processing effect (tint / glow
+    # / bloom / vignette). Kept in its own guard: without it the post_effects
+    # capability is declared off and set_post_effect no-ops, exactly like a
+    # backend that never had it. NOTE scanlines are NOT a CIFilter — AppKit's
+    # layer content filters only honor Apple's built-in CIFilters, silently
+    # dropping a custom CIFilter/CIKernel subclass — so scanlines are drawn in the
+    # render pass instead (see _render_scanlines).
+    from Quartz import CIColor, CIFilter
+
+    _HAS_COREIMAGE = True
+except ImportError:
+    _HAS_COREIMAGE = False
+
+#: Scanline pitch in points (one dark + one light row). Must stay LARGER than the
+#: CIBloom radius (see _build_ci_filters): the lines are painted in the render
+#: pass, then bloom composites over them as a content filter, so too small a pitch
+#: against too wide a bloom washes them out. A follow-up could derive this from
+#: the display's device scale for pixel-exact lines.
+_SCANLINE_PERIOD = 4.0
 
 try:
     import CoreText
@@ -388,6 +457,63 @@ def _fill_rect(rect, color) -> None:
         NSRectFillUsingOperation(rect, NSCompositingOperationSourceOver)
     else:
         NSRectFill(rect)
+
+
+def _ci_filter(name: str, **inputs: "Any") -> "Any":
+    """A defaulted CIFilter with ``inputs`` (input key WITHOUT the ``input``
+    prefix -> value) set. Content filters must leave ``inputImage`` unset; AppKit
+    wires each filter's input to the previous stage's output at composite time."""
+    f = CIFilter.filterWithName_(name)
+    f.setDefaults()
+    for key, value in inputs.items():
+        f.setValue_forKey_(value, "input" + key)
+    return f
+
+
+def _build_ci_filters(effect) -> "list[Any]":
+    """Translate a ``PostEffect`` into an ordered Core Image *content-filter*
+    chain (each filter takes the previous one's output as its input image).
+
+    Pure — takes no view and touches no window — so the mapping is unit-testable
+    without opening a screen. Returns ``[]`` for a cleared / no-op effect or when
+    Core Image is unavailable.
+
+    Covers the *color* side of the look: ``tint`` (CIColorMonochrome), ``glow``
+    (CIColorControls), ``bloom`` (a tight CIBloom halo). ``scanline`` and
+    ``vignette`` are drawn in the render pass (_render_scanlines /
+    _render_vignette): scanlines because AppKit content filters ignore custom
+    CIFilters, and vignette because CIVignette's fixed circular falloff portholes
+    a non-square window — the render-pass version fits the live bounds. ``tint``
+    stays here (a content filter recolors the drawn scanlines/vignette too).
+    ``curvature`` / ``flicker`` are carried by the model but need a geometry warp
+    / a per-frame param update on the animation timer — the next increment.
+    """
+    if not _HAS_COREIMAGE or effect is None or effect.is_noop:
+        return []
+    filters: list[Any] = []
+    if effect.tint is not None:
+        r, g, b = effect.tint[:3]
+        filters.append(_ci_filter(
+            "CIColorMonochrome",
+            Color=CIColor.colorWithRed_green_blue_(r / 255.0, g / 255.0, b / 255.0),
+            Intensity=1.0,
+        ))
+    if effect.glow > 0:
+        filters.append(_ci_filter(
+            "CIColorControls",
+            Saturation=1.0 + effect.glow * 0.4,
+            Brightness=effect.glow * 0.12,
+            Contrast=1.0 + effect.glow * 0.15,
+        ))
+    if effect.bloom > 0:
+        # Tight radius: a halo hugging bright glyphs, not an all-over smear (the
+        # symptom of a wide radius on an all-bright phosphor UI). Also kept below
+        # _SCANLINE_PERIOD so this bloom pass doesn't wash out the painted lines.
+        filters.append(_ci_filter(
+            "CIBloom", Radius=min(effect.bloom * 18.0, _SCANLINE_PERIOD * 0.5),
+            Intensity=effect.bloom,
+        ))
+    return filters
 
 
 @dataclass
@@ -840,16 +966,23 @@ class MacOSBackend(Backend):
             "system_tray": False,
             "media_keys": False,
             "gpu_acceleration": False,
+            "post_effects": True,    # Core Image content-filter composite; gated
+                                     # on _HAS_COREIMAGE in `capabilities` below.
         }
     )
 
     @property
     def capabilities(self) -> CapabilityProfile:
-        if _HAS_QUARTZ:
-            return self.PROFILE
-        # Without Quartz the fade effect cannot be rendered; declare honestly
-        # so the Panel falls back to immediate switches.
-        return CapabilityProfile({**self.PROFILE, "animation": False})
+        overrides: dict[str, bool] = {}
+        if not _HAS_QUARTZ:
+            # Without Quartz the fade effect cannot be rendered; declare honestly
+            # so the Panel falls back to immediate switches.
+            overrides["animation"] = False
+        if not _HAS_COREIMAGE:
+            overrides["post_effects"] = False
+        if overrides:
+            return CapabilityProfile({**self.PROFILE, **overrides})
+        return self.PROFILE
 
     def __init__(self, width: int = 100, height: int = 30, title: str = "PuiKit",
                  base_font: Font | None = None, ui_font: Font | None = None,
@@ -885,6 +1018,16 @@ class MacOSBackend(Backend):
         # repeat request is a no-op. The view's cursorUpdate_ re-asserts it.
         self._pointer_cursor: Any | None = None
         self._pointer_shape: str | None = None
+        # Active post-processing effect (set_post_effect); re-applied to the view
+        # on open() and kept across resizes because it lives on the layer.
+        self._post_effect: Any | None = None
+        # Rolling-band ("vertical hold") animation state, or None when the active
+        # effect has no roll. Keys: active(bool), start, duration, next(start time).
+        self._crt_roll: dict | None = None
+        # Wall-clock (monotonic) of the last user input, for the roll's active-use
+        # gate (see _roll_user_active). Seeded to launch time so a roll can fire
+        # right away if the window opens focused.
+        self._last_input_time: float = time.monotonic()
         # Display list double buffer: widgets fill `_back`, drawRect reads `_front`.
         self._back: list[tuple] = []
         self._front: list[tuple] = []
@@ -954,6 +1097,9 @@ class MacOSBackend(Backend):
         self._window.setContentView_(self._view)
         self._window.setAcceptsMouseMovedEvents_(True)
         self._window.makeFirstResponder_(self._view)
+        # A post effect set before open() (e.g. from the launch theme) now has a
+        # view to attach to; re-assert it (no-op when none / unsupported).
+        self._apply_post_effect()
         # Accept files dropped onto the window from other apps (drop-IN): the view
         # becomes an NSDraggingDestination for file URLs and turns a drop into a
         # FILE_DROP event (see the NSDraggingDestination methods on _PuiKitView).
@@ -981,6 +1127,7 @@ class MacOSBackend(Backend):
         self._anim_timer_interval = None
         self._animations.clear()
         self._tick_callbacks.clear()
+        self._crt_roll = None
         if self._window is not None:
             self._window.setDelegate_(None)
             self._window.orderOut_(None)
@@ -1333,7 +1480,11 @@ class MacOSBackend(Backend):
         actually changes, so steady state costs nothing."""
         if not self._animations and not self._tick_callbacks:
             return
-        interval = self._ANIM_INTERVAL if self._animations else self._IDLE_TICK_INTERVAL
+        # A live widget animation OR an in-flight roll sweep wants smooth 60fps;
+        # otherwise the slow idle-poll rate (a roll only waiting to fire, or a bare
+        # filesystem pump, needs nothing faster).
+        fast = bool(self._animations) or self._roll_active()
+        interval = self._ANIM_INTERVAL if fast else self._IDLE_TICK_INTERVAL
         if self._anim_timer is not None and self._anim_timer_interval == interval:
             return
         if self._anim_timer is not None:
@@ -1450,6 +1601,105 @@ class MacOSBackend(Backend):
                 NSRectClip(self._unit_rect(*command[1:]))
             elif kind == "clip_pop":
                 NSGraphicsContext.restoreGraphicsState()
+        # Scanlines are painted here (not as a CIFilter): AppKit's content filters
+        # drop custom CIFilters, so the color chain (tint/glow/bloom/vignette) runs
+        # as content filters over this whole frame — these dark rows included.
+        effect = self._post_effect
+        if effect is not None and effect.scanline > 0:
+            self._render_scanlines(effect.scanline)
+        if effect is not None and effect.vignette > 0 and _HAS_QUARTZ:
+            self._render_vignette(effect.vignette)
+        # Drawn last in the render pass, so the band sits on top of the scanlines
+        # and vignette (a roll won't be dimmed at the screen edges). It still
+        # passes through the color content filters (tint / glow / bloom) applied
+        # to the whole layer afterward.
+        if effect is not None and effect.roll > 0 and self._roll_active():
+            self._render_roll_band(effect, now)
+
+    def _render_scanlines(self, strength: float) -> None:
+        """Paint dark horizontal rows every ``_SCANLINE_PERIOD`` points over the
+        whole view — the CRT scanline texture. ``strength`` (0..1) is used almost
+        directly as the dark rows' opacity: on a near-black phosphor background a
+        low opacity is invisible (near-black over near-black), so the line must
+        genuinely dim the row for the banding to read. Drawn source-over so it
+        darkens the content; the color CIFilter chain then composites over the
+        result."""
+        bounds = self._view.bounds()
+        w = bounds.size.width
+        h = bounds.size.height
+        _ns_color((0, 0, 0), alpha=min(strength, 0.7)).setFill()
+        line_h = _SCANLINE_PERIOD / 2.0  # half dark, half light
+        y = 0.0
+        while y < h:
+            NSRectFillUsingOperation(
+                NSMakeRect(0.0, y, w, line_h), NSCompositingOperationSourceOver
+            )
+            y += _SCANLINE_PERIOD
+
+    def _render_vignette(self, strength: float) -> None:
+        """Darken the frame toward its edges with a radial falloff that fits the
+        live view bounds. ``strength`` (0..1) is the corner darkness.
+
+        Drawn in the render pass rather than as CIVignette because a content
+        filter's circular falloff can't adapt to the window's aspect ratio — on a
+        wide/short window it collapses into a porthole. Here a CTM scale maps a
+        unit circle onto an ellipse fitting the rect, so distance is normalized
+        per axis: every edge midpoint dims equally and the corners most,
+        regardless of shape, and it re-fits on every resize."""
+        bounds = self._view.bounds()
+        w = bounds.size.width
+        h = bounds.size.height
+        if w <= 0 or h <= 0:
+            return
+        cg = NSGraphicsContext.currentContext().CGContext()
+        alpha = min(strength, 1.0)
+        gradient = CGGradientCreateWithColorComponents(
+            _DEVICE_RGB, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, alpha], [0.0, 1.0], 2
+        )
+        CGContextSaveGState(cg)
+        CGContextTranslateCTM(cg, w * 0.5, h * 0.5)
+        CGContextScaleCTM(cg, w * 0.5, h * 0.5)  # unit circle -> rect-fitting ellipse
+        CGContextDrawRadialGradient(
+            cg, gradient, (0.0, 0.0), _VIGNETTE_INNER, (0.0, 0.0), _VIGNETTE_OUTER,
+            kCGGradientDrawsBeforeStartLocation | kCGGradientDrawsAfterEndLocation,
+        )
+        CGContextRestoreGState(cg)
+
+    def _render_roll_band(self, effect: Any, now: float) -> None:
+        """Paint the rolling "vertical hold" band at its current sweep position: a
+        smooth bright vertical gradient whose opacity follows the bottom-weighted
+        ``_roll_falloff`` profile (transparent at the top edge, peak at
+        ``_ROLL_PEAK``, transparent at the bottom edge). Drawn as one CGGradient
+        rather than stacked rows so it reads as a smooth glow with no banding.
+        Brightening is source-over so it lifts the phosphor; the tint filter then
+        recolors it on-palette. Position comes from how far into the sweep we are."""
+        roll = self._crt_roll
+        bounds = self._view.bounds()
+        w = bounds.size.width
+        h = bounds.size.height
+        if w <= 0 or h <= 0:
+            return
+        progress = (now - roll["start"]) / max(roll["duration"], 1e-6)
+        progress = 0.0 if progress < 0.0 else 1.0 if progress > 1.0 else progress
+        top = _roll_band_top(progress, h, _ROLL_BAND_H)
+        # Bright, phosphor-leaning color; the CIColorMonochrome tint (if any) maps
+        # it back onto the theme hue, so a neutral bright works for tinted or not.
+        r, g, b = (min(255, c + 110) / 255.0 for c in (effect.tint or (170, 255, 185))[:3])
+        peak = effect.roll * 0.9
+        # Three stops reproduce the piecewise-linear falloff exactly: 0 at the top
+        # edge, peak at _ROLL_PEAK, 0 at the bottom edge — a clean two-segment ramp.
+        gradient = CGGradientCreateWithColorComponents(
+            _DEVICE_RGB,
+            [r, g, b, 0.0, r, g, b, peak, r, g, b, 0.0],
+            [0.0, _ROLL_PEAK, 1.0],
+            3,
+        )
+        cg = NSGraphicsContext.currentContext().CGContext()
+        CGContextSaveGState(cg)
+        CGContextDrawLinearGradient(
+            cg, gradient, (0.0, top), (0.0, top + _ROLL_BAND_H), 0
+        )
+        CGContextRestoreGState(cg)
 
     def _begin_group_render(self, key: int, rect: Any, now: float) -> tuple:
         """Set up the group's transition effect (alpha or CTM transform).
@@ -1970,6 +2220,98 @@ class MacOSBackend(Backend):
         if cursor is not None:
             cursor.set()
 
+    def set_post_effect(self, effect: Any | None) -> None:
+        """Composite a CRT / phosphor effect over the whole window, or clear it
+        with ``None`` (see ``puikit.posteffect.PostEffect``). Realized as Core
+        Image *content filters* on the layer-backed view: the frame the display
+        list rasterizes is run through the filter chain by AppKit before it hits
+        the screen, so nothing in the render path changes. Cheap to toggle — the
+        app calls this once when a theme recommends an effect. Stored so open()
+        can re-attach it, and the layer keeps it across window resizes."""
+        self._post_effect = None if (effect is None or effect.is_noop) else effect
+        self._apply_post_effect()
+
+    def _apply_post_effect(self) -> None:
+        """(Re)attach the stored effect's filter chain to the view. Safe to call
+        with no view yet (open() calls it again) or without Core Image."""
+        self._sync_roll()  # start/stop the rolling-band animation (view-independent)
+        if self._view is None or not _HAS_COREIMAGE:
+            return
+        filters = _build_ci_filters(self._post_effect)
+        # layerUsesCoreImageFilters lets a layer-backed NSView run CI filters over
+        # its own drawn content; contentFilters is that chain (empty = cleared).
+        self._view.setWantsLayer_(True)
+        self._view.setLayerUsesCoreImageFilters_(True)
+        self._view.setContentFilters_(filters)
+        self._view.setNeedsDisplay_(True)
+
+    def _sync_roll(self) -> None:
+        """Start or stop the rolling-band animation to match the active effect.
+        The ticker (see _crt_roll_tick) schedules rolls and drives the per-frame
+        redraw while one sweeps; it also parks itself when the app goes idle and
+        is re-armed from _dispatch on the next input (see _ensure_roll_ticker)."""
+        wants = self._post_effect is not None and self._post_effect.roll > 0
+        if wants:
+            if self._crt_roll is None:
+                self._crt_roll = {"active": False, "start": 0.0, "duration": 0.0,
+                                  "next": 0.0}
+            self._ensure_roll_ticker()
+        else:
+            # The tick callback unregisters itself once _crt_roll is None; clearing
+            # it also stops _render_into_view from drawing the band.
+            self._crt_roll = None
+
+    def _ensure_roll_ticker(self) -> None:
+        """Register the roll frame-callback if the effect wants a roll and it is
+        not already running. Reschedules the next roll from now, so resuming after
+        an idle stretch doesn't fire one instantly. A no-op (returns early) while
+        the ticker is already registered, so it's cheap to call on every input."""
+        if self._crt_roll is None or self._crt_roll_tick in self._tick_callbacks:
+            return
+        self._crt_roll["next"] = time.monotonic() + random.uniform(*_ROLL_GAP)
+        self.request_animation_ticks(self._crt_roll_tick)
+
+    def _roll_user_active(self, now: float) -> bool:
+        """Whether the app is actively in use: its window is key AND the last input
+        was recent. Gates *starting* a roll, not finishing one."""
+        win = self._window
+        if win is None or not win.isKeyWindow():
+            return False
+        return (now - self._last_input_time) < _ROLL_IDLE_TIMEOUT
+
+    def _crt_roll_tick(self) -> bool:
+        """Frame callback: advance an in-flight roll to completion, else start one
+        only while the app is actively used. Returns False to unregister — when the
+        effect no longer wants a roll, or when idle (to drop the timer; _dispatch
+        re-arms on the next input)."""
+        roll = self._crt_roll
+        if roll is None:
+            return False
+        now = time.monotonic()
+        if roll["active"]:
+            # An in-flight roll always finishes its sweep, even if the user goes
+            # idle or the window deactivates mid-roll.
+            if now - roll["start"] >= roll["duration"]:
+                roll["active"] = False
+                roll["next"] = now + random.uniform(*_ROLL_GAP)
+                if self._view is not None:
+                    self._view.setNeedsDisplay_(True)  # one clean frame without the band
+            elif self._view is not None:
+                self._view.setNeedsDisplay_(True)      # animate the sweep
+            return True
+        if not self._roll_user_active(now):
+            return False  # park the ticker while idle/inactive; _dispatch re-arms
+        if now >= roll["next"]:
+            roll["active"] = True
+            roll["start"] = now
+            roll["duration"] = random.uniform(*_ROLL_DUR)
+            if self._view is not None:
+                self._view.setNeedsDisplay_(True)
+        return True
+
+    def _roll_active(self) -> bool:
+        return self._crt_roll is not None and self._crt_roll["active"]
+
     def open_url(self, url: str) -> bool:
         """Open ``url`` via the workspace: an http(s) URL in the default browser,
         anything else (a bare path) as a file URL in its default app."""
@@ -2048,6 +2390,10 @@ class MacOSBackend(Backend):
             on_done()
 
     def _dispatch(self, event: Event) -> None:
+        # Every key/mouse/resize event flows through here — record it as user
+        # activity and re-arm the roll ticker if it parked itself while idle.
+        self._last_input_time = time.monotonic()
+        self._ensure_roll_ticker()
         if self._handler is not None:
             self._handler(event)
 

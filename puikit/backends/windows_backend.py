@@ -354,6 +354,10 @@ class WindowsBackend(Backend):
         # reconfigured, not recreated every frame, same reasoning as the one
         # reusable `_brush` below.
         self._shadow_effect: Any = None
+        # Active post-processing effect (set_post_effect). Stored now; the
+        # Direct2D composite pass that consumes it is a TODO (see set_post_effect),
+        # so the post_effects capability stays off and the effect is inert here.
+        self._post_effect: Any | None = None
         self._brush: Any = None
         self._handler: EventHandler | None = None
         self._quit_requested = False
@@ -902,6 +906,28 @@ class WindowsBackend(Backend):
         self._back = []
         if self._hwnd:
             native.user32.InvalidateRect(self._hwnd, None, False)
+
+    def set_post_effect(self, effect: Any | None) -> None:
+        """Store a CRT / phosphor effect (``puikit.posteffect.PostEffect``) for a
+        Direct2D composite pass.
+
+        NOT wired to the render target yet, so ``post_effects`` stays off in this
+        backend's PROFILE and the effect is inert — the call is accepted (an app
+        sets it from the active theme without branching on the backend) but has no
+        visible result until the pass below lands.
+
+        Implementation seam (the Direct2D-effects graph is already in use — see
+        ``_shadow_effect``/``dc_create_effect`` with ``CLSID_D2D1GaussianBlur``):
+        render the display list into an offscreen ID2D1Bitmap target instead of
+        straight to the swap chain (``_render``), then in ``present``/``_render``
+        run that bitmap through a persistent effect chain and DrawImage the
+        result to the back buffer. Map the ``PostEffect`` fields to built-in
+        effects: ``tint`` -> CLSID_D2D1ColorMatrix (luminance->tint), ``bloom`` ->
+        CLSID_D2D1GaussianBlur + CLSID_D2D1Composite (screen), ``vignette`` ->
+        CLSID_D2D1Vignette, ``scanline``/``curvature`` -> a small CLSID_D2D1PixelShader
+        (HLSL), ``flicker`` -> a per-frame ColorMatrix brightness tweak on the
+        WM_PAINT timer. Then flip ``post_effects`` True in this backend's PROFILE."""
+        self._post_effect = None if (effect is None or effect.is_noop) else effect
 
     def _unit_rect(self, x: float, y: float, w_units: float, h_units: float) -> Any:
         return native.D2D1_RECT_F(

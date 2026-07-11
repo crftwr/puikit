@@ -20,6 +20,7 @@ from .font import Font, FontSlant, FontWeight
 from .layout import HSplit, Item, VSplit
 from .menu import SEPARATOR, Menu, MenuItem, MenuSeparator
 from .panel import DrawContext, Panel, Rect
+from .posteffect import CRT, PRESETS, PostEffect
 from .theme import THEME_GUI, THEME_TUI, Theme, derive_theme, lift, mix, theme_for
 
 __version__ = "0.1.0"
@@ -41,6 +42,9 @@ __all__ = [
     "MenuItem",
     "MenuSeparator",
     "Panel",
+    "PostEffect",
+    "CRT",
+    "PRESETS",
     "PROFILE_GAME",
     "PROFILE_GUI_DESKTOP",
     "PROFILE_GUI_WEB",
