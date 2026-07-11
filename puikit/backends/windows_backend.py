@@ -186,6 +186,53 @@ def _global_wndproc(hwnd: int, msg: int, wparam: int, lparam: int) -> int:
 _WNDPROC_TRAMPOLINE = native.WNDPROC(_global_wndproc)
 
 
+#: Resource id of the application icon embedded in the host .exe. Resource
+#: compilers assign id 1 to the first ICON in a script (as TFM's does:
+#: ``1 ICON "TFM.ico"``), and it is the de-facto convention for the app icon.
+_APP_ICON_RESOURCE_ID = 1
+
+
+def _load_app_icons() -> tuple[int, int]:
+    """
+    Load the host executable's embedded application icon as a (large, small)
+    HICON pair for the window class - this is what shows in the title-bar
+    top-left, the taskbar, and Alt-Tab.
+
+    Falls back to the generic system application icon when the running module has
+    no such resource (e.g. under a bare ``python.exe`` in development), so a
+    window always has *some* icon rather than a blank one.
+    """
+    u = native.user32
+    # HICON/HANDLE returns must be pointer-width, or ctypes truncates them to a
+    # 32-bit int and hands back an invalid handle.
+    u.LoadImageW.restype = ctypes.c_void_p
+    u.LoadIconW.restype = ctypes.c_void_p
+
+    IMAGE_ICON = 1
+    LR_DEFAULTCOLOR = 0x0000
+    IDI_APPLICATION = 32512
+    SM_CXICON, SM_CYICON = 11, 12
+    SM_CXSMICON, SM_CYSMICON = 49, 50
+
+    hinst = native.get_module_handle()
+
+    def _load(cx: int, cy: int) -> int:
+        return u.LoadImageW(
+            ctypes.c_void_p(hinst),
+            ctypes.c_void_p(_APP_ICON_RESOURCE_ID),  # MAKEINTRESOURCE(1)
+            IMAGE_ICON, cx, cy, LR_DEFAULTCOLOR,
+        ) or 0
+
+    h_big = _load(u.GetSystemMetrics(SM_CXICON), u.GetSystemMetrics(SM_CYICON))
+    h_small = _load(u.GetSystemMetrics(SM_CXSMICON), u.GetSystemMetrics(SM_CYSMICON))
+    if not h_big:
+        # No app icon embedded in this module - use the OS default so the window
+        # is not left iconless.
+        h_big = u.LoadIconW(None, ctypes.c_void_p(IDI_APPLICATION)) or 0
+        h_small = h_small or h_big
+    return h_big, h_small
+
+
 def _register_window_class() -> None:
     global _class_registered
     if _class_registered:
@@ -196,6 +243,11 @@ def _register_window_class() -> None:
     wc.lpfnWndProc = _WNDPROC_TRAMPOLINE
     wc.hInstance = native.get_module_handle()
     wc.hCursor = native.user32.LoadCursorW(None, ctypes.c_void_p(native.IDC_ARROW))
+    h_icon, h_icon_sm = _load_app_icons()
+    if h_icon:
+        wc.hIcon = h_icon
+    if h_icon_sm:
+        wc.hIconSm = h_icon_sm
     wc.lpszClassName = _CLASS_NAME
     atom = native.user32.RegisterClassExW(ctypes.byref(wc))
     if not atom and ctypes.get_last_error() != _ERROR_CLASS_ALREADY_EXISTS:
