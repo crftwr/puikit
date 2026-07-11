@@ -1,18 +1,20 @@
 # Group Animation Compositing (fade / slide / scale / highlight)
 
 This document explains how PuiKit renders per-widget transition animations, why
-the **fade** transition needs *offscreen compositing* to look right, exactly how
-the macOS backend does it, and **how the Windows backend should be changed to
-match**. It is written to be self-contained: a session working only on the
-Windows backend should be able to implement parity from this document alone.
+the **fade** transition needs *offscreen compositing* to look right, and how the
+macOS and Windows backends each realize it. It is written to be self-contained:
+a session working on either backend should be able to understand and maintain
+fade parity from this document alone.
 
 > TL;DR — macOS renders a fading group into an **offscreen transparency layer**
 > and composites the whole group at the group opacity *once*
-> (`CGContextBeginTransparencyLayer` + `CGContextSetAlpha`). Windows currently
-> fakes it by multiplying **each primitive's** alpha by the group opacity, which
-> is *not* the same operation and double-blends overlapping content. Windows
-> should use **`ID2D1RenderTarget::PushLayer` with `D2D1_LAYER_PARAMETERS.opacity`**,
-> which is the exact Direct2D analog of a Core Graphics transparency layer.
+> (`CGContextBeginTransparencyLayer` + `CGContextSetAlpha`). Windows does the
+> exact analog with **`ID2D1RenderTarget::PushLayer` +
+> `D2D1_LAYER_PARAMETERS.opacity`** (a Core Graphics transparency layer's
+> Direct2D counterpart). An earlier Windows implementation faked it by
+> multiplying **each primitive's** alpha by the group opacity — a *different*
+> operation that double-blends overlapping content; §5 keeps that around as the
+> "why not" and §3.3 has the math.
 
 ---
 
@@ -73,9 +75,10 @@ specifically that fade requires an offscreen pass.
 | `highlight` | color tint over the widget, fading   | overlay fill at `group_end`    | No               |
 | `fade`      | whole widget cross-fades in/out      | **offscreen layer + opacity**  | **Yes**          |
 
-`slide`, `scale`, and `highlight` are *already at parity* between macOS and
-Windows — they use transforms / an overlay fill, no offscreen surface. **Only
-`fade` differs**, and it is the entire subject of §4–§6.
+`slide`, `scale`, and `highlight` are at parity between macOS and Windows — they
+use transforms / an overlay fill, no offscreen surface. `fade` is the one that
+needs an offscreen pass, and how each backend supplies it is the subject of
+§4–§6.
 
 ---
 
@@ -151,7 +154,7 @@ only shows 25% backdrop instead of 50%. For flat opaque dialogs the difference i
 subtle (text looks muddier mid-fade, the panel "materializes" faster than the
 backdrop recedes); for anything with **internal translucency, a drop shadow, or
 overlapping semi-transparent fills it double-attenuates and shows seams**. That
-is the bug we're fixing.
+was the bug the offscreen-layer approach (§6) fixed.
 
 ---
 
@@ -198,67 +201,67 @@ The other kinds, for reference (no offscreen surface):
 
 ---
 
-## 5. Current Windows implementation (what exists today)
+## 5. The previous per-primitive approach (replaced — kept as the "why not")
 
 File: `puikit/backends/windows_backend.py`.
 
-Windows already has the full plumbing — display list, `group_begin`/`group_end`,
+Windows has always had the full plumbing — display list, `group_begin`/`group_end`,
 `Animation`, `_begin_group_render`/`_end_group_render`, a transform stack for
-slide/scale, and a highlight overlay. **slide, scale, and highlight are correct
-and should be left alone.** The problem is only fade.
+slide/scale, and a highlight overlay. slide, scale, and highlight were correct
+from the start and were left untouched by the fade rework. Fade was the outlier.
 
-Fade is currently done with a per-primitive alpha stack:
+The **original** fade used a per-primitive alpha stack — worth understanding so
+it isn't reintroduced:
 
 ```python
-# _begin_group_render, fade branch (windows_backend.py):
+# _begin_group_render, fade branch (OLD — no longer in the tree):
 if animation.kind == "fade":
     self._group_alpha_stack[-1] *= eased
     return (animation, rect, False)
 
-# _set_brush (windows_backend.py) folds the stack into every brush color:
+# _set_brush folded the stack into every brush color (OLD):
 alpha *= self._group_alpha_stack[-1]
 native.brush_set_color(self._brush, native.D2D1_COLOR_F(r/255, g/255, b/255, alpha))
 ```
 
-This is exactly the per-primitive path from §3.3. Every fill/text/stroke gets its
+This is exactly the per-primitive path from §3.3. Every fill/text/stroke got its
 alpha multiplied by the group opacity individually, so overlapping content
-double-blends. `_render_image` and any path that doesn't route color through
-`_set_brush` also silently ignores the group alpha, so images inside a fading
-group don't fade at all with this scheme.
+double-blended. `_render_image` and any path that didn't route color through
+`_set_brush` also silently ignored the group alpha, so images inside a fading
+group didn't fade at all. Both problems are fixed by the offscreen-layer approach
+in §6, which is what ships today. `_group_alpha_stack` no longer exists.
 
 ---
 
-## 6. Recommended Windows change — Direct2D `PushLayer` with opacity
+## 6. How Windows realizes fade — Direct2D `PushLayer` with opacity
 
 `ID2D1RenderTarget::PushLayer` with a `D2D1_LAYER_PARAMETERS.opacity` is the
 **exact Direct2D analog** of `CGContextBeginTransparencyLayer` + `CGContextSetAlpha`:
 it renders subsequent draw calls into an implicit offscreen surface and, on
 `PopLayer`, composites the whole surface back at `opacity`. This gives the Stage-1
 / Stage-2 semantics from §3.2 for free, including correct handling of images and
-overlapping translucency.
+overlapping translucency. This is what ships today (introduced in the
+"Off screen rendering based fade animation on Windows" change).
 
-The current `_render_target` is an **`ID2D1DeviceContext`** (the Direct2D 1.1
-DC path — see `dc_set_target`, `swapchain_bind_target`, `dc_create_effect`), which
-inherits `ID2D1RenderTarget`. So `PushLayer`/`PopLayer` at the inherited vtable
-slots work directly, and in D2D 1.1 you may pass a **NULL `ID2D1Layer`** and let
-the device context manage the layer resource — no `CreateLayer` needed.
+`_render_target` is an **`ID2D1DeviceContext`** (the Direct2D 1.1 DC path — see
+`dc_set_target`, `swapchain_bind_target`, `dc_create_effect`), which inherits
+`ID2D1RenderTarget`. So `PushLayer`/`PopLayer` at the inherited vtable slots work
+directly, and in D2D 1.1 a **NULL `ID2D1Layer`** lets the device context manage
+the layer resource — no `CreateLayer` needed.
 
-### 6.1 Native shim additions — `puikit/backends/_win32_native.py`
+### 6.1 Native shim — `puikit/backends/_win32_native.py`
 
-The vtable indices are already documented in the shim's `ID2D1RenderTarget`
-comment block (`CreateLayer[13]`, `PushLayer[40]`, `PopLayer[41]`). Only wrappers
-and one struct are missing.
-
-Add index constants (near the other `_IDX_RT_*`):
+The vtable indices are documented in the shim's `ID2D1RenderTarget` comment block
+(`CreateLayer[13]`, `PushLayer[40]`, `PopLayer[41]`). The index constants:
 
 ```python
 _IDX_RT_PUSH_LAYER = 40
 _IDX_RT_POP_LAYER  = 41
 ```
 
-Add the `D2D1_LAYER_PARAMETERS` struct. Field order/types must match `d2d1.h`
-exactly; ctypes default alignment (largest member = 8-byte pointer, no
-`#pragma pack`) matches the native layout, so **no `_pack_`**:
+The `D2D1_LAYER_PARAMETERS` struct. Field order/types match `d2d1.h` exactly;
+ctypes default alignment (largest member = 8-byte pointer, no `#pragma pack`)
+matches the native layout, so **no `_pack_`**:
 
 ```python
 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE = 0   # already defined in the shim
@@ -275,15 +278,15 @@ class D2D1_LAYER_PARAMETERS(ctypes.Structure):
         ("layerOptions",      ctypes.c_uint32),
     ]
 
-# D2D1::InfiniteRect() — unbounded layer (simplest; see perf note below)
-def _infinite_rect() -> D2D1_RECT_F:
+# D2D1::InfiniteRect() — unbounded layer (see perf note; prefer a real rect)
+def infinite_rect() -> D2D1_RECT_F:
     import sys
     f = sys.float_info.max
     return D2D1_RECT_F(-f, -f, f, f)
 ```
 
-Add the two call wrappers (following the existing `rt.call(index, restype,
-argtypes, *args)` convention — cf. `rt_push_axis_aligned_clip`):
+The two call wrappers follow the existing `rt.call(index, restype, argtypes,
+*args)` convention (cf. `rt_push_axis_aligned_clip`):
 
 ```python
 def rt_push_layer(rt: ComPtr, params: D2D1_LAYER_PARAMETERS, layer: "ComPtr | None" = None) -> None:
@@ -306,11 +309,12 @@ def rt_pop_layer(rt: ComPtr) -> None:
 > (v1.0) struct above — that's what these wrappers call, and `opacity` lives in
 > both structs, so v1.0 is sufficient.
 
-### 6.2 Backend changes — `puikit/backends/windows_backend.py`
+### 6.2 Backend — `puikit/backends/windows_backend.py`
 
-Replace the fade branch so it opens a layer instead of pushing onto the alpha
-stack. Store on the returned state tuple whether a layer was pushed, so
-`_end_group_render` can pop it.
+The fade branch opens a layer; the returned state tuple carries a `marker`
+string so `_end_group_render` knows to pop it. All branches return the same
+3-tuple shape `(animation, rect, marker)` where `marker ∈ {None, "transform",
+"layer"}`.
 
 `_begin_group_render` (fade branch):
 
@@ -318,7 +322,7 @@ stack. Store on the returned state tuple whether a layer was pushed, so
 if animation.kind == "fade":
     params = native.D2D1_LAYER_PARAMETERS(
         contentBounds     = (self._unit_rect(rect.x, rect.y, rect.w, rect.h)
-                             if rect is not None else native._infinite_rect()),
+                             if rect is not None else native.infinite_rect()),
         geometricMask     = None,
         maskAntialiasMode = native.D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
         maskTransform     = native.D2D1_MATRIX_3X2_F.identity(),
@@ -333,25 +337,21 @@ if animation.kind == "fade":
 `_end_group_render`:
 
 ```python
-animation, rect, kind = state           # kind ∈ {None-ish, "transform", "layer"}
-...
-if kind == "layer":
+animation, rect, marker = state         # marker ∈ {None, "transform", "layer"}
+self._transform_stack.pop()
+if marker == "layer":
     native.rt_pop_layer(self._render_target)
-elif kind == "transform":               # existing slide/scale teardown
+elif marker == "transform":             # slide/scale teardown
     native.rt_set_transform(self._render_target, self._transform_stack[-1])
-# highlight overlay branch unchanged
+# highlight overlay branch (fill at group end) follows, unchanged
 ```
 
-Then **remove the per-primitive fade fold**:
-
-- Delete `self._group_alpha_stack[-1] *= eased` from the fade branch.
-- In `_set_brush`, drop `alpha *= self._group_alpha_stack[-1]`. With PushLayer the
-  group opacity is applied by the layer at pop time, so folding it into the brush
-  too would apply it **twice**.
-- You can delete `_group_alpha_stack` entirely (it exists only for fade). The
-  `_transform_stack` stays — slide/scale still need it. Keep the three tuple
-  shapes returned by `_begin_group_render` consistent so `_end_group_render`'s
-  unpack still works (adjust its arity if you change the tuple).
+There is **no per-primitive fade fold**: `_group_alpha_stack` was removed, and
+`_set_brush` does not touch group opacity. With PushLayer the group opacity is
+applied by the layer at pop time, so folding it into the brush too would apply it
+**twice**. The `_transform_stack` remains — slide/scale still push/pop it, and
+every `_begin_group_render` branch appends to it (mirrored by the unconditional
+`pop()` at the top of `_end_group_render`) so the shapes stay balanced.
 
 ### 6.3 Correctness notes / gotchas
 
@@ -360,14 +360,15 @@ Then **remove the per-primitive fade fold**:
   make sure early-outs don't skip the pop.
 - **`contentBounds` is in the current transform space.** For fade there's no
   active transform, so `_unit_rect(rect...)` is correct. Bounding the layer to the
-  widget rect (instead of `_infinite_rect()`) is the recommended perf choice — an
-  unbounded layer forces D2D to allocate a full-target intermediate.
+  widget rect (instead of `infinite_rect()`) is the perf choice the code makes —
+  an unbounded layer forces D2D to allocate a full-target intermediate.
 - **Clips inside a fading group** (`clip_push`/`clip_pop` →
   `PushAxisAlignedClip`/`PopAxisAlignedClip`) nest fine *inside* the layer; keep
   clip push/pop balanced within the layer just as they must be today.
-- **Images now fade correctly** for free — `_render_image` draws into the layer,
-  so it's covered by the layer opacity even though it never touched `_set_brush`.
-  (This is a real fix over the current behavior, where images don't fade at all.)
+- **Images fade correctly** for free — `_render_image` draws into the layer, so
+  it's covered by the layer opacity even though it never touches `_set_brush`.
+  (This was a real fix over the old per-primitive path, where images didn't fade
+  at all — see §5.)
 - **Premultiplied alpha:** nothing to do. D2D takes straight alpha at the API and
   premultiplies internally, same as Core Graphics; the swap-chain backbuffer's
   alpha mode is irrelevant to the in-layer math.
@@ -379,13 +380,13 @@ Then **remove the per-primitive fade fold**:
 
 An `ID2D1BitmapRenderTarget` (`CreateCompatibleRenderTarget[12]`) would be a more
 literal offscreen bitmap: render children into it, then `DrawBitmap` onto the main
-target with `opacity = eased`. Rejected as the primary approach because it
+target with `opacity = eased`. It was rejected as the primary approach because it
 (a) allocates a bitmap render target per fading group per frame, and (b) requires
 redirecting every `_render_*` method from `self._render_target` to the temporary
 target (they all reference `self._render_target` directly), a much larger and more
 error-prone change. `PushLayer` operates on the same target and needs no
-redirection. Prefer `PushLayer`; keep this only as a fallback if a `PushLayer`
-issue surfaces.
+redirection. It remains documented only as a fallback if a `PushLayer` issue
+surfaces.
 
 ---
 
@@ -419,12 +420,12 @@ fade branch and the brush fold).
 | Display-list replay        | `_render_into_view`               | `_render`                                 |
 | Group setup                | `_begin_group_render`             | `_begin_group_render`                     |
 | Group teardown             | `_end_group_render`               | `_end_group_render`                       |
-| Fade realization           | `CGContextBeginTransparencyLayer` + `CGContextSetAlpha` | **change to** `rt_push_layer(opacity=eased)` |
+| Fade realization           | `CGContextBeginTransparencyLayer` + `CGContextSetAlpha` | `rt_push_layer(opacity=eased)` / `rt_pop_layer` |
 | slide / scale              | `CGContextTranslateCTM` / `ScaleCTM` | `D2D1_MATRIX_3X2_F` + `rt_set_transform` (unchanged) |
 | highlight                  | tint fill at group end            | tint fill at group end (unchanged)        |
 | `Animation` (kind/eased)   | `Animation` dataclass             | `Animation` dataclass (identical)         |
 | Contract                   | `puikit/backend.py:386` `begin_group` / `end_group`                            |
 
-Native shim to extend: `puikit/backends/_win32_native.py`
-(add `_IDX_RT_PUSH_LAYER=40`, `_IDX_RT_POP_LAYER=41`, `D2D1_LAYER_PARAMETERS`,
-`rt_push_layer`, `rt_pop_layer`).
+Native shim: `puikit/backends/_win32_native.py`
+(`_IDX_RT_PUSH_LAYER=40`, `_IDX_RT_POP_LAYER=41`, `D2D1_LAYER_PARAMETERS`,
+`infinite_rect`, `rt_push_layer`, `rt_pop_layer`).
