@@ -9,13 +9,26 @@ pytestmark = pytest.mark.skipif(
 )
 pytest.importorskip("AppKit", reason="pyobjc not installed")
 
+from AppKit import NSFontAttributeName  # noqa: E402
+
 from puikit import Font, FontSlant, FontWeight, Style, TextAttribute  # noqa: E402
 from puikit.backends.macos_backend import (  # noqa: E402
+    _BUNDLED_MONO,
+    _BUNDLED_UI,
     MacOSBackend,
     _PuiKitView,
+    _attr_string,
+    _ensure_bundled_fonts,
     translate_key,
 )
 from puikit.event import EventType  # noqa: E402
+
+
+def _advance(font, ch):
+    """Rendered advance width of one glyph in ``font`` — used to check a face is
+    monospaced by advance (the grid requirement) rather than by the unreliable
+    post-table isFixedPitch flag."""
+    return _attr_string(ch, {NSFontAttributeName: font}).size().width
 
 
 def test_base_font_drives_base_unit():
@@ -34,12 +47,32 @@ def test_base_font_drives_base_unit():
 
 def test_resolve_font_honors_monospace_and_proportional():
     # No family: monospace=True gives a fixed-advance face (the base grid font),
-    # monospace=False gives the proportional system UI font.
+    # monospace=False gives a proportional one. Check by advance width, not the
+    # post-table isFixedPitch flag: the bundled Noto Sans Mono default is
+    # monospaced by advance yet reports isFixedPitch False.
     backend = MacOSBackend()
     mono = backend.resolve_font(Font(monospace=True))
     prop = backend.resolve_font(Font())  # default UI font
-    assert mono.isFixedPitch()
-    assert not prop.isFixedPitch()
+    assert _advance(mono, "i") == _advance(mono, "M")  # equal advances -> grid
+    assert _advance(prop, "i") != _advance(prop, "M")  # proportional
+
+
+def test_resolve_font_defaults_to_bundled_noto():
+    # With no family configured, the default mono/proportional pair is the
+    # bundled Noto superfamily (matched metrics keep text from clipping),
+    # registered with Core Text so it renders without being installed — the same
+    # default the Windows backend uses. The font files are fetched at build time,
+    # not committed, so both outcomes are valid: Noto when present, the OS system
+    # faces (still mono / proportional) when not.
+    backend = MacOSBackend()
+    mono = backend.resolve_font(Font(monospace=True))
+    prop = backend.resolve_font(Font())
+    if _ensure_bundled_fonts():
+        assert mono.familyName() == _BUNDLED_MONO
+        assert prop.familyName() == _BUNDLED_UI
+    else:
+        assert mono.isFixedPitch()
+        assert not prop.isFixedPitch()
 
 
 def test_resolve_font_uses_configured_default_faces():
@@ -54,7 +87,8 @@ def test_resolve_font_uses_configured_default_faces():
     assert backend.resolve_font(Font(monospace=True)).familyName() == "Menlo"
     # An explicit family still wins over the defaults.
     assert backend.resolve_font(Font(family="Georgia")).familyName() == "Georgia"
-    # ui_font=None keeps the OS system UI font (still proportional).
+    # ui_font=None drops to the default proportional face (bundled Noto Sans, or
+    # the OS system UI font if unavailable) — still proportional either way.
     b2 = MacOSBackend(base_font=Font(family="Menlo", size=13, monospace=True))
     assert not b2.resolve_font(Font()).isFixedPitch()
 
@@ -67,7 +101,11 @@ def test_resolve_font_applies_weight_and_slant():
 
     mgr = NSFontManager.sharedFontManager()
     assert mgr.traitsOfFont_(bold) & 0x2  # NSBoldFontMask
-    assert mgr.traitsOfFont_(italic) & 0x1  # NSItalicFontMask
+    # Italic is slanted either by a real italic member (the italic symbolic
+    # trait) or, for a face with none — like the bundled Noto default — by a
+    # synthesized oblique (a shear in the font matrix, matrix[2] != 0).
+    italic_trait = mgr.traitsOfFont_(italic) & 0x1  # NSItalicFontMask
+    assert italic_trait or italic.matrix()[2] != 0
 
 
 def test_style_font_is_cached():

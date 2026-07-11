@@ -17,6 +17,7 @@ unavailable.
 from __future__ import annotations
 
 import math
+import os
 import time
 import warnings
 from dataclasses import dataclass, field, replace
@@ -86,6 +87,7 @@ from AppKit import (
     NSWindowStyleMaskTitled,
 )
 from Foundation import (
+    NSAffineTransform,
     NSMakeRange,
     NSMakeRect,
     NSMakeSize,
@@ -119,8 +121,83 @@ try:
 except ImportError:  # animation gracefully degrades to immediate switches
     _HAS_QUARTZ = False
 
+try:
+    import CoreText
+
+    _HAS_CORETEXT = True
+except ImportError:  # bundled-font registration unavailable; use OS system fonts
+    _HAS_CORETEXT = False
+
 _DEFAULT_FG = (230, 230, 230)
 _DEFAULT_BG = (24, 24, 24)
+
+# Bundled default fonts (puikit/fonts): Noto Sans + Noto Sans Mono — the same
+# metrics-matched superfamily the Windows backend bundles, so an unnamed default
+# Font() resolves to the same faces on both platforms and the base unit (derived
+# from the mono face) fits the UI face without text clipping. Registered with
+# Core Text at process scope so they render without being installed; the backend
+# falls back to the OS system mono/UI fonts if the files are absent or Core Text
+# is unavailable. The files are fetched at build time, not committed.
+_FONT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "fonts")
+_BUNDLED_MONO = "Noto Sans Mono"
+_BUNDLED_UI = "Noto Sans"
+_BUNDLED_FONT_FILES = (
+    "NotoSans-Regular.ttf", "NotoSans-Bold.ttf",
+    "NotoSansMono-Regular.ttf", "NotoSansMono-Bold.ttf",
+)
+
+# Registration is a process-wide side effect, so it runs once and the result is
+# cached: None = not yet attempted, True/False = whether the bundled families
+# are usable.
+_bundled_fonts_registered: bool | None = None
+
+
+def _ensure_bundled_fonts() -> bool:
+    """Register the bundled Noto faces with Core Text (process scope) on first
+    use so they resolve by family name without being installed, and report
+    whether they are usable. Idempotent and process-global; returns False (so
+    callers fall back to the OS system fonts) when Core Text is unavailable, a
+    font file is missing, or registration fails. Success is confirmed by
+    resolving the families rather than by the API return, so an 'already
+    registered' error on a re-run in the same process still counts as usable."""
+    global _bundled_fonts_registered
+    if _bundled_fonts_registered is not None:
+        return _bundled_fonts_registered
+    _bundled_fonts_registered = False
+    if not _HAS_CORETEXT:
+        return False
+    paths = [os.path.join(_FONT_DIR, f) for f in _BUNDLED_FONT_FILES]
+    if not all(os.path.exists(p) for p in paths):
+        return False
+    try:
+        scope = CoreText.kCTFontManagerScopeProcess
+        for path in paths:
+            CoreText.CTFontManagerRegisterFontsForURL(NSURL.fileURLWithPath_(path), scope, None)
+    except Exception:  # any Core Text failure -> OS system fonts
+        return False
+    if (NSFont.fontWithName_size_(_BUNDLED_UI, 12.0) is None
+            or NSFont.fontWithName_size_(_BUNDLED_MONO, 12.0) is None):
+        return False
+    _bundled_fonts_registered = True
+    return True
+
+
+# Slant used to synthesize an italic (oblique) for a face that ships no real
+# italic member — 12 degrees, the conventional synthetic-italic angle.
+_OBLIQUE_SHEAR = math.tan(math.radians(12.0))
+
+
+def _oblique(ns: Any) -> Any:
+    """A synthetic oblique of ``ns``: the same face sheared by a fixed slant, for
+    an italic request against a family with no real italic member (the bundled
+    Noto faces ship upright + bold only). The shear is horizontal, so advances
+    are unchanged and grid / proportional layout is unaffected — matching the
+    Windows backend, where DirectWrite obliques a face that lacks an italic.
+    Returns ``ns`` unchanged if the transform can't be built."""
+    size = ns.pointSize()
+    transform = NSAffineTransform.transform()
+    transform.setTransformStruct_((size, 0.0, _OBLIQUE_SHEAR * size, size, 0.0, 0.0))
+    return NSFont.fontWithDescriptor_textTransform_(ns.fontDescriptor(), transform) or ns
 
 # Upper bound on the attributed-string / measured-width caches. Picked well
 # above the run count of any single frame so steady-state UIs never evict, yet
@@ -923,9 +1000,11 @@ class MacOSBackend(Backend):
         (mono/grid) font for a ``monospace`` request, the ``ui_font`` for a
         proportional one — so widgets share one configurable pair of fonts
         instead of each hardcoding the OS system face. When that default itself
-        names no family, it drops to the OS system monospaced / UI font (the base
-        grid font must stay fixed-advance to tile the grid). ``bold``/``italic``
-        force those traits on top of the descriptor.
+        names no family, it drops to the bundled Noto pair (metrics-matched, so
+        text does not clip — the same default the Windows backend uses), or to
+        the OS system monospaced / UI font if the bundled files are unavailable
+        (the base grid font must stay fixed-advance to tile the grid).
+        ``bold``/``italic`` force those traits on top of the descriptor.
 
         A font that names no size inherits the **base font's** size — the same
         size the base grid unit is derived from — so an unsized ``Font()`` (the
@@ -938,6 +1017,12 @@ class MacOSBackend(Backend):
         if family is None:
             default = self._base_font if font.monospace else self._ui_font
             family = default.family if default is not None else None
+        # A default that still names no family drops to the bundled Noto pair
+        # (metrics-matched, so text does not clip) — the same default the Windows
+        # backend uses — or to the OS system fonts below if the bundled files are
+        # unavailable.
+        if family is None and _ensure_bundled_fonts():
+            family = _BUNDLED_MONO if font.monospace else _BUNDLED_UI
         ns = None
         if family:
             ns = NSFont.fontWithName_size_(family, size)
@@ -949,14 +1034,23 @@ class MacOSBackend(Backend):
                 )
             else:
                 ns = NSFont.systemFontOfSize_weight_(size, weight)
-        # Apply traits a named family does not already encode.
-        mask = 0
+        # Apply traits a named family does not already encode. Bold and italic
+        # are applied separately (not as one combined mask): a family may have a
+        # bold face but no bold-italic member — asking for both at once can drop
+        # the bold, so bold is applied first and kept, then italic is layered on.
+        want_italic = italic or font.italic
+        mgr = NSFontManager.sharedFontManager()
         if want_bold:
-            mask |= NSBoldFontMask
-        if italic or font.italic:
-            mask |= NSItalicFontMask
-        if mask:
-            ns = NSFontManager.sharedFontManager().convertFont_toHaveTrait_(ns, mask) or ns
+            ns = mgr.convertFont_toHaveTrait_(ns, NSBoldFontMask) or ns
+        if want_italic:
+            slanted = mgr.convertFont_toHaveTrait_(ns, NSItalicFontMask)
+            if slanted is not None and (mgr.traitsOfFont_(slanted) & NSItalicFontMask):
+                ns = slanted  # a real italic member
+            else:
+                # No real italic (the bundled Noto faces ship upright + bold
+                # only) — synthesize an oblique so italic prose is still slanted,
+                # keeping any bold already applied above.
+                ns = _oblique(ns)
         return ns
 
     def _init_fonts(self) -> None:
