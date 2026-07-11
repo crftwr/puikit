@@ -21,7 +21,10 @@ classifiers = [
 dependencies = ["numpy"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-timeout>=2"]
+# windows-curses backports the _curses C extension CPython omits on Windows, so
+# the curses (TUI) backend and its tests run there; the marker keeps it off
+# macOS/Linux, which already ship _curses.
+dev = ["pytest>=8", "pytest-timeout>=2", "windows-curses>=2.4; sys_platform == 'win32'"]
 macos = ["pyobjc-framework-Cocoa>=10", "pyobjc-framework-Quartz>=10"]
 
 [project.urls]
