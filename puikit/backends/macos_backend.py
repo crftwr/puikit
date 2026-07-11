@@ -61,6 +61,8 @@ from AppKit import (
     NSItalicFontMask,
     NSImage,
     NSKernAttributeName,
+    NSMutableParagraphStyle,
+    NSParagraphStyleAttributeName,
     NSCompositingOperationSourceOver,
     NSGraphicsContext,
     NSRectClip,
@@ -1077,6 +1079,35 @@ class MacOSBackend(Backend):
         # ~16 byte-per-text-run leak that, across redraws, grew RSS without
         # bound (verified in isolation). One shared NSNumber bridges once.
         self._grid_kern = NSNumber.numberWithDouble_(self._base_w - advance)
+        # Pin the line box to the base unit so drawAtPoint places the baseline
+        # deterministically. The text engine's default line height for a font
+        # varies by launch/link context: a bundled .app resolves Noto's oversized
+        # usWin vertical metrics (a ~30pt box for an 18pt font) where a terminal
+        # run uses the ~24pt typographic box, which drops the baseline and spills
+        # descenders past the cell. A fixed line height keeps every row on the
+        # grid regardless of context.
+        para = NSMutableParagraphStyle.alloc().init()
+        para.setMinimumLineHeight_(float(self._base_h))
+        para.setMaximumLineHeight_(float(self._base_h))
+        self._grid_para = para
+        # Per-line-height paragraph styles for the flow (proportional/sized) path,
+        # cached so a redraw does not allocate. Same purpose as _grid_para but the
+        # height tracks each font's own typographic box instead of the base unit.
+        self._flow_para_cache: dict[int, Any] = {}
+
+    def _line_height_para(self, ns_font: Any) -> Any:
+        """A paragraph style pinning the line box to ``ns_font``'s typographic
+        height (ascent + descent + leading), so drawAtPoint places the baseline
+        the same way regardless of the launch context's default line-height
+        metric — see _init_fonts for why that default is unreliable for Noto."""
+        lh = math.ceil(ns_font.ascender() - ns_font.descender() + ns_font.leading())
+        para = self._flow_para_cache.get(lh)
+        if para is None:
+            para = NSMutableParagraphStyle.alloc().init()
+            para.setMinimumLineHeight_(float(lh))
+            para.setMaximumLineHeight_(float(lh))
+            self._flow_para_cache[lh] = para
+        return para
 
     def _resolve_style_font(self, style: Style) -> Any:
         """The NSFont for a Style carrying a per-widget font, cached by request.
@@ -1549,6 +1580,7 @@ class MacOSBackend(Backend):
             NSRectFill(self._unit_rect(x, y, total, 1))
         kerned = dict(attrs)
         kerned[NSKernAttributeName] = self._grid_kern
+        kerned[NSParagraphStyleAttributeName] = self._grid_para
         # id(ns_font) keys the cache by the exact resolved face, covering both
         # the NORMAL/BOLD base faces and any grid-aligned per-Style monospace.
         sig = (id(ns_font), fg, alpha, underline, thick, strike)
@@ -1587,6 +1619,7 @@ class MacOSBackend(Backend):
         attrs = {
             NSFontAttributeName: ns_font,
             NSForegroundColorAttributeName: _ns_color(fg, alpha),
+            NSParagraphStyleAttributeName: self._line_height_para(ns_font),
         }
         if underline:
             attrs[NSUnderlineStyleAttributeName] = (
