@@ -321,6 +321,59 @@ def test_draw_shadow_renders_with_blur_effect():
         backend.close()
 
 
+def test_fade_group_renders_through_pushlayer():
+    """A fade transition composites its group through an offscreen layer
+    (ID2D1RenderTarget::PushLayer[40] / PopLayer[41] with
+    D2D1_LAYER_PARAMETERS.opacity) instead of folding the group opacity into
+    every brush — the Direct2D analog of macOS's transparency layer (see
+    docs/animation_compositing.md). This drives the real vtable calls against a
+    live device context: a wrong slot index or struct layout would fault or
+    fail EndDraw here."""
+    backend = WindowsBackend(width=40, height=20, title="puikit-fade-test")
+    backend.open()
+    try:
+        widget = object()
+        backend.animate(widget, {"transition": "fade", "duration_ms": 200})
+        rect = Rect(2, 2, 20, 8)
+        backend.begin_group(widget, rect)
+        backend.draw_box(2, 2, 20, 8, hints={"fill": True}, style=Style(bg=(40, 40, 40)))
+        backend.draw_text(3, 3, "fading")
+        backend.end_group(widget)
+        backend.present()
+        backend._render()  # mid-fade: opens/pops a real transparency layer
+        # The group alpha is applied by the layer, never folded into a brush.
+        assert not hasattr(backend, "_group_alpha_stack")
+    finally:
+        backend.close()
+
+
+def test_layer_params_struct_matches_native_layout():
+    """D2D1_LAYER_PARAMETERS must match d2d1.h's v1.0 struct byte-for-byte
+    (default ctypes alignment, no _pack_): 2 rects/matrix worth of floats plus
+    two pointers, an enum, a float, and an options enum. A silently wrong size
+    would corrupt the PushLayer call at runtime."""
+    import ctypes
+
+    p = native.D2D1_LAYER_PARAMETERS(
+        contentBounds=native.infinite_rect(),
+        geometricMask=None,
+        maskAntialiasMode=native.D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+        maskTransform=native.D2D1_MATRIX_3X2_F.identity(),
+        opacity=0.5,
+        opacityBrush=None,
+        layerOptions=native.D2D1_LAYER_OPTIONS_NONE,
+    )
+    assert p.opacity == pytest.approx(0.5)
+    # contentBounds(4f) + geometricMask(ptr) + maskAntialiasMode(u32) +
+    # maskTransform(6f) + opacity(f) + opacityBrush(ptr) + layerOptions(u32),
+    # padded to 8-byte pointer alignment.
+    ptr = ctypes.sizeof(ctypes.c_void_p)
+    expected = 4 * 4 + ptr + 4 + 6 * 4 + 4 + ptr + 4
+    # Round up to the struct's alignment (pointer-sized) for the trailing pad.
+    expected = (expected + ptr - 1) // ptr * ptr
+    assert ctypes.sizeof(native.D2D1_LAYER_PARAMETERS) == expected
+
+
 def test_resize_rebinds_swapchain_target():
     """WM_SIZE must unbind, ResizeBuffers, and rebind a fresh target bitmap
     (native.swapchain_resize) rather than the old single-call rt_resize."""

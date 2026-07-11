@@ -136,6 +136,36 @@ DWRITE_MEASURING_MODE_NATURAL = 0
 DWRITE_WORD_WRAPPING_NO_WRAP = 1
 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE = 0
 
+D2D1_LAYER_OPTIONS_NONE = 0
+
+
+class D2D1_LAYER_PARAMETERS(ctypes.Structure):
+    """Parameters for ID2D1RenderTarget::PushLayer (the offscreen-compositing
+    layer used for fade transitions — see animation_compositing.md). Field
+    order/types mirror d2d1.h's v1.0 struct exactly; ctypes default alignment
+    (largest member is an 8-byte pointer, no #pragma pack in the header) matches
+    the native layout, so no _pack_."""
+
+    _fields_ = [
+        ("contentBounds", D2D1_RECT_F),        # clip/bounds of the layer
+        ("geometricMask", ctypes.c_void_p),    # ID2D1Geometry* — NULL
+        ("maskAntialiasMode", ctypes.c_uint32),
+        ("maskTransform", D2D1_MATRIX_3X2_F),
+        ("opacity", ctypes.c_float),           # the group alpha g
+        ("opacityBrush", ctypes.c_void_p),     # ID2D1Brush* — NULL
+        ("layerOptions", ctypes.c_uint32),
+    ]
+
+
+def infinite_rect() -> D2D1_RECT_F:
+    """D2D1::InfiniteRect() — an unbounded layer. Prefer a real widget rect
+    where possible: an unbounded layer forces D2D to allocate a full-target
+    intermediate."""
+    import sys
+
+    f = sys.float_info.max
+    return D2D1_RECT_F(-f, -f, f, f)
+
 
 # --- generic COM vtable calling ----------------------------------------------
 
@@ -225,6 +255,12 @@ _IDX_RT_DRAW_TEXT = 27
 _IDX_RT_SET_TRANSFORM = 30
 _IDX_RT_SET_ANTIALIAS_MODE = 32
 _IDX_RT_SET_TEXT_ANTIALIAS_MODE = 34
+# Inherited ID2D1RenderTarget::PushLayer/PopLayer. NOTE: _render_target is an
+# ID2D1DeviceContext, which appends its own PushLayer(D2D1_LAYER_PARAMETERS1*)
+# overload at a higher slot; index 40 is the v1.0 PushLayer taking the plain
+# D2D1_LAYER_PARAMETERS struct below (see rt_push_layer / animation_compositing.md).
+_IDX_RT_PUSH_LAYER = 40
+_IDX_RT_POP_LAYER = 41
 _IDX_RT_PUSH_AXIS_ALIGNED_CLIP = 45
 _IDX_RT_POP_AXIS_ALIGNED_CLIP = 46
 _IDX_RT_CLEAR = 47
@@ -572,6 +608,25 @@ def rt_push_axis_aligned_clip(rt: ComPtr, rect: D2D1_RECT_F) -> None:
 
 def rt_pop_axis_aligned_clip(rt: ComPtr) -> None:
     rt.call(_IDX_RT_POP_AXIS_ALIGNED_CLIP, None, [])
+
+
+def rt_push_layer(rt: ComPtr, params: D2D1_LAYER_PARAMETERS, layer: "ComPtr | None" = None) -> None:
+    """Begin an offscreen-compositing layer: subsequent draws render into an
+    implicit offscreen surface which PopLayer composites back at
+    params.opacity — the Direct2D analog of CGContextBeginTransparencyLayer +
+    CGContextSetAlpha. In D2D 1.1 a NULL layer lets the device context manage
+    the layer resource (no CreateLayer needed)."""
+    rt.call(
+        _IDX_RT_PUSH_LAYER,
+        None,
+        [ctypes.POINTER(D2D1_LAYER_PARAMETERS), ctypes.c_void_p],
+        ctypes.byref(params),
+        (layer.addr if layer is not None else None),
+    )
+
+
+def rt_pop_layer(rt: ComPtr) -> None:
+    rt.call(_IDX_RT_POP_LAYER, None, [])
 
 
 def dwrite_create_text_format(

@@ -313,7 +313,6 @@ class WindowsBackend(Backend):
         self._anim_timer_running = False
         self._tick_callbacks: list[Any] = []
         self._transform_stack: list[Any] = [native.D2D1_MATRIX_3X2_F.identity()]
-        self._group_alpha_stack: list[float] = [1.0]
         self._input_caret: tuple[float, float] = (0.0, 0.0)
         # IME mode-gating (see _win32_ime.py): the window's default input
         # context, detached in command mode and re-attached in text mode.
@@ -816,8 +815,11 @@ class WindowsBackend(Backend):
         """SetColor on the one reusable solid-color brush — D2D resource churn
         from creating a brush per draw call is avoidable, so every fill/stroke/
         text draw shares this one brush. Folds in the color's own alpha channel
-        (an RGBA 4-tuple), an explicit ``alpha`` multiplier, and the current
-        group's fade-animation opacity (see _begin_group_render)."""
+        (an RGBA 4-tuple) and an explicit ``alpha`` multiplier. Group fade
+        opacity is NOT folded here: a fading group opens a PushLayer whose
+        opacity attenuates the whole finished group once at PopLayer time (see
+        _begin_group_render); multiplying it into every brush too would apply it
+        twice."""
         if color is None:
             color = _DEFAULT_FG
         if len(color) == 4:
@@ -825,7 +827,6 @@ class WindowsBackend(Backend):
             alpha = alpha * (a / 255.0)
         else:
             r, g, b = color
-        alpha *= self._group_alpha_stack[-1]
         native.brush_set_color(self._brush, native.D2D1_COLOR_F(r / 255, g / 255, b / 255, alpha))
 
     def _render(self) -> None:
@@ -838,7 +839,6 @@ class WindowsBackend(Backend):
         native.rt_clear(rt, bg)
         now = time.monotonic()
         self._transform_stack = [native.D2D1_MATRIX_3X2_F.identity()]
-        self._group_alpha_stack = [1.0]
         group_stack: list[tuple] = []
         for command in self._front:
             kind = command[0]
@@ -1177,13 +1177,36 @@ class WindowsBackend(Backend):
         transitions this drives, see CLAUDE.md for the macOS equivalent."""
         animation = self._animations.get(key)
         self._transform_stack.append(self._transform_stack[-1])
-        self._group_alpha_stack.append(self._group_alpha_stack[-1])
         if animation is None:
-            return (None, rect, False)
+            return (None, rect, None)
         eased = animation.eased(now)
         if animation.kind == "fade":
-            self._group_alpha_stack[-1] *= eased
-            return (animation, rect, False)
+            # Offscreen compositing (the Direct2D analog of macOS's
+            # CGContextBeginTransparencyLayer + CGContextSetAlpha): render the
+            # whole group into an implicit offscreen layer and composite it back
+            # at the group opacity `eased` *once*, on PopLayer. This resolves
+            # overlapping/translucent content (panel fill under text, drop
+            # shadow) before opacity is applied, so nothing double-attenuates —
+            # unlike folding `eased` into every brush. Images inside the group
+            # fade for free too, since they draw into the layer. See
+            # docs/animation_compositing.md.
+            params = native.D2D1_LAYER_PARAMETERS(
+                # Bound the layer to the widget rect (in the current, untransformed
+                # space — fade sets no transform) rather than InfiniteRect, which
+                # would force a full-target intermediate allocation.
+                contentBounds=(
+                    self._unit_rect(rect.x, rect.y, rect.w, rect.h)
+                    if rect is not None else native.infinite_rect()
+                ),
+                geometricMask=None,
+                maskAntialiasMode=native.D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                maskTransform=native.D2D1_MATRIX_3X2_F.identity(),
+                opacity=eased,
+                opacityBrush=None,
+                layerOptions=native.D2D1_LAYER_OPTIONS_NONE,
+            )
+            native.rt_push_layer(self._render_target, params, None)  # NULL layer: DC-managed
+            return (animation, rect, "layer")
         if animation.kind == "slide" and rect is not None:
             # Position: linear (constant velocity), matching the Panel's geometry
             # transitions, so a slide reads the same on GUI and TUI. Slide in
@@ -1196,7 +1219,7 @@ class WindowsBackend(Backend):
             m = native.D2D1_MATRIX_3X2_F.translation(dx, dy)
             self._transform_stack[-1] = m
             native.rt_set_transform(self._render_target, m)
-            return (animation, rect, True)
+            return (animation, rect, "transform")
         if animation.kind == "scale" and rect is not None:
             from_scale = animation.hints.get("from_scale", 0.7)
             scale = from_scale + (1.0 - from_scale) * eased
@@ -1205,15 +1228,17 @@ class WindowsBackend(Backend):
             m = native.D2D1_MATRIX_3X2_F.scale_about(scale, scale, cx, cy)
             self._transform_stack[-1] = m
             native.rt_set_transform(self._render_target, m)
-            return (animation, rect, True)
+            return (animation, rect, "transform")
         # "highlight" draws its color overlay at group end; unknown kinds no-op.
-        return (animation, rect, False)
+        return (animation, rect, None)
 
     def _end_group_render(self, state: tuple, now: float) -> None:
-        animation, rect, pushed_transform = state
-        self._group_alpha_stack.pop()
+        animation, rect, marker = state  # marker ∈ {None, "transform", "layer"}
         self._transform_stack.pop()
-        if pushed_transform:
+        if marker == "layer":
+            # Composite the fade group's offscreen layer back at its opacity.
+            native.rt_pop_layer(self._render_target)
+        elif marker == "transform":
             native.rt_set_transform(self._render_target, self._transform_stack[-1])
         if animation is not None and animation.kind == "highlight" and rect is not None:
             strength = animation.hints.get("strength", 0.45)
