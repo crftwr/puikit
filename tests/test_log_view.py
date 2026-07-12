@@ -269,3 +269,40 @@ def test_logview_keyboard_scrolls_viewport(backend):
     panel.dispatch_event(Event(type=EventType.KEY, key="home"))
     panel.render()
     assert backend.snapshot()[0].startswith("line0")
+
+
+def test_logview_padding_arithmetic():
+    # padding_units applies everywhere; padding_px is a sub-cell fraction of the
+    # base size, expressed only on a pixel/vector backend and collapsing on a grid.
+    log = LogView(padding_px=4, padding_units=1)
+    assert log._padding(True, 8, 16) == (1.5, 1.25)   # 1 cell + 4/8, 1 cell + 4/16
+    assert log._padding(False, 8, 16) == (1.0, 1.0)   # grid: only the whole cells
+    assert LogView(padding_px=4)._padding(False, 8, 16) == (0.0, 0.0)
+
+
+def test_logview_padding_insets_rows_and_shrinks_viewport(backend):
+    # A 1-cell pad on every side: rows shift one column right and one row down,
+    # and the visible viewport shrinks by the top+bottom pad.
+    panel = Panel(backend)
+    log = LogView([f"line{i}" for i in range(20)], auto_scroll=False, padding_units=1)
+    panel.add(log, x=0, y=0, w=20, h=5)
+    panel.render()
+    snap = backend.snapshot()
+    assert snap[0].strip() == ""            # top pad row
+    assert snap[1].startswith(" line0")     # inset one column, first content row
+    assert snap[3].startswith(" line2")     # view_h shrank 5 -> 3, so lines 0..2
+    assert snap[4].strip() == ""            # bottom pad row
+    assert log._view_h == 3.0
+
+
+def test_logview_padding_maps_clicks_through_the_inset(backend):
+    # A pointer hit undoes the same inset the rows were drawn with, so a click on
+    # a padded row selects that row, not the one a raw y would have hit.
+    panel = Panel(backend)
+    log = LogView([f"line{i}" for i in range(20)], auto_scroll=False, padding_units=1)
+    panel.add(log, x=0, y=0, w=20, h=5)
+    panel.render()
+    # Screen row 2 with a 1-row top pad maps to content row 1.
+    assert log._pos_at(2, 2)[0] == 1
+    # Column undo: screen col 1 is the row's first glyph (col 0) after the pad.
+    assert log._pos_at(1, 1) == (0, 0)

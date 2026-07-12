@@ -241,6 +241,9 @@ class LogView(Widget):
         selectable: bool = True,
         auto_scroll: bool = True,
         max_lines: int | None = None,
+        *,
+        padding_px: float = 0.0,
+        padding_units: float = 0.0,
     ):
         # Each stored line is (text, style); a bare string takes the view's
         # default style. The style is for color/attributes, not a taller font:
@@ -261,6 +264,13 @@ class LogView(Widget):
         # lines are dropped. Trimming is batched (see _trim) so streaming stays
         # amortized O(1) rather than O(n) per append.
         self.max_lines = max_lines
+        # Content inset drawn on every side, so the log breathes rather than
+        # butting the surrounding frame. ``padding_px`` is device pixels (a
+        # sub-cell inset on a vector backend, collapsing to nothing on a grid);
+        # ``padding_units`` is whole base units and applies everywhere. Mirrors
+        # ``Label``'s padding / the layout's margin_px / margin_units split.
+        self.padding_px = padding_px
+        self.padding_units = padding_units
 
         self.lines: list[LogLine] = []
         if lines is not None:
@@ -284,6 +294,10 @@ class LogView(Widget):
         self._pitch = 1.0
         self._view_h = 1.0
         self._content_h = 0.0
+        # Resolved padding (base units) from the last draw, so pointer hit-testing
+        # subtracts the same inset the rows were drawn with.
+        self._pad_x = 0.0
+        self._pad_y = 0.0
 
         # Selection endpoints in global-display-row coordinates.
         self._sel_anchor: Pos | None = None
@@ -412,14 +426,32 @@ class LogView(Widget):
 
     # --- drawing -------------------------------------------------------------
 
+    def _padding(self, pixel: bool, base_w: float, base_h: float) -> tuple[float, float]:
+        """The (x, y) content inset in base units: ``padding_units`` whole cells
+        everywhere, plus ``padding_px`` as a sub-unit fraction on a pixel backend
+        (it would cost whole cells on a grid, so it collapses there). Mirrors
+        ``Label._padding`` / the layout's margin_px / margin_units split."""
+        ox = oy = float(self.padding_units)
+        if pixel and self.padding_px:
+            ox += self.padding_px / base_w if base_w else 0.0
+            oy += self.padding_px / base_h if base_h else 0.0
+        return ox, oy
+
     def draw(self, ctx: DrawContext) -> None:
         self._panel = ctx.panel
+        bw, bh = ctx.base_size
+        pad_x, pad_y = self._padding(ctx.vector_shapes, bw, bh)
+        self._pad_x, self._pad_y = pad_x, pad_y
         pitch = ctx.line_height(self.style)
-        view_h = ctx.size_units[1]
+        # The content area is inset by the padding on every side.
+        view_h = max(0.0, ctx.size_units[1] - 2 * pad_y)
         self._pitch = pitch
         self._view_h = view_h
+        # Content width in whole columns (the log is monospace/column-based),
+        # inset by the horizontal padding on both sides.
+        avail = max(0, int(ctx.size_units[0] - 2 * pad_x))
 
-        # The wrap width must depend only on ctx.width, never on whether the
+        # The wrap width must depend only on ``avail``, never on whether the
         # scrollbar is showing: a width that flips with the bar's visibility
         # would rebuild the whole wrap cache the moment the bar appears (and
         # again if it disappears). When wrapping, reserve the gutter column
@@ -428,18 +460,18 @@ class LogView(Widget):
         # far cheaper than re-wrapping the buffer. Unwrapped rows carry no
         # cached layout, so their gutter can stay dynamic.
         if self.wrap:
-            wrap_w = max(0, ctx.width - 1)
+            wrap_w = max(0, avail - 1)
             self._ensure_layout(wrap_w, ctx)
         else:
-            self._ensure_layout(ctx.width, ctx)
+            self._ensure_layout(avail, ctx)
 
         content_h = self._total_rows * pitch
         self._content_h = content_h
         show_bar = content_h > view_h
         if self.wrap:
-            inner_w = ctx.width - 1 if show_bar else ctx.width
+            inner_w = avail - 1 if show_bar else avail
         else:
-            inner_w = ctx.width - (1 if show_bar else 0)
+            inner_w = avail - (1 if show_bar else 0)
 
         if self._follow:
             self.offset = max(0.0, content_h - view_h)
@@ -456,24 +488,25 @@ class LogView(Widget):
                 break
             if index >= 0:
                 text, style = self._row_at(index)
-                self._draw_row(ctx, index, text, y, style, inner_w, theme)
+                # Rows are drawn inset by the padding (x via _draw_row's self._pad_x).
+                self._draw_row(ctx, index, text, y + pad_y, style, inner_w, theme)
             row += 1
 
         if show_bar:
             ratio = view_h / content_h
             denom = content_h - view_h
             pos = self.offset / denom if denom > 0 else 0.0
-            # Fractional width keeps the bar flush to the right edge at pixel
-            # granularity; ctx.width is truncated to whole base units.
+            # Flush to the right edge (fractional so the bar stays crisp at pixel
+            # granularity), top inset by the vertical padding like the rows.
             ctx.draw_scrollbar(
-                ctx.size_units[0] - 1, 0, view_h, max(0.0, min(1.0, pos)), ratio, self.style
+                ctx.size_units[0] - 1, pad_y, view_h, max(0.0, min(1.0, pos)), ratio, self.style
             )
 
     def _draw_row(
         self, ctx: DrawContext, index: int, text: str, y: float, style: Style, width: int, theme
     ) -> None:
         clipped = truncate_to_width(text, width)
-        ctx.draw_text(0, y, clipped, style)
+        ctx.draw_text(self._pad_x, y, clipped, style)
         if not self.selectable:
             return
         span = self._row_highlight_span(index)
@@ -484,7 +517,7 @@ class LogView(Widget):
         end = min(end, len(glyphs))
         if start >= end:
             return
-        x = ctx.measure_text("".join(glyphs[:start]), style)
+        x = self._pad_x + ctx.measure_text("".join(glyphs[:start]), style)
         seg = "".join(glyphs[start:end])
         # The highlight reads as active only while the view holds focus: a
         # legible blue when focused, a muted neutral when focus is elsewhere.
@@ -546,10 +579,11 @@ class LogView(Widget):
     def _pos_at(self, x: float, y: float) -> Pos:
         if self._total_rows == 0:
             return (0, 0)
-        row = int((self.offset + max(0.0, y)) / self._pitch)
+        # Undo the draw-time padding so a click maps to the row/column drawn there.
+        row = int((self.offset + max(0.0, y - self._pad_y)) / self._pitch)
         row = max(0, min(row, self._total_rows - 1))
         glyphs = glyph_runs(self._row_at(row)[0])
-        return (row, _col_to_index(glyphs, int(max(0.0, x))))
+        return (row, _col_to_index(glyphs, int(max(0.0, x - self._pad_x))))
 
     def _word_span(self, pos: Pos) -> tuple[Pos, Pos]:
         """The (start, end) positions of the word under ``pos`` — the maximal
