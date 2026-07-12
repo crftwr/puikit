@@ -140,7 +140,7 @@ def test_splitter_drag_moves_the_divider(backend):
     # Handle sits near x=14 (fraction 0.5 of 29 avail). Grab and drag it right.
     panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=14, y=2, button="left"))
     panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=22, y=2, button="left"))
-    assert split._dragging is True
+    assert split._drag.dragging is True
     assert split.fraction > 0.6
 
 
@@ -212,10 +212,11 @@ def test_splitter_hover_color_waits_for_dwell_delay(monkeypatch):
     panel.render()
 
     # A clock we advance by hand, so the dwell is deterministic (no sleeping).
-    from puikit.widgets import splitter as splitter_mod
+    # The dwell timing lives in the shared DragBar the Splitter delegates to.
+    from puikit.widgets import dragbar as dragbar_mod
 
     clock = {"t": 100.0}
-    monkeypatch.setattr(splitter_mod.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(dragbar_mod.time, "monotonic", lambda: clock["t"])
 
     h = split._handle_rect
     hx, hy = int(h.x), int(h.y + h.h / 2)
@@ -227,7 +228,7 @@ def test_splitter_hover_color_waits_for_dwell_delay(monkeypatch):
     assert backend.style_at(hx, hy).bg == panel.theme.control_border
 
     # Still short of the delay: still the resting color.
-    clock["t"] += splitter_mod._HOVER_DELAY - 0.05
+    clock["t"] += dragbar_mod._HOVER_DELAY - 0.05
     panel.render()
     assert backend.style_at(hx, hy).bg == panel.theme.control_border
 
@@ -249,17 +250,120 @@ def test_splitter_drag_lights_immediately_without_dwell(monkeypatch):
     panel.add(split, x=0, y=0, w=30, h=6)
     panel.render()
 
-    from puikit.widgets import splitter as splitter_mod
+    from puikit.widgets import dragbar as dragbar_mod
 
-    monkeypatch.setattr(splitter_mod.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(dragbar_mod.time, "monotonic", lambda: 100.0)
 
     h = split._handle_rect
     # A press that starts a drag lights the divider on the same frame — a grab is
     # deliberate, so it never waits out the hover dwell.
     panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=h.x + h.w / 2, y=2.0))
     panel.render()
-    assert split._dragging
+    assert split._drag.dragging
     assert backend.style_at(int(h.x), int(h.y + h.h / 2)).bg == panel.theme.accent
+
+
+def test_splitter_grab_first_widens_the_upper_grab_zone():
+    # A flat vertical splitter where an adjacent bar above the boundary reads as
+    # the divider: grab_first makes that bar's whole height grabbable, while the
+    # lower side keeps the default margin.
+    backend = MemoryBackend(width=40, height=16, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+    left, right = Checkbox("top"), Checkbox("bottom")
+    split = Splitter(
+        left, right, orientation="vertical", fraction=0.5,
+        min_first=2, min_second=2, flat=True, grab_first=3.0,
+    )
+    panel.add(split, x=0, y=0, w=30, h=16)
+    panel.render()
+    boundary = split._handle_rect.y  # y=8 (flat: zero-thickness handle)
+
+    # 3 cells above the boundary is inside grab_first (default margin is only 1).
+    assert split._near_handle(15.0, boundary - 3)
+    # 3 cells below is not: the second side keeps the default hairline margin.
+    assert not split._near_handle(15.0, boundary + 3)
+
+    # Pressing up in the widened zone starts a drag WITHOUT snapping the boundary
+    # up to the pressed point (grab-offset preservation) — the fraction holds.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=15.0, y=boundary - 3))
+    assert split._drag.dragging
+    assert split.fraction == pytest.approx(0.5)
+
+    # Dragging then tracks the pointer's motion: moving down grows the first pane.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=15.0, y=boundary + 1))
+    assert split.fraction > 0.5
+
+
+class _FakeCtx:
+    """A minimal DrawContext stand-in for unit-testing DragBar.draw_highlight."""
+
+    def __init__(self, transparency):
+        self.transparency = transparency
+        self.animated = False
+        self.panel = None
+        self.fills = []
+
+    def fill_rect(self, x, y, w, h, style):
+        self.fills.append((x, y, w, h, style))
+
+
+def test_dragbar_drag_preserves_the_grab_offset():
+    from puikit.widgets import DragBar
+
+    bar = DragBar()
+    assert not bar.dragging
+    # Grab 3 units above a divider at 10 (offset -3): the divider does not jump to
+    # the pressed point, and then tracks the pointer's motion one-for-one.
+    bar.begin(7.0, 10.0)
+    assert bar.dragging
+    assert bar.position_for(7.0) == 10.0   # no jump on grab
+    assert bar.position_for(12.0) == 15.0  # pointer +5 -> divider +5
+    bar.end()
+    assert not bar.dragging
+
+
+def test_dragbar_highlight_only_composites_with_transparency():
+    from puikit.widgets import DragBar
+    from puikit.widgets import dragbar as dragbar_mod
+
+    bar = DragBar()
+    # Transparency present + active: a translucent wash lands over the band.
+    gui = _FakeCtx(transparency=True)
+    bar.draw_highlight(gui, 0, 7, 30, 1, active=True)
+    assert len(gui.fills) == 1 and gui.fills[0][4].bg == dragbar_mod._WASH
+    # Inactive: nothing to draw.
+    gui_idle = _FakeCtx(transparency=True)
+    bar.draw_highlight(gui_idle, 0, 7, 30, 1, active=False)
+    assert not gui_idle.fills
+    # No transparency (a character grid): a fill would erase the band's text, so
+    # the brighten is skipped and the host's own feedback stands in.
+    tui = _FakeCtx(transparency=False)
+    bar.draw_highlight(tui, 0, 7, 30, 1, active=True)
+    assert not tui.fills
+
+
+def test_splitter_brightens_the_footer_band_while_active():
+    # A GUI profile (transparency on), so the band wash composites over the bar.
+    backend = MemoryBackend(width=40, height=16, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    left, right = Checkbox("top"), Checkbox("bottom")
+    split = Splitter(
+        left, right, orientation="vertical", fraction=0.5,
+        min_first=2, min_second=2, flat=True, grab_first=1.0,
+    )
+    panel.add(split, x=0, y=0, w=30, h=16)
+    panel.render()
+    from puikit.widgets import dragbar as dragbar_mod
+
+    boundary = split._handle_rect.y  # 8.0
+    band_y = int(boundary - 1)       # the footer row, one unit above the boundary
+    # At rest the band is not washed.
+    assert backend.style_at(3, band_y).bg != dragbar_mod._WASH
+
+    # Grab the footer band -> dragging -> the whole 1-unit band brightens.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=3.0, y=boundary - 0.5))
+    panel.render()
+    assert backend.style_at(3, band_y).bg == dragbar_mod._WASH
 
 
 def _cursor_backend():

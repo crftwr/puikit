@@ -19,7 +19,6 @@ container like ``Container``, not a leaf that swallows input.
 from __future__ import annotations
 
 import math
-import time
 from typing import Any
 
 from ..backend import Style
@@ -28,6 +27,7 @@ from ..focus import FocusContainer, focus_on_click
 from ..panel import DrawContext, Rect
 from ..theme import DEFAULT_THEME
 from .base import Widget
+from .dragbar import DragBar
 
 # Handle thickness. A character grid cannot draw or hit a sub-unit line, so the
 # handle is a whole grabbable cell there; a vector backend draws a sharp hairline
@@ -42,10 +42,6 @@ _HANDLE_HOVER_PX = 3.0  # vector: thicker accent line while hovered / dragging
 # unit (~8px) that would feel far too wide for a hairline.
 _GRAB_UNITS = 1.0     # grid: one cell each side
 _GRAB_PX = 2.0        # vector: device pixels each side (symmetric about the line)
-# Seconds the pointer must dwell in the grab zone before the divider lights to
-# its accent color. A short settle keeps a pointer merely sweeping across the
-# divider from flashing it; a drag lights it immediately (no dwell).
-_HOVER_DELAY = 0.3
 
 
 def _clamp01(v: float) -> float:
@@ -64,6 +60,8 @@ class Splitter(FocusContainer, Widget):
         min_first: float = 4.0,
         min_second: float = 4.0,
         flat: bool = False,
+        grab_first: float = 0.0,
+        grab_second: float = 0.0,
     ):
         self.first = first
         self.second = second
@@ -75,6 +73,14 @@ class Splitter(FocusContainer, Widget):
         # pane footer) reads as the divider. The drag still works through the
         # grab margin straddling the boundary. The vector hairline is unchanged.
         self._flat = flat
+        # Extra grab/hover reach (base units) on the first / second side, beyond
+        # the default hairline margin. When an adjacent bar *is* the visible
+        # divider (a flat splitter with a pane footer above it), pass that bar's
+        # thickness here so its whole height is grabbable — not just the hairline
+        # at its edge. Combined with the default margin via max, so 0.0 leaves the
+        # symmetric hairline behavior untouched.
+        self._grab_first = grab_first
+        self._grab_second = grab_second
         self.fraction = fraction
         self.min_first = min_first
         self.min_second = min_second
@@ -88,12 +94,10 @@ class Splitter(FocusContainer, Widget):
         self._handle = _HANDLE_UNITS  # thickness in base units; set per draw
         self._grab = _GRAB_UNITS      # grab margin in base units; set per draw
         self._snap = False            # whole-unit backend? set per draw
-        self._dragging = False
-        # Hover-dwell state: when the pointer entered the grab zone, the Panel to
-        # wake across the delay, and whether a wake-up tick is registered.
-        self._hover_start: float | None = None
-        self._panel: Any | None = None
-        self._ticking = False
+        # Shared drag/hover mechanics: offset-preserving drag (so grabbing a thick
+        # ``grab_*`` band doesn't snap the boundary under the pointer), hover dwell,
+        # and the neutral band brighten. See ``DragBar``.
+        self._drag = DragBar()
 
     @staticmethod
     def _is_focusable(child: Any) -> bool:
@@ -158,48 +162,46 @@ class Splitter(FocusContainer, Widget):
         # handle) drags left/right; a vertical one drags up/down. Requested
         # while hovering the grab zone or mid-drag (so the cursor holds even if
         # the pointer slips off the thin line). The cursor is immediate on hover
-        # — only the *color* change dwells (see _hover_active). Issued after the
-        # panes draw, so it wins over a child's cursor only inside the grab zone.
-        if hovered or self._dragging:
+        # — only the *feedback* change dwells (see DragBar.hover_active). Issued
+        # after the panes draw, so it wins over a child's cursor only inside the
+        # grab zone.
+        if hovered or self._drag.dragging:
             ctx.set_cursor("col-resize" if self._horizontal else "row-resize")
-        active = self._dragging or self._hover_active(ctx, hovered)
-        self._draw_handle(ctx, handle, active)
+        active = self._drag.dragging or self._drag.hover_active(ctx, hovered)
+        if self._has_band():
+            # An adjacent bar reads as the divider: the active feedback is a
+            # neutral brighten over that whole band, and the hairline stays at its
+            # resting color (drawn active=False). Both overlay the panes.
+            self._draw_handle(ctx, handle, active=False)
+            self._brighten_bands(ctx, handle, active)
+        else:
+            # A plain splitter: the hairline itself thickens to accent when active.
+            self._draw_handle(ctx, handle, active)
 
-    def _hover_active(self, ctx: DrawContext, hovered: bool) -> bool:
-        """Whether the divider should show its accent color for hover. Unlike the
-        cursor, the color lags the pointer entering the grab zone by
-        ``_HOVER_DELAY`` so a pointer merely sweeping across does not flash it;
-        it returns True only once the pointer has *dwelt* in the zone that long.
-        (A drag lights the divider immediately — the caller ORs in ``_dragging``.)"""
-        if not hovered:
-            self._hover_start = None
-            return False
-        self._panel = ctx.panel
-        now = time.monotonic()
-        if self._hover_start is None:
-            self._hover_start = now
-        # Wake the Panel across the delay so the accent appears even if the
-        # pointer then holds still (no further events would trigger a redraw). On
-        # a still backend nothing registers and the accent instead lands on the
-        # next event after the delay — a graceful degradation.
-        if not self._ticking and ctx.animated and ctx.panel is not None:
-            self._ticking = ctx.panel.request_animation_ticks(self._hover_tick)
-        return (now - self._hover_start) >= _HOVER_DELAY
+    def _has_band(self) -> bool:
+        """True when an extended grab margin makes an adjacent bar the divider, so
+        hover feedback is a band brighten rather than an accent hairline."""
+        return self._grab_first > 0.0 or self._grab_second > 0.0
 
-    def _hover_tick(self) -> bool:
-        # Drives redraws only until the dwell delay elapses (then the accent is
-        # up and holds until the pointer leaves, which its own move event
-        # redraws) or the pointer has already left. Self-terminating, so unlike a
-        # spinner it never pins the widget re-rendering.
-        if self._panel is None or self._hover_start is None:
-            self._ticking = False
-            return False
-        elapsed = time.monotonic() - self._hover_start
-        self._panel.render()
-        if elapsed >= _HOVER_DELAY:
-            self._ticking = False
-            return False
-        return True
+    def _brighten_bands(self, ctx: DrawContext, handle: Rect, active: bool) -> None:
+        """Brighten the extended grab band(s) — the visible bar(s) the divider
+        rides on — while active. Each ``grab_*`` is the bar's thickness (the host
+        sets it so), so the wash covers exactly the bar and no more."""
+        wu, hu = self._size
+        if self._grab_first > 0.0:
+            if self._horizontal:
+                self._drag.draw_highlight(
+                    ctx, handle.x - self._grab_first, 0, self._grab_first, hu, active)
+            else:
+                self._drag.draw_highlight(
+                    ctx, 0, handle.y - self._grab_first, wu, self._grab_first, active)
+        if self._grab_second > 0.0:
+            if self._horizontal:
+                self._drag.draw_highlight(
+                    ctx, handle.x + handle.w, 0, self._grab_second, hu, active)
+            else:
+                self._drag.draw_highlight(
+                    ctx, 0, handle.y + handle.h, wu, self._grab_second, active)
 
     def _handle_thickness(self, ctx: DrawContext) -> float:
         """Handle thickness in base units: a whole cell on a character grid (a
@@ -277,18 +279,19 @@ class Splitter(FocusContainer, Widget):
     def _handle_mouse(self, event: Event) -> bool:
         x, y = event.x, event.y
         on_handle = self._near_handle(x, y)
-        if event.type is EventType.MOUSE_DRAG and (self._dragging or on_handle):
-            self._dragging = True
+        if event.type is EventType.MOUSE_DRAG and (self._drag.dragging or on_handle):
+            if not self._drag.dragging:
+                self._begin_drag(x, y)
             self._drag_to(x, y)
             return True
         if event.type is EventType.MOUSE_DOWN:
             if on_handle:
-                self._dragging = True
+                self._begin_drag(x, y)
                 self._drag_to(x, y)
                 return True
-            self._dragging = False  # a press elsewhere ends any drag
+            self._drag.end()  # a press elsewhere ends any drag
         if event.type is EventType.MOUSE_UP:
-            self._dragging = False
+            self._drag.end()
         for child, rect in (
             (self.first, self._first_rect), (self.second, self._second_rect)
         ):
@@ -300,22 +303,42 @@ class Splitter(FocusContainer, Widget):
         return False
 
     def _near_handle(self, x: float | None, y: float | None) -> bool:
-        # A symmetric grab margin on each side of the handle so it is easy to grab
-        # even where the visible line is a hairline (vector) or a single cell.
+        # A grab margin on each side of the handle so it is easy to grab even
+        # where the visible line is a hairline (vector) or a single cell. The
+        # default margin is symmetric; an extended ``grab_*`` widens one side to
+        # cover an adjacent bar that reads as the divider (never below default).
         if x is None or y is None:
             return False
         h = self._handle_rect
-        g = self._grab
+        g1 = max(self._grab, self._grab_first)
+        g2 = max(self._grab, self._grab_second)
         if self._horizontal:
-            return h.x - g <= x <= h.x + h.w + g
-        return h.y - g <= y <= h.y + h.h + g
+            return h.x - g1 <= x <= h.x + h.w + g2
+        return h.y - g1 <= y <= h.y + h.h + g2
+
+    def _begin_drag(self, x: float | None, y: float | None) -> None:
+        """Arm the drag, handing the DragBar the pointer and the current divider
+        position so it preserves the grab offset (no jump when a thick band is
+        grabbed off the boundary). ``divider`` is the inverse of ``_drag_to``'s
+        map, so the fraction is unchanged on grab."""
+        wu, hu = self._size
+        hw = self._handle
+        if self._horizontal:
+            avail = max(1e-6, wu - hw)
+            pos = x
+        else:
+            avail = max(1e-6, hu - hw)
+            pos = y
+        self._drag.begin(pos, self.fraction * avail + hw / 2)
 
     def _drag_to(self, x: float | None, y: float | None) -> None:
         wu, hu = self._size
         hw = self._handle
         if self._horizontal and x is not None:
             avail = max(1e-6, wu - hw)
-            self.fraction = _clamp01((x - hw / 2) / avail)
+            pos = self._drag.position_for(x)
+            self.fraction = _clamp01((pos - hw / 2) / avail)
         elif not self._horizontal and y is not None:
             avail = max(1e-6, hu - hw)
-            self.fraction = _clamp01((y - hw / 2) / avail)
+            pos = self._drag.position_for(y)
+            self.fraction = _clamp01((pos - hw / 2) / avail)

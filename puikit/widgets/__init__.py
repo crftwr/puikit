@@ -6,6 +6,7 @@ from .button import Button
 from .checkbox import Checkbox
 from .combo_box import ComboBox
 from .container import Container
+from .dragbar import DragBar
 from .drawer import Drawer, show_drawer
 from .dropdown import DropDown
 from .image import ImageView
@@ -32,6 +33,7 @@ __all__ = [
     "Checkbox",
     "ComboBox",
     "Container",
+    "DragBar",
     "Drawer",
     "DropDown",
     "ImageView",

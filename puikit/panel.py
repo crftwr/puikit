@@ -300,6 +300,16 @@ class DrawContext:
         return self._caps.supports("native_menus")
 
     @property
+    def transparency(self) -> bool:
+        """True when the backend composites per-pixel, so a translucent RGBA fill
+        lays *over* what is already drawn instead of replacing it. A widget reads
+        it to decide whether a translucent overlay (a hover wash, a scrim) is
+        safe: on a character grid a fill writes opaque cells and would erase the
+        text underneath, so such ornamentation is dropped there. The capability
+        is resolved here, not by the widget."""
+        return self._caps.supports("transparency")
+
+    @property
     def focused(self) -> bool:
         """True when this widget holds the keyboard focus. Interactive widgets
         use it to draw a focus cue (a reversed marker, a cursor); the value is
