@@ -56,6 +56,13 @@ def test_roll_field():
     assert PostEffect().roll == 0.0
     assert PostEffect(roll=5).roll == 1.0       # clamped
     assert not PostEffect(roll=0.3).is_noop     # roll alone is a real effect
+
+
+def test_pixelgrid_field():
+    assert PostEffect().pixelgrid == 0.0
+    assert PostEffect(pixelgrid=5).pixelgrid == 1.0    # clamped
+    assert PostEffect(pixelgrid=-1).pixelgrid == 0.0   # clamped
+    assert not PostEffect(pixelgrid=0.2).is_noop       # the LCD grid alone is a real effect
     assert CRT.roll > 0                          # preset rolls by default
 
 
@@ -145,6 +152,41 @@ def test_macos_scanlines_darken_alternating_rows():
     vals = [lum(y) for y in range(h)]
     assert min(vals) < 0.7, "expected dark scanline rows"
     assert max(vals) > 0.9, "expected light rows between scanlines"
+
+
+def test_macos_pixel_grid_darkens_both_axes():
+    """The dot-matrix pixelgrid overlay dims gaps on BOTH axes — unlike scanlines
+    (constant along each row), a fixed row here still has dark vertical gaps."""
+    mb = _macos()
+    from AppKit import NSBitmapImageRep, NSColor, NSImage, NSRectFill
+    from Foundation import NSMakeRect
+
+    w, h = 40, 40
+    be = mb.MacOSBackend()
+    be._view = mb._PuiKitView.alloc().initWithFrame_(NSMakeRect(0, 0, w, h))
+    img = NSImage.alloc().initWithSize_((w, h))
+    img.lockFocus()
+    try:
+        NSColor.whiteColor().setFill()
+        NSRectFill(((0, 0), (w, h)))
+        be._render_pixel_grid(0.9)
+        rep = NSBitmapImageRep.alloc().initWithFocusedViewRect_(((0, 0), (w, h)))
+    finally:
+        img.unlockFocus()
+    if rep is None:
+        pytest.skip("no offscreen bitmap (headless without a window server)")
+
+    def lum(x, y):
+        c = rep.colorAtX_y_(x, y).colorUsingColorSpaceName_("NSCalibratedRGBColorSpace")
+        return c.redComponent()  # grayscale content, so R == luminance
+
+    # A single non-gap row has dark vertical gaps along it (the vertical grid) AND
+    # bright cells between them — the two-axis signature a scanline can't produce.
+    row = [lum(x, 20) for x in range(w)]
+    assert min(row) < 0.7, "expected dark vertical grid gaps along a row"
+    assert max(row) > 0.9, "expected bright pixel cells between the gaps"
+    col = [lum(20, y) for y in range(h)]
+    assert min(col) < 0.7, "expected dark horizontal grid gaps down a column"
 
 
 def test_macos_vignette_is_aspect_correct_on_a_wide_window():

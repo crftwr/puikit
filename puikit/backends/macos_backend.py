@@ -192,6 +192,12 @@ except ImportError:
 #: the display's device scale for pixel-exact lines.
 _SCANLINE_PERIOD = 4.0
 
+#: LCD dot-matrix cell pitch in points (one pixel cell + its gap), for the
+#: ``pixelgrid`` effect. Smaller than the scanline pitch so the cells read as
+#: fine pixels rather than fat bands; the gap is a fraction of this (see
+#: _render_pixel_grid). Kept small but >1pt so the grid survives Retina scaling.
+_PIXEL_GRID_PERIOD = 3.0
+
 try:
     import CoreText
 
@@ -1621,6 +1627,8 @@ class MacOSBackend(Backend):
         effect = self._post_effect
         if effect is not None and effect.scanline > 0:
             self._render_scanlines(effect.scanline)
+        if effect is not None and effect.pixelgrid > 0:
+            self._render_pixel_grid(effect.pixelgrid)
         if effect is not None and effect.vignette > 0 and _HAS_QUARTZ:
             self._render_vignette(effect.vignette)
         # Drawn last in the render pass, so the band sits on top of the scanlines
@@ -1649,6 +1657,33 @@ class MacOSBackend(Backend):
                 NSMakeRect(0.0, y, w, line_h), NSCompositingOperationSourceOver
             )
             y += _SCANLINE_PERIOD
+
+    def _render_pixel_grid(self, strength: float) -> None:
+        """Paint a fine dark grid on both axes — the LCD dot-matrix "pixels with
+        gaps" texture — over the whole view. Unlike _render_scanlines (horizontal
+        CRT banding only), this darkens thin inter-pixel gaps on *both* axes so
+        every cell reads as a discrete square pixel. ``strength`` (0..1) is the gap
+        opacity; the grid crossings darken twice (source-over) so the pixel corners
+        sit deepest, like a real reflective LCD. Meant for a flat, non-emissive
+        theme — pair it with no bloom/glow so the cells stay crisp."""
+        bounds = self._view.bounds()
+        w = bounds.size.width
+        h = bounds.size.height
+        _ns_color((0, 0, 0), alpha=min(strength, 0.7)).setFill()
+        period = _PIXEL_GRID_PERIOD
+        gap = max(1.0, period * 0.28)  # thin gap; the rest of each cell stays lit
+        y = 0.0
+        while y < h:
+            NSRectFillUsingOperation(
+                NSMakeRect(0.0, y, w, gap), NSCompositingOperationSourceOver
+            )
+            y += period
+        x = 0.0
+        while x < w:
+            NSRectFillUsingOperation(
+                NSMakeRect(x, 0.0, gap, h), NSCompositingOperationSourceOver
+            )
+            x += period
 
     def _render_vignette(self, strength: float) -> None:
         """Darken the frame toward its edges with a radial falloff that fits the
