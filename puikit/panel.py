@@ -49,7 +49,7 @@ def mark_box_units(bw: int, bh: int) -> tuple[float, float, float]:
     side = min(bh, bw * 2) * _MARK_FACTOR
     return side, (side / bw if bw else 1.0), (side / bh if bh else 1.0)
 
-# How far inside the far edge a clamped margin click lands, so it stays within
+# How far inside the far edge a clamped edge click lands, so it stays within
 # the content rect (whose right/bottom bound is exclusive) without losing
 # sub-unit precision. A whole-cell widget floors this to the last cell.
 _EDGE_EPS = 1e-3
@@ -142,10 +142,8 @@ class DrawContext:
         # state (a running color tween) without the app threading an identity.
         self._widget = widget
         # The region pointer operations (hover, press) test against, so they
-        # match exactly what the Panel routes clicks and focus to. By default it
-        # is the visible rect clipped to the parent — but a top-level pane passes
-        # its bled fill (which reaches into the window margin), so hovering and
-        # pressing the margin react the same as clicking it does.
+        # match exactly what the Panel routes clicks and focus to. Defaults to the
+        # visible rect clipped to the parent; a caller may override it.
         self._hit_rect = hit_rect if hit_rect is not None else _intersect(self._rect, self._clip)
         # Whether this widget currently holds the focus, resolved down the
         # parent chain (a widget is focused only if every container above it is
@@ -1046,32 +1044,12 @@ class _Slot:
     rect: Rect
     hints: dict[str, Any] = field(default_factory=dict)
     z: int = 0
-    # Background fill extent. Differs from rect only for layout panes on the
-    # window edge: their fill bleeds across the window margin so the frame
-    # never shows the backend's default background.
-    fill: Rect | None = None
     # Optional geometry recompute for a size-anchored layer. A layer whose rect
     # is derived from the window size (an edge Drawer fills the cross-axis and
     # hugs an edge) passes a callable (sw, sh) -> Rect so its rect is refreshed
     # from the current backend size on every render, tracking window resizes;
     # plain centered/positioned layers leave it None and keep their fixed rect.
     reflow: Any | None = None
-
-
-def _bleed_to_window(
-    rect: Rect, mx: float, my: float, sw: float, sh: float, snap: bool
-) -> Rect:
-    """Extend the sides of ``rect`` that lie on the margin bounds out to the
-    window edges. Interior boundaries are untouched."""
-    eps = 1e-6
-    x0 = 0.0 if rect.x <= mx + eps else rect.x
-    y0 = 0.0 if rect.y <= my + eps else rect.y
-    x1 = sw if rect.x + rect.w >= sw - mx - eps else rect.x + rect.w
-    y1 = sh if rect.y + rect.h >= sh - my - eps else rect.y + rect.h
-    if snap:
-        # Whole-unit backends must keep true integer coordinates.
-        x0, y0, x1, y1 = (round(v) for v in (x0, y0, x1, y1))
-    return Rect(x0, y0, x1 - x0, y1 - y0)
 
 
 # A non-compositing backend (a terminal) cannot draw a smooth transition, so the
@@ -1215,8 +1193,6 @@ class Panel:
         # focus changes toggle it only on a real transition (see _sync_text_input).
         self._text_input_on = False
         self._layout: Any | None = None
-        self._margin_px = 0.0
-        self._margin_units = 0.0
         self._size_anims: dict[Any, _GeometryAnimation] = {}
         # Running color tweens keyed by (widget, key); the widget reads the
         # current value via DrawContext.animated_color (see _ColorAnimation).
@@ -1270,36 +1246,16 @@ class Panel:
         self._focused = None
         self._layout = None
 
-    def set_layout(
-        self, layout: Any, margin_px: float = 0.0, margin_units: float = 0.0
-    ) -> None:
+    def set_layout(self, layout: Any) -> None:
         """Use a declarative layout (see puikit.layout) instead of manual
         add() calls. Rects are recomputed from the backend size on every
         render, so the layout follows window resizes.
 
-        margin_px / margin_units inset the layout from the window frame.
-        They follow the min_px/min hint rules: the pixel margin
-        applies only on pixel-layout backends (it would cost whole base units on
-        a base unit grid), margin_units applies everywhere."""
+        The layout fills the whole window frame. For padding around a region,
+        inset it at the widget level — a ``LayoutView`` carries its own margin,
+        or a widget can pad its own content in ``draw``."""
         self._layout = layout
-        self._margin_px = float(margin_px)
-        self._margin_units = float(margin_units)
         self._apply_layout()
-
-    def _resolve_margin(
-        self, base_w: int, base_h: int, snap: bool
-    ) -> tuple[float, float]:
-        """Window margin in base units per axis, snapped to whole device pixels
-        on pixel-layout backends."""
-        if snap:
-            margin = round(self._margin_units)
-            return (margin, margin)
-        mx, my = self._margin_units, self._margin_units
-        if base_w > 0:
-            mx = round(max(mx, self._margin_px / base_w) * base_w) / base_w
-        if base_h > 0:
-            my = round(max(my, self._margin_px / base_h) * base_h) / base_h
-        return (mx, my)
 
     def _apply_layout(self) -> None:
         from .layout import LayoutContext
@@ -1309,7 +1265,6 @@ class Panel:
         sw, sh = self.backend.size_units
         cw, ch = self.backend.base_size
         snap = not self.backend.capabilities.supports("pixel_layout")
-        mx, my = self._resolve_margin(cw, ch, snap)
         ctx = LayoutContext(
             cw, ch, snap,
             hairline=self.backend.capabilities.supports("hairline"),
@@ -1320,21 +1275,11 @@ class Panel:
             scrollbar_units=self.backend.scrollbar_units,
             image_size=self.backend.image_size,
         )
-        placements = self._layout.resolve(
-            mx, my, max(0.0, sw - 2 * mx), max(0.0, sh - 2 * my), ctx
-        )
-        # Edge panes' backgrounds and the dividers bleed across the window
-        # margin: the margin reads as pane padding, never as a bare frame.
-        from .layout import Divider
-
-        self._dividers = [
-            Divider(_bleed_to_window(d.rect, mx, my, sw, sh, snap), d.vertical, d.level)
-            for d in ctx.dividers
-        ]
+        placements = self._layout.resolve(0.0, 0.0, sw, sh, ctx)
+        self._dividers = list(ctx.dividers)
         focused = self._focused
         self._children = [
-            _Slot(w, rect, hints, fill=_bleed_to_window(rect, mx, my, sw, sh, snap))
-            for w, rect, hints in placements
+            _Slot(w, rect, hints) for w, rect, hints in placements
         ]
         widgets = [slot.widget for slot in self._children]
         if focused not in widgets:
@@ -1566,18 +1511,13 @@ class Panel:
         self.backend.begin_group(slot.widget, rect)
         background = self._pane_background(slot.hints)
         if background is not None:
-            # The fill may bleed past the widget's rect (window margin), so
-            # it is drawn before the content clip is applied.
-            fill = slot.fill if slot.fill is not None else rect
-            self.backend.fill_rect(fill.x, fill.y, fill.w, fill.h, Style(bg=background))
+            # Drawn before the content clip is applied, across the widget's rect.
+            self.backend.fill_rect(rect.x, rect.y, rect.w, rect.h, Style(bg=background))
         self.backend.push_clip(rect.x, rect.y, rect.w, rect.h)
         slot_ctx = DrawContext(
             self.backend, rect, self.backend.capabilities,
             panel=self, background=background,
             focused=slot.widget is self._focused,
-            # Hover/press use the same region clicks and focus route to: the
-            # bled fill, so the window margin belongs to the pane consistently.
-            hit_rect=slot.fill if slot.fill is not None else rect,
             widget=slot.widget,
         )
         slot.widget.draw(slot_ctx)
@@ -2058,9 +1998,7 @@ class Panel:
             if event.type in (EventType.MOUSE_UP, EventType.MOUSE_DRAG) and self._press_slot is not None:
                 return self._route_mouse(self._press_slot, event, clamp=True, is_layer=self._press_is_layer)
             for slot in reversed(self._children):
-                # Hit-test against the fill extent: a click in the bled
-                # window margin belongs to the pane that visually owns it.
-                hit = slot.fill if slot.fill is not None else slot.rect
+                hit = slot.rect
                 if event.x is not None and hit.contains(event.x, event.y):
                     return self._route_mouse(slot, event, clamp=True, is_layer=False)
             return False
@@ -2117,8 +2055,7 @@ class Panel:
     def _over_slot(self, slot: "_Slot", event: Event) -> bool:
         if event.x is None:
             return False
-        hit = slot.fill if slot.fill is not None else slot.rect
-        return hit.contains(event.x, event.y)
+        return slot.rect.contains(event.x, event.y)
 
     def _deliver(self, slot: _Slot, event: Event, clamp: bool = False) -> bool:
         local = event.translated(-slot.rect.x, -slot.rect.y)

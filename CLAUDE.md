@@ -138,13 +138,10 @@ fractional base unit boundaries (exact pixels); others have every boundary snapp
 to whole base units. Layouts re-resolve from the backend size on each render, so
 they follow window resizes.
 
-`set_layout(layout, margin_px=8)` insets the whole layout from the window
-frame. Margins follow the `min_px`/`min` rules: `margin_px` applies
-only on pixel-layout backends (it would cost whole base units on a base unit grid);
-`margin_units` applies everywhere. The margin reads as pane padding, not as
-a bare frame: edge panes' surface backgrounds and the dividers bleed across
-the margin to the window edges, so the backend's default background never
-shows through.
+`set_layout(layout)` resolves the layout across the whole window frame — no
+inset, no edge bleed. Padding around a region is a widget-level concern: a
+`LayoutView` carries its own `margin_px`/`margin_units`, and a widget can pad
+its own content in `draw`.
 
 **Region separation** is intent, not geometry. A drawn separator costs one
 device pixel on GUI but a whole base unit row/column on TUI, so the idiomatic

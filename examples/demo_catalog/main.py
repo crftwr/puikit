@@ -2480,10 +2480,6 @@ def main() -> None:
                 ),
                 status_item,
             ),
-            # GUI: inset the whole layout 4px from the window frame. Edge panes
-            # bleed their backgrounds across the margin, so it reads as padding,
-            # not a bare frame. Ignored on TUI (a px margin would cost base units).
-            margin_px=4,
         )
         apply_theme(0)
 

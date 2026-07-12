@@ -297,24 +297,17 @@ into the slot, and only shrinks-and-aligns when that size is strictly smaller.
 
 ---
 
-## 8. Margins and edge bleed (Panel level)
+## 8. Window-level layout (Panel level)
 
-`Panel.set_layout(layout, margin_px=0, margin_units=0)` insets the whole
-layout from the window frame. Margins follow the same capability rule as
-minimums:
+`Panel.set_layout(layout)` resolves the layout across the **whole** window
+frame: the top-level rect is `(0, 0, size_units)`, with no inset. Slot
+backgrounds and dividers fill their own rects — there is no window-level margin
+and no edge bleed.
 
-- `margin_px` applies **only on pixel-layout backends** (a pixel margin would
-  cost whole base units on a grid).
-- `margin_units` applies everywhere.
-
-A margin must read as **pane padding, not a bare frame**. So the Panel
-*bleeds* edge panes outward: a pane whose rect touches the margin bound has
-its background fill (and the layout's dividers) extended to the window edge,
-while its *content* rect stays inset. Interior boundaries are never extended.
-The backend's default background therefore never shows through the margin, and
-a click in the bled margin is hit-tested to the pane that visually owns it
-(then clamped to that pane's nearest content base unit, so widgets only ever see
-coordinates inside the area they actually drew).
+Padding around a region is a **widget-level** concern instead: a `LayoutView`
+carries its own margin (§9), and any widget can pad its own content inside
+`draw` (offset the text, shrink the available width). This keeps a bar's surface
+filling its whole slot — edge to edge — while only its content is inset.
 
 ---
 
@@ -329,11 +322,10 @@ decisions stay in the DrawContext, so the widget never branches on the backend.
 `LayoutView` also keeps the resolved `(widget, rect)` pairs to route mouse and
 keyboard events to its children.
 
-`LayoutView(layout, margin_px=0, margin_units=0)` carries a margin with the
-same capability rule as the Panel's (px on pixel-layout backends, base units
-everywhere), insetting the hosted layout from the widget's own rect — the area
-behind it shows the pane's own surface background, so it reads as symmetric
-padding without edge bleed. `set_layout(layout)` swaps the hosted layout and
+`LayoutView(layout, margin_px=0, margin_units=0)` carries a margin — `margin_px`
+on pixel-layout backends, `margin_units` (base units) everywhere — insetting the
+hosted layout from the widget's own rect. The area behind it shows the pane's own
+surface background, so it reads as symmetric padding. `set_layout(layout)` swaps the hosted layout and
 re-picks focus, which is how an app switches pages without coordinate
 placement: each page is a `Split`, hosted in one `LayoutView`.
 
@@ -386,7 +378,7 @@ the rounding target inside `resolve`.
 ```
 puikit.layout:  Item, Split, HSplit, VSplit, LayoutContext, Divider, SizeRequest
 puikit:         HSplit, Item, VSplit            (re-exported)
-Panel:          set_layout(layout, margin_px=0, margin_units=0)
+Panel:          set_layout(layout)
 DrawContext:    layout_context(), draw_child(...), draw_divider(...)
                 size_units -> (w, h) exact,  base_size -> (px_w, px_h),  width/height -> int
 Backend:        size_units, base_size, measure_text(text, style) -> float,
