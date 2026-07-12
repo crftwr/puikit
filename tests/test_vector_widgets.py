@@ -11,7 +11,9 @@ import pytest
 
 from puikit import CapabilityProfile, Event, EventType, PROFILE_GUI_DESKTOP, Panel
 from puikit.backends.memory_backend import MemoryBackend
-from puikit.widgets import Button, Checkbox, DropDown, RadioGroup, TextEdit
+from puikit.widgets import (
+    Button, Checkbox, DropDown, RadioGroup, TextEdit, TreeNode, TreeView,
+)
 
 
 class _VectorBackend(MemoryBackend):
@@ -160,3 +162,33 @@ def test_dropdown_field_is_rounded(backend):
     panel.render()
     assert backend.round_rect_calls
     assert backend.round_rect_calls[0][6].get("fill") is True
+
+
+def _mixed_tree():
+    return [
+        TreeNode("src", children=[TreeNode("main.py")], expanded=True),  # branch, open
+        TreeNode("docs", children=[TreeNode("guide.md")]),              # branch, closed
+        TreeNode("README"),                                            # leaf
+    ]
+
+
+def test_tree_branches_draw_vector_chevrons_not_glyphs(backend):
+    panel = Panel(backend)
+    panel.add(TreeView(_mixed_tree()), x=0, y=0, w=30, h=12)
+    panel.render()
+    # One chevron per visible branch (src, docs); the visible leaves
+    # (main.py under expanded src, README) draw none.
+    assert len(backend.chevron_calls) == 2
+    expanded_flags = sorted(call[4] for call in backend.chevron_calls)
+    assert expanded_flags == [False, True]  # docs collapsed, src expanded
+    # The ▸/▾ glyphs are gone from the grid — the mark is a vector stroke now.
+    text = "\n".join(backend.snapshot())
+    assert "▸" not in text and "▾" not in text
+    assert "src" in text and "README" in text  # labels still render
+
+
+def test_tree_leaf_only_draws_no_chevron(backend):
+    panel = Panel(backend)
+    panel.add(TreeView([TreeNode("a"), TreeNode("b")]), x=0, y=0, w=30, h=12)
+    panel.render()
+    assert backend.chevron_calls == []

@@ -65,6 +65,7 @@ class MemoryBackend(Backend):
         self.image_calls: list[tuple[float, float, str, dict[str, Any]]] = []
         self.round_rect_calls: list[tuple] = []
         self.check_calls: list[tuple] = []
+        self.chevron_calls: list[tuple] = []
         self.shadow_calls: list[tuple] = []       # draw_shadow (GUI compositing)
         self.shadow_rect_calls: list[tuple] = []  # shadow_rect (TUI stand-in)
         self.flash_calls: list[tuple] = []
@@ -215,6 +216,21 @@ class MemoryBackend(Backend):
         hints: dict[str, Any] | None = None,
     ) -> None:
         self.check_calls.append((x, y, w, h, style))
+
+    def draw_chevron(
+        self,
+        x: float,
+        y: float,
+        w: float,
+        h: float,
+        expanded: bool,
+        style: Style = DEFAULT_STYLE,
+        hints: dict[str, Any] | None = None,
+    ) -> None:
+        # Recorded for tests that opt into vector_shapes; the default TUI profile
+        # masks the capability off so the Panel keeps the ▸/▾ glyph inline and
+        # this is never hit (mirrors draw_check / draw_round_rect).
+        self.chevron_calls.append((x, y, w, h, expanded, style))
 
     def dim_rect(
         self, x: int, y: int, w: int, h: int, scrim: Any = None, per_cell: bool = False,

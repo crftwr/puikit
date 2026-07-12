@@ -362,6 +362,24 @@ class Backend(ABC):
         ``vector_shapes`` never receive it (the Panel layer draws "[x]" text)."""
         raise CapabilityNotSupported("vector_shapes")
 
+    def draw_chevron(
+        self,
+        x: float,
+        y: float,
+        w: float,
+        h: float,
+        expanded: bool,
+        style: Style = DEFAULT_STYLE,
+        hints: dict[str, Any] | None = None,
+    ) -> None:
+        """A disclosure chevron inscribed in the (base-unit) rect, stroked with
+        ``style.fg``: a right-pointing ``>`` when ``expanded`` is False, a
+        down-pointing ``⌄`` when True. Used by tree / list expander marks so the
+        disclosure reads as UI chrome rather than a font glyph; backends without
+        ``vector_shapes`` never receive it (the Panel layer keeps the ▸/▾
+        character inline in the row's text)."""
+        raise CapabilityNotSupported("vector_shapes")
+
     # --- animation (capability "animation"; Panel gates the calls) -----------
 
     def animate(self, widget: Any, hints: dict[str, Any] | None = None) -> None:

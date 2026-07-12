@@ -1407,6 +1407,18 @@ class MacOSBackend(Backend):
     ) -> None:
         self._back.append(("check", x, y, w, h, style))
 
+    def draw_chevron(
+        self,
+        x: float,
+        y: float,
+        w: float,
+        h: float,
+        expanded: bool,
+        style: Style = DEFAULT_STYLE,
+        hints: dict[str, Any] | None = None,
+    ) -> None:
+        self._back.append(("chevron", x, y, w, h, expanded, style))
+
     def dim_rect(
         self, x: int, y: int, w: int, h: int, scrim: Any = None, per_cell: bool = False,
         fade: bool = False,
@@ -1585,6 +1597,8 @@ class MacOSBackend(Backend):
                 self._render_round_rect(*command[1:])
             elif kind == "check":
                 self._render_check(*command[1:])
+            elif kind == "chevron":
+                self._render_chevron(*command[1:])
             elif kind == "dim":
                 self._render_dim(*command[1:])
             elif kind == "shadow":
@@ -1971,6 +1985,33 @@ class MacOSBackend(Backend):
         path.lineToPoint_((ox + pw * 0.42, oy + ph * 0.70))
         path.lineToPoint_((ox + pw * 0.78, oy + ph * 0.30))
         path.setLineWidth_(max(1.4, ph * 0.13))
+        path.setLineCapStyle_(1)   # NSLineCapStyleRound
+        path.setLineJoinStyle_(1)  # NSLineJoinStyleRound
+        _ns_color(style.fg or _DEFAULT_FG).setStroke()
+        path.stroke()
+
+    def _render_chevron(
+        self, x: float, y: float, w: float, h: float, expanded: bool, style: Style
+    ) -> None:
+        rect = self._unit_rect(x, y, w, h)
+        cx = rect.origin.x + rect.size.width / 2.0
+        cy = rect.origin.y + rect.size.height / 2.0
+        # Both arms run at 45° from the apex (equal x/y reach in device pixels),
+        # so the two arms meet at exactly 90°. `k` is the short half-extent,
+        # sized to fill the box (capped by the smaller of width/height); the mark
+        # keeps the same size when it rotates open, pivoting about the center.
+        # View is flipped (larger y is lower).
+        k = min(rect.size.width, rect.size.height) * 0.24
+        path = NSBezierPath.bezierPath()
+        if expanded:   # ⌄ apex at bottom-center, arms up-left / up-right
+            path.moveToPoint_((cx - 2 * k, cy - k))
+            path.lineToPoint_((cx,         cy + k))
+            path.lineToPoint_((cx + 2 * k, cy - k))
+        else:          # › apex at right-center, arms up-left / down-left
+            path.moveToPoint_((cx - k, cy - 2 * k))
+            path.lineToPoint_((cx + k, cy))
+            path.lineToPoint_((cx - k, cy + 2 * k))
+        path.setLineWidth_(max(1.4, k * 0.5))
         path.setLineCapStyle_(1)   # NSLineCapStyleRound
         path.setLineJoinStyle_(1)  # NSLineJoinStyleRound
         _ns_color(style.fg or _DEFAULT_FG).setStroke()

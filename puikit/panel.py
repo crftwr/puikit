@@ -939,6 +939,28 @@ class DrawContext:
                 self._rect.x + x, self._rect.y + y, w, h, self._resolve(style)
             )
 
+    def draw_chevron(
+        self, x: float, y: float, w: float, h: float, *,
+        expanded: bool, style: Style = DEFAULT_STYLE,
+    ) -> None:
+        """Draw a disclosure chevron inscribed in the base-unit rect — a ``>``
+        that rotates to ``⌄`` when ``expanded`` — stroked with ``style.fg``. The
+        intent primitive for a tree / list expander mark:
+
+        - a ``vector_shapes`` backend strokes crisp diagonals so the mark reads as
+          UI chrome rather than a font character;
+        - a grid backend draws **nothing** here — its caller keeps the ``▸``/``▾``
+          glyph inline in the row's text so the mark truncates with the row's
+          box-drawing connectors and lands on the cell grid.
+
+        Vector-only, mirroring :meth:`draw_caret`: the caller reserves the same
+        marker slot either way, so the label origin and the expander hit region
+        are unchanged whichever path draws the mark."""
+        if self._caps.supports("vector_shapes"):
+            self._backend.draw_chevron(
+                self._rect.x + x, self._rect.y + y, w, h, expanded, self._resolve(style)
+            )
+
     def draw_divider(self, divider: "Any") -> None:
         """Render a layout Divider in this context's coordinates, mirroring
         the Panel's top-level divider drawing: a hairline on hairline-capable

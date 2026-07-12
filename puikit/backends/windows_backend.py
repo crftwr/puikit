@@ -913,6 +913,11 @@ class WindowsBackend(Backend):
     ) -> None:
         self._back.append(("check", x, y, w, h, style))
 
+    def draw_chevron(
+        self, x: float, y: float, w: float, h: float, expanded: bool, style: Style = DEFAULT_STYLE, hints: dict[str, Any] | None = None
+    ) -> None:
+        self._back.append(("chevron", x, y, w, h, expanded, style))
+
     def dim_rect(
         self, x: int, y: int, w: int, h: int, scrim: Any = None, per_cell: bool = False,
         fade: bool = False,
@@ -1371,6 +1376,8 @@ class WindowsBackend(Backend):
                 self._render_round_rect(*command[1:])
             elif kind == "check":
                 self._render_check(*command[1:])
+            elif kind == "chevron":
+                self._render_chevron(*command[1:])
             elif kind == "scrollbar":
                 self._render_scrollbar(*command[1:])
             elif kind == "image":
@@ -1531,6 +1538,30 @@ class WindowsBackend(Backend):
         p0 = native.D2D1_POINT_2F(ox + pw * 0.24, oy + ph * 0.52)
         p1 = native.D2D1_POINT_2F(ox + pw * 0.42, oy + ph * 0.70)
         p2 = native.D2D1_POINT_2F(ox + pw * 0.78, oy + ph * 0.30)
+        native.rt_draw_line(self._render_target, p0, p1, self._brush, line_width)
+        native.rt_draw_line(self._render_target, p1, p2, self._brush, line_width)
+
+    def _render_chevron(
+        self, x: float, y: float, w: float, h: float, expanded: bool, style: Style
+    ) -> None:
+        rect = self._unit_rect(x, y, w, h)
+        cx = (rect.left + rect.right) / 2.0
+        cy = (rect.top + rect.bottom) / 2.0
+        # Both arms run at 45° from the apex (equal x/y reach), so the two arms
+        # meet at exactly 90°. `k` is the short half-extent, sized to fill the box
+        # (capped by the smaller of width/height); the mark keeps the same size
+        # when it rotates open, pivoting about the center. y increases downward.
+        k = min(rect.right - rect.left, rect.bottom - rect.top) * 0.24
+        line_width = max(1.4, k * 0.5)
+        self._set_brush(style.fg or _DEFAULT_FG)
+        if expanded:   # ⌄ apex at bottom-center, arms up-left / up-right
+            p0 = native.D2D1_POINT_2F(cx - 2 * k, cy - k)
+            p1 = native.D2D1_POINT_2F(cx,         cy + k)
+            p2 = native.D2D1_POINT_2F(cx + 2 * k, cy - k)
+        else:          # › apex at right-center, arms up-left / down-left
+            p0 = native.D2D1_POINT_2F(cx - k, cy - 2 * k)
+            p1 = native.D2D1_POINT_2F(cx + k, cy)
+            p2 = native.D2D1_POINT_2F(cx - k, cy + 2 * k)
         native.rt_draw_line(self._render_target, p0, p1, self._brush, line_width)
         native.rt_draw_line(self._render_target, p1, p2, self._brush, line_width)
 

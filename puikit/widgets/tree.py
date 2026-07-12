@@ -26,6 +26,11 @@ _INDENT = 2  # columns per depth level
 _EXPANDED = "▾ "
 _COLLAPSED = "▸ "
 _LEAF = "  "
+# GUI/vector disclosure chevron: reserved slot width + gap before the label, in
+# base units. The chevron fills the slot; the gap gives the label breathing room.
+# (The grid path keeps the ▸/▾ glyph inline instead of reserving this.)
+_MARK_W = 1.1
+_MARK_GAP = 0.4
 
 
 @dataclass
@@ -133,7 +138,11 @@ class TreeView(Widget):
                 # Grid: carry the indent as leading spaces from x=0 so a focused
                 # row's reverse-video highlight still covers the indent cells.
                 if ctx.vector_shapes:
-                    content, text_x = marker + node.label, indent
+                    # The label sits after a reserved chevron slot + gap; a
+                    # branch's disclosure mark is stroked as a vector chevron in
+                    # that slot below, so leaf/branch labels align on one fixed
+                    # origin and the mark reads as UI chrome.
+                    content, text_x = node.label, indent + _MARK_W + _MARK_GAP
                 else:
                     content, text_x = " " * indent + marker + node.label, 0
                 clipped = truncate_to_width(
@@ -145,6 +154,14 @@ class TreeView(Widget):
                         style, theme, ctx.focused, ctx.vector_shapes
                     )
                 draw_list_row(ctx, top, clipped, text_w, style, text_x, fill_w, row_h=row_h)
+                if ctx.vector_shapes and not node.is_leaf:
+                    # A crisp › / ⌄ filling the marker slot, in the row's text
+                    # color (matching the ▸/▾ glyph it replaces on the grid).
+                    fg = style.fg or (theme.text if theme is not None else None)
+                    ctx.draw_chevron(
+                        indent, top, _MARK_W, row_h,
+                        expanded=node.expanded, style=Style(fg=fg),
+                    )
             index += 1
 
         if show_bar:
