@@ -328,6 +328,10 @@ class CursesBackend(Backend):
         # True while the left button is held, so a following motion report reads
         # as a drag (text selection) rather than a bare hover.
         self._mouse_down = False
+        # An event read while coalescing a burst of pointer reports that does not
+        # belong to the run (see _coalesce_input): stashed here so the next loop
+        # iteration delivers it instead of dropping it.
+        self._pending_event: "Event | None" = None
         # Self-driven animation ticks (capability "animation_ticks"). A terminal
         # cannot composite a transition, but the event loop already wakes on a
         # timer, so a registered callback (a busy spinner, a blinking caret) is
@@ -1321,10 +1325,21 @@ class CursesBackend(Backend):
         if self._empty_wake_streak >= self._DEAD_TERMINAL_WAKE_STREAK:
             self._quit_requested = True
 
+    #: Pointer events whose buffered burst is collapsed before dispatch (see
+    #: _coalesce_input). Scroll is handled separately (it accumulates).
+    _COALESCE_MOTION_TYPES = frozenset({EventType.MOUSE_MOVE, EventType.MOUSE_DRAG})
+
     def run_event_loop_iteration(self, handler: EventHandler, timeout_ms: int = 0) -> bool:
         assert self._stdscr is not None
         if self._quit_requested:
             return False
+        # Deliver an event deferred by coalescing before reading more, so it is
+        # never dropped and keeps its arrival order (see _coalesce_input).
+        if self._pending_event is not None:
+            event = self._pending_event
+            self._pending_event = None
+            handler(event)
+            return not self._quit_requested
         self._stdscr.timeout(timeout_ms)
         # get_wch() (not getch()) assembles multibyte UTF-8 input into one
         # character, so committed IME / CJK text arrives whole instead of as
@@ -1341,18 +1356,71 @@ class CursesBackend(Backend):
             self._run_ticks()
             return not self._quit_requested
         self._empty_wake_streak = 0
+        event = self._char_to_event(ch)
+        if event is not None:
+            # A wheel spin or a quick drag floods stdin with reports, and
+            # rendering once per report caps the wheel's speed and lags the drag
+            # behind the pointer. Collapse the burst already buffered into one
+            # event so the app repaints once for the whole burst.
+            if (event.type is EventType.MOUSE_SCROLL
+                    or event.type in self._COALESCE_MOTION_TYPES):
+                event = self._coalesce_input(event)
+            handler(event)
+        return not self._quit_requested
+
+    def _char_to_event(self, ch: "int | str") -> "Event | None":
         # An ESC may begin an SGR mouse report (ESC [ < b ; x ; y M/m). Mouse
         # tracking is driven directly (see open()), so these arrive as raw bytes
         # rather than a KEY_MOUSE; assemble and parse them here. Real function /
         # arrow keys never reach this branch — keypad() pre-assembles them into
         # integer keycodes — so a bare ESC here is the Escape key.
         if ch == 27 or ch == "\x1b":
-            event = self._read_escape_sequence()
-        else:
-            event = self._translate(ch)
-        if event is not None:
-            handler(event)
-        return not self._quit_requested
+            return self._read_escape_sequence()
+        return self._translate(ch)
+
+    def _coalesce_input(self, first: "Event") -> "Event":
+        """Collapse the burst of same-kind pointer events already buffered behind
+        ``first`` into one, so a fast wheel spin or drag repaints once per burst
+        instead of once per report. Reads non-blocking, so it only merges what the
+        terminal has already delivered. The first event that does not belong to
+        the run (a different type, or a scroll with different modifiers) ends it
+        and is stashed in ``_pending_event`` for the next iteration, never
+        dropped and never reordered."""
+        assert self._stdscr is not None
+        result = first
+        self._stdscr.timeout(0)  # non-blocking: only what is already buffered
+        while True:
+            try:
+                ch = self._stdscr.get_wch()
+            except curses.error:
+                break  # nothing more buffered
+            nxt = self._char_to_event(ch)
+            if nxt is None:
+                continue
+            merged = self._merge_pointer(result, nxt)
+            if merged is None:
+                self._pending_event = nxt  # not part of the run: defer, don't drop
+                break
+            result = merged
+        return result
+
+    @staticmethod
+    def _merge_pointer(acc: "Event", nxt: "Event") -> "Event | None":
+        """Combine ``nxt`` into the accumulated pointer event ``acc``, or return
+        None when ``nxt`` starts a new gesture (ending the coalesced run).
+
+        Wheel notches add up (keeping the latest position); a scroll with
+        different modifiers — e.g. shift for horizontal — is a separate gesture.
+        Hover / drag has no accumulation: the newest report supersedes the queued
+        ones entirely, so only its final position is drawn."""
+        if acc.type is EventType.MOUSE_SCROLL:
+            if nxt.type is EventType.MOUSE_SCROLL and nxt.modifiers == acc.modifiers:
+                return Event(type=EventType.MOUSE_SCROLL, x=nxt.x, y=nxt.y,
+                             scroll=acc.scroll + nxt.scroll, modifiers=acc.modifiers)
+            return None
+        if nxt.type is acc.type:  # MOUSE_MOVE / MOUSE_DRAG: latest position wins
+            return nxt
+        return None
 
     def _read_escape_sequence(self) -> "Event | None":
         seq = self._collect_escape()

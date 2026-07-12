@@ -190,3 +190,130 @@ def test_nonblocking_poll_instant_returns_are_not_eof():
         be._note_idle_wake(timeout_ms=0, elapsed_s=0.0)
     assert be._empty_wake_streak == 0
     assert be._quit_requested is False
+
+
+# --- mouse-wheel scroll coalescing ---------------------------------------------
+
+
+class _FakeStdscr:
+    """A stdscr whose get_wch() replays a scripted list of chars, one per call,
+    raising curses.error (as a real timeout does) once the script is exhausted.
+    Lets the event-loop iteration run against buffered input without a terminal."""
+
+    def __init__(self, chars):
+        self._chars = list(chars)
+
+    def timeout(self, ms):
+        pass
+
+    def get_wch(self):
+        if not self._chars:
+            raise curses.error("no input")
+        return self._chars.pop(0)
+
+
+def _sgr(seq):
+    """Expand an SGR mouse report body (e.g. "[<64;2;2M") into the ESC-prefixed
+    char stream get_wch() would deliver it as."""
+    return ["\x1b"] + list(seq)
+
+
+_WHEEL_UP = "[<64;2;2M"
+_WHEEL_DOWN = "[<65;2;2M"
+
+
+def _drain(be):
+    events = []
+    while be.run_event_loop_iteration(events.append, timeout_ms=0):
+        if not be._stdscr._chars and be._pending_event is None:
+            break
+    return events
+
+
+def test_scroll_burst_coalesces_into_one_event():
+    # Three wheel-up notches already buffered collapse to a single MOUSE_SCROLL
+    # carrying the summed delta, so the app repaints once for the whole burst.
+    be = CursesBackend()
+    be._stdscr = _FakeStdscr(_sgr(_WHEEL_UP) + _sgr(_WHEEL_UP) + _sgr(_WHEEL_UP))
+    events = _drain(be)
+    scrolls = [e for e in events if e.type is EventType.MOUSE_SCROLL]
+    assert len(scrolls) == 1
+    assert scrolls[0].scroll == 3
+
+
+def test_scroll_burst_nets_opposite_directions():
+    # Up + up + down sums to the net displacement rather than three frames.
+    be = CursesBackend()
+    be._stdscr = _FakeStdscr(_sgr(_WHEEL_UP) + _sgr(_WHEEL_UP) + _sgr(_WHEEL_DOWN))
+    scrolls = [e for e in _drain(be) if e.type is EventType.MOUSE_SCROLL]
+    assert len(scrolls) == 1
+    assert scrolls[0].scroll == 1
+
+
+def test_scroll_coalesce_defers_trailing_key():
+    # A key typed right after a scroll burst ends the run: the burst is delivered
+    # coalesced and the key survives, in order, on the next iteration.
+    be = CursesBackend()
+    be._stdscr = _FakeStdscr(_sgr(_WHEEL_UP) + _sgr(_WHEEL_UP) + ["a"])
+    events = _drain(be)
+    assert len(events) == 2
+    assert events[0].type is EventType.MOUSE_SCROLL and events[0].scroll == 2
+    assert events[1].type is EventType.KEY and events[1].key == "a"
+
+
+def test_scroll_coalesce_stops_at_different_modifiers():
+    # Shift+wheel (horizontal intent) must not merge into a plain vertical burst;
+    # it ends the run and is delivered separately.
+    shift_up = "[<68;2;2M"  # 64 wheel | 4 shift
+    be = CursesBackend()
+    be._stdscr = _FakeStdscr(_sgr(_WHEEL_UP) + _sgr(shift_up))
+    events = _drain(be)
+    scrolls = [e for e in events if e.type is EventType.MOUSE_SCROLL]
+    assert len(scrolls) == 2
+    assert scrolls[0].scroll == 1 and "shift" not in scrolls[0].modifiers
+    assert scrolls[1].scroll == 1 and "shift" in scrolls[1].modifiers
+
+
+# --- pointer-motion (hover / drag) coalescing ----------------------------------
+
+
+def test_drag_burst_keeps_latest_position():
+    # A quick splitter drag buffers many motion reports; only the final position
+    # matters, so the burst collapses to a single MOUSE_DRAG at the last point
+    # (the preceding press is a distinct gesture and stays separate).
+    be = CursesBackend()
+    be._stdscr = _FakeStdscr(
+        _sgr("[<0;6;3M")      # left press: arms the drag
+        + _sgr("[<32;6;3M")   # drag to x=5
+        + _sgr("[<32;9;3M")   # drag to x=8
+        + _sgr("[<32;13;3M")  # drag to x=12
+    )
+    events = _drain(be)
+    assert [e.type for e in events] == [EventType.MOUSE_DOWN, EventType.MOUSE_DRAG]
+    assert (events[1].x, events[1].y) == (12, 2)
+
+
+def test_move_burst_keeps_latest_position():
+    # Bare hover motion (all-motion tracking) collapses the same way.
+    be = CursesBackend(pointer_shape=True)
+    be._stdscr = _FakeStdscr(
+        _sgr("[<32;6;3M") + _sgr("[<32;9;3M") + _sgr("[<32;13;3M")
+    )
+    moves = [e for e in _drain(be) if e.type is EventType.MOUSE_MOVE]
+    assert len(moves) == 1
+    assert (moves[0].x, moves[0].y) == (12, 2)
+
+
+def test_drag_coalesce_defers_release():
+    # The button release that ends a drag is a different gesture: it stops the
+    # run and is delivered after the coalesced drag, in order.
+    be = CursesBackend()
+    be._mouse_down = True  # already dragging
+    be._stdscr = _FakeStdscr(
+        _sgr("[<32;9;3M")     # drag to x=8
+        + _sgr("[<32;13;3M")  # drag to x=12
+        + _sgr("[<0;13;3m")   # left release -> MOUSE_UP
+    )
+    events = _drain(be)
+    assert [e.type for e in events] == [EventType.MOUSE_DRAG, EventType.MOUSE_UP]
+    assert (events[0].x, events[0].y) == (12, 2)
