@@ -1060,6 +1060,12 @@ class _Slot:
     # from the current backend size on every render, tracking window resizes;
     # plain centered/positioned layers leave it None and keep their fixed rect.
     reflow: Any | None = None
+    # Whether this layer takes part in the modal event/focus stack. A normal layer
+    # is interactive: the top-most interactive layer is the modal that owns events
+    # and the focus leaf, and draws focused. A NON-interactive layer draws on top
+    # (by its z) but is transparent to events and focus — e.g. a completion popup
+    # that must sit above its dialog visually while the dialog keeps the keyboard.
+    interactive: bool = True
 
 
 # A non-compositing backend (a terminal) cannot draw a smooth transition, so the
@@ -1306,16 +1312,27 @@ class Panel:
         z: int = 0,
         hints: dict[str, Any] | None = None,
         reflow: Any | None = None,
+        interactive: bool = True,
     ) -> None:
         hints = hints or {}
         rect = self._layer_rect(hints)
-        self._layers.append(_Slot(widget, rect, hints, z, reflow=reflow))
+        self._layers.append(_Slot(widget, rect, hints, z, reflow=reflow, interactive=interactive))
         self._layers.sort(key=lambda s: s.z)
 
     def pop_layer(self) -> Any | None:
         if not self._layers:
             return None
         return self._layers.pop().widget
+
+    def _top_interactive_slot(self) -> "_Slot | None":
+        """The top-most layer that participates in the modal event/focus stack —
+        the active modal. A non-interactive overlay (e.g. a completion popup) sits
+        above it visually but is skipped here, so events and the focus leaf stay
+        with the modal beneath it."""
+        for slot in reversed(self._layers):
+            if slot.interactive:
+                return slot
+        return None
 
     @property
     def has_layers(self) -> bool:
@@ -1418,8 +1435,10 @@ class Panel:
         too: descend from the top layer's widget, not the (page) ``_focused``.
         This is what lets a ``TextEdit`` inside a modal dialog / drawer engage
         the IME, and it survives ``_apply_layout`` (which only manages page
-        focus) because it reads the layer, not ``_focused``."""
-        w = self._layers[-1].widget if self._layers else self._focused
+        focus) because it reads the layer, not ``_focused``. A non-interactive
+        overlay above the modal is skipped, so the leaf stays in the modal."""
+        top = self._top_interactive_slot()
+        w = top.widget if top is not None else self._focused
         while isinstance(w, FocusContainer):
             nxt = w.get_focused()
             if nxt is None:
@@ -1595,8 +1614,10 @@ class Panel:
         layer_ctx = DrawContext(
             self.backend, rect, self.backend.capabilities,
             panel=self, background=background,
-            # The top-most layer is the active modal, so it holds the focus.
-            focused=bool(self._layers) and slot is self._layers[-1],
+            # The top-most INTERACTIVE layer is the active modal, so it holds the
+            # focus; a non-interactive overlay above it draws unfocused and leaves
+            # the modal beneath drawing focused (its text field keeps the caret/IME).
+            focused=slot is self._top_interactive_slot(),
             widget=slot.widget,
         )
         slot.widget.draw(layer_ctx)
@@ -1985,11 +2006,13 @@ class Panel:
         if event.type is EventType.MOUSE_MOVE:
             return False
 
-        # The topmost layer gets events exclusively (modal behavior); it owns
-        # its own focus traversal (e.g. a dialog cycles its buttons), so Tab is
-        # routed in, not intercepted here.
-        if self._layers:
-            slot = self._layers[-1]
+        # The topmost INTERACTIVE layer gets events exclusively (modal behavior);
+        # it owns its own focus traversal (e.g. a dialog cycles its buttons), so
+        # Tab is routed in, not intercepted here. A non-interactive overlay above
+        # it (a completion popup) is transparent to events — they pass to the modal
+        # beneath, which drives the overlay itself.
+        slot = self._top_interactive_slot()
+        if slot is not None:
             return self._route_mouse(slot, event, clamp=False, is_layer=True)
 
         # Tab / Shift+Tab walk the whole focus tree from the root, crossing

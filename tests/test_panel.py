@@ -140,6 +140,30 @@ def test_topmost_layer_receives_events_exclusively():
     assert dialog.events and not below.events
 
 
+def test_non_interactive_layer_is_transparent_to_events_and_focus():
+    # A non-interactive overlay (e.g. a completion popup) is drawn on top by its
+    # z, but events and the focus leaf pass through it to the modal beneath — so a
+    # dialog can float a popup above its own field while keeping the keyboard.
+    backend = MemoryBackend(width=20, height=10)
+    panel = Panel(backend)
+    dialog = Recorder()
+    overlay = Recorder()
+    panel.push_layer(dialog, z=10, hints={"w": 10, "h": 4})
+    panel.push_layer(overlay, z=11, hints={"w": 10, "h": 3}, interactive=False)
+
+    # The overlay is the top layer by z, but the dialog owns events + focus.
+    assert panel._layers[-1].widget is overlay
+    assert panel._top_interactive_slot().widget is dialog
+    assert panel.focused_leaf() is dialog
+    assert panel.dispatch_event(Event(type=EventType.KEY, key="enter"))
+    assert dialog.events and not overlay.events
+
+    # Removing the overlay leaves the dialog as the sole (top) modal.
+    panel.remove(overlay)
+    assert panel._top_interactive_slot().widget is dialog
+    assert panel.focused_leaf() is dialog
+
+
 def test_file_drop_is_routed_to_widget_under_pointer():
     # A FILE_DROP is a positioned event: it routes to the widget under its point
     # like a mouse event, translated to widget-local coordinates, carrying the
