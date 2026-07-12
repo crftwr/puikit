@@ -309,6 +309,19 @@ carries its own margin (§9), and any widget can pad its own content inside
 `draw` (offset the text, shrink the available width). This keeps a bar's surface
 filling its whole slot — edge to edge — while only its content is inset.
 
+A widget that pads itself uses the **same dual-unit idiom as the layout's
+margin** (`margin_px` / `margin_units`, §9), just applied to its own content:
+`padding_units` (whole base units, honored on every backend) plus `padding_px`
+(device pixels, applied only on a pixel/vector backend and converted through
+`base_size`; it would cost a whole cell on a grid, so it collapses there). The
+part that makes it work without the app branching is that **padding grows the
+widget's `measure`** (§6): a padded widget adds `2 × padding` to the size it
+reports, so a `size="content"` item *reserves* the padded extent. This is how a
+header or status bar gains breathing room — and, on GUI, extra height — from one
+`Label(padding_units=…, padding_px=…)` with no per-backend code (see
+`puikit/widgets/label.py`; the drawing side of the idiom is
+`docs/rendering_system.md` §6, rule 3).
+
 ---
 
 ## 9. Nesting inside a widget: `LayoutView`
