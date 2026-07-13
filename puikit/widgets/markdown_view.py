@@ -914,6 +914,19 @@ class MarkdownView(Widget):
         # the view height; cache on both to re-contain images on a vertical resize.
         self._wrap_view_h: float = -1.0
         self._view_h: float = 1.0
+        # A layout depends only on (width, view height, source) — never on the
+        # scroll offset — so it is memoized per wrap width for the current view
+        # height. draw() probes TWO widths each frame (the full width, then one
+        # base unit narrower to reserve the scrollbar), so an overflowing document
+        # alternates between them every frame; a single slot would miss on both
+        # and re-lay-out the whole document twice per scroll step. Keeping both
+        # widths warm makes a pure scroll re-lay-out nothing. Cleared when the
+        # view height (image cap) or the source changes; bounded so a live resize
+        # (a stream of new widths) can't grow it without limit.
+        self._layout_cache: dict[
+            float, tuple[list[_Row], list[float], dict[str, float], float]
+        ] = {}
+        self._cache_view_h: float = -1.0
 
         # Click targets from the last draw: (x0, y0, x1, y1, url) in widget-local
         # base units, one per visible link span. The Panel is kept to open a URL.
@@ -950,6 +963,8 @@ class MarkdownView(Widget):
         self._rows = None
         self._wrap_width = -1.0
         self._wrap_view_h = -1.0
+        self._layout_cache.clear()
+        self._cache_view_h = -1.0
 
     # --- layout ---------------------------------------------------------------
 
@@ -960,11 +975,16 @@ class MarkdownView(Widget):
         face measures and spaces correctly, and an image is sized to its aspect
         ratio. Rebuilt only when the width, view height (image cap), or source
         changes."""
-        if (
-            self._rows is not None
-            and self._wrap_width == width
-            and self._wrap_view_h == self._view_h
-        ):
+        # A change in view height re-contains images, so it invalidates every
+        # cached width; drop them all and rebuild for the new height.
+        if self._cache_view_h != self._view_h:
+            self._layout_cache.clear()
+            self._cache_view_h = self._view_h
+        cached = self._layout_cache.get(width)
+        if cached is not None:
+            self._rows, self._row_tops, self._anchors, self._line_pitch = cached
+            self._wrap_width = width
+            self._wrap_view_h = self._view_h
             return self._rows
         theme = ctx.theme or DEFAULT_THEME
         measure = ctx.measure_text
@@ -1080,6 +1100,12 @@ class MarkdownView(Widget):
         self._anchors = {slug: tops[idx] for slug, idx in anchors if slug}
         self._wrap_width = width
         self._wrap_view_h = self._view_h
+        # Memoize under the current (already view-height-consistent) cache. Steady
+        # state holds just the two probe widths; extra entries accrue only mid
+        # resize, so evict the oldest to keep the dict bounded.
+        if len(self._layout_cache) >= 4:
+            self._layout_cache.pop(next(iter(self._layout_cache)))
+        self._layout_cache[width] = (rows, tops, self._anchors, self._line_pitch)
         return rows
 
     def _layout_code(
