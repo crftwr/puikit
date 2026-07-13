@@ -507,13 +507,13 @@ def _build_ci_filters(effect) -> "list[Any]":
             Contrast=1.0 + effect.glow * 0.15,
         ))
     if effect.bloom > 0:
-        # Tight radius: a halo hugging bright glyphs, not an all-over smear (the
-        # symptom of a wide radius on an all-bright phosphor UI). Also kept below
-        # _SCANLINE_PERIOD so this bloom pass doesn't wash out the painted lines.
-        filters.append(_ci_filter(
-            "CIBloom", Radius=min(effect.bloom * 18.0, _SCANLINE_PERIOD * 0.5),
-            Intensity=effect.bloom,
-        ))
+        # Radius grows with the strength for a wide, soft halo. It is capped below
+        # _SCANLINE_PERIOD *only when scanlines are drawn*, so the halo can't wash the
+        # painted lines out; with no scanlines a theme can ask for a broad glow.
+        radius = effect.bloom * 18.0
+        if effect.scanline > 0:
+            radius = min(radius, _SCANLINE_PERIOD * 0.5)
+        filters.append(_ci_filter("CIBloom", Radius=radius, Intensity=effect.bloom))
     return filters
 
 

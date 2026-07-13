@@ -115,10 +115,19 @@ def test_macos_filter_chain_for_crt_has_no_monochrome():
 
 def test_macos_bloom_radius_stays_below_scanline_pitch():
     # Bloom is a content filter applied over the painted scanlines, so its radius
-    # must stay under the pitch or it washes the lines out.
+    # must stay under the pitch or it washes the lines out (TINTED has scanlines).
     mb = _macos()
     bloom = [f for f in mb._build_ci_filters(TINTED) if f.name() == "CIBloom"][0]
     assert float(bloom.valueForKey_("inputRadius")) <= mb._SCANLINE_PERIOD * 0.6
+
+
+def test_macos_bloom_radius_uncapped_without_scanlines():
+    # With no scanlines to protect, the bloom radius grows with the strength into a
+    # wide halo — the scanline-pitch cap only applies when scanlines are drawn.
+    mb = _macos()
+    bloom = [f for f in mb._build_ci_filters(PostEffect(bloom=0.5))
+             if f.name() == "CIBloom"][0]
+    assert float(bloom.valueForKey_("inputRadius")) > mb._SCANLINE_PERIOD  # ~9px, not 2
 
 
 def test_macos_scanlines_darken_alternating_rows():
