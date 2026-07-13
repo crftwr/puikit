@@ -47,11 +47,6 @@ class PostEffect:
                  effect only needs glow / scanlines.
       bloom      Phosphor glow: bright areas bleed into their neighbours.
       scanline   Horizontal CRT scanline darkening.
-      pixelgrid  LCD dot-matrix grid: a fine dark grid on *both* axes that
-                 separates the frame into discrete square pixel cells — the
-                 reflective-LCD "pixels with gaps" look. Distinct from
-                 ``scanline`` (horizontal CRT banding only); pair it with a flat,
-                 non-emissive theme (no bloom/glow) for a handheld-LCD screen.
       vignette   Corner/edge darkening (the tube's rounded falloff).
       curvature  Barrel distortion — the screen bulges toward the viewer.
       flicker    Subtle per-frame brightness wobble (needs an animating backend;
@@ -61,24 +56,32 @@ class PostEffect:
                  occasionally sweeps top-to-bottom, like an untuned CRT. Animated
                  (self-driven), so it needs a backend with an animation timer; a
                  still backend ignores it. Sets how bright/frequent the band is.
+      drop_shadow  A soft drop shadow under the *text* (the LCD "segments"), for a
+                 reflective-LCD embossed look. Unlike the other fields this is not a
+                 full-frame composite (that would need a two-input blend the layer
+                 can't run); a backend applies it as it draws the glyphs. Scoped to
+                 text on purpose — a whole-frame/context shadow would also shadow the
+                 background and selection *fills*, whose rectangular shadows read as
+                 ugly boxes. A grid backend (no sub-pixel offset) ignores it. Sets
+                 the shadow's depth.
     """
 
     name: str = "crt"
     tint: Color | None = None
     bloom: float = 0.0
     scanline: float = 0.0
-    pixelgrid: float = 0.0
     vignette: float = 0.0
     curvature: float = 0.0
     flicker: float = 0.0
     glow: float = 0.0
     roll: float = 0.0
+    drop_shadow: float = 0.0
 
     def __post_init__(self) -> None:
         # Clamp on a frozen dataclass via object.__setattr__ so callers (and
         # config files) can't push a backend into an out-of-range parameter.
-        for f in ("bloom", "scanline", "pixelgrid", "vignette", "curvature",
-                  "flicker", "glow", "roll"):
+        for f in ("bloom", "scanline", "vignette", "curvature",
+                  "flicker", "glow", "roll", "drop_shadow"):
             object.__setattr__(self, f, _clamp01(getattr(self, f)))
 
     @property
@@ -86,8 +89,8 @@ class PostEffect:
         """True when the effect would change nothing (no tint and every strength
         zero) — a backend can skip the whole composite pass."""
         return self.tint is None and not any(
-            (self.bloom, self.scanline, self.pixelgrid, self.vignette,
-             self.curvature, self.flicker, self.glow, self.roll)
+            (self.bloom, self.scanline, self.vignette, self.curvature,
+             self.flicker, self.glow, self.roll, self.drop_shadow)
         )
 
     def with_tint(self, tint: Color | None) -> "PostEffect":

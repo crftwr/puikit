@@ -79,11 +79,6 @@ _SHADOW_ALPHA = 0.33
 # Scanline pitch (one dark + one light row) in dip. Kept above the bloom blur
 # sigma so the additive bloom pass doesn't wash the painted lines out.
 _SCANLINE_PERIOD = 4.0
-# LCD dot-matrix cell pitch (one pixel cell + its gap) in dip, for the
-# ``pixelgrid`` effect. Smaller than the scanline pitch so cells read as fine
-# pixels; the gap is a fraction of this (see _render_pixel_grid). Mirrors
-# MacOSBackend._PIXEL_GRID_PERIOD.
-_PIXEL_GRID_PERIOD = 3.0
 # Vignette falloff, as a fraction of the window half-extent: the gradient is
 # clear until _INNER and reaches full corner darkness at _OUTER. Edge midpoints
 # sit at 1.0 and corners at ~1.41, so _OUTER just past the corners dims them most
@@ -1144,8 +1139,6 @@ class WindowsBackend(Backend):
         effect = self._post_effect
         if effect.scanline > 0:
             self._render_scanlines(effect.scanline)
-        if effect.pixelgrid > 0:
-            self._render_pixel_grid(effect.pixelgrid)
         if effect.vignette > 0:
             self._render_vignette(effect.vignette)
         if effect.roll > 0 and self._roll_active():
@@ -1167,25 +1160,6 @@ class WindowsBackend(Backend):
         while y < h:
             native.rt_fill_rectangle(self._render_target, native.D2D1_RECT_F(0.0, y, w, y + line_h), self._brush)
             y += period
-
-    def _render_pixel_grid(self, strength: float) -> None:
-        """Paint a fine dark grid on both axes — the LCD dot-matrix "pixels with
-        gaps" texture — over the whole window. Unlike _render_scanlines (horizontal
-        banding only), this darkens thin inter-pixel gaps on *both* axes so every
-        cell reads as a discrete square pixel; grid crossings darken twice so the
-        pixel corners sit deepest. Mirrors MacOSBackend._render_pixel_grid."""
-        w, h = self._client_size_px()
-        period = _PIXEL_GRID_PERIOD * self._dpi_scale
-        gap = max(1.0, period * 0.28)  # thin gap; the rest of each cell stays lit
-        self._set_brush((0, 0, 0), min(strength, 0.7))
-        y = 0.0
-        while y < h:
-            native.rt_fill_rectangle(self._render_target, native.D2D1_RECT_F(0.0, y, w, y + gap), self._brush)
-            y += period
-        x = 0.0
-        while x < w:
-            native.rt_fill_rectangle(self._render_target, native.D2D1_RECT_F(x, 0.0, x + gap, h), self._brush)
-            x += period
 
     def _render_vignette(self, strength: float) -> None:
         """Darken the frame toward its edges with a radial falloff that fits the

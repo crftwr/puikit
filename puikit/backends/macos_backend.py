@@ -62,6 +62,7 @@ from AppKit import (
     NSItalicFontMask,
     NSImage,
     NSKernAttributeName,
+    NSShadowAttributeName,
     NSMutableParagraphStyle,
     NSParagraphStyleAttributeName,
     NSCompositingOperationSourceOver,
@@ -191,12 +192,6 @@ except ImportError:
 #: against too wide a bloom washes them out. A follow-up could derive this from
 #: the display's device scale for pixel-exact lines.
 _SCANLINE_PERIOD = 4.0
-
-#: LCD dot-matrix cell pitch in points (one pixel cell + its gap), for the
-#: ``pixelgrid`` effect. Smaller than the scanline pitch so the cells read as
-#: fine pixels rather than fat bands; the gap is a fraction of this (see
-#: _render_pixel_grid). Kept small but >1pt so the grid survives Retina scaling.
-_PIXEL_GRID_PERIOD = 3.0
 
 try:
     import CoreText
@@ -1027,6 +1022,9 @@ class MacOSBackend(Backend):
         # Active post-processing effect (set_post_effect); re-applied to the view
         # on open() and kept across resizes because it lives on the layer.
         self._post_effect: Any | None = None
+        # Cached NSShadow for the effect's ``drop_shadow`` (rebuilt when the effect
+        # changes); None when the active effect has none.
+        self._drop_shadow_obj: Any | None = None
         # Rolling-band ("vertical hold") animation state, or None when the active
         # effect has no roll. Keys: active(bool), start, duration, next(start time).
         self._crt_roll: dict | None = None
@@ -1627,8 +1625,6 @@ class MacOSBackend(Backend):
         effect = self._post_effect
         if effect is not None and effect.scanline > 0:
             self._render_scanlines(effect.scanline)
-        if effect is not None and effect.pixelgrid > 0:
-            self._render_pixel_grid(effect.pixelgrid)
         if effect is not None and effect.vignette > 0 and _HAS_QUARTZ:
             self._render_vignette(effect.vignette)
         # Drawn last in the render pass, so the band sits on top of the scanlines
@@ -1657,33 +1653,6 @@ class MacOSBackend(Backend):
                 NSMakeRect(0.0, y, w, line_h), NSCompositingOperationSourceOver
             )
             y += _SCANLINE_PERIOD
-
-    def _render_pixel_grid(self, strength: float) -> None:
-        """Paint a fine dark grid on both axes — the LCD dot-matrix "pixels with
-        gaps" texture — over the whole view. Unlike _render_scanlines (horizontal
-        CRT banding only), this darkens thin inter-pixel gaps on *both* axes so
-        every cell reads as a discrete square pixel. ``strength`` (0..1) is the gap
-        opacity; the grid crossings darken twice (source-over) so the pixel corners
-        sit deepest, like a real reflective LCD. Meant for a flat, non-emissive
-        theme — pair it with no bloom/glow so the cells stay crisp."""
-        bounds = self._view.bounds()
-        w = bounds.size.width
-        h = bounds.size.height
-        _ns_color((0, 0, 0), alpha=min(strength, 0.7)).setFill()
-        period = _PIXEL_GRID_PERIOD
-        gap = max(1.0, period * 0.28)  # thin gap; the rest of each cell stays lit
-        y = 0.0
-        while y < h:
-            NSRectFillUsingOperation(
-                NSMakeRect(0.0, y, w, gap), NSCompositingOperationSourceOver
-            )
-            y += period
-        x = 0.0
-        while x < w:
-            NSRectFillUsingOperation(
-                NSMakeRect(x, 0.0, gap, h), NSCompositingOperationSourceOver
-            )
-            x += period
 
     def _render_vignette(self, strength: float) -> None:
         """Darken the frame toward its edges with a radial falloff that fits the
@@ -1817,6 +1786,29 @@ class MacOSBackend(Backend):
             x * self._base_w, y * self._base_h, w_units * self._base_w, h_units * self._base_h
         )
 
+    def _drop_shadow_ns(self) -> "Any | None":
+        """The NSShadow for the active effect's ``drop_shadow`` (a soft shadow under
+        the drawn glyphs — the reflective-LCD "segments cast a shadow" look), or
+        ``None`` when the effect has none. Applied only to *text* (the ink), as an
+        NSAttributedString attribute — NOT as a whole-context shadow: a context
+        shadow also shadows the background/row/selection *fills*, and a filled rect's
+        rectangular shadow reads as ugly boxes/underlines behind the text. So the
+        drop shadow is scoped to the ink here, in the one place that draws it. Built
+        once per effect and cached; the offset is down-right (negative y is down in
+        this view, as for the popup shadow) and grows with the strength."""
+        eff = self._post_effect
+        strength = getattr(eff, "drop_shadow", 0.0) if eff is not None else 0.0
+        if strength <= 0:
+            return None
+        if self._drop_shadow_obj is None:
+            depth = 0.6 + strength * 1.4  # points
+            sh = NSShadow.alloc().init()
+            sh.setShadowOffset_(NSMakeSize(depth * 0.5, -depth))
+            sh.setShadowBlurRadius_(strength * 1.6)
+            sh.setShadowColor_(_ns_color((0, 0, 0), min(0.6, 0.2 + strength * 0.45)))
+            self._drop_shadow_obj = sh
+        return self._drop_shadow_obj
+
     def _render_text(self, x: int, y: int, text: str, style: Style) -> None:
         fg = style.fg or _DEFAULT_FG
         bg = style.bg
@@ -1859,6 +1851,9 @@ class MacOSBackend(Backend):
             )
         if strike:
             attrs[NSStrikethroughStyleAttributeName] = NSUnderlineStyleSingle
+        shadow = self._drop_shadow_ns()
+        if shadow is not None:
+            attrs[NSShadowAttributeName] = shadow
 
         # Lock each glyph to its base unit column without drawing it in its own
         # call. The base unit width is the monospaced advance rounded *up*, so a
@@ -1882,7 +1877,7 @@ class MacOSBackend(Backend):
         kerned[NSParagraphStyleAttributeName] = self._grid_para
         # id(ns_font) keys the cache by the exact resolved face, covering both
         # the NORMAL/BOLD base faces and any grid-aligned per-Style monospace.
-        sig = (id(ns_font), fg, alpha, underline, thick, strike)
+        sig = (id(ns_font), fg, alpha, underline, thick, strike, shadow is not None)
         col = 0
         i = 0
         n = len(runs)
@@ -1926,7 +1921,11 @@ class MacOSBackend(Backend):
             )
         if strike:
             attrs[NSStrikethroughStyleAttributeName] = NSUnderlineStyleSingle
-        key = ("f", text, id(ns_font), tuple(fg) if fg else None, alpha, underline, thick, strike)
+        shadow = self._drop_shadow_ns()
+        if shadow is not None:
+            attrs[NSShadowAttributeName] = shadow
+        key = ("f", text, id(ns_font), tuple(fg) if fg else None, alpha,
+               underline, thick, strike, shadow is not None)
         ns_text = self._cached_attr_string(key, text, attrs)
         origin = self._unit_rect(x, y, 1, 1).origin
         if bg is not None and not is_transparent(bg):
@@ -2305,6 +2304,7 @@ class MacOSBackend(Backend):
         app calls this once when a theme recommends an effect. Stored so open()
         can re-attach it, and the layer keeps it across window resizes."""
         self._post_effect = None if (effect is None or effect.is_noop) else effect
+        self._drop_shadow_obj = None  # rebuilt lazily for the new effect
         self._apply_post_effect()
 
     def _apply_post_effect(self) -> None:
