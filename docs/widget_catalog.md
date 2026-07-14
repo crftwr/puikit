@@ -32,7 +32,7 @@ One implementation each, running unchanged on every backend.
 | `ProgressBar` | `progress_bar.py` | Read-only determinate ratio bar |
 | `BusyIndicator` | `busy_indicator.py` | Indeterminate activity spinner (`animation` fallback) |
 | `Splitter` | `splitter.py` | Two panes with a draggable divider (drag to resize) |
-| `ListView` | `list.py` | Scrollable selectable rows; text by default, or a widget per row via `row_factory` |
+| `ListView` | `list.py` | Scrollable selectable rows; text by default (over-long rows clip, or elide with `ellipsis`/`elide_where`), or a widget per row via `row_factory` |
 | `LogView` | `log_view.py` | Virtualized append-only stream; per-line color, wrap, drag-select + copy, tail-follow |
 | `MarkdownView` | `markdown_view.py` | Scrolling read-only Markdown viewer; proportional prose + monospace/sized headings, clickable links, images |
 | `TreeView` / `TreeNode` | `tree.py` | Expandable hierarchical rows with indentation |

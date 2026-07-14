@@ -108,6 +108,29 @@ def test_listview_clips_by_measured_width_not_column_count():
     assert "z" * 13 not in backend.rows             # not one glyph past the edge
 
 
+def test_listview_middle_elides_long_rows(backend):
+    # A path-like row too wide for the pane is middle-elided when the ellipsis
+    # option is set, keeping both the head and the meaningful tail; the default
+    # (empty ellipsis) still end-clips, dropping the tail.
+    panel = Panel(backend)
+    item = "/aaa/bbb/ccc/ddd.txt"
+    elided = ListView([item], ellipsis="…", elide_where="middle")
+    panel.add(elided, x=0, y=0, w=12, h=2)
+    panel.render()
+    row = panel.backend.snapshot()[0].rstrip()
+    assert "…" in row
+    assert row.startswith("/aaa")      # head kept
+    assert row.endswith(".txt")        # tail (the destination) kept
+
+    plain = ListView([item])           # default: end clip, no ellipsis
+    panel2 = Panel(backend)
+    panel2.add(plain, x=0, y=0, w=12, h=2)
+    panel2.render()
+    row2 = backend.snapshot()[0].rstrip()
+    assert "…" not in row2
+    assert not row2.endswith(".txt")   # tail dropped by the end clip
+
+
 def test_listview_keyboard_navigation_scrolls(backend):
     panel = Panel(backend)
     listview = ListView([f"item{i}" for i in range(20)])

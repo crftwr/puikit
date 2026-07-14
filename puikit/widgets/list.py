@@ -18,7 +18,7 @@ from typing import Any
 from ..backend import DEFAULT_STYLE, Style
 from ..event import Event, EventType
 from ..panel import DrawContext
-from ..text import truncate_to_width
+from ..text import elide, truncate_to_width
 from ._input import is_activate
 from .base import Widget, draw_list_row, selected_row_style
 
@@ -34,11 +34,19 @@ class ListView(Widget):
         on_change: Callable[[int, Any], None] | None = None,
         row_factory: Callable[[Any], Widget] | None = None,
         row_height: float = 1,
+        ellipsis: str = "",
+        elide_where: str = "end",
     ):
         # When row_factory is None, items are strings drawn one per row. With a
         # row_factory, items may be any value; row_factory(item) -> Widget gives
         # the row its appearance, and each row is row_height base units tall.
         self.items = list(items)
+        # Text-row abbreviation. Default (empty ellipsis) is a pure end clip, as
+        # before. Set ``ellipsis`` (e.g. "…") to mark elided content, and
+        # ``elide_where`` ("end"/"start"/"middle") to choose which part to keep —
+        # "middle" is ideal for paths/filenames, whose tail carries the meaning.
+        self._ellipsis = ellipsis
+        self._elide_where = elide_where
         self.style = style
         self.selected = 0
         # First visible item, measured in base units (== rows when each row is
@@ -182,7 +190,11 @@ class ListView(Widget):
                 # length-based clip would let the row overflow the pane by a
                 # column. draw_list_row then spans the highlight to the full pane
                 # width (a proportional row is narrower than its column count).
-                clipped = truncate_to_width(self.items[index], text_w, measure=measure)
+                if self._ellipsis:
+                    clipped = elide(self.items[index], text_w, self._ellipsis,
+                                    where=self._elide_where, measure=measure)
+                else:
+                    clipped = truncate_to_width(self.items[index], text_w, measure=measure)
                 style = self.style
                 if index == self.selected:
                     style = selected_row_style(
