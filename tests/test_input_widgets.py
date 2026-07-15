@@ -446,6 +446,96 @@ def test_textedit_plain_arrow_collapses_selection(backend):
     assert field.cursor == 0
 
 
+@pytest.mark.parametrize("word_mod", ["ctrl", "alt"])
+def test_textedit_word_move_left_and_right(backend, word_mod):
+    # Ctrl (Windows/terminal) and Alt/Option (macOS/terminal) both jump the
+    # caret over whole words, skipping the separators between them.
+    mod = frozenset({word_mod})
+    panel = Panel(backend)
+    field = TextEdit("foo bar baz", width=16)
+    panel.add(field, x=0, y=0, w=16, h=1)
+    panel.dispatch_event(_key("home"))
+    panel.dispatch_event(_key("right", modifiers=mod))
+    assert field.cursor == 3   # end of "foo"
+    panel.dispatch_event(_key("right", modifiers=mod))
+    assert field.cursor == 7   # skipped the space, end of "bar"
+    panel.dispatch_event(_key("left", modifiers=mod))
+    assert field.cursor == 4   # back to the start of "bar"
+    panel.dispatch_event(_key("left", modifiers=mod))
+    assert field.cursor == 0   # start of "foo"
+
+
+def test_textedit_word_move_treats_punctuation_as_separator(backend):
+    panel = Panel(backend)
+    field = TextEdit("a.bc-de", width=16)
+    panel.add(field, x=0, y=0, w=16, h=1)
+    panel.dispatch_event(_key("home"))
+    panel.dispatch_event(_key("right", modifiers=frozenset({"ctrl"})))
+    assert field.cursor == 1   # end of "a"; the "." is a separator
+    panel.dispatch_event(_key("right", modifiers=frozenset({"ctrl"})))
+    assert field.cursor == 4   # skipped "." then end of "bc"
+
+
+def test_textedit_word_delete_backward(backend):
+    edits = []
+    panel = Panel(backend)
+    field = TextEdit("foo bar baz", on_change=edits.append)
+    panel.add(field, x=0, y=0, w=16, h=1)
+    panel.dispatch_event(_key("end"))
+    panel.dispatch_event(_key("backspace", modifiers=frozenset({"alt"})))
+    assert field.text == "foo bar " and field.cursor == 8
+    panel.dispatch_event(_key("backspace", modifiers=frozenset({"ctrl"})))
+    assert field.text == "foo " and field.cursor == 4
+    assert edits[-1] == "foo "
+
+
+def test_textedit_word_delete_forward(backend):
+    panel = Panel(backend)
+    field = TextEdit("foo bar baz", width=16)
+    panel.add(field, x=0, y=0, w=16, h=1)
+    panel.dispatch_event(_key("home"))
+    panel.dispatch_event(_key("delete", modifiers=frozenset({"ctrl"})))
+    assert field.text == " bar baz" and field.cursor == 0
+    panel.dispatch_event(_key("delete", modifiers=frozenset({"ctrl"})))
+    assert field.text == " baz" and field.cursor == 0
+
+
+def test_textedit_word_delete_removes_selection_first(backend):
+    # With a selection, a word-delete drops the selection (not an extra word).
+    panel = Panel(backend)
+    field = TextEdit("foo bar baz", width=16)
+    panel.add(field, x=0, y=0, w=16, h=1)
+    panel.dispatch_event(_key("home"))
+    for _ in range(3):
+        panel.dispatch_event(_key("right", modifiers=frozenset({"shift"})))
+    assert field.selection_text == "foo"
+    panel.dispatch_event(_key("backspace", modifiers=frozenset({"ctrl"})))
+    assert field.text == " bar baz" and field.cursor == 0
+
+
+def test_textedit_shift_ctrl_extends_selection_by_word(backend):
+    panel = Panel(backend)
+    field = TextEdit("foo bar baz", width=16)
+    panel.add(field, x=0, y=0, w=16, h=1)
+    panel.dispatch_event(_key("home"))
+    panel.dispatch_event(_key("right", modifiers=frozenset({"shift", "ctrl"})))
+    assert field.selection_text == "foo"
+    panel.dispatch_event(_key("right", modifiers=frozenset({"shift", "ctrl"})))
+    assert field.selection_text == "foo bar"
+
+
+def test_textedit_word_move_at_edges_is_a_noop_but_consumed(backend):
+    panel = Panel(backend)
+    field = TextEdit("hi", width=12)
+    panel.add(field, x=0, y=0, w=12, h=1)
+    panel.dispatch_event(_key("home"))
+    assert field.handle_event(_key("left", modifiers=frozenset({"ctrl"}))) is True
+    assert field.cursor == 0
+    panel.dispatch_event(_key("end"))
+    assert field.handle_event(_key("delete", modifiers=frozenset({"alt"}))) is True
+    assert field.text == "hi"
+
+
 def test_textedit_mouse_drag_selects(backend):
     panel = Panel(backend)
     field = TextEdit("hello", width=12)

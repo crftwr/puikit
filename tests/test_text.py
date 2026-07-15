@@ -5,6 +5,7 @@ from puikit.text import (
     display_width,
     elide,
     glyph_runs,
+    is_word_char,
     truncate_to_width,
     word_bounds,
     wrap_text,
@@ -40,6 +41,13 @@ def test_word_bounds_clamps_index_and_empty():
     g = glyph_runs("hi")
     assert word_bounds(g, 99) == (0, 2)  # past the end clamps onto the last glyph
     assert word_bounds([], 0) == (0, 0)
+
+
+def test_is_word_char_classes():
+    assert is_word_char("a") and is_word_char("Z") and is_word_char("7")
+    assert is_word_char("_") and is_word_char("日")  # underscore and CJK are words
+    assert not is_word_char(" ") and not is_word_char("\t")  # whitespace is not
+    assert not is_word_char("-") and not is_word_char(".")  # punctuation is not
 
 
 def test_char_width_ascii_and_wide():

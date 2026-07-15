@@ -6,7 +6,14 @@ These exercise the pure translation logic without opening a real terminal
 
 import curses
 
-from puikit.backends.curses_backend import CursesBackend
+from puikit.backends.curses_backend import (
+    CursesBackend,
+    _csi_modifiers,
+    _escape_complete,
+    _extended_key_event,
+    _meta_char_event,
+    _parse_csi_key,
+)
 from puikit.event import EventType
 
 
@@ -59,6 +66,100 @@ def test_ctrl_letter_does_not_shadow_named_control_keys():
     assert be._translate_char("\r").key == "enter"
     assert be._translate_char("\x08").key == "backspace"
     assert be._translate_char("\x1b").key == "escape"
+
+
+# --- modified function-key (word-editing) decoding ------------------------------
+
+
+def test_csi_modifiers_decode_xterm_parameter():
+    # mod = 1 + bitmask(Shift=1, Alt=2, Ctrl=4): 5 -> Ctrl, 3 -> Alt, 6 -> Shift+Ctrl.
+    assert _csi_modifiers(1) == frozenset()
+    assert _csi_modifiers(5) == frozenset({"ctrl"})
+    assert _csi_modifiers(3) == frozenset({"alt"})
+    assert _csi_modifiers(2) == frozenset({"shift"})
+    assert _csi_modifiers(6) == frozenset({"shift", "ctrl"})
+
+
+def test_parse_csi_key_modified_arrows_and_delete():
+    # xterm: CSI 1 ; <mod> <final> for arrows, CSI <n> ; <mod> ~ for delete etc.
+    ev = _parse_csi_key("[1;5D")  # Ctrl+Left
+    assert ev.key == "left" and ev.modifiers == frozenset({"ctrl"})
+    ev = _parse_csi_key("[1;3C")  # Alt+Right
+    assert ev.key == "right" and ev.modifiers == frozenset({"alt"})
+    ev = _parse_csi_key("[3;5~")  # Ctrl+Delete
+    assert ev.key == "delete" and ev.modifiers == frozenset({"ctrl"})
+    ev = _parse_csi_key("[1;6D")  # Shift+Ctrl+Left
+    assert ev.key == "left" and ev.modifiers == frozenset({"shift", "ctrl"})
+
+
+def test_parse_csi_key_unmodified_ss3_and_csi():
+    assert _parse_csi_key("OC").key == "right"       # SS3 arrow, app-cursor mode
+    assert _parse_csi_key("[C") == _parse_csi_key("[C")
+    assert _parse_csi_key("[C").modifiers == frozenset()
+    assert _parse_csi_key("[999X") is None           # not a key we recognize
+
+
+def test_meta_char_event_readline_word_keys():
+    # Alt+b / Alt+f move by word, Alt+d deletes forward, Alt+Backspace deletes back.
+    assert _meta_char_event("b") == _meta_char_event("b")
+    assert _meta_char_event("b").key == "left" and "alt" in _meta_char_event("b").modifiers
+    assert _meta_char_event("f").key == "right"
+    assert _meta_char_event("d").key == "delete"
+    assert _meta_char_event("\x7f").key == "backspace"
+    assert _meta_char_event("\x08").key == "backspace"
+    assert _meta_char_event("z") is None  # not a word-editing chord
+
+
+def test_extended_key_event_ncurses_capnames():
+    # ncurses pre-assembles Ctrl+Left etc. into an extended key whose capability
+    # name (kLFT5) carries the base and the xterm modifier digit.
+    ev = _extended_key_event("kLFT5")
+    assert ev.key == "left" and ev.modifiers == frozenset({"ctrl"})
+    ev = _extended_key_event("kDC3")   # Alt+Delete
+    assert ev.key == "delete" and ev.modifiers == frozenset({"alt"})
+    ev = _extended_key_event("kRIT")   # no trailing digit -> unmodified
+    assert ev.key == "right" and ev.modifiers == frozenset()
+    assert _extended_key_event("kSOMETHING") is None
+
+
+def test_escape_complete_recognizes_sequence_kinds():
+    assert not _escape_complete("")        # a bare ESC never completes
+    assert not _escape_complete("[")       # CSI still gathering
+    assert not _escape_complete("[1;5")    # ...still no final byte
+    assert _escape_complete("[1;5D")       # final byte 'D'
+    assert _escape_complete("[<0;5;3M")    # SGR mouse ends at 'M'
+    assert not _escape_complete("O")       # SS3 needs its final char
+    assert _escape_complete("OC")
+    assert _escape_complete("b")           # ESC + single meta char
+
+
+def _drive_key(chars):
+    """Feed an ESC-prefixed char stream through one event-loop pass and return
+    the single KEY event it produces (mirrors the mouse tests' _FakeStdscr)."""
+    be = CursesBackend()
+    be._stdscr = _FakeStdscr(chars)
+    events = []
+    be.run_event_loop_iteration(events.append, timeout_ms=0)
+    return events
+
+
+def test_terminal_ctrl_left_decodes_to_word_move():
+    events = _drive_key(["\x1b"] + list("[1;5D"))
+    assert len(events) == 1
+    assert events[0].type is EventType.KEY
+    assert events[0].key == "left" and events[0].modifiers == frozenset({"ctrl"})
+
+
+def test_terminal_alt_backspace_decodes_to_word_delete():
+    events = _drive_key(["\x1b", "\x7f"])
+    assert len(events) == 1
+    assert events[0].key == "backspace" and events[0].modifiers == frozenset({"alt"})
+
+
+def test_terminal_bare_escape_is_still_the_escape_key():
+    events = _drive_key(["\x1b"])  # nothing follows: a real Escape press
+    assert len(events) == 1
+    assert events[0].key == "escape"
 
 
 def test_sgr_modifiers_decode_shift():

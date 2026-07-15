@@ -21,13 +21,17 @@ from ..backend import DEFAULT_STYLE, Style, TextAttribute
 from ..event import Event, EventType
 from ..layout import LayoutContext, SizeRequest
 from ..panel import DrawContext
-from ..text import display_width, word_bounds
+from ..text import display_width, is_word_char, word_bounds
 from ..theme import DEFAULT_THEME
 from ._input import MultiClickTracker, typed_char
 from .base import CONTROL_HEIGHT, Widget
 
 # Corner radius of the field, in device pixels (dropped on a character grid).
 _FIELD_RADIUS = 4.0
+
+# Keys whose meaning changes to a whole-word operation when a word modifier
+# (Ctrl / Alt-Option) is held: caret motion and forward/backward deletion.
+_WORD_KEYS = frozenset({"left", "right", "backspace", "delete"})
 
 
 class TextEdit(Widget):
@@ -390,6 +394,13 @@ class TextEdit(Widget):
         if event.type is not EventType.KEY:
             return False
 
+        # Word-granularity caret motion / deletion: Ctrl (Windows, terminals) or
+        # Alt/Option (macOS, terminals) turns an arrow or delete key into a
+        # whole-word operation. Handled before the Cmd/Ctrl command branch so a
+        # chord like Ctrl+Left is a word move, not an unhandled command chord.
+        if event.modifiers & {"ctrl", "alt"} and event.key in _WORD_KEYS:
+            return self._handle_key(event)
+
         # Command shortcuts (Cmd/Ctrl) are consumed before text insertion, so a
         # chord like Cmd+A never types its letter into the field.
         if event.modifiers & {"ctrl", "cmd"}:
@@ -399,7 +410,7 @@ class TextEdit(Widget):
         if ch is not None:
             self._insert(ch)
             return True
-        return self._handle_key(event.key, "shift" in event.modifiers)
+        return self._handle_key(event)
 
     def _index_at_column(self, target_x: float) -> int:
         """The buffer index nearest field-local x ``target_x`` (padding already
@@ -482,36 +493,30 @@ class TextEdit(Widget):
         self.cursor += len(text)
         self._changed()
 
-    def _handle_key(self, key: str | None, extend: bool) -> bool:
+    def _handle_key(self, event: Event) -> bool:
+        key = event.key
+        extend = "shift" in event.modifiers
+        # A held Ctrl (Windows/terminals) or Alt-Option (macOS/terminals) makes
+        # caret motion and deletion operate on whole words.
+        word = bool(event.modifiers & {"ctrl", "alt"})
         if key in ("left", "right", "home", "end"):
-            return self._move(key, extend)
+            return self._move(key, extend, word)
         if key == "backspace":
-            if self._delete_selection():
-                self._changed()
-            elif self.cursor > 0:
-                self.text = self.text[: self.cursor - 1] + self.text[self.cursor :]
-                self.cursor -= 1
-                self._changed()
-            return True
+            return self._delete(forward=False, word=word)
         if key == "delete":
-            if self._delete_selection():
-                self._changed()
-            elif self.cursor < len(self.text):
-                self.text = self.text[: self.cursor] + self.text[self.cursor + 1 :]
-                self._changed()
-            return True
+            return self._delete(forward=True, word=word)
         if key == "enter":
             if self.on_submit is not None:
                 self.on_submit(self.text)
             return self.on_submit is not None
         return False
 
-    def _move(self, key: str | None, extend: bool) -> bool:
+    def _move(self, key: str | None, extend: bool, word: bool = False) -> bool:
         sel = self._selection()
         if extend:
             if self._anchor is None:  # begin a keyboard selection from the cursor
                 self._anchor = self.cursor
-        elif sel is not None and key in ("left", "right"):
+        elif sel is not None and key in ("left", "right") and not word:
             # Plain left/right collapse a selection onto the matching edge.
             self.cursor = sel[0] if key == "left" else sel[1]
             self._anchor = None
@@ -519,14 +524,60 @@ class TextEdit(Widget):
         else:
             self._anchor = None
         if key == "left":
-            self.cursor = max(0, self.cursor - 1)
+            self.cursor = self._word_boundary(False) if word else max(0, self.cursor - 1)
         elif key == "right":
-            self.cursor = min(len(self.text), self.cursor + 1)
+            self.cursor = self._word_boundary(True) if word else min(len(self.text), self.cursor + 1)
         elif key == "home":
             self.cursor = 0
         elif key == "end":
             self.cursor = len(self.text)
         return True
+
+    def _delete(self, forward: bool, word: bool) -> bool:
+        """Delete a character (or, with ``word``, to the next word boundary) in
+        the given direction, or the selection if there is one. Always consumes
+        the key, even when there is nothing left to remove at the edge."""
+        if self._delete_selection():
+            self._changed()
+            return True
+        if word:
+            target = self._word_boundary(forward)
+            if target != self.cursor:
+                lo, hi = min(self.cursor, target), max(self.cursor, target)
+                self.text = self.text[:lo] + self.text[hi:]
+                self.cursor = lo
+                self._changed()
+            return True
+        if forward:
+            if self.cursor < len(self.text):
+                self.text = self.text[: self.cursor] + self.text[self.cursor + 1 :]
+                self._changed()
+        elif self.cursor > 0:
+            self.text = self.text[: self.cursor - 1] + self.text[self.cursor :]
+            self.cursor -= 1
+            self._changed()
+        return True
+
+    def _word_boundary(self, forward: bool) -> int:
+        """The index of the next word boundary from the cursor in ``forward``
+        direction. Moving forward skips a run of separators (whitespace /
+        punctuation) then the word that follows; backward is the mirror. A word
+        is an alphanumeric/underscore run (:func:`~puikit.text.is_word_char`),
+        so this steps between words the way native fields do."""
+        text = self.text
+        i = self.cursor
+        if forward:
+            n = len(text)
+            while i < n and not is_word_char(text[i]):
+                i += 1
+            while i < n and is_word_char(text[i]):
+                i += 1
+        else:
+            while i > 0 and not is_word_char(text[i - 1]):
+                i -= 1
+            while i > 0 and is_word_char(text[i - 1]):
+                i -= 1
+        return i
 
     def _insert(self, ch: str) -> None:
         # A committed character ends any composition and replaces any selection.

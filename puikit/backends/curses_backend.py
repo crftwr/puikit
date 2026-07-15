@@ -226,6 +226,111 @@ _CONTROL_CHARS = {
     "\x08": "backspace",
 }
 
+# --- modified function-key decoding ------------------------------------------
+#
+# Modern terminals report a modified cursor/edit key as an xterm CSI sequence:
+# ``ESC [ 1 ; <mod> <final>`` for arrows / home / end, or ``ESC [ <n> ; <mod> ~``
+# for delete / insert / page keys. ``<mod>`` is ``1 + bitmask`` where the bits
+# are Shift=1, Alt=2, Ctrl=4, Meta=8 (so Ctrl = 5, Alt = 3, Shift+Ctrl = 6).
+# ncurses may instead pre-assemble the same key into an extended keycode whose
+# capability name (``kLFT5`` = Ctrl+Left, ``kDC3`` = Alt+Delete) carries the
+# base and the same trailing modifier digit. Both paths feed _csi_modifiers.
+
+#: CSI final byte (letter form) -> key name — arrows and home/end.
+_CSI_FINAL_KEYS = {
+    "A": "up", "B": "down", "C": "right", "D": "left", "H": "home", "F": "end",
+}
+#: Leading number of a ``CSI <n> ; <mod> ~`` sequence -> key name.
+_CSI_TILDE_KEYS = {
+    "1": "home", "2": "insert", "3": "delete", "4": "end",
+    "5": "pageup", "6": "pagedown", "7": "home", "8": "end",
+}
+#: ncurses extended-capability base name -> key name.
+_EXTENDED_BASE_KEYS = {
+    "kLFT": "left", "kRIT": "right", "kUP": "up", "kDN": "down",
+    "kHOM": "home", "kEND": "end", "kDC": "delete", "kIC": "insert",
+    "kNXT": "pagedown", "kPRV": "pageup",
+}
+#: ESC-prefixed meta char -> key name (readline word-editing: Alt+b / Alt+f
+#: move by word, Alt+d deletes the next word; Alt+Backspace is handled apart).
+_META_WORD_KEYS = {"b": "left", "f": "right", "d": "delete"}
+
+
+def _escape_complete(buf: str) -> bool:
+    """True once ``buf`` (the bytes after an ESC) forms a complete escape
+    sequence: a CSI (``[`` … a final byte 0x40-0x7E), an SS3 (``O`` + one char),
+    or a single meta char. An empty buffer is a bare ESC and never completes."""
+    if not buf:
+        return False
+    if buf[0] == "[":
+        return len(buf) >= 2 and "\x40" <= buf[-1] <= "\x7e"
+    if buf[0] == "O":
+        return len(buf) >= 2
+    return True  # ESC + a single (meta) char
+
+
+def _csi_modifiers(param: int) -> frozenset[str]:
+    """Decode an xterm key-modifier parameter (``1 + bitmask`` of Shift=1,
+    Alt=2, Ctrl=4, Meta=8) into contract modifier names. ``1`` (or ``0``, an
+    absent parameter) means no modifier."""
+    bits = param - 1 if param > 0 else 0
+    names = []
+    if bits & 1:
+        names.append("shift")
+    if bits & 2:
+        names.append("alt")
+    if bits & 4:
+        names.append("ctrl")
+    if bits & 8:
+        names.append("cmd")
+    return frozenset(names)
+
+
+def _parse_csi_key(seq: str) -> "Event | None":
+    """Decode a CSI/SS3 function-key sequence — ESC already stripped, e.g.
+    ``[1;5D`` (Ctrl+Left), ``[3;3~`` (Alt+Delete), ``OC`` (Right) — into a
+    modified KEY event, or None when it is not a key we recognize."""
+    body = seq[1:]
+    if not body:
+        return None
+    final = body[-1]
+    params = body[:-1].split(";") if body[:-1] else []
+    mod = int(params[1]) if len(params) >= 2 and params[1].isdigit() else 1
+    modifiers = _csi_modifiers(mod)
+    name = _CSI_FINAL_KEYS.get(final)
+    if name is not None:
+        return Event(type=EventType.KEY, key=name, modifiers=modifiers)
+    if final == "~" and params and params[0].isdigit():
+        name = _CSI_TILDE_KEYS.get(params[0])
+        if name is not None:
+            return Event(type=EventType.KEY, key=name, modifiers=modifiers)
+    return None
+
+
+def _extended_key_event(name: str) -> "Event | None":
+    """Decode an ncurses extended-capability name (``kLFT5`` = Ctrl+Left,
+    ``kDC3`` = Alt+Delete) into a modified KEY event, or None if unrecognized.
+    The trailing digit, when present, is the xterm modifier parameter."""
+    base, mod = name, 1
+    if name and name[-1].isdigit():
+        base, mod = name[:-1], int(name[-1])
+    key = _EXTENDED_BASE_KEYS.get(base)
+    if key is None:
+        return None
+    return Event(type=EventType.KEY, key=key, modifiers=_csi_modifiers(mod))
+
+
+def _meta_char_event(ch: str) -> "Event | None":
+    """An ESC-prefixed single char is an Alt/Meta chord (readline word editing):
+    Alt+Backspace (ESC DEL/BS) deletes the previous word, Alt+b / Alt+f move by
+    word, Alt+d deletes the next word. Other Alt chords are left unhandled."""
+    if ch in ("\x7f", "\x08"):
+        return Event(type=EventType.KEY, key="backspace", modifiers=frozenset({"alt"}))
+    key = _META_WORD_KEYS.get(ch.lower())
+    if key is not None:
+        return Event(type=EventType.KEY, key=key, modifiers=frozenset({"alt"}))
+    return None
+
 _ATTR_MAP = [
     (TextAttribute.BOLD, curses.A_BOLD),
     (TextAttribute.UNDERLINE, curses.A_UNDERLINE),
@@ -1424,14 +1529,21 @@ class CursesBackend(Backend):
 
     def _read_escape_sequence(self) -> "Event | None":
         seq = self._collect_escape()
+        if not seq:
+            return Event(type=EventType.KEY, key="escape")  # a bare ESC
         if seq.startswith("[<") and seq[-1:] in ("M", "m"):
             return self._parse_sgr_mouse(seq)
-        return Event(type=EventType.KEY, key="escape")
+        # A CSI/SS3 function-key sequence or an Alt/Meta chord (word-editing
+        # keys arrive this way on terminals). Anything unrecognized falls back
+        # to Escape, matching the old behavior.
+        return self._parse_key_sequence(seq) or Event(type=EventType.KEY, key="escape")
 
     def _collect_escape(self) -> str:
-        """Read the bytes following an ESC without blocking, enough to capture a
-        short SGR mouse report. The terminal sends the whole sequence at once, so
-        the bytes are already buffered; a bare ESC collects nothing."""
+        """Read the bytes following an ESC without blocking. The terminal sends a
+        whole sequence at once, so the bytes are already buffered; a bare ESC
+        collects nothing (the Escape key). Returns the payload after the ESC — a
+        CSI/SS3 function-key sequence (``[1;5D``, ``OC``), an SGR mouse report
+        (``[<0;5;3M``), or a single meta char (``b``, ``\\x7f``)."""
         assert self._stdscr is not None
         self._stdscr.timeout(0)
         buf = ""
@@ -1441,15 +1553,20 @@ class CursesBackend(Backend):
             except curses.error:
                 break
             if isinstance(c, int):
-                break  # a keycode mid-sequence: not a mouse report
+                break  # a keycode mid-sequence: not part of an ANSI escape
             buf += c
-            # Keep reading only while buf is still a viable SGR mouse prefix;
-            # stop once the closing M/m arrives or it diverges from "[<...".
-            if not ("[<".startswith(buf) or buf.startswith("[<")):
-                break
-            if buf.startswith("[<") and c in "Mm":
+            if _escape_complete(buf):
                 break
         return buf
+
+    def _parse_key_sequence(self, seq: str) -> "Event | None":
+        """Decode the payload of an escape sequence (ESC already stripped) into a
+        KEY event, or None when it is not a key we recognize."""
+        if len(seq) == 1:
+            return _meta_char_event(seq)
+        if seq[0] in "[O":
+            return _parse_csi_key(seq)
+        return None
 
     def quit(self) -> None:
         self._quit_requested = True
@@ -1466,6 +1583,12 @@ class CursesBackend(Backend):
             return Event(type=EventType.KEY, key="tab", modifiers=frozenset({"shift"}))
         if ch in _KEY_NAMES:
             return Event(type=EventType.KEY, key=_KEY_NAMES[ch])
+        if ch >= 256:
+            # A curses keycode we don't map directly: a modified cursor/edit key
+            # (Ctrl+Left, Alt+Delete, ...) that ncurses pre-assembled into an
+            # extended keycode. Decode its capability name; swallow anything
+            # still unknown rather than chr()-ing a keycode into the field.
+            return self._translate_extended(ch)
         if 0 <= ch < 0x110000:
             char = chr(ch)
             if char.isprintable():
@@ -1473,6 +1596,15 @@ class CursesBackend(Backend):
                 # (space, shift-letter) is applied in one place.
                 return self._translate_char(char)
         return None
+
+    def _translate_extended(self, ch: int) -> "Event | None":
+        """Map an ncurses extended keycode (a modified cursor/edit key) to an
+        Event via its terminfo capability name, or None if unrecognized."""
+        try:
+            name = curses.keyname(ch).decode("ascii", "replace")
+        except (ValueError, curses.error):
+            return None
+        return _extended_key_event(name)
 
     def _translate_char(self, ch: str) -> Event | None:
         # Control characters that get_wch delivers as strings map to key names;

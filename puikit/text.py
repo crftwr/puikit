@@ -237,6 +237,14 @@ def _char_class(glyph: str) -> str:
     return "punct"
 
 
+def is_word_char(glyph: str) -> bool:
+    """True when ``glyph`` is a word character — alphanumeric (including CJK) or
+    underscore. Whitespace and punctuation are separators. This is the unit
+    word-wise caret motion and deletion move over (Option/Ctrl + arrow, and the
+    word-delete keys); see :func:`_char_class`."""
+    return _char_class(glyph) == "word"
+
+
 def word_bounds(glyphs: list[str], index: int) -> tuple[int, int]:
     """The half-open glyph range ``(start, end)`` of the word at ``index`` — the
     maximal run of one character class (see :func:`_char_class`) containing it.

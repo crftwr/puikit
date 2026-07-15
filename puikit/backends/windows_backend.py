@@ -198,6 +198,10 @@ _CONTROL_KEYS = {
     "\t": "tab",
     "\x1b": "escape",
     "\x08": "backspace",
+    # Ctrl+Backspace: Windows sends WM_CHAR 0x7F (DEL) for it while plain
+    # Backspace comes as 0x08. Mapping it to backspace lets the still-held Ctrl
+    # (read from key state in _on_char) drive a word-delete backward.
+    "\x7f": "backspace",
 }
 
 # WM_KEYDOWN virtual-key codes for keys that never produce a WM_CHAR.

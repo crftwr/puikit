@@ -576,6 +576,27 @@ def test_lone_low_surrogate_without_pending_high_is_dropped():
         backend.close()
 
 
+def test_ctrl_backspace_is_a_ctrl_modified_backspace(monkeypatch):
+    # Windows delivers Ctrl+Backspace as WM_CHAR 0x7F (plain Backspace is 0x08);
+    # it must reach the field as a ctrl-modified backspace so the widget deletes
+    # a whole word. The Ctrl comes from live key state, faked here.
+    import puikit.backends.windows_backend as wb
+    from puikit.event import EventType
+
+    monkeypatch.setattr(wb, "_key_modifiers", lambda: frozenset({"ctrl"}))
+    backend = WindowsBackend()
+    events = []
+    backend._handler = events.append
+    try:
+        backend._on_char(0x7F)
+        assert len(events) == 1
+        assert events[0].type == EventType.KEY
+        assert events[0].key == "backspace"
+        assert "ctrl" in events[0].modifiers
+    finally:
+        backend.close()
+
+
 # --- drag-out (begin_file_drag) ---------------------------------------------
 
 

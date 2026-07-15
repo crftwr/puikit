@@ -165,6 +165,23 @@ def test_translate_modifiers():
     assert event.modifiers == frozenset({"shift", "cmd"})
 
 
+def test_translate_option_arrows_and_delete_carry_alt_for_word_editing():
+    from AppKit import NSEventModifierFlagOption
+
+    # Option+Left/Right and Option+Backspace/Delete reach the field as
+    # alt-modified keys — the TextEdit widget turns those into whole-word caret
+    # moves and deletions. doCommandBySelector_ re-translates the raw key event
+    # (keeping Option), so the word-editing command selectors need no per-name
+    # mapping.
+    assert translate_key("", NSEventModifierFlagOption).key == "left"
+    assert "alt" in translate_key("", NSEventModifierFlagOption).modifiers
+    assert translate_key("", NSEventModifierFlagOption).key == "right"
+    back = translate_key("\x7f", NSEventModifierFlagOption)
+    assert back.key == "backspace" and "alt" in back.modifiers
+    fwd = translate_key("", NSEventModifierFlagOption)  # NSDeleteFunctionKey
+    assert fwd.key == "delete" and "alt" in fwd.modifiers
+
+
 def test_translate_unknown_returns_none():
     assert translate_key("") is None
     assert translate_key("\x00") is None

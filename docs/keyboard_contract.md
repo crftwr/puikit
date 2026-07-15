@@ -52,10 +52,39 @@ drops it, so `Shift+1` reports `("!", {})` everywhere). `alt` (Option) is **kept
 
 ## 5. Terminal limits are explicit
 
-curses cannot deliver `cmd`, and `alt` / Option combos are unreliable. A binding
-that requires them (e.g. `Cmd-ENTER`, `Alt-ENTER`) is therefore **GUI-only** and
-simply never fires on the curses backend. Applications should treat such bindings
-as GUI-conditional rather than expecting parity across backends.
+curses cannot deliver `cmd`, and arbitrary `alt` / Option + letter combos are
+unreliable. A binding that requires them (e.g. `Cmd-ENTER`, `Alt-ENTER`) is
+therefore **GUI-only** and simply never fires on the curses backend. Applications
+should treat such bindings as GUI-conditional rather than expecting parity across
+backends. The **cursor / editing** keys of §5a are the deliberate exception:
+their modified forms are decoded on every backend.
+
+## 5a. Modified cursor & editing keys — word granularity
+
+The named cursor/edit keys `left`, `right`, `backspace`, `delete` carry a word
+modifier so a widget can offer whole-word caret motion and deletion:
+
+- **`ctrl`** on Windows and terminals, **`alt`** (Option) on macOS and terminals.
+  A consumer treats either as "by word" — `modifiers & {"ctrl","alt"}`.
+
+Delivery per backend, so this holds without branching on backend type:
+
+- **macOS** — Option+arrow / Option+Delete reach the field as the raw key with
+  `alt` kept; `doCommandBySelector_` re-translates the originating event rather
+  than mapping the `moveWordLeft:` / `deleteWordBackward:` selectors by name.
+- **Windows** — `Ctrl+Left/Right/Delete` come straight from `WM_KEYDOWN` with
+  `ctrl`; `Ctrl+Backspace` arrives as `WM_CHAR` `0x7F` and is mapped to a
+  ctrl-modified `backspace`.
+- **curses** — modified keys arrive either as xterm CSI sequences
+  (`ESC [ 1 ; <mod> <final>`, `ESC [ <n> ; <mod> ~`) or, when ncurses
+  pre-assembles them, as extended keycodes (`kLFT5` = Ctrl+Left); both decode
+  the xterm modifier parameter (`1 + Shift·1 + Alt·2 + Ctrl·4`). The readline
+  meta chords `ESC b` / `ESC f` (word left/right), `ESC d` (delete word
+  forward), and `ESC DEL` (Alt+Backspace, delete word back) are accepted too.
+
+`TextEdit` implements this; see `word_bounds` / `is_word_char` in `puikit.text`
+for the word unit (an alphanumeric-or-underscore run; whitespace and punctuation
+are separators).
 
 ---
 
