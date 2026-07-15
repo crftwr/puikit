@@ -113,6 +113,42 @@ def _roll_falloff(pos: float) -> float:
     return (1.0 - pos) / (1.0 - _ROLL_PEAK)
 
 
+# Kernel sampling the blur disc for the text drop shadow (see _render_text): a
+# quincunx (center + four corners) of offset ink copies whose overlap feathers
+# the shadow edge into a soft blur, without a per-glyph Gaussian-blur effect. A
+# real blur would have to retarget the DC to a command list mid-frame, which ends
+# the frame's BeginDraw batch and drops the active pane clip (_render_text runs
+# inside one — unlike _render_shadow), corrupting the rest of the frame. Corner
+# offsets are in units of the blur radius; the center anchors the shadow's core.
+_SHADOW_KERNEL: tuple[tuple[float, float], ...] = (
+    (0.0, 0.0), (-0.7, -0.7), (0.7, -0.7), (-0.7, 0.7), (0.7, 0.7),
+)
+
+
+def _shadow_tap_alpha(peak: float) -> float:
+    """Per-tap alpha so the kernel's fully-overlapped core (every tap covering the
+    glyph stroke) alpha-composites up to ``peak``: ``1-(1-a)^n = peak``. Edge
+    pixels are hit by fewer taps and stay lighter, giving the feathered falloff."""
+    return 1.0 - (1.0 - peak) ** (1.0 / len(_SHADOW_KERNEL))
+
+
+def _drop_shadow_params(strength: float) -> "tuple[float, float, float, float] | None":
+    """Down-right offset ``(dx, dy)``, core ``peak`` alpha, and ``blur`` radius (all
+    dip except the unitless alpha) for a text ``drop_shadow`` of ``strength``
+    (0..1), or ``None`` when off — the reflective-LCD "segments cast a shadow" look
+    (see set_post_effect / _render_text). Offset/alpha follow
+    MacOSBackend._drop_shadow_ns; its NSShadow blur — dropped in the first cut for
+    a crisp copy — is realized here as the ``blur`` spread the multi-tap kernel
+    samples, so the shadow reads soft rather than hard-edged. Pure, for unit tests.
+    The dip values are scaled by _dpi_scale at draw."""
+    if strength <= 0:
+        return None
+    depth = 0.6 + strength * 1.4                 # dip; grows with the strength
+    peak = min(0.6, 0.2 + strength * 0.45)       # darker/denser as it deepens
+    blur = 0.6 + strength * 2.4                  # dip; the soft spread radius
+    return (depth * 0.5, depth, peak, blur)      # offset down-right (y is down)
+
+
 def _tint_matrix(tint: tuple) -> "native.D2D1_MATRIX_5X4_F":
     """A 5x4 color matrix remapping luminance onto ``tint`` (the D2D analogue of
     macOS's CIColorMonochrome): every pixel becomes ``tint`` scaled by its own
@@ -440,6 +476,12 @@ class WindowsBackend(Backend):
         # effect (or before the target exists). Holds the ID2D1Effect objects
         # (reconfigured, not recreated, each frame) — a dict of ComPtrs.
         self._crt: dict[str, Any] | None = None
+        # Text drop-shadow params (offset dx, dy; core alpha; blur radius — see
+        # _drop_shadow_params) from the active effect's ``drop_shadow``, or None.
+        # Unlike the CRT composite this is not a full-frame pass — it's painted
+        # inline under each glyph in _render_text (the reflective-LCD look), as a
+        # soft multi-tap kernel, so a drop-shadow-only theme needs no composite.
+        self._drop_shadow: tuple[float, float, float, float] | None = None
         # The current frame's render target: the swap-chain bitmap normally, or a
         # command list while the CRT pass captures the frame for compositing.
         # _render_shadow restores to *this* (not the swap-chain bitmap) after its
@@ -1042,14 +1084,35 @@ class WindowsBackend(Backend):
         overlays too (the macOS render-pass-then-Core-Image ordering; painting the
         overlays *after* the chain instead read far too dark). Cheap to toggle:
         the app calls this once when a theme recommends an effect. The chain is
-        rebuilt here (and on device loss) and re-used every frame."""
+        rebuilt here (and on device loss) and re-used every frame.
+
+        ``drop_shadow`` is the exception: it is *not* a full-frame composite (a
+        rect's rectangular shadow would read as ugly boxes behind the text) but a
+        translucent offset ink copy painted under each glyph in ``_render_text``,
+        matching MacOSBackend's text-scoped NSShadow. An effect that asks only for
+        it therefore skips the capture pass entirely (see ``_build_crt_chain``)."""
         self._post_effect = None if (effect is None or effect.is_noop) else effect
+        self._drop_shadow = (
+            None if self._post_effect is None
+            else _drop_shadow_params(self._post_effect.drop_shadow)
+        )
         self._build_crt_chain()
         self._sync_roll()
         if self._hwnd:
             native.user32.InvalidateRect(self._hwnd, None, False)
 
     # --- CRT effect chain (color side: tint / glow / bloom) ------------------
+
+    @staticmethod
+    def _effect_needs_composite(effect: Any) -> bool:
+        """Whether ``effect`` needs the full-frame Direct2D composite pass — a
+        color stage (tint / glow / bloom) or a painted overlay (scanline /
+        vignette / roll). ``drop_shadow`` alone does not (it's drawn inline in
+        _render_text), so a drop-shadow-only theme skips the frame capture."""
+        return bool(
+            effect.tint is not None or effect.glow or effect.bloom
+            or effect.scanline or effect.vignette or effect.roll
+        )
 
     def _build_crt_chain(self) -> None:
         """(Re)build the persistent Direct2D-effects graph for the active effect.
@@ -1059,6 +1122,11 @@ class WindowsBackend(Backend):
         self._release_crt_chain()
         effect = self._post_effect
         if effect is None or self._render_target is None:
+            return
+        # ``drop_shadow`` is painted inline per glyph (see _render_text), not
+        # composited; an effect that asks *only* for it needs no capture pass, so
+        # leave ``_crt`` None and let the frame go straight to the swap chain.
+        if not self._effect_needs_composite(effect):
             return
         rt = self._render_target
         crt: dict[str, Any] = {"color_chain": [], "blur": None, "opacity": None, "vignette": None}
@@ -1429,6 +1497,27 @@ class WindowsBackend(Backend):
             self._set_brush(bg)
             native.rt_fill_rectangle(self._render_target, self._unit_rect(x, y, total, 1), self._brush)
 
+        # Drop-shadow ink pass (Segment LCD look): each glyph re-drawn as a soft
+        # kernel of translucent-black copies around the shadow offset, over the bg
+        # fill but under the real glyphs, so the segments look embossed with a soft
+        # (not hard) shadow. Scoped to the text like macOS's NSShadow — the fills
+        # are deliberately left unshadowed.
+        if self._drop_shadow is not None:
+            dx, dy, peak, blur = self._drop_shadow
+            s = self._dpi_scale
+            bx, by, br = dx * s, dy * s, blur * s
+            self._set_brush((0, 0, 0), _shadow_tap_alpha(peak))
+            col = 0
+            for glyph, width in zip(runs, widths):
+                r = self._unit_rect(x + col, y, width, 1)
+                for kx, ky in _SHADOW_KERNEL:
+                    ox, oy = bx + kx * br, by + ky * br
+                    native.rt_draw_text(
+                        self._render_target, glyph, text_format,
+                        native.D2D1_RECT_F(r.left + ox, r.top + oy, r.right + ox, r.bottom + oy),
+                        self._brush)
+                col += width
+
         self._set_brush(fg, alpha)
         col = 0
         for glyph, width in zip(runs, widths):
@@ -1479,6 +1568,20 @@ class WindowsBackend(Backend):
             native.rt_fill_rectangle(
                 self._render_target, native.D2D1_RECT_F(origin_x, origin_y, origin_x + width, origin_y + self._base_h), self._brush
             )
+        # Drop-shadow ink pass under the real run (see _render_text): the run's
+        # ink re-drawn as the same soft kernel of translucent-black copies.
+        if self._drop_shadow is not None:
+            dx, dy, peak, blur = self._drop_shadow
+            s = self._dpi_scale
+            bx, by, br = dx * s, dy * s, blur * s
+            self._set_brush((0, 0, 0), _shadow_tap_alpha(peak))
+            for kx, ky in _SHADOW_KERNEL:
+                ox, oy = bx + kx * br, by + ky * br
+                native.rt_draw_text(
+                    self._render_target, text, text_format,
+                    native.D2D1_RECT_F(origin_x + ox, origin_y + oy,
+                                       origin_x + ox + 100000.0, origin_y + oy + 100000.0),
+                    self._brush)
         self._set_brush(fg, alpha)
         # A generously large layout rect: the outer pane clip (push_clip)
         # already bounds what's visible, so this only needs to avoid wrapping.

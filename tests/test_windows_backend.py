@@ -16,7 +16,8 @@ from puikit import CRT, PostEffect, Rect  # noqa: E402
 from puikit.backend import Style, TextAttribute  # noqa: E402
 from puikit.font import Font, FontWeight  # noqa: E402
 from puikit.backends.windows_backend import (  # noqa: E402
-    Animation, WindowsBackend, _glow_matrix, _roll_band_top, _roll_falloff, _tint_matrix,
+    Animation, WindowsBackend, _SHADOW_KERNEL, _drop_shadow_params, _glow_matrix,
+    _roll_band_top, _roll_falloff, _shadow_tap_alpha, _tint_matrix,
 )
 from puikit.backends import _win32_native as native  # noqa: E402
 
@@ -846,3 +847,95 @@ def test_crt_bloom_composite_is_additive_not_darkening():
     assert native.D2D1_COMPOSITE_MODE_PLUS == 9
     bright = _crt_readback_bright_band(PostEffect(bloom=0.30))
     assert bright > 220, f"bloom crushed the band to {bright:.0f} (expected it to stay bright)"
+
+
+# --- text drop shadow (the Segment LCD look; see _drop_shadow_params / _render_text) ---
+
+
+def test_drop_shadow_params_grow_and_cap():
+    # Pure mapping, mirroring the roll-helper coverage above.
+    assert _drop_shadow_params(0.0) is None          # off at/below zero
+    assert _drop_shadow_params(-1.0) is None
+    dx, dy, peak, blur = _drop_shadow_params(0.6)
+    assert dy > dx > 0                               # offset down-right, deeper than wide
+    assert blur > 0                                  # a soft spread, not a hard copy
+    assert peak == pytest.approx(min(0.6, 0.2 + 0.6 * 0.45))
+    dx2, dy2, peak2, blur2 = _drop_shadow_params(1.0)   # a deeper shadow spreads further
+    assert dx2 > dx and dy2 > dy and blur2 > blur
+    assert peak2 == pytest.approx(0.6)               # and its alpha saturates at the cap
+
+
+def test_shadow_tap_alpha_reaches_peak_when_fully_overlapped():
+    # The kernel's per-tap alpha is chosen so all taps overlapping compose up to
+    # the requested core alpha; a single tap is much lighter (the feathered edge).
+    peak = 0.47
+    a = _shadow_tap_alpha(peak)
+    assert 0 < a < peak
+    composited = 1.0 - (1.0 - a) ** len(_SHADOW_KERNEL)
+    assert composited == pytest.approx(peak)
+
+
+def test_drop_shadow_only_effect_skips_the_composite_pass():
+    # drop_shadow is painted inline per glyph, not composited, so a shadow-only
+    # effect leaves _crt None (no frame capture) while still arming the shadow.
+    be = WindowsBackend()
+    be.set_post_effect(PostEffect(drop_shadow=0.6))
+    assert be._post_effect is not None
+    assert be._drop_shadow is not None
+    assert be._crt is None
+    # Clearing the effect disarms the shadow.
+    be.set_post_effect(None)
+    assert be._drop_shadow is None
+
+
+def test_render_text_draws_soft_offset_shadow_under_each_glyph(monkeypatch):
+    # With a drop shadow active, each glyph gets a soft shadow: one kernel of
+    # translucent-black copies (all glyphs), then the real foreground pass, so the
+    # segments read as embossed. No GPU: the D2D draw calls and the brush setter
+    # are stubbed; _render_text's geometry (_unit_rect) is pure.
+    be = WindowsBackend(base_font=Font(size=14, monospace=True))
+    be._init_fonts()
+    be._render_target = object()      # non-None sentinel; the draw calls are stubbed
+    be._dpi_scale = 1.0
+    be.set_post_effect(PostEffect(drop_shadow=0.6))
+    calls = []
+    monkeypatch.setattr(native, "rt_draw_text",
+                        lambda rt, text, fmt, rect, brush: calls.append((text, rect)))
+    monkeypatch.setattr(native, "rt_fill_rectangle", lambda *a, **k: None)
+    monkeypatch.setattr(be, "_set_brush", lambda *a, **k: None)
+    be._render_text(2, 3, "AB", Style(fg=(20, 30, 20)))
+    k = len(_SHADOW_KERNEL)
+    # 2 glyphs x (k shadow taps + 1 foreground): shadow taps first, then the fg pass.
+    assert [t for t, _ in calls] == ["A"] * k + ["B"] * k + ["A", "B"]
+    a_taps = [r for t, r in calls[:k]]                    # the "A" glyph's shadow kernel
+    a_fg = calls[2 * k][1]                                # the "A" glyph's foreground rect
+    # The kernel spreads around its offset center (a soft blur, not one hard copy)...
+    assert max(r.left for r in a_taps) > min(r.left for r in a_taps)
+    assert max(r.top for r in a_taps) > min(r.top for r in a_taps)
+    # ...and its center of mass sits down-right of the glyph (the offset).
+    assert sum(r.left for r in a_taps) / k > a_fg.left
+    assert sum(r.top for r in a_taps) / k > a_fg.top
+    try:
+        be.close()
+    except Exception:
+        pass
+
+
+def test_render_with_drop_shadow_effect():
+    """The real draw path for the Segment LCD look: text (grid and flow fonts)
+    drawn through the inline shadow-ink pass against a live swap chain. A wrong
+    offset rect or a missing brush reset would fault or fail EndDraw here."""
+    backend = WindowsBackend(width=40, height=16, title="puikit-lcd-test")
+    backend.open()
+    try:
+        backend.set_post_effect(PostEffect(drop_shadow=0.6))
+        assert backend._post_effect is not None and backend._crt is None
+        lcd = Style(fg=(22, 32, 22), bg=(209, 225, 173))
+        backend.draw_box(0, 0, 20, 6, hints={"fill": True}, style=Style(bg=(209, 225, 173)))
+        backend.draw_text(1, 1, "88:88", style=lcd)                       # grid path
+        backend.draw_text(1, 3, "segment", style=Style(                   # flow path
+            fg=(22, 32, 22), font=Font(family="Consolas", size=16)))
+        backend.present()
+        backend._render()   # paints the offset shadow ink inline
+    finally:
+        backend.close()
