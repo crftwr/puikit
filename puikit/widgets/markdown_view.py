@@ -29,6 +29,14 @@ to the first visible row and stops at the pane edge, so a long document scrolls
 cheaply. Navigation is pure scrolling (a document has no "current item"):
 arrows / page keys / home / end move the viewport and the mouse wheel scrolls.
 
+For a host that wants find-in-document, the ``search_*`` methods drive an
+incremental search over the rendered text — every occurrence of the pattern is
+highlighted in place (each styled run keeps its own color under the tint), the
+matching display rows form the navigable set, and scrolling brings the current
+match into view. The host owns the search-input UI (a text field / bar) and
+calls in; match finding, scrolling and highlighting stay here because they need
+the widget's own wrapped, proportional layout.
+
 The Markdown subset covers the common GitHub-flavored cases: ATX headings
 (``#``..``######``) and setext (``===`` / ``---`` underline) headings,
 paragraphs with hard line breaks (two trailing spaces or a backslash),
@@ -823,6 +831,28 @@ def _wrap_spans(spans: list[Span], width: float, measure, *, word: bool) -> list
     return rows or [[]]
 
 
+# --- incremental-search highlight ---------------------------------------------
+
+# Search-match background = the surface blended toward amber, firmer for the
+# current match — derived from the surface (not a fixed dark constant) so the
+# highlight tracks the theme (a dark wash on a dark surface, a pale one on a
+# light one), matching TFM's text-viewer isearch.
+_SEARCH_HUE: Color = (200, 175, 55)
+_SEARCH_TINT = 0.24
+_SEARCH_CURRENT_TINT = 0.46
+
+
+def _mix(a: Color, b: Color, t: float) -> Color:
+    """Linear RGB blend a->b by ``t`` (0..1)."""
+    return tuple(round(a[i] + (b[i] - a[i]) * t) for i in range(3))  # type: ignore[return-value]
+
+
+def _search_bg(surface: Color | None, current: bool) -> Color:
+    """Search-highlight background for ``surface``, firmer for the current match."""
+    return _mix(surface or (30, 30, 38), _SEARCH_HUE,
+                _SEARCH_CURRENT_TINT if current else _SEARCH_TINT)
+
+
 def _wrap_cells(cells: list[Span], width: float, measure, *, word: bool) -> list[list[Span]]:
     """Wrap a flat cell list to ``width`` base units. ``measure(text, style)``
     reports a fragment's width in base units (a column count on the grid, native
@@ -936,6 +966,20 @@ class MarkdownView(Widget):
         # Rebuilt each layout alongside the row index.
         self._anchors: dict[str, float] = {}
 
+        # Incremental search (driven by a host viewer's search bar; see the
+        # ``search_*`` methods). The pattern highlights every occurrence in the
+        # visible rows; the navigable match set is the display rows that contain
+        # it (the row is the unit, mirroring TFM's text-viewer isearch, which
+        # walks matching lines). ``_search_token`` records the (pattern, wrap
+        # width) the set was built at so a resize that re-wraps the document
+        # rebuilds it; ``_search_origin`` is the pre-search scroll, restored on
+        # cancel.
+        self._search_pattern: str = ""
+        self._search_rows: list[int] = []  # indices into _rows with a hit
+        self._search_pos: int = -1         # index into _search_rows (current match)
+        self._search_token: tuple[str, float] = ("", -1.0)
+        self._search_origin: float = 0.0
+
     # --- construction ---------------------------------------------------------
 
     @classmethod
@@ -965,6 +1009,7 @@ class MarkdownView(Widget):
         self._wrap_view_h = -1.0
         self._layout_cache.clear()
         self._cache_view_h = -1.0
+        self.clear_search()
 
     # --- layout ---------------------------------------------------------------
 
@@ -1268,6 +1313,12 @@ class MarkdownView(Widget):
             content_h = self._row_tops[-1]
         self._clamp(content_h)
 
+        # Reconcile the search match set with this (possibly re-wrapped) layout,
+        # then note which row is the current match so it highlights firmer.
+        self._sync_search()
+        current_match = (self._search_rows[self._search_pos]
+                         if 0 <= self._search_pos < len(self._search_rows) else -1)
+
         # Binary-search the cumulative tops for the first row whose bottom is
         # below the viewport top, then draw down until a row starts past the
         # bottom edge (the clip trims the partial rows at either end).
@@ -1309,6 +1360,8 @@ class MarkdownView(Widget):
                 if href:
                     self._link_hits.append((x, y, x + w, y + row.height, href))
                 x += w
+            if self._search_pattern and row.spans:
+                self._draw_search_row(ctx, y, row, index == current_match, theme)
 
         # A pointing hand over a link, so it reads as clickable. The pointer is
         # taken in widget-local coords (panel pointer minus this widget's screen
@@ -1396,6 +1449,47 @@ class MarkdownView(Widget):
         for e in tr.edges:
             ctx.draw_hairline(e + _TABLE_BORDER / 2.0, y, height, vertical=True, style=stroke)
 
+    def _draw_search_row(
+        self, ctx: DrawContext, y: float, row: _Row, current: bool, theme: Theme
+    ) -> None:
+        """Overlay incremental-search highlights on one visible text row: every
+        occurrence of the pattern in the row's concatenated text is redrawn with a
+        highlight background (firmer for the current match), preserving each
+        glyph's own color/font/attrs so a styled run — inline code, a link —
+        stays recognisable under the tint. A match spanning a style boundary is
+        drawn in its constituent runs.
+
+        The row was already drawn by :meth:`draw`; this second pass over the same
+        x layout (spans measured left to right from ``row.x0``) repaints only the
+        matched substrings, so the highlight lands exactly on the glyphs."""
+        plain = self._row_plain(row)
+        low = plain.lower()
+        pat = self._search_pattern.lower()
+        idx = low.find(pat)
+        if idx < 0:
+            return
+        surface = self.style.bg or theme.surface_bg("content")
+        hl = _search_bg(surface, current)
+        # Per-span offsets: (char_start, text, style, x_start), so a match at any
+        # character offset maps to an x position even across span boundaries.
+        segs: list[tuple[int, str, Style, float]] = []
+        x = row.x0
+        pos = 0
+        for text, style, _ in row.spans:
+            segs.append((pos, text, style, x))
+            x += ctx.measure_text(text, style)
+            pos += len(text)
+        while idx >= 0:
+            end = idx + len(pat)
+            for c0, text, style, sx in segs:
+                s = max(idx, c0)
+                e = min(end, c0 + len(text))
+                if e <= s:
+                    continue
+                hx = sx + ctx.measure_text(text[: s - c0], style)
+                ctx.draw_text(hx, y, text[s - c0 : e - c0], replace(style, bg=hl))
+            idx = low.find(pat, end)
+
     # --- scrolling ------------------------------------------------------------
 
     def _content_h(self) -> float:
@@ -1407,6 +1501,106 @@ class MarkdownView(Widget):
     def scroll_by(self, amount: float) -> None:
         self.offset += amount
         self._clamp(self._content_h())
+
+    # --- incremental search ---------------------------------------------------
+    #
+    # A host viewer (TFM's modal file viewer) drives these from its shared search
+    # bar so the rendered Markdown view gets the same incremental-search UX as the
+    # raw text view. Match finding, scroll-to-match and highlighting all need the
+    # widget's own (proportional, wrapped) layout, so they live here rather than
+    # in the host.
+
+    @staticmethod
+    def _row_plain(row: _Row) -> str:
+        """A text row's concatenated plain text (empty for image / rule / table /
+        blank rows, which carry no spans, so those never match)."""
+        return "".join(t for t, _, _ in row.spans)
+
+    def _recompute_search_rows(self) -> None:
+        """Rebuild the navigable match set (display rows whose plain text contains
+        the pattern, case-insensitive) from the current layout."""
+        rows = self._rows or []
+        pat = self._search_pattern.lower()
+        self._search_rows = (
+            [i for i, r in enumerate(rows) if pat in self._row_plain(r).lower()]
+            if pat else []
+        )
+        self._search_token = (self._search_pattern, self._wrap_width)
+
+    def _sync_search(self) -> None:
+        """Keep the match set consistent with the layout that draw is about to
+        render: after a resize re-wraps the document (a new wrap width), the row
+        indices shift, so rebuild the set and re-clamp the current match."""
+        if not self._search_pattern:
+            return
+        if self._search_token != (self._search_pattern, self._wrap_width):
+            self._recompute_search_rows()
+            if self._search_rows:
+                self._search_pos = max(0, min(self._search_pos, len(self._search_rows) - 1))
+            else:
+                self._search_pos = -1
+
+    def _scroll_to_search_row(self, row_index: int) -> None:
+        """Scroll so display row ``row_index`` sits at the top of the viewport."""
+        if 0 <= row_index < len(self._row_tops) - 1:
+            self.offset = self._row_tops[row_index]
+            self._clamp(self._content_h())
+
+    def search_begin(self) -> None:
+        """Remember the current scroll as the pre-search origin (restored by
+        :meth:`search_cancel`) and drop any stale highlights. Call when opening the
+        search bar."""
+        self._search_origin = self.offset
+        self.clear_search()
+
+    def search_set(self, pattern: str) -> int:
+        """Set the case-insensitive search ``pattern`` (live, per keystroke):
+        highlight every occurrence, scroll to the nearest match at/after the
+        current viewport top, and return the number of matching rows. With no
+        match, restore the pre-search scroll (mirrors the text viewer)."""
+        self._search_pattern = pattern
+        self._recompute_search_rows()
+        if self._search_rows:
+            self._search_pos = next(
+                (k for k, ri in enumerate(self._search_rows)
+                 if self._row_tops[ri] >= self.offset), 0)
+            self._scroll_to_search_row(self._search_rows[self._search_pos])
+        else:
+            self._search_pos = -1
+            self.offset = self._search_origin
+            self._clamp(self._content_h())
+        return len(self._search_rows)
+
+    def search_navigate(self, delta: int) -> None:
+        """Walk to the previous (``delta < 0``) / next (``delta > 0``) matching
+        row, wrapping at the ends. A no-op with no matches."""
+        if not self._search_rows:
+            return
+        self._search_pos = (self._search_pos + delta) % len(self._search_rows)
+        self._scroll_to_search_row(self._search_rows[self._search_pos])
+
+    def search_status(self) -> tuple[int, int]:
+        """``(position, total)`` for the bar's counter: the 1-based index of the
+        current match (0 when off any match) and the matching-row count."""
+        n = len(self._search_rows)
+        return (self._search_pos + 1 if (n and self._search_pos >= 0) else 0, n)
+
+    def search_accept(self) -> None:
+        """Enter: keep the current scroll; drop the pattern and highlights."""
+        self.clear_search()
+
+    def search_cancel(self) -> None:
+        """Esc / outside click: restore the pre-search scroll and clear."""
+        self.offset = self._search_origin
+        self._clamp(self._content_h())
+        self.clear_search()
+
+    def clear_search(self) -> None:
+        """Drop the search pattern, highlights, and match set."""
+        self._search_pattern = ""
+        self._search_rows = []
+        self._search_pos = -1
+        self._search_token = ("", -1.0)
 
     # --- events ---------------------------------------------------------------
 

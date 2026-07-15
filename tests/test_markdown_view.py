@@ -13,6 +13,7 @@ from puikit.widgets.markdown_view import (
     DEFAULT_TEXT_FONT,
     _block_style,
     _parse_inline,
+    _search_bg,
     parse_markdown,
 )
 from puikit.theme import DEFAULT_THEME, lift
@@ -770,3 +771,177 @@ def test_anchor_link_scrolls_to_heading():
     assert view.offset == 0.0
     panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=1, y=0))
     assert view.offset > 0.0  # jumped down toward the heading
+
+
+# --- incremental search -------------------------------------------------------
+#
+# A host viewer (TFM's file viewer) drives these; the widget owns match finding,
+# scroll-to-match and highlighting over its own wrapped layout. On the plain grid
+# backend every row is one unit tall, so a match at display row i sits at
+# offset i, which the offset assertions below rely on.
+
+
+def _paras(*texts: str) -> str:
+    """Blank-line-separated paragraphs, so each stays its own (unwrapped) row."""
+    return "\n\n".join(texts)
+
+
+def test_search_finds_matching_rows(backend):
+    view = MarkdownView(_paras("alpha", "beta", "gamma alpha", "delta"))
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=24, h=8)
+    panel.render()
+    # Two paragraphs contain 'alpha' (rows 0 and 4; blanks are rows 1/3/5).
+    assert view.search_set("alpha") == 2
+    assert view._search_rows == [0, 4]
+    assert view.search_status() == (1, 2)          # first match current
+    assert view.offset == 0.0                       # row 0 already at top
+
+
+def test_search_is_case_insensitive(backend):
+    view = MarkdownView(_paras("Alpha", "beta"))
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=24, h=8)
+    panel.render()
+    assert view.search_set("ALPHA") == 1
+    assert view.search_status() == (1, 1)
+
+
+def test_search_scrolls_to_nearest_and_navigates(backend):
+    # 20 paragraphs; 'needle' in #0, #5, #8 -> display rows 0, 10, 16 (all within
+    # the scroll range, so offset lands exactly on the row top).
+    parts = [f"line{i} needle" if i in (0, 5, 8) else f"line{i}" for i in range(20)]
+    view = MarkdownView(_paras(*parts))
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=24, h=8)
+    panel.render()
+    assert view.search_set("needle") == 3
+    assert view._search_rows == [0, 10, 16]
+    assert view._search_pos == 0 and view.offset == 0.0
+    view.search_navigate(1)
+    assert view._search_pos == 1 and view.offset == 10.0
+    view.search_navigate(1)
+    assert view._search_pos == 2 and view.offset == 16.0
+    view.search_navigate(1)                          # wraps to first
+    assert view._search_pos == 0 and view.offset == 0.0
+    view.search_navigate(-1)                         # wraps back to last
+    assert view._search_pos == 2 and view.offset == 16.0
+
+
+def test_search_nearest_match_at_or_after_offset(backend):
+    parts = [f"line{i} needle" if i in (0, 8) else f"line{i}" for i in range(20)]
+    view = MarkdownView(_paras(*parts))
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=24, h=8)
+    panel.render()
+    view.scroll_by(6.0)                              # viewport top at row 6
+    assert view.offset == 6.0
+    view.search_set("needle")                        # nearest at/after row 6 -> row 16
+    assert view._search_pos == 1 and view.offset == 16.0
+
+
+def test_search_no_match_restores_origin(backend):
+    parts = [f"line{i} hit" if i == 9 else f"line{i}" for i in range(20)]
+    view = MarkdownView(_paras(*parts))
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=24, h=8)
+    panel.render()
+    view.scroll_by(5.0)
+    view.search_begin()                              # origin = 5.0 (current top)
+    assert view.search_set("hit") == 1               # scrolls away to row 18
+    assert view.offset == 18.0
+    assert view.search_set("hit-nope") == 0          # extend to a dead pattern
+    assert view.search_status() == (0, 0)
+    assert view.offset == 5.0                        # back to the search origin
+
+
+def test_search_accept_keeps_scroll_cancel_restores(backend):
+    parts = [f"line{i} needle" if i == 6 else f"line{i}" for i in range(20)]
+    view = MarkdownView(_paras(*parts))
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=24, h=8)
+    panel.render()
+
+    view.search_begin()                              # origin = 0
+    view.search_set("needle")
+    assert view.offset == 12.0                        # row 12 (paragraph #6)
+    view.search_accept()                              # keep scroll, drop chrome
+    assert view.offset == 12.0
+    assert view._search_pattern == "" and view._search_rows == []
+
+    view.search_begin()                              # new origin = 12
+    view.search_set("line0")
+    assert view.offset == 0.0
+    view.search_cancel()                             # restore origin
+    assert view.offset == 12.0
+    assert view._search_pattern == "" and view._search_rows == []
+
+
+def test_search_highlights_matched_glyphs(backend):
+    view = MarkdownView(_paras("alpha beta", "gamma"))
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=24, h=8)
+    panel.render()
+    view.search_set("alpha")
+    panel.render()                                    # repaint with highlights
+    snap = backend.snapshot()
+    row = next(y for y, r in enumerate(snap) if "alpha" in r)
+    col = snap[row].index("alpha")
+    expected = _search_bg(view.style.bg or DEFAULT_THEME.surface_bg("content"), True)
+    # The matched glyphs carry the (current-match) highlight background; the next
+    # column (the space after 'alpha') does not.
+    assert backend.style_at(col, row).bg == expected
+    assert backend.style_at(col + len("alpha"), row).bg != expected
+
+
+def test_search_highlight_preserves_run_color(backend):
+    # A match landing inside an inline-code run keeps the code color, only its
+    # background is tinted — the highlight overlays style, it doesn't replace it.
+    from puikit.widgets.markdown_view import _CODE_FG
+
+    view = MarkdownView("plain `codeword` plain")
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=8)
+    panel.render()
+    view.search_set("codeword")
+    panel.render()
+    snap = backend.snapshot()
+    row = next(y for y, r in enumerate(snap) if "codeword" in r)
+    col = snap[row].index("codeword")
+    st = backend.style_at(col, row)
+    expected = _search_bg(view.style.bg or DEFAULT_THEME.surface_bg("content"), True)
+    assert st.bg == expected                          # highlighted
+    assert st.fg == _CODE_FG                           # still the inline-code color
+
+
+def test_search_recomputes_on_rewrap():
+    # A word that wraps to a different display row on a narrower pane still
+    # resolves to a match after the re-layout (the match set is keyed on the
+    # wrap width and rebuilt when it changes).
+    view = MarkdownView("aaa bbb ccc needle ddd eee fff")
+    backend = MemoryBackend(width=40, height=8, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=8)
+    panel.render()
+    assert view.search_set("needle") == 1
+    wide_row = view._search_rows[0]
+    # Re-lay-out narrower so the paragraph wraps onto more rows.
+    panel.remove(view)
+    narrow = MemoryBackend(width=10, height=8, capabilities=PROFILE_TUI)
+    panel2 = Panel(narrow)
+    panel2.add(view, x=0, y=0, w=10, h=8)
+    panel2.render()                                   # _sync_search rebuilds the set
+    assert view._search_rows and "needle" in "".join(narrow.snapshot())
+    # The match row index tracked the re-wrap (more rows -> larger index).
+    assert view._search_rows[0] >= wide_row
+
+
+def test_clear_search_drops_highlights(backend):
+    view = MarkdownView(_paras("alpha", "beta"))
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=24, h=8)
+    panel.render()
+    view.search_set("alpha")
+    assert view._search_rows
+    view.clear_search()
+    assert view._search_pattern == "" and view._search_rows == [] and view._search_pos == -1
