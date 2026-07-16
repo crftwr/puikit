@@ -10,6 +10,7 @@ from .dragbar import DragBar
 from .drawer import Drawer, show_drawer
 from .dropdown import DropDown
 from .image import ImageView
+from .json_view import JsonView
 from .label import Label
 from .layout_view import LayoutView
 from .list import ListView
@@ -22,6 +23,7 @@ from .radio import RadioGroup
 from .scroll_bar import ScrollBar
 from .scroll_view import ScrollView
 from .splitter import Splitter
+from .table_view import TableView
 from .tabs import Tabs
 from .text_block import TextBlock
 from .text_edit import TextEdit
@@ -37,6 +39,7 @@ __all__ = [
     "Drawer",
     "DropDown",
     "ImageView",
+    "JsonView",
     "Label",
     "LayoutView",
     "ListView",
@@ -50,6 +53,7 @@ __all__ = [
     "ScrollBar",
     "ScrollView",
     "Splitter",
+    "TableView",
     "Tabs",
     "TextBlock",
     "TextEdit",
