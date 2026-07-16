@@ -65,6 +65,35 @@ def test_header_frozen_while_body_scrolls():
     assert "row10" in "".join(snap)        # a later row is now visible
 
 
+def test_header_survives_fractional_scroll():
+    # A wheel/trackpad scroll lands the body on a fractional offset; the frozen
+    # header must stay intact (a body row scrolled up beneath it must not paint
+    # over it).
+    be = MemoryBackend(width=24, height=6, capabilities=PROFILE_TUI)
+    rows = [[str(i), f"row{i}", str(i * 2), "c"] for i in range(30)]
+    view = TableView(["id", "name", "qty", "color"], rows)
+    panel = Panel(be)
+    panel.add(view, x=0, y=0, w=24, h=6)
+    panel.render()
+    view.offset = 3.5          # fractional
+    panel.render()
+    snap = be.snapshot()
+    assert snap[0].startswith("id") and "name" in snap[0]   # header still whole
+
+
+def test_body_does_not_overlap_horizontal_scrollbar():
+    # A wide + tall table shows both bars; the last body row must stop above the
+    # horizontal scroll bar's track rather than bleeding into it.
+    be = MemoryBackend(width=16, height=7, capabilities=PROFILE_TUI)
+    rows = [[str(i), f"row{i}", str(i * 2), "wide-col-value"] for i in range(30)]
+    view = TableView(["id", "name", "qty", "notes"], rows)
+    panel = Panel(be)
+    panel.add(view, x=0, y=0, w=16, h=7)
+    panel.render()
+    snap = be.snapshot()
+    assert "row" not in snap[-1]      # bottom row is the h-scrollbar, not content
+
+
 def test_keyboard_moves_current_cell(backend):
     view = _table()
     panel = Panel(backend)

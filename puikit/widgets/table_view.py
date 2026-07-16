@@ -92,6 +92,7 @@ class TableView(Widget):
         self._viewport_rows = 1
         self._header_h: float = 1.0
         self._body_top: float = 1.0
+        self._body_bottom: float = 1.0    # bottom of the body track (above the h-bar)
         self._cur_row = 0
         self._cur_col = 0
         self._sel_anchor: tuple[int, int] | None = None
@@ -150,13 +151,15 @@ class TableView(Widget):
         nrows = len(self._body_lines)
 
         # Reserve the two scroll bars (vertical first, then horizontal against the
-        # width left after it), then size the body viewport.
+        # width left after it), then size the body viewport between the frozen
+        # header row and the horizontal bar's track.
         body_area = view_h - row_h
         vbar = nrows * row_h > body_area
         text_w = int(view_w) - (1 if vbar else 0)
         hbar = self._total_w > text_w
-        body_h = view_h - row_h - (row_h if hbar else 0.0)
+        body_h = max(0.0, view_h - row_h - (row_h if hbar else 0.0))
         self._body_top = row_h
+        self._body_bottom = row_h + body_h
         self._text_w = max(1, text_w)
         self._viewport_rows = max(1, int(body_h / row_h))
 
@@ -165,33 +168,34 @@ class TableView(Widget):
 
         base_fg = self.style.fg or (theme.text if theme is not None else (212, 212, 212))
         bg = self.style.bg
-        muted = theme.muted_text if theme is not None else (150, 150, 150)
         ctx.fill_rect(0, 0, view_w, view_h, Style(bg=bg))
 
-        # Frozen header band (its own surface, horizontally scrolled with body).
-        header_bg = (theme.surface_bg("header") if theme is not None else None) or bg
-        ctx.fill_rect(0, 0, view_w, row_h, Style(bg=header_bg))
-        head = self._header_line[l:l + text_w]
-        ctx.draw_text(0, 0, head, Style(fg=base_fg, bg=header_bg,
-                                        attr=TextAttribute.BOLD, font=_MONO))
-
-        # Body rows, virtualized vertically.
+        # Body rows, virtualized vertically, and only within the body track (above
+        # the horizontal scroll bar). A row mid-scroll may start under the header
+        # row; it is drawn here and the frozen header (below) paints over that
+        # overlap, so the header stays crisp.
         first = int(self.offset / row_h)
         index = first
         while index < nrows:
             top = row_h + index * row_h - self.offset
-            if top >= view_h:
+            if top >= self._body_bottom:
                 break
-            if top + row_h > row_h - 0.001:
-                self._draw_body_row(ctx, top, index, l, text_w, row_h,
-                                    base_fg, bg, theme)
+            self._draw_body_row(ctx, top, index, l, text_w, row_h, base_fg, bg, theme)
             index += 1
 
         if self._pattern:
             self._draw_matches(ctx, first, nrows, l, text_w, row_h, base_fg, bg)
         self._draw_selection(ctx, first, nrows, l, text_w, row_h, base_fg, bg, theme)
 
-        # Scroll bars.
+        # Frozen header — drawn last so it sits above any body row scrolled up
+        # beneath it (its own surface, scrolled horizontally with the body).
+        header_bg = (theme.surface_bg("header") if theme is not None else None) or bg
+        ctx.fill_rect(0, 0, view_w, row_h, Style(bg=header_bg))
+        head = self._header_line[l:l + text_w]
+        ctx.draw_text(0, 0, head, Style(fg=base_fg, bg=header_bg,
+                                        attr=TextAttribute.BOLD, font=_MONO))
+
+        # Scroll bars, each in its own reserved track (no content row overlaps them).
         if vbar:
             content_h = nrows * row_h
             ratio = min(1.0, body_h / content_h)
@@ -242,7 +246,7 @@ class TableView(Widget):
         last = min(r1, nrows - 1)
         for row in range(max(r0, first), last + 1):
             top = row_h + row * row_h - self.offset
-            if top >= self._view_h:
+            if top >= self._body_bottom:
                 break
             sub = self._body_lines[row][l + x0:l + x1]
             ctx.draw_text(x0, top, sub, Style(fg=base_fg, bg=sel_bg, font=_MONO))
@@ -253,7 +257,7 @@ class TableView(Widget):
             return
         current_row = self._matches[self._search_pos] if (
             self._search_pos >= 0 and self._matches) else -1
-        last = int((self.offset + (self._view_h - row_h)) / row_h) + 1
+        last = int((self.offset + (self._body_bottom - row_h)) / row_h) + 1
         for index in range(first, min(nrows, last + 1)):
             line = self._body_lines[index]
             low = line.lower()
