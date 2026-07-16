@@ -668,6 +668,59 @@ def test_textedit_selection_renders_highlight(backend):
     assert backend.style_at(1, 0).bg == panel.theme.text_selection_inactive_bg
 
 
+# --- masked (password) fields ------------------------------------------------
+
+
+def test_textedit_mask_shows_glyph_not_plaintext(backend):
+    # A masked field displays the mask glyph for every character while the
+    # buffer keeps the real value.
+    panel = Panel(backend)
+    field = TextEdit("abc", width=12, mask="•")
+    panel.add(field, x=0, y=0, w=12, h=1)
+    panel.render()
+    line = backend.snapshot()[0]
+    assert line[1:4] == "•••"   # glyphs 1..3, one per character
+    assert "a" not in line and "b" not in line and "c" not in line
+    assert field.text == "abc"  # buffer untouched
+
+
+def test_textedit_mask_edits_operate_on_real_text(backend):
+    # Typing/deleting still edits the true buffer; only the display is masked.
+    panel = Panel(backend)
+    field = TextEdit("ab", width=12, mask="•")
+    panel.add(field, x=0, y=0, w=12, h=1)
+    panel.dispatch_event(_key("c", char="c"))
+    assert field.text == "abc"
+    panel.dispatch_event(_key("backspace"))
+    assert field.text == "ab"
+
+
+def test_textedit_mask_disables_copy_and_cut(backend):
+    # A password field never surrenders its plaintext to the clipboard.
+    panel = Panel(backend)
+    field = TextEdit("secret", width=12, mask="•")
+    panel.add(field, x=0, y=0, w=12, h=1)
+    panel.render()
+    panel.set_clipboard("sentinel")
+    panel.dispatch_event(_key("a", char="a", modifiers=frozenset({"cmd"})))  # select all
+    panel.dispatch_event(_key("c", char="c", modifiers=frozenset({"cmd"})))  # copy (no-op)
+    assert panel.get_clipboard() == "sentinel"
+    panel.dispatch_event(_key("x", char="x", modifiers=frozenset({"cmd"})))  # cut (no-op)
+    assert field.text == "secret"          # nothing removed
+    assert panel.get_clipboard() == "sentinel"
+
+
+def test_textedit_mask_click_positions_caret(backend):
+    # Hit-testing measures the masked display, so a click still lands the caret
+    # on the right character boundary.
+    panel = Panel(backend)
+    field = TextEdit("abcd", width=12, mask="•")
+    panel.add(field, x=0, y=0, w=12, h=1)
+    panel.render()
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=3, y=0, button="left"))
+    assert field.cursor == 2  # column 3 → after the 2nd glyph (padding is column 0)
+
+
 # --- static text selection ---------------------------------------------------
 
 

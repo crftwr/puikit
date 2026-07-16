@@ -46,11 +46,17 @@ class TextEdit(Widget):
         width: int = 24,
         right_pad: int = 0,
         style: Style = DEFAULT_STYLE,
+        mask: str | None = None,
     ):
         self.text = text
         self.on_change = on_change
         self.on_submit = on_submit
         self.width = width
+        # When set to a single glyph (e.g. "•"), the field is a password prompt:
+        # every character is *displayed* as this glyph while ``self.text`` keeps
+        # the real value. ``_display`` renders it and copy/cut are disabled so the
+        # plaintext never leaves the field. None = an ordinary visible field.
+        self._mask = mask
         # Columns reserved at the field's right edge for an external adornment
         # (e.g. a combo box chevron) that draws over the field box. The box still
         # spans the full width; only the text/caret region shrinks, so the
@@ -84,6 +90,15 @@ class TextEdit(Widget):
         # grid), so hit-testing between frames maps clicks the same way the glyphs
         # were laid out. A column-count fallback covers events before the first draw.
         self._measure = lambda t: float(display_width(t))
+
+    # --- masking -------------------------------------------------------------
+
+    def _display(self, s: str) -> str:
+        """The on-screen form of a buffer run: ``s`` itself, or one mask glyph
+        per character when the field is masked. Length-preserving (1 glyph per
+        character), so cursor/selection/view indices into ``self.text`` still map
+        one-to-one onto the returned string."""
+        return self._mask * len(s) if self._mask else s
 
     # --- selection -----------------------------------------------------------
 
@@ -139,8 +154,12 @@ class TextEdit(Widget):
         if self._anchor is not None:
             self._anchor = max(0, min(self._anchor, len(self.text)))
 
-        # The displayed string has the preedit spliced in at the cursor.
-        disp = self.text[: self.cursor] + self._preedit + self.text[self.cursor :]
+        # The displayed string has the preedit spliced in at the cursor. Masked
+        # fields substitute a mask glyph for every character; ``_display`` keeps
+        # the length, so the index math below (which addresses ``self.text``)
+        # still lines up with this display string.
+        mtext = self._display(self.text)
+        disp = mtext[: self.cursor] + self._display(self._preedit) + mtext[self.cursor :]
         pre_start, pre_end = self.cursor, self.cursor + len(self._preedit)
         caret = self.cursor + (self._preedit_caret if self._preedit else 0)
         # Display range of the clause currently selected for conversion (the
@@ -320,7 +339,8 @@ class TextEdit(Widget):
         # Keep the start (a character index) such that the caret stays inside the
         # field, measured in base units (proportional on GUI, columns on a grid)
         # so the visible window matches how the run is laid out in draw.
-        disp = self.text[: self.cursor] + self._preedit + self.text[self.cursor :]
+        mtext = self._display(self.text)
+        disp = mtext[: self.cursor] + self._display(self._preedit) + mtext[self.cursor :]
         if caret < self._view:
             self._view = caret
         while self._view < caret and ctx.measure_text(disp[self._view : caret]) > field_w - 1:
@@ -420,7 +440,7 @@ class TextEdit(Widget):
         view = self._view
         idx, prev = view, 0.0
         while idx < len(self.text):
-            cur = self._measure(self.text[view : idx + 1])
+            cur = self._measure(self._display(self.text[view : idx + 1]))
             if cur >= target:
                 # Snap to whichever glyph boundary (before / after) is nearer.
                 return idx + 1 if (target - prev) > (cur - target) else idx
@@ -471,6 +491,10 @@ class TextEdit(Widget):
     def _copy(self) -> bool:
         """Put the current selection on the clipboard. Returns True if there was
         a selection to copy (cut relies on this to know whether to delete)."""
+        # A masked (password) field never surrenders its plaintext to the
+        # clipboard; returning False here disables both copy and cut.
+        if self._mask:
+            return False
         text = self.selection_text
         if not text or self._panel is None:
             return False
