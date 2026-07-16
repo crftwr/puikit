@@ -2,14 +2,26 @@
 
 import pytest
 
-from puikit import Event, EventType, Panel, PROFILE_GUI_DESKTOP, PROFILE_TUI
+from puikit import (CapabilityProfile, Event, EventType, Panel,
+                   PROFILE_GUI_DESKTOP, PROFILE_TUI)
 from puikit.backends.memory_backend import MemoryBackend
 from puikit.widgets import TableView
+
+_BOX_GLYPHS = "│─┼├┤┬┴┌┐└┘"
 
 
 @pytest.fixture(params=[PROFILE_TUI, PROFILE_GUI_DESKTOP], ids=["tui", "gui"])
 def backend(request):
     return MemoryBackend(width=24, height=8, capabilities=request.param)
+
+
+class _VectorBackend(MemoryBackend):
+    """A grid backend that *claims* vector_shapes so the Panel's vector path (thin
+    hairline strokes instead of box-drawing glyphs) can be exercised headlessly."""
+
+    @property
+    def capabilities(self) -> CapabilityProfile:
+        return CapabilityProfile({**self._capabilities, "vector_shapes": True})
 
 
 def _key(name, mods=frozenset()):
@@ -30,10 +42,39 @@ def test_header_and_rows_align(backend):
     panel.add(_table(), x=0, y=0, w=24, h=8)
     panel.render()
     snap = backend.snapshot()
-    assert snap[0].startswith("id")            # frozen header on top
-    assert "apple" in snap[1]
-    # Numeric "qty" column is right-aligned: 12 / 7 / 40 line up on their right.
-    assert snap[1].index("12") + 2 == snap[2].index("7") + 1
+    assert "id" in snap[0] and "name" in snap[0]   # frozen header on top
+    assert any(g in snap[1] for g in "├┼─")         # box-drawing header separator
+    row_apple = next(r for r in snap if "apple" in r)
+    row_banana = next(r for r in snap if "banana" in r)
+    # Numeric "qty" column is right-aligned: 12 and 7 share a right edge.
+    assert row_apple.index("12") + len("12") == row_banana.index("7") + len("7")
+
+
+def test_tui_draws_box_drawing_grid():
+    # On a character grid the keisen are box-drawing glyphs: ``│`` column bars and
+    # a ``├─┼─┤`` separator under the header (like MarkdownView's tables).
+    be = MemoryBackend(width=26, height=10, capabilities=PROFILE_TUI)
+    panel = Panel(be)
+    panel.add(_table(), x=0, y=0, w=26, h=10)
+    panel.render()
+    snap = be.snapshot()
+    assert snap[0].count("│") >= 2                      # header framed by column bars
+    assert any(g in snap[1] for g in "├┼┤")             # header separator row
+    assert "─" in snap[1]
+    body = next(r for r in snap if "apple" in r)
+    assert "│" in body                                  # body cells separated by bars
+
+
+def test_gui_uses_hairlines_not_box_glyphs():
+    # On a vector backend the keisen are device-thin hairline strokes, so no
+    # box-drawing glyph is ever painted onto the grid.
+    be = _VectorBackend(width=26, height=10, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(be)
+    panel.add(_table(), x=0, y=0, w=26, h=10)
+    panel.render()
+    text = "\n".join(be.snapshot())
+    assert not any(g in text for g in _BOX_GLYPHS)      # hairlines, not glyphs
+    assert "apple" in text                               # cells still render
 
 
 def test_horizontal_scroll_reveals_later_columns():
@@ -60,8 +101,8 @@ def test_header_frozen_while_body_scrolls():
     view.offset = 10.0     # scroll the body down
     panel.render()
     snap = be.snapshot()
-    assert snap[0].startswith("id")        # header row still shows the header
-    assert "row0" not in "".join(snap)     # early rows scrolled off
+    assert "id" in snap[0] and "name" in snap[0]   # header row still shows the header
+    assert "row0 " not in "".join(snap)    # early rows scrolled off
     assert "row10" in "".join(snap)        # a later row is now visible
 
 
@@ -78,7 +119,7 @@ def test_header_survives_fractional_scroll():
     view.offset = 3.5          # fractional
     panel.render()
     snap = be.snapshot()
-    assert snap[0].startswith("id") and "name" in snap[0]   # header still whole
+    assert "id" in snap[0] and "name" in snap[0]   # header still whole
 
 
 def test_body_does_not_overlap_horizontal_scrollbar():

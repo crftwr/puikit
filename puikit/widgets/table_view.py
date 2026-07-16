@@ -1,17 +1,25 @@
-"""A scrollable table grid with a frozen header row.
+"""A scrollable table grid with a frozen header row and ruled grid lines.
 
-``TableView`` renders a header plus a list of string rows as an aligned grid: a
-frozen header band across the top (scrolls horizontally with the body but never
-vertically), body rows that virtualize vertically (only visible rows are drawn,
-so a large CSV stays cheap), and independent horizontal + vertical scroll bars.
-Numeric columns right-align; everything else left-aligns. Cells are drawn in a
-fixed-advance face so columns line up on the terminal and the GUI alike.
+``TableView`` renders a header plus a list of string rows as an aligned grid with
+ruled lines ("keisen"): a frozen header band across the top (scrolls horizontally
+with the body but never vertically), body rows that virtualize vertically (only
+visible rows are drawn, so a large CSV stays cheap), independent horizontal +
+vertical scroll bars, and column / row rules. Numeric columns right-align;
+everything else left-aligns. Cells are drawn in a fixed-advance face so columns
+line up on the terminal and the GUI alike.
+
+The grid lines follow the backend, mirroring ``MarkdownView``'s tables: a vector
+(GUI) backend strokes device-pixel-thin **hairlines** for a full grid — every
+column edge and every row boundary; a character grid draws **box-drawing** rules
+(``│`` column bars, a ``├─┼─┤`` header separator) and zebra-stripes the body rows
+(a per-row rule would cost a whole text row there).
 
 The host modal file viewer drives it: arrow keys move a current cell (page /
 home / end jump), the wheel scrolls, a press+drag selects a rectangular block of
 cells, ``Cmd/Ctrl+C`` copies the selection as TSV and ``Cmd/Ctrl+A`` selects the
 whole body. It also implements the incremental-search protocol (``search_*``):
-rows containing the pattern are the navigable match set, highlighted in place.
+rows containing the pattern are the navigable match set, highlighted in place,
+with the selection moving to the matching cell.
 """
 
 from __future__ import annotations
@@ -24,14 +32,32 @@ from ..event import Event, EventType
 from ..font import Font
 from ..panel import DrawContext
 from ..text import display_width, truncate_to_width
+from ..theme import lift
 from .base import Widget
 
 #: Cells are drawn fixed-advance so a column maps to one base unit — the header
 #: lines up with the body and search highlights land on the right columns.
 _MONO = Font(monospace=True)
-_GAP = "  "            # blank columns between two table columns
 _COL_MAX = 40          # a single column is capped this wide (long cells elide)
-_H_STEP = 4            # columns a Left/Right key pans by
+#: A column edge takes one grid column for its ``│`` bar, with one blank pad
+#: column on each side of the cell text (matching MarkdownView's table metrics),
+#: so a ``│`` never lands on top of a glyph.
+_BORDER = 1
+_PAD = 1
+
+#: Box-drawing junction glyph by which of its four arms (up, down, left, right)
+#: carry a line — used to draw the connected header separator on a character grid
+#: (a vector backend just overlaps real strokes, so it needs none of these).
+_BOX = {
+    (0, 1, 0, 1): "┌", (0, 1, 1, 0): "┐", (1, 0, 0, 1): "└", (1, 0, 1, 0): "┘",
+    (1, 1, 0, 1): "├", (1, 1, 1, 0): "┤", (0, 1, 1, 1): "┬", (1, 0, 1, 1): "┴",
+    (1, 1, 1, 1): "┼", (0, 0, 1, 1): "─", (1, 1, 0, 0): "│",
+}
+
+
+def _box_glyph(up: bool, down: bool, left: bool, right: bool) -> str:
+    return _BOX.get((int(up), int(down), int(left), int(right)), "─")
+
 
 #: Search-match highlight = the surface blended toward amber, firmer for the
 #: current match (mirrors the text viewer / JsonView).
@@ -68,16 +94,23 @@ class TableView(Widget):
         self._ncols = max([len(self.header)] + [len(r) for r in self.rows], default=0)
 
         # Per-column width (capped) and alignment; then the laid-out full-width
-        # header / body line strings and each column's start column, so drawing,
-        # hit-testing and highlights all share one column geometry.
+        # header / body line strings and the column geometry every draw / hit-test
+        # shares: ``_edges`` are the ncol+1 grid columns the ``│`` bars sit in, and
+        # ``_content_x`` each column's text origin (one border + one pad past its
+        # left edge). The line strings carry only the cell text on a blank field;
+        # the bars are overlaid at draw time so a vector backend can stroke real
+        # hairlines instead.
         self._numeric = [self._col_numeric(j) for j in range(self._ncols)]
         self._colw = [self._col_width(j) for j in range(self._ncols)]
-        self._col_start: list[int] = []
-        start = 0
+        self._edges: list[int] = []
+        self._content_x: list[int] = []
+        x = 0
         for j in range(self._ncols):
-            self._col_start.append(start)
-            start += self._colw[j] + len(_GAP)
-        self._total_w = max(0, start - len(_GAP))
+            self._edges.append(x)
+            self._content_x.append(x + _BORDER + _PAD)
+            x = x + _BORDER + _PAD + self._colw[j] + _PAD
+        self._edges.append(x)
+        self._total_w = x + _BORDER
         self._header_line = self._line(self.header)
         self._body_lines = [self._line(r) for r in self.rows]
 
@@ -135,32 +168,46 @@ class TableView(Widget):
         return pad + fit if right else fit + pad
 
     def _line(self, cells: Sequence[str]) -> str:
-        return _GAP.join(
-            self._pad(self._cell(cells, j), self._colw[j], self._numeric[j])
-            for j in range(self._ncols)
-        )
+        """The full-width text of one row: each padded cell placed at its content
+        origin on a blank field (border + pad columns left as spaces, so the ``│``
+        bars overlaid at draw time never sit on a glyph)."""
+        buf = [" "] * self._total_w
+        for j in range(self._ncols):
+            cell = self._pad(self._cell(cells, j), self._colw[j], self._numeric[j])
+            cx = self._content_x[j]
+            for k, ch in enumerate(cell[:self._colw[j]]):
+                buf[cx + k] = ch
+        return "".join(buf)
 
     # --- drawing -------------------------------------------------------------
 
     def draw(self, ctx: DrawContext) -> None:
         self._panel = ctx.panel
         theme = ctx.theme
+        vector = ctx.vector_shapes
         view_w, view_h = ctx.size_units
         self._view_h = view_h
         row_h = self._row_h = ctx.line_height(Style(font=_MONO))
         self._header_h = row_h
         nrows = len(self._body_lines)
 
+        # The header zone is the header row plus its separator rule. On a vector
+        # backend the rule is a device-thin hairline (no row cost); on a character
+        # grid it needs a whole row of box-drawing ``├─┼─┤``, so the body starts one
+        # row lower there.
+        sep_h = 0.0 if vector else row_h
+        header_zone = row_h + sep_h
+
         # Reserve the two scroll bars (vertical first, then horizontal against the
-        # width left after it), then size the body viewport between the frozen
-        # header row and the horizontal bar's track.
-        body_area = view_h - row_h
+        # width left after it), then size the body viewport between the header zone
+        # and the horizontal bar's track.
+        body_area = view_h - header_zone
         vbar = nrows * row_h > body_area
         text_w = int(view_w) - (1 if vbar else 0)
         hbar = self._total_w > text_w
-        body_h = max(0.0, view_h - row_h - (row_h if hbar else 0.0))
-        self._body_top = row_h
-        self._body_bottom = row_h + body_h
+        body_h = max(0.0, view_h - header_zone - (row_h if hbar else 0.0))
+        self._body_top = header_zone
+        self._body_bottom = header_zone + body_h
         self._text_w = max(1, text_w)
         self._viewport_rows = max(1, int(body_h / row_h))
 
@@ -169,19 +216,24 @@ class TableView(Widget):
 
         base_fg = self.style.fg or (theme.text if theme is not None else (212, 212, 212))
         bg = self.style.bg
+        stripe_bg = lift(bg, 0.06) if bg is not None else None
         ctx.fill_rect(0, 0, view_w, view_h, Style(bg=bg))
 
         # Body rows, virtualized vertically, and only within the body track (above
         # the horizontal scroll bar). A row mid-scroll may start under the header
-        # row; it is drawn here and the frozen header (below) paints over that
-        # overlap, so the header stays crisp.
+        # zone; it is drawn here and the header (below) paints over that overlap so
+        # the header stays crisp. A character grid zebra-stripes alternate rows so
+        # the body reads as a table without a rule per row.
         first = int(self.offset / row_h)
         index = first
         while index < nrows:
-            top = row_h + index * row_h - self.offset
+            top = self._body_top + (index * row_h - self.offset)
             if top >= self._body_bottom:
                 break
-            self._draw_body_row(ctx, top, index, l, text_w, row_h, base_fg, bg, theme)
+            # A grid draw_text replaces the whole cell, so a striped row carries its
+            # band color on the glyphs (a bare fill would be erased under the text).
+            row_bg = stripe_bg if (not vector and index % 2 == 1) else bg
+            self._draw_body_row(ctx, top, index, l, text_w, base_fg, row_bg)
             index += 1
 
         if self._pattern:
@@ -196,13 +248,16 @@ class TableView(Widget):
         ctx.draw_text(0, 0, head, Style(fg=base_fg, bg=header_bg,
                                         attr=TextAttribute.BOLD, font=_MONO))
 
+        # Grid lines ("keisen") over the content, then the scroll bars over those.
+        self._draw_grid(ctx, vector, l, text_w, row_h, sep_h, first, nrows, theme)
+
         # Scroll bars, each in its own reserved track (no content row overlaps them).
         if vbar:
             content_h = nrows * row_h
             ratio = min(1.0, body_h / content_h)
             denom = content_h - body_h
             pos = self.offset / denom if denom > 0 else 0.0
-            ctx.draw_scrollbar(int(view_w) - 1, row_h, body_h,
+            ctx.draw_scrollbar(int(view_w) - 1, header_zone, body_h,
                                max(0.0, min(1.0, pos)), ratio, self.style)
         if hbar:
             ratio = min(1.0, text_w / self._total_w) if self._total_w else 1.0
@@ -212,9 +267,71 @@ class TableView(Widget):
                                max(0.0, min(1.0, pos)), ratio, self.style,
                                orientation="horizontal")
 
-    def _draw_body_row(self, ctx, top, index, l, text_w, row_h, base_fg, bg, theme) -> None:
+    # --- grid lines ("keisen") -----------------------------------------------
+
+    def _draw_grid(self, ctx, vector, l, text_w, row_h, sep_h, first, nrows, theme) -> None:
+        """Draw the column / row rules. A vector backend strokes hairlines for a
+        full grid (every column edge full height, every row boundary); a character
+        grid draws ``│`` column bars over the header + body and a box-drawing
+        ``├─┼─┤`` separator under the header (the body's own rows are separated by
+        zebra striping, set in :meth:`draw`)."""
+        stroke = Style(fg=theme.divider_color if theme is not None else (110, 110, 124))
+        # Rules reach only as far down as the content: the header zone always, plus
+        # the visible body rows — not the empty body track below a short table.
+        content_bottom = self._body_top + max(0.0, nrows * row_h - self.offset)
+        grid_bottom = max(self._body_top, min(self._body_bottom, content_bottom))
+        # Visible horizontal extent of the table (its outer edges, clipped in).
+        gx0 = max(0.0, self._edges[0] - l)
+        gx1 = min(float(text_w), self._edges[-1] - l)
+        if vector:
+            # Column edges: one full-height hairline each; row boundaries: a
+            # hairline under the header and between every visible body row (a full
+            # grid), plus the outer top / bottom frame.
+            for e in self._edges:
+                sx = e - l
+                if 0.0 <= sx <= text_w:
+                    ctx.draw_hairline(sx, 0.0, grid_bottom, vertical=True, style=stroke)
+            if gx1 > gx0:
+                w = gx1 - gx0
+                ctx.draw_hairline(gx0, 0.0, w, style=stroke)            # top frame
+                ctx.draw_hairline(gx0, row_h, w, style=stroke)          # under header
+                r = first
+                while True:
+                    y = self._body_top + ((r + 1) * row_h - self.offset)
+                    if y > grid_bottom + 0.001:
+                        break
+                    if y >= self._body_top:
+                        ctx.draw_hairline(gx0, min(y, grid_bottom), w, style=stroke)
+                    r += 1
+            return
+        # Character grid: ``│`` bars down every visible column edge across the whole
+        # header + body height (draw_hairline draws one glyph per cell), then the
+        # box-drawing header separator row over them at the header boundary.
+        for e in self._edges:
+            sx = e - l
+            if 0 <= sx < text_w:
+                ctx.draw_hairline(sx + 0.5, 0.0, grid_bottom, vertical=True, style=stroke)
+        self._draw_hsep(ctx, row_h, l, text_w, stroke)
+
+    def _draw_hsep(self, ctx, y, l, text_w, stroke) -> None:
+        """The box-drawing header separator row (grid only): a ``─`` run across the
+        table with a ``├`` / ``┼`` / ``┤`` junction at each visible column edge, so
+        the header's ``│`` bars above and the body's below connect through it."""
+        row = int(y)
+        gx0 = max(0, self._edges[0] - l)
+        gx1 = min(text_w - 1, self._edges[-1] - l)
+        if gx1 < gx0:
+            return
+        ctx.draw_text(gx0, row, "─" * (gx1 - gx0 + 1), stroke, ink=False)
+        for k, e in enumerate(self._edges):
+            sx = e - l
+            if 0 <= sx < text_w:
+                glyph = _box_glyph(True, True, k > 0, k < len(self._edges) - 1)
+                ctx.draw_text(sx, row, glyph, stroke, ink=False)
+
+    def _draw_body_row(self, ctx, top, index, l, text_w, base_fg, row_bg) -> None:
         line = self._body_lines[index]
-        ctx.draw_text(0, top, line[l:l + text_w], Style(fg=base_fg, bg=bg, font=_MONO))
+        ctx.draw_text(0, top, line[l:l + text_w], Style(fg=base_fg, bg=row_bg, font=_MONO))
 
     def _span_x(self, c0: int, c1: int, l: int, text_w: int) -> tuple[int, int] | None:
         """Visible [x0, x1) column window for absolute columns [c0, c1), clipped
@@ -226,8 +343,9 @@ class TableView(Widget):
         return (a - l, b - l)
 
     def _cell_cols(self, col: int) -> tuple[int, int]:
-        """Absolute [start, end) columns occupied by table column ``col``."""
-        s = self._col_start[col]
+        """Absolute [start, end) content columns occupied by table column ``col``
+        (the cell text, between its pad columns)."""
+        s = self._content_x[col]
         return (s, s + self._colw[col])
 
     def _draw_selection(self, ctx, first, nrows, l, text_w, row_h, base_fg, bg, theme) -> None:
@@ -240,13 +358,13 @@ class TableView(Widget):
                 return
             r = (self._cur_row, self._cur_col, self._cur_row, self._cur_col)
         r0, c0, r1, c1 = r
-        span = self._span_x(self._col_start[c0], self._cell_cols(c1)[1], l, text_w)
+        span = self._span_x(self._content_x[c0], self._cell_cols(c1)[1], l, text_w)
         if span is None:
             return
         x0, x1 = span
         last = min(r1, nrows - 1)
         for row in range(max(r0, first), last + 1):
-            top = row_h + row * row_h - self.offset
+            top = self._body_top + (row * row_h - self.offset)
             if top >= self._body_bottom:
                 break
             sub = self._body_lines[row][l + x0:l + x1]
@@ -258,11 +376,11 @@ class TableView(Widget):
             return
         current_row = self._matches[self._search_pos] if (
             self._search_pos >= 0 and self._matches) else -1
-        last = int((self.offset + (self._body_bottom - row_h)) / row_h) + 1
+        last = int((self.offset + (self._body_bottom - self._body_top)) / row_h) + 1
         for index in range(first, min(nrows, last + 1)):
             line = self._body_lines[index]
             low = line.lower()
-            top = row_h + index * row_h - self.offset
+            top = self._body_top + (index * row_h - self.offset)
             hl_bg = _match_bg(bg, index == current_row)
             start = 0
             while True:
@@ -384,13 +502,10 @@ class TableView(Widget):
         return (row, self._col_at(absc))
 
     def _col_at(self, absc: int) -> int:
-        col = 0
         for j in range(self._ncols):
-            if self._col_start[j] <= absc:
-                col = j
-            else:
-                break
-        return col
+            if absc < self._edges[j + 1]:
+                return j
+        return max(0, self._ncols - 1)
 
     def _selection_range(self) -> tuple[int, int, int, int] | None:
         if self._sel_anchor is None or self._sel_cursor is None:
