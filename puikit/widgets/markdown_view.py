@@ -295,6 +295,7 @@ class _TableRow:
     role: str = ""
     pad_v: float = 0.0  # inner top/bottom margin so text clears the rules (vector)
     bg: Color | None = None  # row band fill (header / zebra stripe), else surface
+    header: bool = False  # the table's header text row (copies its cells as <th>)
 
 
 # Box-drawing glyph for a junction by which of its four arms carry a line. Used
@@ -988,17 +989,22 @@ class MarkdownView(Widget):
         self._search_origin: float = 0.0
 
         # Read-only text selection (opt-in; a host file viewer sets it). Modeled
-        # over the laid-out ``_rows`` as ``(row_index, glyph_index)`` positions —
+        # over the laid-out ``_rows`` as ``(row, cell, line, glyph)`` positions —
         # the same rows the draw virtualizes — so a selection rides the existing
         # scroll and per-glyph styling (which also drives a faithful rich copy).
-        # Click/drag selects, double/triple-click escalate to word/line, and
-        # Cmd/Ctrl+A / +C select-all / copy. See the ``--- selection ---`` block.
+        # Prose / code / heading rows use ``cell = line = 0`` (a flat glyph run);
+        # a table row addresses a cell, a wrapped line within it, and a glyph, so a
+        # drag selects cell text and a copy reproduces the grid (TSV / an HTML
+        # ``<table>``). The 4-tuple sorts in reading order (row, then cell-major,
+        # then line, then glyph), so range math is uniform across both. Click/drag
+        # selects, double/triple-click escalate to word/line, and Cmd/Ctrl+A / +C
+        # select-all / copy. See the ``--- selection ---`` block.
         self.selectable = selectable
-        self._sel_anchor: tuple[int, int] | None = None  # fixed end
-        self._sel_cursor: tuple[int, int] | None = None  # moving end (drag)
+        self._sel_anchor: tuple[int, int, int, int] | None = None  # fixed end
+        self._sel_cursor: tuple[int, int, int, int] | None = None  # moving end (drag)
         self._sel_granularity = 1                        # 1 caret / 2 word / 3 line
-        self._sel_base: tuple[tuple[int, int], tuple[int, int]] | None = None
-        self._sel_clicks: MultiClickTracker[tuple[int, int]] = MultiClickTracker()
+        self._sel_base: tuple[tuple[int, int, int, int], tuple[int, int, int, int]] | None = None
+        self._sel_clicks: MultiClickTracker[tuple[int, int, int, int]] = MultiClickTracker()
         self._sel_pressed = False   # set between a press in this widget and release
         self._sel_dragged = False   # a drag happened, so the trailing click won't open a link
         # Text measurement from the last draw (style-aware), used to hit-test a
@@ -1275,7 +1281,10 @@ class MarkdownView(Widget):
         def hline(role: str) -> _Row:
             return _Row(qind, [], border_h, quote=qd, table=_TableRow([], edges, hline=True, role=role))
 
-        def band_row(cell_runs: list[list[InlineRun]], base_style: Style, band_bg: Color | None) -> _Row:
+        def band_row(
+            cell_runs: list[list[InlineRun]], base_style: Style,
+            band_bg: Color | None, header: bool = False,
+        ) -> _Row:
             # Cell text carries the band bg per glyph (a grid draw_text replaces the
             # whole cell style, so the fill alone would be erased under the text);
             # draw() also fills the band across the row so the gaps carry it too.
@@ -1289,7 +1298,7 @@ class MarkdownView(Widget):
             height = n_lines * self._line_pitch + 2 * cell_pad_v
             return _Row(
                 qind, [], height, quote=qd,
-                table=_TableRow(cells, edges, pad_v=cell_pad_v, bg=band_bg),
+                table=_TableRow(cells, edges, pad_v=cell_pad_v, bg=band_bg, header=header),
             )
 
         # The header always takes a distinct fill. Body rows: a vector backend
@@ -1309,7 +1318,7 @@ class MarkdownView(Widget):
         stripe_bg = lift(surface, 0.08)
         rows: list[_Row] = [
             hline("top"),
-            band_row(tbl.header, replace(hdr, bg=header_bg), header_bg),
+            band_row(tbl.header, replace(hdr, bg=header_bg), header_bg, header=True),
             hline("mid"),
         ]
         for i, r in enumerate(tbl.rows):
@@ -1377,6 +1386,10 @@ class MarkdownView(Widget):
                                   style=Style(fg=theme.muted_text))
             if row.table is not None:
                 self._draw_table_row(ctx, y, row.height, row.table, theme)
+                if self.selectable:
+                    # A table row draws itself and continues, so overlay its
+                    # selection highlight here (the flat-row pass below is skipped).
+                    self._draw_selection_row(ctx, y, index, row, theme)
                 continue
             if row.code_bg is not None:
                 # A continuous fill across the whole block width behind the code,
@@ -1538,115 +1551,201 @@ class MarkdownView(Widget):
 
     # --- selection ------------------------------------------------------------
     #
-    # Read-only selection over the laid-out ``_rows`` as ``(row_index,
-    # glyph_index)`` positions. It parallels ``SelectableText`` (used by the
-    # static Label/TextBlock) but is implemented here because this view scrolls
+    # Read-only selection over the laid-out ``_rows`` as ``(row, cell, line,
+    # glyph)`` positions. It parallels ``SelectableText`` (used by the static
+    # Label/TextBlock) but is implemented here because this view scrolls
     # (``self.offset``), stacks rows at variable heights (``_row_tops``), and
     # draws each row from styled spans — so both the hit-test and the highlight
     # measure each glyph in *its own* Style, and the same per-span walk feeds the
-    # rich (HTML) copy. Only wired when ``selectable`` (a host file viewer opts in).
+    # rich (HTML) copy. A prose / code / heading row is a flat glyph run
+    # (``cell = line = 0``); a **table** row is 2-D — cells side by side, each
+    # wrapped into lines — so the position addresses a cell, a line within it, and
+    # a glyph, and the 4-tuple sorts in reading order (row, cell-major, line,
+    # glyph). Only wired when ``selectable`` (a host file viewer opts in).
 
     def _row_glyphs(self, index: int) -> list[str]:
-        """The displayed glyphs of row ``index`` (its spans' text, concatenated
-        then split into glyph runs). A non-text row (image / rule / table / blank)
-        has no spans, so this is empty and the row contributes nothing to a
-        selection — a drag still passes over it."""
+        """The displayed glyphs of a *flat* row ``index`` (its spans' text
+        concatenated, split into glyph runs). A table / image / rule / blank row
+        has no spans, so this is empty; a table's own text lives per cell/line and
+        is walked by :meth:`_table_lines` instead."""
         rows = self._rows or []
         if not 0 <= index < len(rows):
             return []
         return glyph_runs(self._row_plain(rows[index]))
 
-    def _row_span_glyphs(
+    def _table_lines(
         self, row: _Row
-    ) -> list[tuple[int, list[str], Style, "str | None", float]]:
-        """Walk ``row``'s spans into ``(glyph_offset, glyphs, style, href,
-        x_start)`` tuples: the glyph index the span begins at, its glyph runs, its
-        Style/href, and the base-unit x its text starts at (from ``row.x0``).
-        Shared by the highlight draw and the copy, so both agree on where each
-        glyph sits and how it is styled."""
-        out: list[tuple[int, list[str], Style, str | None, float]] = []
-        gi = 0
-        x = row.x0
-        for text, style, href in row.spans:
-            glyphs = glyph_runs(text)
-            out.append((gi, glyphs, style, href, x))
-            gi += len(glyphs)
-            x += self._measure(text, style)
+    ) -> list[tuple[int, int, list[Span], list[str], float, float]]:
+        """A table text row's cell lines as ``(cell, line, spans, glyphs, x_start,
+        y_off)`` in cell-major, line order — the order a ``(cell, line, glyph)``
+        sub-position sorts by. ``x_start`` is the absolute x the line's text draws
+        at (its alignment offset baked in, mirroring :meth:`_draw_table_row`) and
+        ``y_off`` its y from the row top; empty for an ``hline`` / non-table row."""
+        tr = row.table
+        out: list[tuple[int, int, list[Span], list[str], float, float]] = []
+        if tr is None or tr.hline:
+            return out
+        for cell_idx, (text_x, w, align, lines) in enumerate(tr.cells):
+            for line_idx, spans in enumerate(lines):
+                glyphs = glyph_runs("".join(t for t, _, _ in spans))
+                lw = sum(self._measure(t, st) for t, st, _ in spans if t)
+                if align == "right":
+                    ox = w - lw
+                elif align == "center":
+                    ox = max(0.0, (w - lw) / 2.0)
+                else:
+                    ox = 0.0
+                out.append((cell_idx, line_idx, spans, glyphs, text_x + ox,
+                            tr.pad_v + line_idx * self._line_pitch))
         return out
 
-    def _glyph_at(self, row: _Row, x: float) -> int:
-        """Glyph index within ``row`` at base-unit x ``x`` (widget-local). Walks
-        spans by their measured width, then measures the growing glyph prefix
-        *within* the hit span so a proportional font hit-tests by real rendered
-        width (kerning honored). ``x`` and the spans' ``sx`` are both absolute
-        (measured from the widget's left, already including ``row.x0``), so a
-        click left of the content (a hanging indent) lands on glyph 0 and one past
-        the last glyph returns the row's glyph count (the row end)."""
-        total = 0
-        for gi, glyphs, style, _href, sx in self._row_span_glyphs(row):
-            total = gi + len(glyphs)
-            span_w = self._measure("".join(glyphs), style) if glyphs else 0.0
-            if x < sx + span_w:
+    def _glyph_in_line(self, spans: list[Span], x: float, x_start: float) -> int:
+        """Glyph index within a line of ``spans`` drawn from absolute x
+        ``x_start``, at absolute x ``x``. Walks spans by measured width, then
+        measures the growing glyph prefix within the hit span so a proportional
+        font hit-tests by real rendered width (kerning honored). ``x`` left of the
+        line lands on glyph 0; past the end returns the glyph count."""
+        sx = x_start
+        gi = 0
+        for text, style, _href in spans:
+            gl = glyph_runs(text)
+            w = self._measure(text, style) if text else 0.0
+            if x < sx + w:
                 local = x - sx
                 j = 0
-                while j < len(glyphs) and self._measure("".join(glyphs[: j + 1]), style) <= local:
+                while j < len(gl) and self._measure("".join(gl[: j + 1]), style) <= local:
                     j += 1
                 return gi + j
-        return total
+            sx += w
+            gi += len(gl)
+        return gi
 
-    def _pos_at(self, x: float, y: float) -> tuple[int, int]:
-        """Widget-local ``(x, y)`` (base units) to a ``(row_index, glyph_index)``
+    def _pos_at(self, x: float, y: float) -> tuple[int, int, int, int]:
+        """Widget-local ``(x, y)`` (base units) to a ``(row, cell, line, glyph)``
         selection position, resolving the row through the scroll offset and the
-        cumulative-tops index the draw uses."""
+        cumulative-tops index the draw uses. A flat row lands at ``cell = line =
+        0``; a table row resolves the cell (by column edge), the wrapped line (by
+        y), and the glyph within it."""
         rows = self._rows or []
         if not rows:
-            return (0, 0)
+            return (0, 0, 0, 0)
+        x = max(0.0, x)
         doc_y = max(0.0, y) + self.offset
         index = max(0, bisect.bisect_right(self._row_tops, doc_y) - 1)
         index = min(index, len(rows) - 1)
-        return (index, self._glyph_at(rows[index], max(0.0, x)))
+        row = rows[index]
+        if row.table is not None:
+            if row.table.hline:
+                return (index, 0, 0, 0)
+            return (index,) + self._table_pos_at(row, x, doc_y - self._row_tops[index])
+        return (index, 0, 0, self._glyph_in_line(row.spans, x, row.x0))
 
-    def _selection_range(self) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    def _table_pos_at(self, row: _Row, x: float, ry: float) -> tuple[int, int, int]:
+        """Resolve ``(cell, line, glyph)`` within a table text row at absolute x
+        ``x`` and row-local y ``ry``: the cell by which column-edge band ``x``
+        falls in, the wrapped line by ``ry``, the glyph within that line."""
+        tr = row.table
+        lines = self._table_lines(row)
+        if not lines or tr is None:
+            return (0, 0, 0)
+        edges = tr.edges
+        cell = max(0, len(edges) - 2)
+        for j in range(len(edges) - 1):
+            if x < edges[j + 1]:
+                cell = j
+                break
+        cell_lines = [u for u in lines if u[0] == cell]
+        if not cell_lines:
+            return (cell, 0, 0)
+        li = int((ry - tr.pad_v) / self._line_pitch) if self._line_pitch else 0
+        li = max(0, min(li, len(cell_lines) - 1))
+        _c, line_idx, spans, _glyphs, x_start, _yoff = cell_lines[li]
+        return (cell, line_idx, self._glyph_in_line(spans, x, x_start))
+
+    def _selection_range(
+        self,
+    ) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]] | None:
         a, b = self._sel_anchor, self._sel_cursor
         if a is None or b is None or a == b:
             return None
         return (a, b) if a <= b else (b, a)
 
-    def _row_sel_span(self, index: int) -> tuple[int, int] | None:
-        """The selected glyph range ``(start, end)`` within row ``index``, or None
-        when the row carries no (non-empty) selection."""
-        sel = self._selection_range()
-        if sel is None:
-            return None
-        (r0, c0), (r1, c1) = sel
+    def _row_end_sub(self, index: int) -> tuple[int, int, int]:
+        """The past-the-end sub-position ``(cell, line, glyph)`` of row ``index`` —
+        the last table cell line's end, or a flat row's glyph count."""
+        rows = self._rows or []
+        if not 0 <= index < len(rows):
+            return (0, 0, 0)
+        row = rows[index]
+        if row.table is not None and not row.table.hline:
+            lines = self._table_lines(row)
+            if lines:
+                cell, line, _spans, glyphs, *_ = lines[-1]
+                return (cell, line, len(glyphs))
+            return (0, 0, 0)
+        return (0, 0, len(self._row_glyphs(index)))
+
+    def _row_local_range(
+        self, index: int, sel: tuple[tuple[int, int, int, int], tuple[int, int, int, int]]
+    ) -> tuple[tuple[int, int, int], tuple[int, int, int]] | None:
+        """The selected sub-range ``(lo, hi)`` (each ``(cell, line, glyph)``) within
+        row ``index`` for sorted ``sel``, or None when the row holds no non-empty
+        selection: the row's own start/end except at the two boundary rows, which
+        clip to the caret positions."""
+        (r0, c0, l0, g0), (r1, c1, l1, g1) = sel
         if not r0 <= index <= r1:
             return None
-        glyphs = self._row_glyphs(index)
-        start = c0 if index == r0 else 0
-        end = c1 if index == r1 else len(glyphs)
-        return (start, end) if start < end else None
+        lo = (c0, l0, g0) if index == r0 else (0, 0, 0)
+        hi = (c1, l1, g1) if index == r1 else self._row_end_sub(index)
+        return (lo, hi) if lo < hi else None
+
+    def _draw_line_range(
+        self, ctx: DrawContext, ly: float, height: float, spans: list[Span],
+        x_start: float, gstart: int, gend: int, sel_bg: Color,
+    ) -> None:
+        """Fill+redraw the selected glyph range ``[gstart, gend)`` of one line of
+        ``spans`` (drawn from ``x_start``) under ``sel_bg``, keeping each glyph's
+        own color/font/attrs over the tint."""
+        sx = x_start
+        gi = 0
+        for text, style, _href in spans:
+            gl = glyph_runs(text)
+            n = len(gl)
+            s = max(gstart, gi)
+            e = min(gend, gi + n)
+            if e > s:
+                hx = sx + self._measure("".join(gl[: s - gi]), style)
+                seg = "".join(gl[s - gi : e - gi])
+                ctx.fill_rect(hx, ly, self._measure(seg, style), height, Style(bg=sel_bg))
+                ctx.draw_text(hx, ly, seg, replace(style, bg=sel_bg))
+            sx += self._measure(text, style) if text else 0.0
+            gi += n
 
     def _draw_selection_row(
         self, ctx: DrawContext, y: float, index: int, row: _Row, theme: Theme
     ) -> None:
-        """Overlay the selection highlight on one visible row: fill the selected
-        glyphs' band with the theme's text-selection background (muted when the
-        widget is blurred) and redraw those glyphs over it so their color / font /
-        attrs survive under the tint."""
-        span = self._row_sel_span(index)
-        if span is None:
+        """Overlay the selection highlight on one visible row. A flat row fills its
+        selected glyph range across the row height; a table row highlights the
+        selected glyphs of each covered cell line at its own x/y."""
+        sel = self._selection_range()
+        if sel is None:
             return
-        start, end = span
+        lr = self._row_local_range(index, sel)
+        if lr is None:
+            return
+        lo, hi = lr
         sel_bg = theme.text_selection_bg if ctx.focused else theme.text_selection_inactive_bg
-        for gi, glyphs, style, _href, sx in self._row_span_glyphs(row):
-            s = max(start, gi)
-            e = min(end, gi + len(glyphs))
-            if e <= s:
-                continue
-            hx = sx + self._measure("".join(glyphs[: s - gi]), style)
-            seg = "".join(glyphs[s - gi : e - gi])
-            ctx.fill_rect(hx, y, self._measure(seg, style), row.height, Style(bg=sel_bg))
-            ctx.draw_text(hx, y, seg, replace(style, bg=sel_bg))
+        if row.table is not None:
+            for cell, line, spans, glyphs, x_start, y_off in self._table_lines(row):
+                key = (cell, line)
+                if key < (lo[0], lo[1]) or key > (hi[0], hi[1]):
+                    continue
+                gs = lo[2] if key == (lo[0], lo[1]) else 0
+                ge = hi[2] if key == (hi[0], hi[1]) else len(glyphs)
+                if ge > gs:
+                    self._draw_line_range(ctx, y + y_off, self._line_pitch, spans, x_start, gs, ge, sel_bg)
+            return
+        self._draw_line_range(ctx, y, row.height, row.spans, row.x0, lo[2], hi[2], sel_bg)
 
     # --- selection events / copy ----------------------------------------------
 
@@ -1688,7 +1787,7 @@ class MarkdownView(Widget):
             self._sel_cursor = pos
         return True
 
-    def _sel_extend_to(self, pos: tuple[int, int]) -> None:
+    def _sel_extend_to(self, pos: tuple[int, int, int, int]) -> None:
         if self._sel_anchor is None:
             self._sel_anchor = pos
         if self._sel_base is None:
@@ -1699,23 +1798,42 @@ class MarkdownView(Widget):
         self._sel_anchor = min(b0, p0)
         self._sel_cursor = max(b1, p1)
 
-    def _word_span(self, pos: tuple[int, int]) -> tuple[tuple[int, int], tuple[int, int]]:
-        row, idx = pos
-        glyphs = self._row_glyphs(row)
-        start, end = word_bounds(glyphs, idx)
-        return (row, start), (row, end)
+    def _sub_glyphs(self, pos: tuple[int, int, int, int]) -> list[str]:
+        """The glyph list of the display line ``pos`` addresses — a flat row's
+        glyphs, or the specific table cell line's glyphs."""
+        row_i, cell, line, _g = pos
+        rows = self._rows or []
+        if not 0 <= row_i < len(rows):
+            return []
+        row = rows[row_i]
+        if row.table is not None and not row.table.hline:
+            for c, ln, _spans, glyphs, *_ in self._table_lines(row):
+                if (c, ln) == (cell, line):
+                    return glyphs
+            return []
+        return self._row_glyphs(row_i)
 
-    def _line_span(self, pos: tuple[int, int]) -> tuple[tuple[int, int], tuple[int, int]]:
-        row = pos[0]
-        return (row, 0), (row, len(self._row_glyphs(row)))
+    def _word_span(
+        self, pos: tuple[int, int, int, int]
+    ) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
+        row_i, cell, line, g = pos
+        start, end = word_bounds(self._sub_glyphs(pos), g)
+        return (row_i, cell, line, start), (row_i, cell, line, end)
+
+    def _line_span(
+        self, pos: tuple[int, int, int, int]
+    ) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
+        row_i, cell, line, _g = pos
+        return (row_i, cell, line, 0), (row_i, cell, line, len(self._sub_glyphs(pos)))
 
     def _select_all(self) -> None:
         rows = self._rows or []
         if not rows:
             return
         last = len(rows) - 1
-        self._sel_anchor = (0, 0)
-        self._sel_cursor = (last, len(self._row_glyphs(last)))
+        cell, line, glyph = self._row_end_sub(last)
+        self._sel_anchor = (0, 0, 0, 0)
+        self._sel_cursor = (last, cell, line, glyph)
         self._sel_base = None
         self._sel_granularity = 1
 
@@ -1727,58 +1845,143 @@ class MarkdownView(Widget):
         self._sel_dragged = False
 
     def selection_text(self) -> str:
-        """The selected text as plain rows joined by newlines (empty when nothing
-        is selected). A wrapped paragraph copies as the display rows it shows."""
-        sel = self._selection_range()
-        if sel is None:
-            return ""
-        (r0, c0), (r1, c1) = sel
-        parts: list[str] = []
-        for r in range(r0, r1 + 1):
-            glyphs = self._row_glyphs(r)
-            start = c0 if r == r0 else 0
-            end = c1 if r == r1 else len(glyphs)
-            parts.append("".join(glyphs[start:end]))
-        return "\n".join(parts)
-
-    def selection_html(self) -> str:
-        """The selected text as an HTML fragment carrying the shown formatting —
-        ``<strong>`` / ``<em>`` / ``<s>`` / ``<u>`` from a run's attributes, a
-        monospace run as ``<code>``, a link as ``<a href>``, and a heading row
-        wrapped in ``<h1>``..``<h6>`` — so a rich editor pastes it formatted.
-        Empty when nothing is selected."""
+        """The selected text as plain lines joined by newlines (empty when nothing
+        is selected). A wrapped paragraph copies as the display rows it shows; a
+        table row copies its selected cells tab-separated (a border adds no line)."""
         sel = self._selection_range()
         if sel is None:
             return ""
         rows = self._rows or []
-        (r0, c0), (r1, c1) = sel
-        lines: list[str] = []
+        r0, r1 = sel[0][0], sel[1][0]
+        parts: list[str] = []
         for r in range(r0, r1 + 1):
             if not 0 <= r < len(rows):
                 continue
             row = rows[r]
-            glyph_total = len(self._row_glyphs(r))
-            start = c0 if r == r0 else 0
-            end = c1 if r == r1 else glyph_total
-            frag = self._row_html(row, start, end, heading=bool(row.heading))
+            lr = self._row_local_range(r, sel)
+            if row.table is not None:
+                if row.table.hline:
+                    continue
+                parts.append(self._table_row_text(row, lr) if lr else "")
+            elif lr is None:
+                parts.append("")  # a blank / empty prose row keeps its line break
+            else:
+                parts.append("".join(self._row_glyphs(r)[lr[0][2]:lr[1][2]]))
+        return "\n".join(parts)
+
+    def _table_row_text(
+        self, row: _Row, lr: tuple[tuple[int, int, int], tuple[int, int, int]]
+    ) -> str:
+        """A table text row's selected cells as tab-separated plain text (each
+        cell's wrapped lines joined by a space), so a paste lands in spreadsheet
+        columns. Every cell across the selected span is emitted — an empty one as
+        an empty column — so the tabs keep the columns aligned."""
+        lo, hi = lr
+        per_cell: dict[int, list[str]] = {c: [] for c in range(lo[0], hi[0] + 1)}
+        for cell, line, _spans, glyphs, *_ in self._table_lines(row):
+            key = (cell, line)
+            if key < (lo[0], lo[1]) or key > (hi[0], hi[1]):
+                continue
+            gs = lo[2] if key == (lo[0], lo[1]) else 0
+            ge = hi[2] if key == (hi[0], hi[1]) else len(glyphs)
+            if ge > gs:
+                per_cell.setdefault(cell, []).append("".join(glyphs[gs:ge]))
+        return "\t".join(" ".join(per_cell[c]) for c in range(lo[0], hi[0] + 1))
+
+    def selection_html(self) -> str:
+        """The selected text as an HTML fragment carrying the shown formatting —
+        ``<strong>`` / ``<em>`` / ``<s>`` / ``<u>`` from a run's attributes, a
+        monospace run as ``<code>``, a link as ``<a href>``, a heading row wrapped
+        in ``<h1>``..``<h6>``, and a table as a real ``<table>`` (``<th>`` header /
+        ``<td>`` body cells) — so a rich editor pastes it formatted. Empty when
+        nothing is selected."""
+        sel = self._selection_range()
+        if sel is None:
+            return ""
+        rows = self._rows or []
+        r0, r1 = sel[0][0], sel[1][0]
+        out: list[str] = []
+        r = r0
+        while r <= r1:
+            if not 0 <= r < len(rows):
+                r += 1
+                continue
+            row = rows[r]
+            if row.table is not None:
+                # Gather the contiguous run of table rows into one <table>.
+                end = r
+                while end + 1 <= r1 and end + 1 < len(rows) and rows[end + 1].table is not None:
+                    end += 1
+                out.append(self._table_html(r, end, sel))
+                r = end + 1
+                continue
+            lr = self._row_local_range(r, sel)
+            frag = self._spans_html(row.spans, lr[0][2], lr[1][2], heading=bool(row.heading)) if lr else ""
             if row.heading and frag:
                 frag = f"<h{row.heading}>{frag}</h{row.heading}>"
-            lines.append(frag)
-        return "<html><body>" + "<br>\n".join(lines) + "</body></html>"
+            out.append(frag)
+            r += 1
+        return "<html><body>" + "<br>\n".join(out) + "</body></html>"
 
-    def _row_html(self, row: _Row, start: int, end: int, heading: bool = False) -> str:
-        """HTML for the selected glyph range ``[start, end)`` of one row, one
-        fragment per (clipped) span, each styled from its Style. In a heading row
-        the per-run BOLD (added to every heading for weight) is dropped, since the
-        ``<h1>``..``<h6>`` wrapper already carries it."""
-        out: list[str] = []
-        for gi, glyphs, style, href, _sx in self._row_span_glyphs(row):
-            s = max(start, gi)
-            e = min(end, gi + len(glyphs))
-            if e <= s:
+    def _table_html(
+        self, r0: int, r1: int,
+        sel: tuple[tuple[int, int, int, int], tuple[int, int, int, int]],
+    ) -> str:
+        """Render the selected cells of the contiguous table rows ``[r0, r1]`` as an
+        HTML ``<table>`` (its header row's cells as ``<th>``, body as ``<td>``)."""
+        rows = self._rows or []
+        trs: list[str] = []
+        for r in range(r0, r1 + 1):
+            row = rows[r]
+            tr = row.table
+            if tr is None or tr.hline:
                 continue
-            st = replace(style, attr=style.attr & ~TextAttribute.BOLD) if heading else style
-            out.append(self._style_html("".join(glyphs[s - gi : e - gi]), st, href))
+            lr = self._row_local_range(r, sel)
+            if lr is None:
+                continue
+            cells = self._table_cells_html(row, lr, tr.header)
+            if cells:
+                trs.append("<tr>" + "".join(cells) + "</tr>")
+        return "<table>" + "".join(trs) + "</table>" if trs else ""
+
+    def _table_cells_html(
+        self, row: _Row, lr: tuple[tuple[int, int, int], tuple[int, int, int]], header: bool
+    ) -> list[str]:
+        """The selected cells of one table row as ``<th>`` / ``<td>`` HTML, one per
+        covered cell (its lines' formatted fragments space-joined)."""
+        lo, hi = lr
+        tag = "th" if header else "td"
+        per_cell: dict[int, list[str]] = {c: [] for c in range(lo[0], hi[0] + 1)}
+        for cell, line, spans, glyphs, *_ in self._table_lines(row):
+            key = (cell, line)
+            if key < (lo[0], lo[1]) or key > (hi[0], hi[1]):
+                continue
+            gs = lo[2] if key == (lo[0], lo[1]) else 0
+            ge = hi[2] if key == (hi[0], hi[1]) else len(glyphs)
+            if ge > gs:
+                # A header cell is bold by layout; <th> already conveys that, so
+                # drop the per-run BOLD (the ``heading`` flag) to avoid <th><strong>.
+                per_cell.setdefault(cell, []).append(self._spans_html(spans, gs, ge, heading=header))
+        # Every cell across the span emits a <td>/<th> (an empty one included), so
+        # the row keeps its column count when a cell has no text.
+        return [f"<{tag}>{' '.join(per_cell[c])}</{tag}>" for c in range(lo[0], hi[0] + 1)]
+
+    def _spans_html(self, spans: list[Span], gstart: int, gend: int, heading: bool = False) -> str:
+        """HTML for the selected glyph range ``[gstart, gend)`` of one line of
+        ``spans``, one fragment per (clipped) span styled from its Style. In a
+        heading the per-run BOLD (added for weight) is dropped — the ``<h1>``..
+        ``<h6>`` wrapper already carries it."""
+        out: list[str] = []
+        gi = 0
+        for text, style, href in spans:
+            gl = glyph_runs(text)
+            n = len(gl)
+            s = max(gstart, gi)
+            e = min(gend, gi + n)
+            if e > s:
+                st = replace(style, attr=style.attr & ~TextAttribute.BOLD) if heading else style
+                out.append(self._style_html("".join(gl[s - gi : e - gi]), st, href))
+            gi += n
         return "".join(out)
 
     @staticmethod

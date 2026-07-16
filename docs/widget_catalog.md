@@ -208,17 +208,26 @@ positioned over `_rows` as `(row_index, glyph_index)` so a selection rides the
 existing virtualized scroll. It reuses the small shared helpers `MultiClickTracker`
 (`_input.py`) and `word_bounds` / `glyph_runs` (`text.py`).
 
-Copy is **rich**: `selection_text()` yields plain rows joined by newlines, and
+The selection position is a **4-tuple `(row, cell, line, glyph)`**: a prose / code /
+heading row is a flat glyph run (`cell = line = 0`), while a **table** row is 2-D —
+cells side by side, each wrapped into lines — so the position addresses a cell, a
+wrapped line, and a glyph, and the tuple sorts in reading order (row, cell-major,
+line, glyph) so one range math covers both. Table cells select and highlight
+per-cell, including partial text within a cell.
+
+Copy is **rich**: `selection_text()` yields plain rows joined by newlines (a table
+row's selected cells tab-separated, so a paste lands in spreadsheet columns), and
 `selection_html()` maps each run's `Style` to semantic HTML — `<strong>` / `<em>` /
-`<s>` / `<u>` / `<code>` (monospace run) / `<a href>`, with a heading row wrapped
-in `<h1>`..`<h6>` (a `_Row.heading` field carries the level). The copy goes through
-the **new `clipboard_rich` capability**: `Panel.set_clipboard_rich(text, html=…)`
-→ `Backend.set_clipboard_rich`, which the macOS backend realizes as an
-`NSPasteboardTypeHTML` type written alongside the plain string (a rich editor
-keeps the formatting, a plain target reads the text), while every other backend
-falls back to plain text — so the widget issues one intent and never branches
-(mirroring the `os_open` link fallback above). Tables and images carry no spans,
-so they are not part of a selection.
+`<s>` / `<u>` / `<code>` (monospace run) / `<a href>`, a heading row wrapped in
+`<h1>`..`<h6>` (a `_Row.heading` field carries the level), and a table as a real
+`<table>` (header row as `<th>`, body as `<td>`; a `_TableRow.header` flag marks
+it). The copy goes through the **new `clipboard_rich` capability**:
+`Panel.set_clipboard_rich(text, html=…)` → `Backend.set_clipboard_rich`, which the
+macOS backend realizes as an `NSPasteboardTypeHTML` type written alongside the
+plain string (a rich editor keeps the formatting, a plain target reads the text),
+while every other backend falls back to plain text — so the widget issues one
+intent and never branches (mirroring the `os_open` link fallback above). Images
+carry no spans, so they are not part of a selection.
 
 ##### Future work (TODO)
 1. **Inline images.** Only standalone `![alt](url)` lines are blocks today;

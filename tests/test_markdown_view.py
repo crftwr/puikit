@@ -1066,6 +1066,87 @@ def test_set_source_clears_selection(backend):
     assert view.selection_text() == ""
 
 
+_TABLE_DOC = (
+    "Intro\n\n"
+    "| Name | Qty |\n|------|-----|\n| Apple | 3 |\n| Pear | 7 |\n\n"
+    "Outro\n"
+)
+
+
+def _first(view, pred):
+    return next(i for i, r in enumerate(view._rows) if pred(r))
+
+
+def test_table_select_all_copies_cells(backend):
+    panel, view = _mk(backend, source=_TABLE_DOC, w=40, h=16)
+    panel.dispatch_event(Event(type=EventType.KEY, key="a", modifiers={"cmd"}))
+    # Plain: tab-separated cells, one line per table text row (borders drop out).
+    assert "Name\tQty" in view.selection_text()
+    assert "Apple\t3" in view.selection_text()
+    assert "Pear\t7" in view.selection_text()
+    # HTML: a real table, header cells as <th>, body as <td> (no redundant <strong>).
+    html = view.selection_html()
+    assert "<table>" in html and "</table>" in html
+    assert "<th>Name</th>" in html and "<th>Qty</th>" in html
+    assert "<tr><td>Apple</td><td>3</td></tr>" in html
+
+
+def test_table_partial_cell_selection(backend):
+    panel, view = _mk(backend, source=_TABLE_DOC, w=40, h=16)
+    body = _first(view, lambda r: r.table is not None
+                  and not r.table.hline and not r.table.header)  # the "Apple" row
+    y = view._row_tops[body]
+    text_x = view._rows[body].table.cells[0][0]  # first cell's text origin
+    # Drag from the cell start across 3 glyphs -> "App".
+    view._sel_anchor = view._pos_at(text_x, y)
+    view._sel_cursor = view._pos_at(text_x + 3.0, y)
+    assert view._sel_anchor == (body, 0, 0, 0)
+    assert view.selection_text() == "App"
+    assert view.selection_html() == "<html><body><table><tr><td>App</td></tr></table></body></html>"
+
+
+def test_table_cell_selection_is_highlighted(backend):
+    # The selected cell text must paint the theme's selection background — a table
+    # row draws itself and continues, so its highlight overlay is easy to miss.
+    panel, view = _mk(backend, source=_TABLE_DOC, w=40, h=16)
+    body = _first(view, lambda r: r.table is not None
+                  and not r.table.hline and not r.table.header)  # the "Apple" row
+    y = view._row_tops[body]
+    text_x = view._rows[body].table.cells[0][0]
+    view._sel_anchor = view._pos_at(text_x, y)
+    view._sel_cursor = view._pos_at(text_x + 5.0, y)  # "Apple"
+    panel.render()
+    row_y = int(y)
+    line = backend.snapshot()[row_y]
+    sel_bg = DEFAULT_THEME.text_selection_bg
+    painted = "".join(
+        line[cx] for cx in range(len(line)) if backend.style_at(cx, row_y).bg == sel_bg
+    )
+    assert painted == "Apple"
+
+
+def test_table_empty_cell_keeps_column(backend):
+    # A middle empty cell still emits an empty column (tab / <td></td>) so the
+    # row keeps its shape on paste.
+    doc = "| A | B | C |\n|---|---|---|\n| x |  | z |\n"
+    panel, view = _mk(backend, source=doc, w=40, h=10)
+    panel.dispatch_event(Event(type=EventType.KEY, key="a", modifiers={"cmd"}))
+    assert "x\t\tz" in view.selection_text()
+    assert "<td>x</td><td></td><td>z</td>" in view.selection_html()
+
+
+def test_table_double_click_selects_cell_word(backend):
+    panel, view = _mk(backend, source=_TABLE_DOC, w=40, h=16)
+    body = _first(view, lambda r: r.table is not None
+                  and not r.table.hline and not r.table.header)
+    y = view._row_tops[body]
+    text_x = view._rows[body].table.cells[0][0]
+    for _ in range(2):  # double-click inside "Apple"
+        panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=text_x + 1.0, y=y))
+    panel.dispatch_event(Event(type=EventType.MOUSE_UP, x=text_x + 1.0, y=y))
+    assert view.selection_text() == "Apple"
+
+
 def test_hit_test_on_indented_row(backend):
     # A fenced code line hangs at a left pad (row.x0 > 0); the pointer x and the
     # spans' x are both absolute, so an absolute-x hit lands on the right glyph.
@@ -1073,6 +1154,6 @@ def test_hit_test_on_indented_row(backend):
     row, y = view._rows[0], view._row_tops[0]
     assert row.x0 > 0
     glyphs = view._row_glyphs(0)
-    _r, col = view._pos_at(row.x0 + 6.0, y)   # 6 glyphs in from the content start
+    _r, _c, _l, col = view._pos_at(row.x0 + 6.0, y)   # 6 glyphs in from content start
     assert glyphs[col] == "w"                  # "hello_" is 6 chars
-    assert view._pos_at(0.0, y) == (0, 0)      # left of the pad -> row start
+    assert view._pos_at(0.0, y) == (0, 0, 0, 0)  # left of the pad -> row start
