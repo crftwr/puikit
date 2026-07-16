@@ -105,6 +105,7 @@ class TableView(Widget):
         self._matches: list[int] = []
         self._search_pos = -1
         self._origin: float = 0.0
+        self._origin_cur: tuple[int, int] = (0, 0)  # pre-search current cell
 
     # --- layout / build -------------------------------------------------------
 
@@ -424,36 +425,43 @@ class TableView(Widget):
 
     def search_begin(self) -> None:
         self._origin = self.offset
+        self._origin_cur = (self._cur_row, self._cur_col)
         self.clear_search()
 
     def search_set(self, pattern: str) -> int:
+        """Set the case-insensitive ``pattern`` (live, per keystroke): highlight
+        every matching row and **move the current cell** to the nearest match
+        at/after the current row (mirroring the main file manager's i-search, so
+        ``Enter`` commits the selection on the found row). With no match, restore
+        the pre-search cell. Returns the match count."""
         self._pattern = pattern
         self._recompute()
         if self._matches:
-            cur = int(self.offset / self._row_h) if self._row_h else 0
             self._search_pos = next(
-                (k for k, ri in enumerate(self._matches) if ri >= cur), 0)
-            self._scroll_to_row(self._matches[self._search_pos])
+                (k for k, ri in enumerate(self._matches) if ri >= self._cur_row), 0)
+            self._select_match()
         else:
             self._search_pos = -1
-            self.offset = self._origin
+            self._restore_origin()
         return len(self._matches)
 
     def search_navigate(self, delta: int) -> None:
         if not self._matches:
             return
         self._search_pos = (self._search_pos + delta) % len(self._matches)
-        self._scroll_to_row(self._matches[self._search_pos])
+        self._select_match()
 
     def search_status(self) -> tuple[int, int]:
         n = len(self._matches)
         return (self._search_pos + 1 if (n and self._search_pos >= 0) else 0, n)
 
     def search_accept(self) -> None:
+        """Enter: keep the current cell on the matched row; drop the highlights."""
         self.clear_search()
 
     def search_cancel(self) -> None:
-        self.offset = self._origin
+        """Esc / outside click: restore the pre-search cell + scroll and clear."""
+        self._restore_origin()
         self.clear_search()
 
     def clear_search(self) -> None:
@@ -461,5 +469,13 @@ class TableView(Widget):
         self._matches = []
         self._search_pos = -1
 
-    def _scroll_to_row(self, row_index: int) -> None:
-        self.offset = max(0.0, row_index * self._row_h)
+    def _select_match(self) -> None:
+        """Move the current cell onto the matched row and scroll it in (the drag
+        selection is dropped so the current cell reads as the cursor)."""
+        self._cur_row = self._matches[self._search_pos]
+        self._sel_anchor = self._sel_cursor = None
+        self._ensure_cell_visible(self._text_w)
+
+    def _restore_origin(self) -> None:
+        self._cur_row, self._cur_col = self._origin_cur
+        self.offset = self._origin

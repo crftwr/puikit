@@ -140,6 +140,34 @@ def test_search_matches_navigate_and_status(backend):
     assert view.search_status()[0] == 2
 
 
+def test_search_moves_current_cell_and_commits_on_accept(backend):
+    # Like the main file manager's i-search: the current cell follows the match
+    # and Enter (search_accept) leaves it on the matched row.
+    view = _table()
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=24, h=8)
+    panel.render()
+    assert view._cur_row == 0
+    view.search_begin()
+    view.search_set("cherry")                # 3rd body row
+    assert view._cur_row == 2                # current cell moved to the match
+    assert view._sel_anchor is None          # drag selection dropped
+    view.search_accept()                     # Enter
+    assert view._cur_row == 2                # stays on the match
+
+
+def test_search_cancel_restores_current_cell(backend):
+    view = _table()
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=24, h=8)
+    panel.render()
+    view.search_begin()
+    view.search_set("cherry")
+    assert view._cur_row == 2
+    view.search_cancel()                     # Esc restores the pre-search cell
+    assert (view._cur_row, view._cur_col) == (0, 0)
+
+
 def test_search_no_match_restores_scroll(backend):
     view = _table()
     panel = Panel(backend)

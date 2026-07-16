@@ -148,6 +148,7 @@ class JsonView(Widget):
         self._match_ids: set[int] = set()
         self._search_pos = -1
         self._origin: float = 0.0
+        self._origin_node: _Node | None = None  # pre-search selection (by identity)
 
         # Click / double-click tracking (a click toggles the expander or selects
         # a row; kept for parity with the other selectable views).
@@ -362,11 +363,6 @@ class JsonView(Widget):
         elif top + self._row_h > self.offset + self._view_h:
             self.offset = top + self._row_h - self._view_h
 
-    def _scroll_to_row(self, row_index: int) -> None:
-        """Scroll so display row ``row_index`` sits at the top of the viewport."""
-        self.offset = row_index * self._row_h
-        self._clamp_offset(len(self._visible()), self._view_h)
-
     # --- events --------------------------------------------------------------
 
     def handle_event(self, event: Event) -> bool:
@@ -502,36 +498,37 @@ class JsonView(Widget):
                          if id(n) in self._match_ids]
 
     def search_begin(self) -> None:
-        """Remember the current scroll as the pre-search origin and drop stale
-        highlights. Call when opening the search bar."""
+        """Remember the pre-search scroll + selected node (restored on cancel) and
+        drop stale highlights. Call when opening the search bar."""
         self._origin = self.offset
+        rows = self._visible()
+        self._origin_node = rows[self.selected][0] if rows else None
         self.clear_search()
 
     def search_set(self, pattern: str) -> int:
         """Set the case-insensitive search ``pattern`` (live, per keystroke):
-        expand + highlight every match, scroll to the nearest one at/after the
-        current viewport top, and return the match count. With no match, restore
-        the pre-search scroll."""
+        expand + highlight every match and **move the selection** to the nearest
+        match at/after the current one (mirroring the main file manager's
+        i-search, so ``Enter`` commits the selection on the found row). With no
+        match, restore the pre-search selection. Returns the match count."""
         self._pattern = pattern
         self._recompute()
         if self._matches:
-            cur = int(self.offset / self._row_h) if self._row_h else 0
             self._search_pos = next(
-                (k for k, (ri, _n) in enumerate(self._matches) if ri >= cur), 0)
-            self._scroll_to_row(self._matches[self._search_pos][0])
+                (k for k, (ri, _n) in enumerate(self._matches) if ri >= self.selected), 0)
+            self._select_match()
         else:
             self._search_pos = -1
-            self.offset = self._origin
-            self._clamp_offset(len(self._visible()), self._view_h)
+            self._restore_origin()
         return len(self._matches)
 
     def search_navigate(self, delta: int) -> None:
-        """Walk to the previous (``delta < 0``) / next (``delta > 0``) match,
-        wrapping at the ends. A no-op with no matches."""
+        """Move the selection to the previous (``delta < 0``) / next (``delta >
+        0``) match, wrapping at the ends. A no-op with no matches."""
         if not self._matches:
             return
         self._search_pos = (self._search_pos + delta) % len(self._matches)
-        self._scroll_to_row(self._matches[self._search_pos][0])
+        self._select_match()
 
     def search_status(self) -> tuple[int, int]:
         """``(position, total)`` for the bar's counter: the 1-based index of the
@@ -540,15 +537,31 @@ class JsonView(Widget):
         return (self._search_pos + 1 if (n and self._search_pos >= 0) else 0, n)
 
     def search_accept(self) -> None:
-        """Enter: keep the current scroll; drop the pattern and highlights."""
+        """Enter: keep the selection on the current match; drop the highlights."""
         self.clear_search()
 
     def search_cancel(self) -> None:
-        """Esc / outside click: restore the pre-search scroll and clear (nodes
-        expanded to reveal a match stay expanded)."""
+        """Esc / outside click: restore the pre-search selection + scroll and clear
+        (nodes expanded to reveal a match stay expanded)."""
+        self._restore_origin()
+        self.clear_search()
+
+    def _select_match(self) -> None:
+        """Move the selection cursor onto the current match and scroll it in."""
+        self.selected = self._matches[self._search_pos][0]
+        self._ensure_visible()
+        self._clamp_offset(len(self._visible()), self._view_h)
+
+    def _restore_origin(self) -> None:
+        """Restore the pre-search selection (found by node identity — an expansion
+        may have shifted its row index) and the pre-search scroll."""
+        if self._origin_node is not None:
+            for i, (node, _d) in enumerate(self._visible()):
+                if node is self._origin_node:
+                    self.selected = i
+                    break
         self.offset = self._origin
         self._clamp_offset(len(self._visible()), self._view_h)
-        self.clear_search()
 
     def clear_search(self) -> None:
         """Drop the search pattern, highlights, and match set."""

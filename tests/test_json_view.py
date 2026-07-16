@@ -119,6 +119,34 @@ def test_search_navigate_wraps(backend):
     assert view.search_status() == (1, 2)
 
 
+def test_search_moves_selection_and_commits_on_accept(backend):
+    # Like the main file manager's i-search: the selection follows the match and
+    # Enter (search_accept) leaves it on the matched node.
+    view = JsonView({"a": 1, "b": 2, "nested": {"target": 99}, "c": 3})
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    panel.render()
+    assert view.selected == 0
+    view.search_begin()
+    view.search_set("target")
+    assert view._visible()[view.selected][0].key == "target"   # selection on match
+    view.search_accept()                                        # Enter
+    assert view._visible()[view.selected][0].key == "target"   # stays there
+
+
+def test_search_cancel_restores_selection(backend):
+    view = JsonView({"a": 1, "b": 2, "nested": {"target": 99}, "c": 3})
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    panel.render()
+    origin = view._visible()[view.selected][0]     # the node selected before search
+    view.search_begin()
+    view.search_set("target")
+    assert view._visible()[view.selected][0].key == "target"
+    view.search_cancel()                            # Esc restores the origin node
+    assert view._visible()[view.selected][0] is origin
+
+
 def test_search_cancel_restores_scroll(backend):
     view = JsonView({str(i): i for i in range(40)})
     panel = Panel(backend)
