@@ -460,6 +460,21 @@ class Backend(ABC):
         """Replace the plain-text clipboard contents. See ``get_clipboard``."""
         self._clipboard = text
 
+    def set_clipboard_rich(
+        self, text: str, *, html: str | None = None, rtf: str | None = None
+    ) -> None:
+        """Replace the clipboard with plain ``text`` plus optional rich
+        representations (``html`` / ``rtf``) a rich editor pastes with its
+        formatting intact — bold, links, headings — while a plain-text target
+        still receives ``text``.
+
+        The default keeps only the plain text (dropping the rich reps), so a
+        widget always calls this unconditionally and gets working copy on every
+        backend; only a backend advertising ``clipboard_rich`` overrides it to
+        write the extra pasteboard types. The Panel/widget layer never branches
+        on the capability."""
+        self.set_clipboard(text)
+
     # --- pointer shape (capability "pointer_shape"; Panel gates the calls) ----
 
     def set_pointer_shape(self, shape: str | None) -> None:

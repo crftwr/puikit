@@ -34,7 +34,7 @@ One implementation each, running unchanged on every backend.
 | `Splitter` | `splitter.py` | Two panes with a draggable divider (drag to resize) |
 | `ListView` | `list.py` | Scrollable selectable rows; text by default (over-long rows clip, or elide with `ellipsis`/`elide_where`), or a widget per row via `row_factory` |
 | `LogView` | `log_view.py` | Virtualized append-only stream; per-line color, wrap, drag-select + copy, tail-follow |
-| `MarkdownView` | `markdown_view.py` | Scrolling read-only Markdown viewer; proportional prose + monospace/sized headings, clickable links, images |
+| `MarkdownView` | `markdown_view.py` | Scrolling read-only Markdown viewer; proportional prose + monospace/sized headings, clickable links, images; opt-in `selectable` (drag-select + copy as plain **and** rich HTML) |
 | `TreeView` / `TreeNode` | `tree.py` | Expandable hierarchical rows with indentation |
 | `Tabs` | `tabs.py` | Title strip swapping a content pane |
 | `MenuBar` / `MenuPopup` | `menu.py` | Widget-rendered menu fallback (non-`native_menus` backends) |
@@ -195,24 +195,46 @@ Inline mixed styles, links, flowing content.
   consumer appears, lift it (span list + wrap) into a shared helper and let
   `TextBlock` opt in, rather than duplicating it.
 
+##### Selection + copy — **shipped**
+`MarkdownView(..., selectable=True)` adds read-only text selection: drag-select,
+double-click word / triple-click line (a following drag then grows by that unit),
+shift-click extend, `Cmd`/`Ctrl`+`A` select-all, and `Cmd`/`Ctrl`+`C` copy. It
+**parallels** `SelectableText` (`_selection.py`, used by `Label`/`TextBlock`)
+rather than reusing it, because this view scrolls (`self.offset`), stacks rows at
+variable heights (`_row_tops`), and draws each row from **styled spans** — so both
+the pointer hit-test and the highlight measure each glyph in *its own* `Style`
+(the flat mixin's single-style prefix measure would mis-place a proportional run),
+positioned over `_rows` as `(row_index, glyph_index)` so a selection rides the
+existing virtualized scroll. It reuses the small shared helpers `MultiClickTracker`
+(`_input.py`) and `word_bounds` / `glyph_runs` (`text.py`).
+
+Copy is **rich**: `selection_text()` yields plain rows joined by newlines, and
+`selection_html()` maps each run's `Style` to semantic HTML — `<strong>` / `<em>` /
+`<s>` / `<u>` / `<code>` (monospace run) / `<a href>`, with a heading row wrapped
+in `<h1>`..`<h6>` (a `_Row.heading` field carries the level). The copy goes through
+the **new `clipboard_rich` capability**: `Panel.set_clipboard_rich(text, html=…)`
+→ `Backend.set_clipboard_rich`, which the macOS backend realizes as an
+`NSPasteboardTypeHTML` type written alongside the plain string (a rich editor
+keeps the formatting, a plain target reads the text), while every other backend
+falls back to plain text — so the widget issues one intent and never branches
+(mirroring the `os_open` link fallback above). Tables and images carry no spans,
+so they are not part of a selection.
+
 ##### Future work (TODO)
-1. **Selection + copy.** `MarkdownView` cannot select text yet, unlike
-   `LogView` / `TextBlock` (`_selection.py`: drag-select + `Cmd`/`Ctrl`+`C`).
-   Reuse that machinery so a reader can copy passages. *(Highest-value gap —
-   this is a widget-interaction feature, not a Markdown one.)*
-2. **Inline images.** Only standalone `![alt](url)` lines are blocks today;
+1. **Inline images.** Only standalone `![alt](url)` lines are blocks today;
    a mid-paragraph image *run* (a row as tall as its tallest run) is rare and
    layout-heavy, so it stays deferred.
-3. **Themeable syntax palette.** The seven syntax colors are fixed module
+2. **Themeable syntax palette.** The seven syntax colors are fixed module
    constants (VS Code Dark+ hues, mirroring TFM's `tfm_colors` categories); lift
    them onto `Theme` if a light-surface code block ever needs different hues.
 
 *Shipped since the initial cut* (all GitHub-rendered, so in scope): GFM tables,
 task lists, strikethrough, `<autolink>` / bare-URL / reference links, setext
 headings, hard line breaks, nested + reflowed block quotes, `#heading` anchor
-links, the link-hover `pointer` cursor, a continuous code-block background, and
+links, the link-hover `pointer` cursor, a continuous code-block background,
 optional **Pygments syntax highlighting** (graceful flat-color fallback when
-Pygments is absent or the language is unknown).
+Pygments is absent or the language is unknown), and **text selection + rich
+(HTML) copy** (the new `clipboard_rich` capability).
 
 #### Accordion / collapsible panel
 - **Existing flexibility?** **Yes** — `Tree` (disclosure) and `Tabs` (swapping)

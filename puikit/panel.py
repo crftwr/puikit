@@ -1900,6 +1900,17 @@ class Panel:
         """Replace the plain-text clipboard contents. See ``get_clipboard``."""
         self.backend.set_clipboard(text)
 
+    def set_clipboard_rich(
+        self, text: str, *, html: str | None = None, rtf: str | None = None
+    ) -> None:
+        """Replace the clipboard with plain ``text`` plus optional ``html`` /
+        ``rtf`` representations, so a rich editor pastes the formatting while a
+        plain target still gets ``text``. Delegated to the backend; where the
+        backend lacks ``clipboard_rich`` the rich reps are dropped and the plain
+        text is written, so the widget never branches (see
+        ``Backend.set_clipboard_rich``)."""
+        self.backend.set_clipboard_rich(text, html=html, rtf=rtf)
+
     # --- open a URL -----------------------------------------------------------
 
     def open_url(self, url: str) -> bool:

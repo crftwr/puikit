@@ -55,14 +55,16 @@ from __future__ import annotations
 import bisect
 import re
 from dataclasses import dataclass, field, replace
+from html import escape as _html_escape
 
 from ..backend import DEFAULT_STYLE, Color, Style, TextAttribute
 from ..event import Event, EventType
 from ..font import Font
 from ..image import aspect_extent
 from ..panel import DrawContext
-from ..text import glyph_runs
+from ..text import glyph_runs, word_bounds
 from ..theme import DEFAULT_THEME, Theme, lift
+from ._input import MultiClickTracker
 from .base import Widget
 
 # Syntax highlighting is optional: if Pygments is installed a fenced code block
@@ -272,6 +274,10 @@ class _Row:
     # A fenced-code row: the fill color painted across the whole block width
     # behind the text (a continuous background, not just per-glyph), else None.
     code_bg: Color | None = None
+    # Heading level (1..6) when this row belongs to an ATX/setext heading, else 0.
+    # Carried so a rich (HTML) copy of a selection can wrap the row in <h1>..<h6>
+    # rather than losing the heading to a flat bold line.
+    heading: int = 0
 
 
 @dataclass
@@ -917,6 +923,7 @@ class MarkdownView(Widget):
         text_font: Font = DEFAULT_TEXT_FONT,
         code_font: Font = DEFAULT_CODE_FONT,
         heading_scales: dict[int, float] = DEFAULT_HEADING_SCALES,
+        selectable: bool = False,
     ):
         self.style = style
         # Prose face (proportional on GUI) and code face (monospace). Both fold
@@ -980,6 +987,25 @@ class MarkdownView(Widget):
         self._search_token: tuple[str, float] = ("", -1.0)
         self._search_origin: float = 0.0
 
+        # Read-only text selection (opt-in; a host file viewer sets it). Modeled
+        # over the laid-out ``_rows`` as ``(row_index, glyph_index)`` positions —
+        # the same rows the draw virtualizes — so a selection rides the existing
+        # scroll and per-glyph styling (which also drives a faithful rich copy).
+        # Click/drag selects, double/triple-click escalate to word/line, and
+        # Cmd/Ctrl+A / +C select-all / copy. See the ``--- selection ---`` block.
+        self.selectable = selectable
+        self._sel_anchor: tuple[int, int] | None = None  # fixed end
+        self._sel_cursor: tuple[int, int] | None = None  # moving end (drag)
+        self._sel_granularity = 1                        # 1 caret / 2 word / 3 line
+        self._sel_base: tuple[tuple[int, int], tuple[int, int]] | None = None
+        self._sel_clicks: MultiClickTracker[tuple[int, int]] = MultiClickTracker()
+        self._sel_pressed = False   # set between a press in this widget and release
+        self._sel_dragged = False   # a drag happened, so the trailing click won't open a link
+        # Text measurement from the last draw (style-aware), used to hit-test a
+        # pointer to a glyph and to place the selection highlight. The column-count
+        # default keeps it sane before the first draw.
+        self._measure = lambda text, style=None: float(len(text))
+
     # --- construction ---------------------------------------------------------
 
     @classmethod
@@ -990,6 +1016,7 @@ class MarkdownView(Widget):
         text_font: Font = DEFAULT_TEXT_FONT,
         code_font: Font = DEFAULT_CODE_FONT,
         heading_scales: dict[int, float] = DEFAULT_HEADING_SCALES,
+        selectable: bool = False,
     ) -> "MarkdownView":
         """Build a view from a ``*.md`` file (read as UTF-8)."""
         with open(path, encoding="utf-8") as f:
@@ -999,6 +1026,7 @@ class MarkdownView(Widget):
                 text_font=text_font,
                 code_font=code_font,
                 heading_scales=heading_scales,
+                selectable=selectable,
             )
 
     def set_source(self, source: str) -> None:
@@ -1010,6 +1038,7 @@ class MarkdownView(Widget):
         self._layout_cache.clear()
         self._cache_view_h = -1.0
         self.clear_search()
+        self.clear_selection()
 
     # --- layout ---------------------------------------------------------------
 
@@ -1136,7 +1165,8 @@ class MarkdownView(Widget):
                     cells = row
                     x0 = qind + prefix_w
                 height = max((line_height(st) for _, st, _ in cells), default=line_height(base))
-                rows.append(_Row(x0, cells, height, quote=qd))
+                hlevel = sem.level if sem.block == "heading" else 0
+                rows.append(_Row(x0, cells, height, quote=qd, heading=hlevel))
         self._rows = rows
         tops = [0.0]
         for row in rows:
@@ -1295,6 +1325,9 @@ class MarkdownView(Widget):
     def draw(self, ctx: DrawContext) -> None:
         self._panel = ctx.panel
         self._link_hits = []
+        # Keep the style-aware measurement so a later mouse event can hit-test a
+        # pointer to a glyph and the selection highlight can place itself.
+        self._measure = ctx.measure_text
         theme = ctx.theme or DEFAULT_THEME
         # Use the exact (fractional) width on pixel backends so proportional text
         # wraps to the real pane edge, not a column-snapped one.
@@ -1362,6 +1395,8 @@ class MarkdownView(Widget):
                 x += w
             if self._search_pattern and row.spans:
                 self._draw_search_row(ctx, y, row, index == current_match, theme)
+            if self.selectable:
+                self._draw_selection_row(ctx, y, index, row, theme)
 
         # A pointing hand over a link, so it reads as clickable. The pointer is
         # taken in widget-local coords (panel pointer minus this widget's screen
@@ -1501,6 +1536,284 @@ class MarkdownView(Widget):
                 ctx.draw_text(hx, y, seg, replace(style, bg=hl))
             idx = low.find(pat, end)
 
+    # --- selection ------------------------------------------------------------
+    #
+    # Read-only selection over the laid-out ``_rows`` as ``(row_index,
+    # glyph_index)`` positions. It parallels ``SelectableText`` (used by the
+    # static Label/TextBlock) but is implemented here because this view scrolls
+    # (``self.offset``), stacks rows at variable heights (``_row_tops``), and
+    # draws each row from styled spans — so both the hit-test and the highlight
+    # measure each glyph in *its own* Style, and the same per-span walk feeds the
+    # rich (HTML) copy. Only wired when ``selectable`` (a host file viewer opts in).
+
+    def _row_glyphs(self, index: int) -> list[str]:
+        """The displayed glyphs of row ``index`` (its spans' text, concatenated
+        then split into glyph runs). A non-text row (image / rule / table / blank)
+        has no spans, so this is empty and the row contributes nothing to a
+        selection — a drag still passes over it."""
+        rows = self._rows or []
+        if not 0 <= index < len(rows):
+            return []
+        return glyph_runs(self._row_plain(rows[index]))
+
+    def _row_span_glyphs(
+        self, row: _Row
+    ) -> list[tuple[int, list[str], Style, "str | None", float]]:
+        """Walk ``row``'s spans into ``(glyph_offset, glyphs, style, href,
+        x_start)`` tuples: the glyph index the span begins at, its glyph runs, its
+        Style/href, and the base-unit x its text starts at (from ``row.x0``).
+        Shared by the highlight draw and the copy, so both agree on where each
+        glyph sits and how it is styled."""
+        out: list[tuple[int, list[str], Style, str | None, float]] = []
+        gi = 0
+        x = row.x0
+        for text, style, href in row.spans:
+            glyphs = glyph_runs(text)
+            out.append((gi, glyphs, style, href, x))
+            gi += len(glyphs)
+            x += self._measure(text, style)
+        return out
+
+    def _glyph_at(self, row: _Row, x: float) -> int:
+        """Glyph index within ``row`` at base-unit x ``x`` (widget-local). Walks
+        spans by their measured width, then measures the growing glyph prefix
+        *within* the hit span so a proportional font hit-tests by real rendered
+        width (kerning honored). ``x`` and the spans' ``sx`` are both absolute
+        (measured from the widget's left, already including ``row.x0``), so a
+        click left of the content (a hanging indent) lands on glyph 0 and one past
+        the last glyph returns the row's glyph count (the row end)."""
+        total = 0
+        for gi, glyphs, style, _href, sx in self._row_span_glyphs(row):
+            total = gi + len(glyphs)
+            span_w = self._measure("".join(glyphs), style) if glyphs else 0.0
+            if x < sx + span_w:
+                local = x - sx
+                j = 0
+                while j < len(glyphs) and self._measure("".join(glyphs[: j + 1]), style) <= local:
+                    j += 1
+                return gi + j
+        return total
+
+    def _pos_at(self, x: float, y: float) -> tuple[int, int]:
+        """Widget-local ``(x, y)`` (base units) to a ``(row_index, glyph_index)``
+        selection position, resolving the row through the scroll offset and the
+        cumulative-tops index the draw uses."""
+        rows = self._rows or []
+        if not rows:
+            return (0, 0)
+        doc_y = max(0.0, y) + self.offset
+        index = max(0, bisect.bisect_right(self._row_tops, doc_y) - 1)
+        index = min(index, len(rows) - 1)
+        return (index, self._glyph_at(rows[index], max(0.0, x)))
+
+    def _selection_range(self) -> tuple[tuple[int, int], tuple[int, int]] | None:
+        a, b = self._sel_anchor, self._sel_cursor
+        if a is None or b is None or a == b:
+            return None
+        return (a, b) if a <= b else (b, a)
+
+    def _row_sel_span(self, index: int) -> tuple[int, int] | None:
+        """The selected glyph range ``(start, end)`` within row ``index``, or None
+        when the row carries no (non-empty) selection."""
+        sel = self._selection_range()
+        if sel is None:
+            return None
+        (r0, c0), (r1, c1) = sel
+        if not r0 <= index <= r1:
+            return None
+        glyphs = self._row_glyphs(index)
+        start = c0 if index == r0 else 0
+        end = c1 if index == r1 else len(glyphs)
+        return (start, end) if start < end else None
+
+    def _draw_selection_row(
+        self, ctx: DrawContext, y: float, index: int, row: _Row, theme: Theme
+    ) -> None:
+        """Overlay the selection highlight on one visible row: fill the selected
+        glyphs' band with the theme's text-selection background (muted when the
+        widget is blurred) and redraw those glyphs over it so their color / font /
+        attrs survive under the tint."""
+        span = self._row_sel_span(index)
+        if span is None:
+            return
+        start, end = span
+        sel_bg = theme.text_selection_bg if ctx.focused else theme.text_selection_inactive_bg
+        for gi, glyphs, style, _href, sx in self._row_span_glyphs(row):
+            s = max(start, gi)
+            e = min(end, gi + len(glyphs))
+            if e <= s:
+                continue
+            hx = sx + self._measure("".join(glyphs[: s - gi]), style)
+            seg = "".join(glyphs[s - gi : e - gi])
+            ctx.fill_rect(hx, y, self._measure(seg, style), row.height, Style(bg=sel_bg))
+            ctx.draw_text(hx, y, seg, replace(style, bg=sel_bg))
+
+    # --- selection events / copy ----------------------------------------------
+
+    def _selection_mouse(self, event: Event) -> bool:
+        """Drive selection from a raw press/drag/release (mirrors
+        ``SelectableText._selection_mouse``): a press seeds the anchor and
+        escalates caret -> word -> line by repeat count; a drag extends, growing
+        by whole words/lines after a double/triple click. The release only clears
+        the pressed latch — the trailing synthesized click is left to open a link,
+        guarded by ``_sel_dragged`` in ``_handle_click``."""
+        if event.type is EventType.MOUSE_UP:
+            self._sel_pressed = False
+            return True
+        pos = self._pos_at(event.x or 0.0, event.y or 0.0)
+        if event.type is EventType.MOUSE_DRAG:
+            if not self._sel_pressed:
+                return False
+            self._sel_clicks.note_drag()
+            self._sel_dragged = True
+            self._sel_extend_to(pos)
+            return True
+        # MOUSE_DOWN
+        self._sel_pressed = True
+        self._sel_dragged = False
+        count = self._sel_clicks.press(pos)
+        self._sel_granularity = (count - 1) % 3 + 1
+        if self._sel_granularity == 2:
+            self._sel_base = self._word_span(pos)
+            self._sel_anchor, self._sel_cursor = self._sel_base
+        elif self._sel_granularity == 3:
+            self._sel_base = self._line_span(pos)
+            self._sel_anchor, self._sel_cursor = self._sel_base
+        elif "shift" in event.modifiers and self._sel_anchor is not None:
+            self._sel_base = None
+            self._sel_cursor = pos  # shift+press extends from the existing anchor
+        else:
+            self._sel_base = None
+            self._sel_anchor = pos  # a plain press starts a fresh selection here
+            self._sel_cursor = pos
+        return True
+
+    def _sel_extend_to(self, pos: tuple[int, int]) -> None:
+        if self._sel_anchor is None:
+            self._sel_anchor = pos
+        if self._sel_base is None:
+            self._sel_cursor = pos
+            return
+        b0, b1 = self._sel_base
+        p0, p1 = self._word_span(pos) if self._sel_granularity == 2 else self._line_span(pos)
+        self._sel_anchor = min(b0, p0)
+        self._sel_cursor = max(b1, p1)
+
+    def _word_span(self, pos: tuple[int, int]) -> tuple[tuple[int, int], tuple[int, int]]:
+        row, idx = pos
+        glyphs = self._row_glyphs(row)
+        start, end = word_bounds(glyphs, idx)
+        return (row, start), (row, end)
+
+    def _line_span(self, pos: tuple[int, int]) -> tuple[tuple[int, int], tuple[int, int]]:
+        row = pos[0]
+        return (row, 0), (row, len(self._row_glyphs(row)))
+
+    def _select_all(self) -> None:
+        rows = self._rows or []
+        if not rows:
+            return
+        last = len(rows) - 1
+        self._sel_anchor = (0, 0)
+        self._sel_cursor = (last, len(self._row_glyphs(last)))
+        self._sel_base = None
+        self._sel_granularity = 1
+
+    def clear_selection(self) -> None:
+        """Drop any selection (e.g. when the source changes)."""
+        self._sel_anchor = None
+        self._sel_cursor = None
+        self._sel_base = None
+        self._sel_dragged = False
+
+    def selection_text(self) -> str:
+        """The selected text as plain rows joined by newlines (empty when nothing
+        is selected). A wrapped paragraph copies as the display rows it shows."""
+        sel = self._selection_range()
+        if sel is None:
+            return ""
+        (r0, c0), (r1, c1) = sel
+        parts: list[str] = []
+        for r in range(r0, r1 + 1):
+            glyphs = self._row_glyphs(r)
+            start = c0 if r == r0 else 0
+            end = c1 if r == r1 else len(glyphs)
+            parts.append("".join(glyphs[start:end]))
+        return "\n".join(parts)
+
+    def selection_html(self) -> str:
+        """The selected text as an HTML fragment carrying the shown formatting —
+        ``<strong>`` / ``<em>`` / ``<s>`` / ``<u>`` from a run's attributes, a
+        monospace run as ``<code>``, a link as ``<a href>``, and a heading row
+        wrapped in ``<h1>``..``<h6>`` — so a rich editor pastes it formatted.
+        Empty when nothing is selected."""
+        sel = self._selection_range()
+        if sel is None:
+            return ""
+        rows = self._rows or []
+        (r0, c0), (r1, c1) = sel
+        lines: list[str] = []
+        for r in range(r0, r1 + 1):
+            if not 0 <= r < len(rows):
+                continue
+            row = rows[r]
+            glyph_total = len(self._row_glyphs(r))
+            start = c0 if r == r0 else 0
+            end = c1 if r == r1 else glyph_total
+            frag = self._row_html(row, start, end, heading=bool(row.heading))
+            if row.heading and frag:
+                frag = f"<h{row.heading}>{frag}</h{row.heading}>"
+            lines.append(frag)
+        return "<html><body>" + "<br>\n".join(lines) + "</body></html>"
+
+    def _row_html(self, row: _Row, start: int, end: int, heading: bool = False) -> str:
+        """HTML for the selected glyph range ``[start, end)`` of one row, one
+        fragment per (clipped) span, each styled from its Style. In a heading row
+        the per-run BOLD (added to every heading for weight) is dropped, since the
+        ``<h1>``..``<h6>`` wrapper already carries it."""
+        out: list[str] = []
+        for gi, glyphs, style, href, _sx in self._row_span_glyphs(row):
+            s = max(start, gi)
+            e = min(end, gi + len(glyphs))
+            if e <= s:
+                continue
+            st = replace(style, attr=style.attr & ~TextAttribute.BOLD) if heading else style
+            out.append(self._style_html("".join(glyphs[s - gi : e - gi]), st, href))
+        return "".join(out)
+
+    @staticmethod
+    def _style_html(text: str, style: Style, href: str | None) -> str:
+        """Wrap ``text`` in the semantic tags its Style implies. Order is
+        innermost-first so nested emphasis composes; an in-document ``#anchor``
+        link is emitted as plain text (its target is meaningless once pasted)."""
+        inner = _html_escape(text)
+        attr = style.attr
+        if style.font is not None and style.font.monospace:
+            inner = f"<code>{inner}</code>"
+        if attr & TextAttribute.BOLD:
+            inner = f"<strong>{inner}</strong>"
+        if attr & TextAttribute.ITALIC:
+            inner = f"<em>{inner}</em>"
+        if attr & TextAttribute.STRIKETHROUGH:
+            inner = f"<s>{inner}</s>"
+        link = href is not None and not href.startswith("#")
+        # A link already reads as a link via <a>; only add <u> to non-link underlines.
+        if attr & TextAttribute.UNDERLINE and not link:
+            inner = f"<u>{inner}</u>"
+        if link:
+            inner = f'<a href="{_html_escape(href, quote=True)}">{inner}</a>'
+        return inner
+
+    def _copy_selection(self) -> bool:
+        """Put the selection on the clipboard as plain text plus HTML (rich
+        editors keep the formatting; a plain target gets the text). No-op with
+        nothing selected or before the first draw wires the panel."""
+        text = self.selection_text()
+        if not text or self._panel is None:
+            return False
+        self._panel.set_clipboard_rich(text, html=self.selection_html())
+        return True
+
     # --- scrolling ------------------------------------------------------------
 
     def _content_h(self) -> float:
@@ -1622,9 +1935,20 @@ class MarkdownView(Widget):
                 amount = float(event.scroll)
             self.scroll_by(-amount)
             return True
+        if self.selectable and event.type in (
+            EventType.MOUSE_DOWN, EventType.MOUSE_UP, EventType.MOUSE_DRAG
+        ):
+            return self._selection_mouse(event)
         if event.type is EventType.MOUSE_CLICK:
             return self._handle_click(event)
         if event.type is EventType.KEY:
+            if self.selectable and event.modifiers & {"ctrl", "cmd"}:
+                if event.key == "c":
+                    self._copy_selection()
+                    return True
+                if event.key == "a":
+                    self._select_all()
+                    return True
             return self._handle_key(event.key)
         return False
 
@@ -1634,6 +1958,12 @@ class MarkdownView(Widget):
         backends launch the OS handler, others copy the URL) — no widget branch."""
         if event.x is None or event.y is None:
             return False
+        # A click that ended a drag-select (or lands while a selection stands) is
+        # part of the selection gesture, not a link activation — swallow it so the
+        # drag doesn't also open whatever URL sits under the release point.
+        if self.selectable and (self._sel_dragged or self._selection_range() is not None):
+            self._sel_dragged = False
+            return True
         for x0, y0, x1, y1, url in self._link_hits:
             if x0 <= event.x < x1 and y0 <= event.y < y1:
                 if url.startswith("#"):

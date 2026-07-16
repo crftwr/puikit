@@ -50,6 +50,8 @@ from AppKit import (
     NSEventTypeApplicationDefined,
     NSPasteboard,
     NSPasteboardTypeFileURL,
+    NSPasteboardTypeHTML,
+    NSPasteboardTypeRTF,
     NSPasteboardTypeString,
     NSTimer,
     NSBoldFontMask,
@@ -962,7 +964,7 @@ class MacOSBackend(Backend):
             "drag_and_drop": True,   # drop-IN: NSDraggingDestination (FILE_DROP)
             "os_drag_drop": True,    # drag-OUT: native NSDraggingSource (below)
             "ime": True,
-            "clipboard_rich": False,
+            "clipboard_rich": True,   # NSPasteboard multi-type write (HTML + plain)
             "native_file_dialog": False,
             "system_tray": False,
             "media_keys": False,
@@ -2255,6 +2257,28 @@ class MacOSBackend(Backend):
     def set_clipboard(self, text: str) -> None:
         pb = NSPasteboard.generalPasteboard()
         pb.clearContents()
+        pb.setString_forType_(text, NSPasteboardTypeString)
+
+    def set_clipboard_rich(
+        self, text: str, *, html: str | None = None, rtf: str | None = None
+    ) -> None:
+        """Write plain ``text`` and any ``rtf`` / ``html`` reps to the system
+        pasteboard as separate types, so a rich editor pastes with formatting
+        while a plain target reads the string. Types are declared richest-first
+        (RTF, then HTML, then plain); a reader picks the best it supports."""
+        pb = NSPasteboard.generalPasteboard()
+        pb.clearContents()
+        types = []
+        if rtf is not None:
+            types.append(NSPasteboardTypeRTF)
+        if html is not None:
+            types.append(NSPasteboardTypeHTML)
+        types.append(NSPasteboardTypeString)
+        pb.declareTypes_owner_(types, None)
+        if rtf is not None:
+            pb.setString_forType_(rtf, NSPasteboardTypeRTF)
+        if html is not None:
+            pb.setString_forType_(html, NSPasteboardTypeHTML)
         pb.setString_forType_(text, NSPasteboardTypeString)
 
     # --- pointer shape -------------------------------------------------------

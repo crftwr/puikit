@@ -974,3 +974,105 @@ def test_clear_search_drops_highlights(backend):
     assert view._search_rows
     view.clear_search()
     assert view._search_pattern == "" and view._search_rows == [] and view._search_pos == -1
+
+
+# --- text selection + copy ----------------------------------------------------
+
+_SEL_DOC = "# Title\n\nsome **bold** and `code` and a [link](http://x.com)\n"
+
+
+def _drag(panel, x0, y0, x1, y1):
+    """A press -> drag -> release gesture, in widget-local base units."""
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=float(x0), y=float(y0)))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=float(x1), y=float(y1)))
+    panel.dispatch_event(Event(type=EventType.MOUSE_UP, x=float(x1), y=float(y1)))
+
+
+def _mk(backend, source=_SEL_DOC, selectable=True, w=60, h=12):
+    panel = Panel(backend)
+    view = MarkdownView(source, selectable=selectable)
+    panel.add(view, x=0, y=0, w=w, h=h)
+    panel.render()
+    return panel, view
+
+
+def test_not_selectable_by_default(backend):
+    _panel, view = _mk(backend, selectable=False)
+    _drag(_panel, 0, 0, 100, 0)
+    assert view.selection_text() == ""  # a drag on an inert view selects nothing
+
+
+def test_select_all_and_copy_plain(backend):
+    panel, view = _mk(backend)
+    panel.dispatch_event(Event(type=EventType.KEY, key="a", modifiers={"cmd"}))
+    assert view.selection_text() == "Title\n\nsome bold and code and a link\n"
+    panel.dispatch_event(Event(type=EventType.KEY, key="c", modifiers={"cmd"}))
+    # MemoryBackend has no clipboard_rich, so the rich reps drop to plain text.
+    assert backend.get_clipboard() == "Title\n\nsome bold and code and a link\n"
+
+
+def test_selection_html_carries_formatting(backend):
+    panel, view = _mk(backend)
+    panel.dispatch_event(Event(type=EventType.KEY, key="a", modifiers={"cmd"}))
+    html = view.selection_html()
+    assert "<h1>" in html and "</h1>" in html          # heading structure
+    assert "<strong>bold</strong>" in html             # bold run
+    assert "<code>code</code>" in html                 # inline code -> monospace
+    assert '<a href="http://x.com">link</a>' in html   # link target
+
+
+def test_drag_selects_a_row(backend):
+    panel, view = _mk(backend)
+    _drag(panel, 0, 0, 100, 0)               # across the heading row (wide x)
+    assert view.selection_text() == "Title"
+    assert view.selection_html() == "<html><body><h1>Title</h1></body></html>"
+
+
+def test_double_click_selects_word(backend):
+    panel, view = _mk(backend)
+    # Row 2 is the paragraph; double-click lands on a word and grabs it whole.
+    row2_y = view._row_tops[2]
+    pos = view._pos_at(6.0, row2_y)          # somewhere inside "bold"
+    for _ in range(2):                        # two presses at the same spot -> word
+        panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=6.0, y=row2_y))
+    panel.dispatch_event(Event(type=EventType.MOUSE_UP, x=6.0, y=row2_y))
+    assert view.selection_text() == "bold"
+
+
+def test_drag_suppresses_link_open(backend):
+    opened = []
+
+    class OpeningBackend(MemoryBackend):
+        def open_url(self, url):
+            opened.append(url)
+            return True
+
+    be = OpeningBackend(width=60, height=12, capabilities=PROFILE_GUI_DESKTOP)
+    panel, view = _mk(be)
+    # Drag across the paragraph row that ends on the link, then a click is
+    # synthesized on release — the drag must swallow it, not open the URL.
+    row2_y = view._row_tops[2]
+    _drag(panel, 0, row2_y, 100, row2_y)
+    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=100, y=row2_y))
+    assert opened == []
+    assert "link" in view.selection_text()
+
+
+def test_set_source_clears_selection(backend):
+    panel, view = _mk(backend)
+    panel.dispatch_event(Event(type=EventType.KEY, key="a", modifiers={"cmd"}))
+    assert view.selection_text()
+    view.set_source("new content")
+    assert view.selection_text() == ""
+
+
+def test_hit_test_on_indented_row(backend):
+    # A fenced code line hangs at a left pad (row.x0 > 0); the pointer x and the
+    # spans' x are both absolute, so an absolute-x hit lands on the right glyph.
+    panel, view = _mk(backend, source="```\nhello_world = 42\n```\n")
+    row, y = view._rows[0], view._row_tops[0]
+    assert row.x0 > 0
+    glyphs = view._row_glyphs(0)
+    _r, col = view._pos_at(row.x0 + 6.0, y)   # 6 glyphs in from the content start
+    assert glyphs[col] == "w"                  # "hello_" is 6 chars
+    assert view._pos_at(0.0, y) == (0, 0)      # left of the pad -> row start
