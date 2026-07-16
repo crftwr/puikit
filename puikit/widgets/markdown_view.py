@@ -1461,7 +1461,13 @@ class MarkdownView(Widget):
 
         The row was already drawn by :meth:`draw`; this second pass over the same
         x layout (spans measured left to right from ``row.x0``) repaints only the
-        matched substrings, so the highlight lands exactly on the glyphs."""
+        matched substrings. The tint is a ``fill_rect`` spanning the row's own
+        ``height`` first, then the glyphs are redrawn over it: ``draw_text``'s own
+        background fills exactly one body cell, which clips a sized heading row
+        (taller than a cell) to the top of its glyphs — the fill covers the whole
+        row height instead. The glyphs keep their own color/font/attrs (only the
+        background is the tint) so a styled run — inline code, a link — stays
+        recognisable under it."""
         plain = self._row_plain(row)
         low = plain.lower()
         pat = self._search_pattern.lower()
@@ -1486,8 +1492,13 @@ class MarkdownView(Widget):
                 e = min(end, c0 + len(text))
                 if e <= s:
                     continue
+                seg = text[s - c0 : e - c0]
                 hx = sx + ctx.measure_text(text[: s - c0], style)
-                ctx.draw_text(hx, y, text[s - c0 : e - c0], replace(style, bg=hl))
+                # Paint the tint across the row's full height, then redraw the
+                # glyphs over it (a grid backend, which can't composite a
+                # transparent glyph over the fill, keeps the tint via bg=hl too).
+                ctx.fill_rect(hx, y, ctx.measure_text(seg, style), row.height, Style(bg=hl))
+                ctx.draw_text(hx, y, seg, replace(style, bg=hl))
             idx = low.find(pat, end)
 
     # --- scrolling ------------------------------------------------------------

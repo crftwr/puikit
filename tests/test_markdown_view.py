@@ -914,6 +914,35 @@ def test_search_highlight_preserves_run_color(backend):
     assert st.fg == _CODE_FG                           # still the inline-code color
 
 
+def test_search_highlight_covers_the_full_sized_heading_row():
+    # A match in a sized heading tints the whole (taller-than-a-cell) heading row,
+    # not just the top body cell: the tint is a fill_rect at the row's own height,
+    # because draw_text's own background fills exactly one base cell (which would
+    # leave the bottom of a 2x-tall heading glyph un-highlighted). See the
+    # _draw_search_row fill/redraw path.
+    backend = SizedBackend(width=40, height=30, capabilities=PROFILE_GUI_DESKTOP)
+    fills: list[tuple[float, float, float, float, object]] = []
+    orig_fill = backend.fill_rect
+
+    def fill_spy(x, y, w, h, style=None):
+        fills.append((x, y, w, h, style.bg if style else None))
+        return orig_fill(x, y, w, h) if style is None else orig_fill(x, y, w, h, style)
+
+    backend.fill_rect = fill_spy
+    view = MarkdownView("# needle heading")
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=30)
+    panel.render()
+    heading_h = view._rows[0].height
+    assert heading_h == DEFAULT_HEADING_SCALES[1]     # 2x a body cell, so > 1.0
+    view.search_set("needle")
+    panel.render()                                    # repaint with highlights
+    expected = _search_bg(view.style.bg or DEFAULT_THEME.surface_bg("content"), True)
+    hl_fills = [f for f in fills if f[4] == expected]
+    assert hl_fills                                   # the tint was painted...
+    assert all(h == heading_h for _, _, _, h, _ in hl_fills)  # ...to the full row height
+
+
 def test_search_recomputes_on_rewrap():
     # A word that wraps to a different display row on a narrower pane still
     # resolves to a match after the re-layout (the match set is keyed on the
