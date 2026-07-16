@@ -2,7 +2,8 @@
 
 import pytest
 
-from puikit import Event, EventType, Panel, PROFILE_GUI_DESKTOP, PROFILE_TUI
+from puikit import (CapabilityProfile, Event, EventType, Panel,
+                   PROFILE_GUI_DESKTOP, PROFILE_TUI)
 from puikit.backends.memory_backend import MemoryBackend
 from puikit.widgets import JsonView
 
@@ -10,6 +11,16 @@ from puikit.widgets import JsonView
 @pytest.fixture(params=[PROFILE_TUI, PROFILE_GUI_DESKTOP], ids=["tui", "gui"])
 def backend(request):
     return MemoryBackend(width=40, height=14, capabilities=request.param)
+
+
+class _VectorBackend(MemoryBackend):
+    """A grid backend that *claims* vector_shapes and records the vector
+    primitives, so the Panel's vector path can be tested headlessly (the real
+    MemoryBackend masks the capability off — it cannot render vectors)."""
+
+    @property
+    def capabilities(self) -> CapabilityProfile:
+        return CapabilityProfile({**self._capabilities, "vector_shapes": True})
 
 
 def _key(name, mods=frozenset()):
@@ -47,6 +58,30 @@ def test_right_expands_left_collapses(backend):
     assert any('0: "tui"' in r for r in snap) and any('1: "files"' in r for r in snap)
     panel.dispatch_event(_key("left"))     # collapse
     assert view.roots[1].expanded is False
+
+
+def test_branches_draw_vector_chevrons_not_glyphs():
+    view = JsonView(_data())
+    view.roots[1].expanded = True          # expand "tags" (its children are scalars)
+    be = _VectorBackend(width=40, height=14, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(be)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    panel.render()
+    # Visible branches: "tags" (expanded) + "nested" (collapsed) → 2 chevrons;
+    # the scalar "name" and tags' scalar items draw none.
+    assert len(be.chevron_calls) == 2
+    assert sorted(call[4] for call in be.chevron_calls) == [False, True]
+    text = "\n".join(be.snapshot())
+    assert "▸" not in text and "▾" not in text   # the glyph is a vector stroke now
+    assert 'name: "tfm"' in text                  # labels still render
+
+
+def test_scalar_document_draws_no_chevron():
+    be = _VectorBackend(width=40, height=14, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(be)
+    panel.add(JsonView([1, 2, 3]), x=0, y=0, w=40, h=14)   # scalar leaves only
+    panel.render()
+    assert be.chevron_calls == []
 
 
 def test_scalar_document_renders_single_leaf(backend):

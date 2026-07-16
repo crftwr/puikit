@@ -35,6 +35,15 @@ _EXPANDED = "▾ "
 _COLLAPSED = "▸ "
 _LEAF = "  "
 
+# GUI/vector disclosure chevron. On a vector backend a branch's mark is stroked as
+# a crisp ›/⌄ chevron (``ctx.draw_chevron``, width ``_MARK_W``) in a reserved slot;
+# a character grid keeps the inline ▸/▾ glyph (the constants above). The slot is a
+# whole ``_MARK_SLOT`` columns wide — the same width as the inline "▸ " glyph — so
+# the key/value text starts at the *same* integer column on both backends (which
+# also keeps the colored segments on integer columns, off the sub-cell grid).
+_MARK_W = 1.1
+_MARK_SLOT = 2
+
 #: Content is drawn in a fixed-advance face so a column maps to one base unit —
 #: search highlights and the depth indent line up on the GUI as on the TUI.
 _MONO = Font(monospace=True)
@@ -200,12 +209,6 @@ class JsonView(Widget):
             return _LEAF
         return _EXPANDED if node.expanded else _COLLAPSED
 
-    def _plain_row(self, node: _Node, depth: int) -> str:
-        """The full plain text of a row (indent + marker + key/value), used for
-        search matching and to place highlights by column."""
-        segs = self._value_segs(node, _DEFAULT_PALETTE, None)
-        return " " * (depth * _INDENT) + self._marker(node) + "".join(t for t, _ in segs)
-
     def _label_text(self, node: _Node) -> str:
         """The searchable key + value text of a node (no indent / marker), used
         by :meth:`_recompute` where the display depth is not known."""
@@ -270,41 +273,65 @@ class JsonView(Widget):
     def _draw_row(self, ctx, top, index, node, depth, text_w, fill_w, row_h,
                   palette, base_fg, bg, theme) -> None:
         indent = depth * _INDENT
-        marker = self._marker(node)
+        # A vector backend strokes the disclosure mark as a crisp chevron in a
+        # reserved slot (like TreeView), with the label after it; a grid keeps the
+        # ▸/▾ glyph inline. Either way the key/value text starts at ``text_x``.
+        vector = ctx.vector_shapes
+        if vector:
+            text_x = float(indent + _MARK_SLOT)
+            prefix = ""
+        else:
+            text_x = 0.0
+            prefix = " " * indent + self._marker(node)
+        value_segs = self._value_segs(node, palette, base_fg)
+
         if index == self.selected:
             # The selected row flattens to one legible color over the selection
             # fill (per-type coloring would fight the accent). draw_list_row
             # carries the tested reverse-video grid path.
             style = selected_row_style(Style(fg=base_fg, bg=bg), theme,
                                        ctx.focused, ctx.vector_shapes)
-            plain = " " * indent + marker + "".join(
-                t for t, _ in self._value_segs(node, palette, base_fg))
-            clipped = truncate_to_width(plain, text_w)
+            plain = prefix + "".join(t for t, _ in value_segs)
+            clipped = truncate_to_width(plain, max(0, text_w - int(text_x)))
             draw_list_row(ctx, top, clipped, text_w, Style(style.fg, style.bg,
-                          style.attr, font=_MONO), 0.0, fill_w, row_h)
+                          style.attr, font=_MONO), text_x, fill_w, row_h)
+            chevron_fg = style.fg or base_fg
         else:
-            # Indent + marker, then each colored value segment, truncating at the
+            # Marker (grid only) then each colored value segment, truncating at the
             # content edge (no horizontal scroll — a long value is elided).
-            col = 0
-            for text, color in [(" " * indent + marker, palette["muted"]),
-                                *self._value_segs(node, palette, base_fg)]:
+            col = text_x
+            for text, color in ([(prefix, palette["muted"])] if prefix else []) + value_segs:
                 if col >= text_w:
                     break
                 piece = text if display_width(text) <= text_w - col \
-                    else truncate_to_width(text, text_w - col)
+                    else truncate_to_width(text, int(text_w - col))
                 ctx.draw_text(col, top, piece, Style(fg=color, bg=bg, font=_MONO),
                               ink=color is None or _is_light(bg))
                 col += display_width(piece)
-        if self._pattern:
-            self._draw_matches(ctx, top, index, node, depth, text_w, base_fg, bg)
+            chevron_fg = palette["muted"]
 
-    def _draw_matches(self, ctx, top, index, node, depth, text_w, base_fg, bg) -> None:
+        # The vector disclosure chevron for a branch (a no-op on a grid backend,
+        # which drew the glyph inline above). Muted at rest, the row color when
+        # selected so it reads over the selection fill.
+        if vector and node.is_branch:
+            ctx.draw_chevron(indent, top, _MARK_W, row_h,
+                             expanded=node.expanded, style=Style(fg=chevron_fg))
+        if self._pattern:
+            self._draw_matches(ctx, top, index, node, text_w, base_fg, bg,
+                               prefix, text_x)
+
+    def _draw_matches(self, ctx, top, index, node, text_w, base_fg, bg,
+                      prefix, text_x) -> None:
         """Repaint every occurrence of the pattern in this row over a highlight
-        background (firmer for the current match), like the text viewer."""
+        background (firmer for the current match), like the text viewer. Positions
+        are relative to ``text_x`` — where the key/value text is drawn — so the
+        highlight lands on the label whether the marker is inline (grid) or a
+        vector chevron in the reserved slot."""
         if id(node) not in self._match_ids:
             return
-        plain = self._plain_row(node, depth)
-        low = plain.lower()
+        row_plain = prefix + "".join(
+            t for t, _ in self._value_segs(node, _DEFAULT_PALETTE, None))
+        low = row_plain.lower()
         pat = self._pattern.lower()
         current = (self._search_pos >= 0 and self._matches
                    and self._matches[self._search_pos][0] == index)
@@ -316,10 +343,12 @@ class JsonView(Widget):
                 break
             end = hit + len(pat)
             start = end
-            if hit >= text_w:
+            x = text_x + hit
+            if x >= text_w:
                 continue
-            sub = plain[hit:min(end, text_w)]
-            ctx.draw_text(hit, top, sub, Style(fg=base_fg, bg=hl_bg, font=_MONO))
+            sub = truncate_to_width(row_plain[hit:end], int(text_w - x))
+            if sub:
+                ctx.draw_text(x, top, sub, Style(fg=base_fg, bg=hl_bg, font=_MONO))
 
     # --- scroll helpers ------------------------------------------------------
 
