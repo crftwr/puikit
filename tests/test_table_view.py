@@ -156,6 +156,26 @@ def test_search_moves_current_cell_and_commits_on_accept(backend):
     assert view._cur_row == 2                # stays on the match
 
 
+def test_search_moves_current_cell_to_matching_column():
+    # The cursor lands on the matching *cell* (row and column), panning the view
+    # horizontally to reveal a match in an off-screen column.
+    rows = [["1", "apple", "red", "sweet"],
+            ["2", "banana", "yellow", "soft"],
+            ["3", "cherry", "crimson", "tart"]]
+    view = TableView(["id", "name", "color", "taste"], rows)
+    be = MemoryBackend(width=16, height=8, capabilities=PROFILE_TUI)  # forces h-scroll
+    panel = Panel(be)
+    panel.add(view, x=0, y=0, w=16, h=8)
+    panel.render()
+    assert (view._cur_row, view._cur_col) == (0, 0) and view.left == 0.0
+    view.search_begin()
+    view.search_set("crimson")               # column 2, row 2, off-screen at rest
+    assert (view._cur_row, view._cur_col) == (2, 2)
+    assert view.left > 0.0                    # panned horizontally to reveal it
+    panel.render()
+    assert "crimson" in "".join(be.snapshot())
+
+
 def test_search_cancel_restores_current_cell(backend):
     view = _table()
     panel = Panel(backend)

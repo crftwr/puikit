@@ -470,11 +470,25 @@ class TableView(Widget):
         self._search_pos = -1
 
     def _select_match(self) -> None:
-        """Move the current cell onto the matched row and scroll it in (the drag
-        selection is dropped so the current cell reads as the cursor)."""
-        self._cur_row = self._matches[self._search_pos]
+        """Move the current cell onto the matched row *and* the matching column,
+        then scroll it in on both axes (the drag selection is dropped so the
+        current cell reads as the cursor)."""
+        row = self._matches[self._search_pos]
+        self._cur_row = row
+        self._cur_col = self._match_col(row)
         self._sel_anchor = self._sel_cursor = None
         self._ensure_cell_visible(self._text_w)
+
+    def _match_col(self, row: int) -> int:
+        """The first column in ``row`` whose cell contains the pattern, so the
+        cursor lands on the matching cell (and the view pans horizontally to
+        reveal it). Falls back to the current column if no single cell matches
+        (e.g. a match that only spans the padding between columns)."""
+        pat = self._pattern.lower()
+        for j in range(self._ncols):
+            if pat in self._cell(self.rows[row], j).lower():
+                return j
+        return self._cur_col
 
     def _restore_origin(self) -> None:
         self._cur_row, self._cur_col = self._origin_cur
