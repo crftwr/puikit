@@ -10,7 +10,11 @@ lifecycle, and the property that makes parking invisible: the scene's clock coun
 
 import pytest
 
-from puikit import Background3D, Shader, Wallpaper
+from puikit import Shader, Wallpaper
+
+#: The one animated background kind. Idle parking is about the tick, not the
+#: scene, so a shader that never has to compile stands in throughout.
+_SHADER = Shader(source="fragment float4 puikit_bg_fragment() { return 0; }")
 
 mb = pytest.importorskip("puikit.backends.macos_backend")
 
@@ -130,17 +134,17 @@ class TestTarget:
 
     def test_recent_input_wants_full_rate(self, monkeypatch):
         clock = FakeClock()
-        be = _backend(monkeypatch, Background3D(kind="cube"), clock)
+        be = _backend(monkeypatch, _SHADER, clock)
         assert be._bg_target(clock.now) == 1.0
 
     def test_idle_wants_zero(self, monkeypatch):
         clock = FakeClock()
-        be = _backend(monkeypatch, Background3D(kind="cube"), clock)
+        be = _backend(monkeypatch, _SHADER, clock)
         assert be._bg_target(clock.now + _BG_IDLE_TIMEOUT + 1) == 0.0
 
     def test_just_inside_the_timeout_still_runs(self, monkeypatch):
         clock = FakeClock()
-        be = _backend(monkeypatch, Background3D(kind="cube"), clock)
+        be = _backend(monkeypatch, _SHADER, clock)
         assert be._bg_target(clock.now + _BG_IDLE_TIMEOUT - 0.1) == 1.0
 
 
@@ -148,13 +152,10 @@ class TestTarget:
 
 class TestParking:
 
-    @pytest.mark.parametrize("background", [
-        Background3D(kind="cube"),
-        Shader(source="fragment float4 puikit_bg_fragment() { return 0; }"),
-    ], ids=["segments", "shader"])
-    def test_it_parks_once_idle(self, monkeypatch, background):
-        # Both animated kinds must stop; the shader is the easy one to forget
-        # because it never repaints the UI in the first place.
+    def test_it_parks_once_idle(self, monkeypatch):
+        # The shader is the easy one to forget, because it never repaints the UI
+        # in the first place -- its cost is the tick alone.
+        background = _SHADER
         clock = FakeClock()
         be = _backend(monkeypatch, background, clock)
         clock.advance(_BG_IDLE_TIMEOUT + 1)          # go idle
@@ -164,7 +165,7 @@ class TestParking:
 
     def test_it_keeps_running_while_in_use(self, monkeypatch):
         clock = FakeClock()
-        be = _backend(monkeypatch, Background3D(kind="cube"), clock)
+        be = _backend(monkeypatch, _SHADER, clock)
         for _ in range(600):                          # 10s of frames, always active
             clock.advance(FRAME)
             be._last_input_time = clock.now           # user still typing
@@ -173,7 +174,7 @@ class TestParking:
 
     def test_it_coasts_rather_than_stopping_dead(self, monkeypatch):
         clock = FakeClock()
-        be = _backend(monkeypatch, Background3D(kind="cube"), clock)
+        be = _backend(monkeypatch, _SHADER, clock)
         clock.advance(_BG_IDLE_TIMEOUT + 1)
         # Halfway through the coast it must still be moving, just slower.
         _run(be, clock, _BG_RAMP_DOWN / 2)
@@ -181,7 +182,7 @@ class TestParking:
 
     def test_input_re_arms_it(self, monkeypatch):
         clock = FakeClock()
-        be = _backend(monkeypatch, Background3D(kind="cube"), clock)
+        be = _backend(monkeypatch, _SHADER, clock)
         clock.advance(_BG_IDLE_TIMEOUT + 1)
         _run(be, clock, _BG_RAMP_DOWN + 2)
         assert be._bg_running is False
@@ -191,7 +192,7 @@ class TestParking:
 
     def test_re_arming_is_idempotent(self, monkeypatch):
         clock = FakeClock()
-        be = _backend(monkeypatch, Background3D(kind="cube"), clock)
+        be = _backend(monkeypatch, _SHADER, clock)
         be._ensure_background_ticker()
         be._ensure_background_ticker()
         assert be._bg_running is True
@@ -207,7 +208,7 @@ class TestParking:
 
     def test_a_cleared_background_stops_the_tick(self, monkeypatch):
         clock = FakeClock()
-        be = _backend(monkeypatch, Background3D(kind="cube"), clock)
+        be = _backend(monkeypatch, _SHADER, clock)
         be._background = None
         assert be._background_tick() is False
         assert be._bg_running is False
@@ -219,13 +220,13 @@ class TestClock:
 
     def test_it_advances_while_running(self, monkeypatch):
         clock = FakeClock()
-        be = _backend(monkeypatch, Background3D(kind="cube"), clock)
+        be = _backend(monkeypatch, _SHADER, clock)
         _run(be, clock, 1.0)
         assert be._bg_clock == pytest.approx(1.0, abs=0.05)
 
     def test_it_never_goes_backwards(self, monkeypatch):
         clock = FakeClock()
-        be = _backend(monkeypatch, Background3D(kind="cube"), clock)
+        be = _backend(monkeypatch, _SHADER, clock)
         seen = []
         for _ in range(300):
             clock.advance(FRAME)
@@ -237,7 +238,7 @@ class TestClock:
         # The reason the clock exists. Wall-clock time would have the scene leap
         # ten minutes forward on resume; animated time resumes where it stopped.
         clock = FakeClock()
-        be = _backend(monkeypatch, Background3D(kind="cube"), clock)
+        be = _backend(monkeypatch, _SHADER, clock)
         clock.advance(_BG_IDLE_TIMEOUT + 1)
         _run(be, clock, _BG_RAMP_DOWN + 2)
         parked_at = be._bg_clock
@@ -252,7 +253,7 @@ class TestClock:
     def test_a_stall_does_not_lurch_the_scene(self, monkeypatch):
         # A blocked main thread must not be paid back all at once when it recovers.
         clock = FakeClock()
-        be = _backend(monkeypatch, Background3D(kind="cube"), clock)
+        be = _backend(monkeypatch, _SHADER, clock)
         clock.advance(5.0)                      # a five second stall
         be._last_input_time = clock.now
         be._background_tick()
@@ -260,10 +261,10 @@ class TestClock:
 
     def test_a_new_background_starts_from_zero(self, monkeypatch):
         clock = FakeClock()
-        be = _backend(monkeypatch, Background3D(kind="cube"), clock)
+        be = _backend(monkeypatch, _SHADER, clock)
         _run(be, clock, 1.0)
         assert be._bg_clock > 0
-        be.set_background(Background3D(kind="cube"))
+        be.set_background(_SHADER)
         assert be._bg_clock == 0.0
         assert be._bg_rate == 1.0       # a theme switch is itself user activity
         assert be._bg_running is True
@@ -278,14 +279,14 @@ class TestFrameTimer:
 
     def test_running_background_holds_the_fast_rate(self, monkeypatch):
         clock = FakeClock()
-        be = _backend(monkeypatch, Background3D(kind="cube"), clock)
+        be = _backend(monkeypatch, _SHADER, clock)
         assert self._wants_fast(be)
 
     def test_parked_background_releases_it(self, monkeypatch):
         # The point of parking: the timer must be allowed back down to the idle
         # rate, not held at 60Hz by a background that is no longer moving.
         clock = FakeClock()
-        be = _backend(monkeypatch, Background3D(kind="cube"), clock)
+        be = _backend(monkeypatch, _SHADER, clock)
         clock.advance(_BG_IDLE_TIMEOUT + 1)
         _run(be, clock, _BG_RAMP_DOWN + 2)
         assert not self._wants_fast(be)

@@ -20,7 +20,7 @@ from .event import Event
 from .font import Font, FontMetrics
 
 if TYPE_CHECKING:
-    from .background import Background3D
+    from .background import Shader, Wallpaper
     from .posteffect import PostEffect
 
 
@@ -410,8 +410,8 @@ class Backend(ABC):
         in base units. Backends that render per-widget effects (animation alpha,
         transforms, ...) use the markers; the default is a no-op. ``opaque`` marks
         an overlay group whose surface fills must occlude rather than dissolve
-        under an active ``Background3D`` reveal (see :meth:`set_background`);
-        backends without that effect ignore it."""
+        over an active background (see :meth:`set_background`); backends without
+        that effect ignore it."""
 
     def end_group(self, key: Any) -> None:
         """Counterpart of begin_group."""
@@ -509,26 +509,23 @@ class Backend(ABC):
         the call is always safe. A backend that implements it must re-apply the
         stored effect across window resizes on its own."""
 
-    # --- background behind the UI (capability "background_3d") ----------------
+    # --- background behind the UI --------------------------------------------
 
-    def set_background(self, background: "Background3D | Wallpaper | None") -> None:
+    def set_background(self, background: "Shader | Wallpaper | None") -> None:
         """Set what is drawn *behind* the display list — the app's one background,
         of three kinds (see ``puikit.background``):
 
         * ``None`` → **solid**: nothing behind the UI but the surfaces' own color.
-        * a ``Background3D`` → **animation**: an animated scene (the cube), drawn
-          per frame with its own redraw tick.
         * a ``Shader`` → **shader**: a GPU fragment shader painted across the
-          window, with its own redraw tick. Gated on the separate
-          ``background_shader`` capability, since it needs a GPU path the
-          segment kinds do not; a backend without it no-ops on this kind alone.
+          window, with its own redraw tick. Gated on the ``background_shader``
+          capability; a backend without it no-ops on this kind alone.
         * a ``Wallpaper`` → **wallpaper**: a single static image, drawn (no tick).
+          Gated on ``background``.
 
-        Only backends with the ``background_3d`` capability act on this: a
-        pixel-owning GUI backend draws the background under every widget; a
+        A pixel-owning GUI backend draws the background under every widget; a
         character-grid terminal has no sub-cell pixels, so the default no-ops. Apps
         set it once (from the active theme) and never branch on the backend — the
-        call is always safe. A backend that implements it keeps an animation running
+        call is always safe. A backend that implements it keeps a shader running
         and re-fits the background across window resizes on its own."""
 
     def set_surface_opacity(self, opacity: float) -> None:

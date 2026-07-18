@@ -39,7 +39,7 @@ from typing import Any
 from . import _win32_dragdrop, _win32_ime
 from . import _win32_native as native
 from ._d3d_shader import HAVE_D3D_SHADER, D3DShaderBackground
-from ..background import ANIMATIONS, Background3D, Shader, Wallpaper, group_by_alpha
+from ..background import Shader, Wallpaper
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, is_transparent
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..event import Event, EventType, char_key_event
@@ -65,13 +65,6 @@ _DEFAULT_FG = (230, 230, 230)
 _DEFAULT_BG = (24, 24, 24)
 
 # --- animated background behind the UI (see set_background) --------------------
-# Mirrors the MacOSBackend constants of the same names so a Background3D reads the
-# same on both platforms; see macos_backend.py for the full rationale.
-#: Fallback line color for a Background3D that names none (a soft blue over the
-#: dark default clear); an app normally passes a theme color so it stays on-palette.
-_BG3D_DEFAULT_COLOR = (90, 140, 200)
-#: Stroke width (dip at 96 dpi, scaled by _dpi_scale) for the wireframe edges.
-_BG3D_LINE_WIDTH = 1.5
 #: The animated background coasts to a stop when the app is idle or unfocused and
 #: spins back up on the next input — the same park/re-arm shape as the CRT roll.
 #: Seconds of no input before the animation begins slowing.
@@ -473,8 +466,8 @@ class WindowsBackend(Backend):
             "system_tray": False,
             "media_keys": False,
             "post_effects": True,  # Direct2D-effects CRT composite (set_post_effect)
-            "background_3d": True,  # animation / image drawn under the UI in the
-                                    # render pass (see set_background).
+            "background": True,  # a wallpaper image drawn under the UI in the
+                                 # render pass (see set_background).
             "background_shader": True,  # GPU (D3D11 + HLSL) fragment-shader
                                         # background; gated on HAVE_D3D_SHADER below.
         }
@@ -614,10 +607,9 @@ class WindowsBackend(Backend):
         # or None for a path that failed to decode (so a missing/corrupt
         # image doesn't retry-and-fail every single frame).
         self._image_cache: dict[str, tuple[Any, int, int] | None] = {}
-        # Active background behind the UI (set_background): a Background3D
-        # (animation), a Shader (GPU), a Wallpaper (static image), or None (solid).
-        # An animated kind drives a per-frame tick; the render pass draws whichever
-        # kind under the display list (the shader is composited beneath it instead).
+        # Active background behind the UI (set_background): a Shader (GPU), a
+        # Wallpaper (static image), or None (solid). A Shader drives a per-frame
+        # tick and is composited beneath the UI; a Wallpaper the render pass draws.
         self._background: Any | None = None
         # The animation's own clock, in seconds of *animated* time — it advances
         # only by what was actually drawn (dt x rate), so a background that coasted
@@ -1221,12 +1213,12 @@ class WindowsBackend(Backend):
 
     def set_background(self, background: Any | None) -> None:
         """Set the background behind the display list (see ``Backend.set_background``):
-        a ``Background3D`` (animation), a ``Shader`` (GPU), a ``Wallpaper`` (static
-        image), or ``None`` (solid). An animation or shader registers a per-frame
-        tick; a wallpaper draws once per frame. Idempotent to re-set (a theme
+        a ``Shader`` (GPU), a ``Wallpaper`` (static image), or ``None`` (solid).
+        A shader registers a per-frame tick; a wallpaper draws once per frame.
+        Idempotent to re-set (a theme
         switch); survives resizes — the background re-fits to the live client area."""
         self._background = None if (background is None or background.is_noop) else background
-        if isinstance(self._background, (Background3D, Shader)):
+        if isinstance(self._background, Shader):
             # A new background starts from the beginning of its own clock at full
             # rate — a theme switch is itself user activity, so it should not arrive
             # mid-coast.
@@ -1265,7 +1257,7 @@ class WindowsBackend(Backend):
     def _ensure_background_ticker(self) -> None:
         """Re-arm the background tick if it parked while idle. Cheap to call on
         every input: returns immediately once running."""
-        if self._bg_running or not isinstance(self._background, (Background3D, Shader)):
+        if self._bg_running or not isinstance(self._background, Shader):
             return
         self._bg_running = True
         self._bg_last_tick = time.monotonic()
@@ -1278,7 +1270,7 @@ class WindowsBackend(Backend):
         _dispatch on the next input. Mirrors MacOSBackend._background_tick; the
         _on_animation_tick repaint covers both the segment scene (drawn in the
         render pass) and the shader (whose texture is produced there too)."""
-        if not isinstance(self._background, (Background3D, Shader)):
+        if not isinstance(self._background, Shader):
             self._bg_running = False
             return False
         now = time.monotonic()
@@ -1874,39 +1866,10 @@ class WindowsBackend(Backend):
         every widget paints over it. Dispatch on the kind; the backdrop clear in
         _render already painted, so each kind only adds its own content."""
         bg = self._background
-        if isinstance(bg, Background3D):
-            self._render_animation(bg)
-        elif isinstance(bg, Wallpaper):
+        if isinstance(bg, Wallpaper):
             self._render_wallpaper(bg)
         elif isinstance(bg, Shader):
             self._render_shader_backdrop(shader_tex)
-
-    def _render_animation(self, bg: Any) -> None:
-        """Stroke the animation scene under the display list. The projection is pure
-        math (``ANIMATIONS[bg.kind]`` returns 2D segments in pixels); this only turns
-        them into stroked lines, so the backend stays free of any 3D. Fit to the live
-        client area, so it re-centers on resize. Time is ``_bg_clock`` — animated
-        time — so motion is smooth regardless of frame pacing (see
-        MacOSBackend._render_animation)."""
-        generator = ANIMATIONS.get(bg.kind)
-        if generator is None:
-            return
-        cw, ch = self._client_size_px()
-        segments = generator(float(cw), float(ch), self._bg_clock,
-                             speed=getattr(bg, "speed", 1.0))
-        if not segments:
-            return
-        color = getattr(bg, "color", None) or _BG3D_DEFAULT_COLOR
-        opacity = getattr(bg, "opacity", 1.0)
-        width = _BG3D_LINE_WIDTH * self._dpi_scale
-        rt = self._render_target
-        # A segment may carry its own alpha (depth); grouping by it keeps this to one
-        # brush color per distinct level rather than one set-color per segment.
-        for alpha, group in group_by_alpha(segments):
-            self._set_brush(color, opacity * alpha)
-            for seg in group:
-                native.rt_draw_line(rt, native.D2D1_POINT_2F(seg[0], seg[1]),
-                                    native.D2D1_POINT_2F(seg[2], seg[3]), self._brush, width)
 
     def _render_wallpaper(self, bg: Any) -> None:
         """Draw the wallpaper image under the display list, scaled into the live

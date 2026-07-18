@@ -89,10 +89,10 @@ class TestDescriptor:
         assert "BackgroundUniforms" in s.program
 
     def test_it_is_a_distinct_background_kind(self):
-        # Not a Background3D subclass: the backend dispatches on type, and a
-        # shader takes an entirely different (GPU) path.
-        from puikit import Background3D
-        assert not isinstance(Shader(source="x"), Background3D)
+        # The backend dispatches on type: a shader takes the GPU layer path, a
+        # wallpaper is drawn by the UI render pass.
+        from puikit import Wallpaper
+        assert not isinstance(Shader(source="x"), Wallpaper)
         assert {f.name for f in dataclasses.fields(Shader)} == {
             "source", "speed", "opacity", "ink", "backdrop", "resolution_scale",
             "source_hlsl"}
@@ -143,16 +143,11 @@ class TestFrameRate:
         return be
 
     def _wants_fast(self, be):
-        from puikit.backends.macos_backend import Background3D as B3D
         return (bool(be._animations) or be._roll_active()
-                or isinstance(be._background, (B3D, Shader)))
+                or isinstance(be._background, Shader))
 
     def test_a_shader_asks_for_the_animation_rate(self):
         assert self._wants_fast(self._backend(Shader(source=FLAT_INK)))
-
-    def test_an_animation_still_asks_for_the_animation_rate(self):
-        from puikit import Background3D
-        assert self._wants_fast(self._backend(Background3D(kind="cube")))
 
     def test_a_static_background_does_not(self):
         # A wallpaper never changes and no background at all needs nothing, so

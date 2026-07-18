@@ -108,7 +108,7 @@ from Foundation import (
 import objc
 from PyObjCTools import AppHelper
 
-from ..background import ANIMATIONS, Background3D, Shader, Wallpaper, group_by_alpha
+from ..background import Shader, Wallpaper
 from ._metal import HAVE_METAL as _HAS_METAL, MetalBackground, PIXEL_FORMAT as _METAL_PIXEL_FORMAT
 
 try:
@@ -213,13 +213,6 @@ except ImportError:  # bundled-font registration unavailable; use OS system font
 
 _DEFAULT_FG = (230, 230, 230)
 _DEFAULT_BG = (24, 24, 24)
-
-#: Fallback line color for the animated 3D background when the Background3D names
-#: none (a soft blue that reads over the dark default clear). An app normally
-#: passes a theme-derived color instead so the scene stays on-palette.
-_BG3D_DEFAULT_COLOR = (90, 140, 200)
-#: Stroke width (points) for the background wireframe edges.
-_BG3D_LINE_WIDTH = 1.5
 
 #: An animated background is the one thing that keeps a file manager redrawing
 #: while nobody is using it, so it coasts to a stop when the app goes idle or
@@ -1075,7 +1068,7 @@ class MacOSBackend(Backend):
             "gpu_acceleration": False,
             "post_effects": True,    # Core Image content-filter composite; gated
                                      # on _HAS_COREIMAGE in `capabilities` below.
-            "background_3d": True,    # a background (animation / image) drawn under
+            "background": True,      # a background (a wallpaper image) drawn under
                                      # the UI in the render pass (see set_background).
             "background_shader": True,  # GPU fragment-shader background; gated on
                                         # _HAS_METAL in `capabilities` below.
@@ -1142,10 +1135,9 @@ class MacOSBackend(Backend):
         # Rolling-band ("vertical hold") animation state, or None when the active
         # effect has no roll. Keys: active(bool), start, duration, next(start time).
         self._crt_roll: dict | None = None
-        # Active background behind the UI (set_background): a Background3D
-        # (animation), a Shader (GPU), a Wallpaper (static image), or None (solid).
-        # An animated kind drives a per-frame tick; the render pass draws whichever
-        # kind under the display list.
+        # Active background behind the UI (set_background): a Shader (GPU), a
+        # Wallpaper (static image), or None (solid). A Shader drives a per-frame
+        # tick and paints its own layer; a Wallpaper is drawn by the render pass.
         self._background: Any | None = None
         # The animation's own clock, in seconds of *animated* time. Deliberately not
         # wall-clock: it advances only by what was actually drawn (dt x the current
@@ -1174,7 +1166,7 @@ class MacOSBackend(Backend):
         # independent of which wallpaper (the 3D scene, a future static image).
         self._surface_opacity: float = 1.0
         # Nesting depth of reveal-exempt (opaque overlay) groups during the render
-        # pass; while > 0 a Background3D reveal does not dissolve surface fills, so
+        # pass; while > 0 the background does not dissolve surface fills, so
         # an overlay layer occludes the base instead of showing it through.
         self._reveal_exempt_depth: int = 0
         # Wall-clock (monotonic) of the last user input, for the roll's active-use
@@ -1776,9 +1768,7 @@ class MacOSBackend(Backend):
         # The background is drawn *before* the display list, so every widget paints
         # over it — it shows through only where the UI leaves the cleared background
         # bare (or paints a translucent fill). Dispatch on the kind.
-        if isinstance(bg, Background3D):
-            self._render_animation(bg, now)
-        elif isinstance(bg, Wallpaper):
+        if isinstance(bg, Wallpaper):
             self._render_wallpaper(bg)
         # A Shader is deliberately absent here: it paints its own layer from the
         # frame tick (see _background_tick), not from the UI's render pass, so a
@@ -1916,56 +1906,6 @@ class MacOSBackend(Backend):
         stats.update({"n": 0, "frame": 0.0, "gen": 0.0, "stroke": 0.0,
                       "segs": 0, "paths": 0, "ui": 0,
                       "t0": time.perf_counter()})
-
-    def _render_animation(self, bg: Any, now: float) -> None:
-        """Stroke the animation scene under the display list. The projection is pure
-        math — the animation ``kind`` is looked up in ``ANIMATIONS`` to get the
-        segment generator (only the wireframe cube today) — this only turns the
-        returned 2D segments into an NSBezierPath and strokes them, so the backend
-        stays free of any 3D. Fit to the live bounds, so it re-centers on every
-        resize. Time comes from ``_bg_clock`` — animated time, not wall clock — so
-        the motion is smooth regardless of frame pacing and does not jump across an
-        idle stretch the background spent parked."""
-        generator = ANIMATIONS.get(bg.kind)
-        if generator is None:
-            return
-        bounds = self._view.bounds()
-        mark = time.perf_counter() if _BG_PROFILE else 0.0
-        segments = generator(
-            bounds.size.width, bounds.size.height, self._bg_clock,
-            speed=getattr(bg, "speed", 1.0),
-        )
-        if _BG_PROFILE:
-            stats = getattr(self, "_bg_stats", None)
-            if stats is not None:
-                stats["kind"] = "segments"
-                stats["gen"] += time.perf_counter() - mark
-                stats["segs"] += len(segments)
-            mark = time.perf_counter()
-        if not segments:
-            return
-        color = getattr(bg, "color", None) or _BG3D_DEFAULT_COLOR
-        opacity = getattr(bg, "opacity", 1.0)
-        # A segment may carry its own alpha to express depth (a far star, a fading
-        # trail). Grouping by that alpha keeps this to one stroked path per distinct
-        # level rather than one per segment, and a scene that uses no per-segment
-        # alpha collapses to the single 1.0 bucket — the plain uniform stroke.
-        paths = 0
-        for alpha, group in group_by_alpha(segments):
-            paths += 1
-            _ns_color(color, alpha=opacity * alpha).set()
-            path = NSBezierPath.bezierPath()
-            path.setLineWidth_(_BG3D_LINE_WIDTH)
-            path.setLineJoinStyle_(1)  # NSLineJoinStyleRound — clean vertex joins
-            for seg in group:
-                path.moveToPoint_((seg[0], seg[1]))
-                path.lineToPoint_((seg[2], seg[3]))
-            path.stroke()
-        if _BG_PROFILE:
-            stats = getattr(self, "_bg_stats", None)
-            if stats is not None:
-                stats["stroke"] += time.perf_counter() - mark
-                stats["paths"] += paths
 
     def _render_shader(self, bg: Any, now: float) -> None:
         """Draw one frame of the shader background onto its GPU layer.
@@ -2725,14 +2665,14 @@ class MacOSBackend(Backend):
 
     def set_background(self, background: Any | None) -> None:
         """Set the background behind the display list (see ``Backend.set_background``):
-        a ``Background3D`` (animation), a ``Shader`` (GPU fragment shader), a
-        ``Wallpaper`` (static image), or ``None`` (solid). An animation or shader
-        registers a permanent redraw tick; a wallpaper draws once per frame (no
+        a ``Shader`` (GPU fragment shader), a ``Wallpaper`` (static image), or
+        ``None`` (solid). A shader registers a permanent redraw tick; a
+        wallpaper draws once per frame (no
         tick). Idempotent to re-set (e.g. on a theme switch): a no-op / cleared
         background drops any tick and the next frame paints without it. Survives
         window resizes — the background re-fits to the live bounds."""
         self._background = None if (background is None or background.is_noop) else background
-        if isinstance(self._background, (Background3D, Shader)):
+        if isinstance(self._background, Shader):
             # A new background starts from the beginning of its own clock, at full
             # rate — switching theme is itself user activity, so it should not
             # arrive mid-coast.
@@ -2838,7 +2778,7 @@ class MacOSBackend(Backend):
         does not itself trigger a repaint — see _on_animation_tick — so it must ask).
         A static wallpaper never registers this, so it does not spin the timer."""
         background = self._background
-        if not isinstance(background, (Background3D, Shader)):
+        if not isinstance(background, Shader):
             self._bg_running = False
             return False
         now = time.monotonic()
@@ -2894,7 +2834,7 @@ class MacOSBackend(Backend):
     def _ensure_background_ticker(self) -> None:
         """Re-arm the background tick if it parked itself while idle. Cheap to call
         on every input: returns immediately once running."""
-        if self._bg_running or not isinstance(self._background, (Background3D, Shader)):
+        if self._bg_running or not isinstance(self._background, Shader):
             return
         self._bg_running = True
         # Reset the tick baseline, or the first dt would be the whole idle stretch.

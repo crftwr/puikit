@@ -13,7 +13,11 @@ import pytest
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows-only backend")
 pytest.importorskip("ctypes.wintypes", reason="Windows-only backend")
 
-from puikit.background import Background3D, Shader, Wallpaper  # noqa: E402
+from puikit.background import Shader, Wallpaper  # noqa: E402
+
+#: A minimal well-formed shader — these tests cover set_background wiring
+#: (ticks, clock reset, no-op dropping), not shader compilation.
+_SHADER = Shader(source="fragment float4 puikit_bg_fragment() { return 0; }")
 from puikit.backends.windows_backend import (  # noqa: E402
     WindowsBackend, _approach, _smoothstep, _wallpaper_dest,
 )
@@ -78,11 +82,11 @@ class TestBackgroundApi:
         assert b.has_wallpaper is False
         assert b._background is None
 
-    def test_set_background3d_registers_and_reports_wallpaper(self):
+    def test_set_shader_registers_and_reports_wallpaper(self):
         b = WindowsBackend()
-        b.set_background(Background3D(kind="wireframe"))
+        b.set_background(_SHADER)
         assert b.has_wallpaper is True
-        assert isinstance(b._background, Background3D)
+        assert isinstance(b._background, Shader)
         assert b._bg_running  # a ticker was armed
 
     def test_set_wallpaper_reports_wallpaper_but_no_tick(self):
@@ -93,22 +97,22 @@ class TestBackgroundApi:
 
     def test_a_noop_background_is_dropped(self):
         b = WindowsBackend()
-        b.set_background(Background3D(kind="wireframe", opacity=0.0))
+        b.set_background(Shader(source=_SHADER.source, opacity=0.0))
         assert b._background is None
         assert b.has_wallpaper is False
 
     def test_clearing_the_background(self):
         b = WindowsBackend()
-        b.set_background(Background3D(kind="wireframe"))
+        b.set_background(_SHADER)
         b.set_background(None)
         assert b._background is None
         assert b.has_wallpaper is False
 
     def test_setting_a_background_resets_its_clock(self):
         b = WindowsBackend()
-        b.set_background(Background3D(kind="wireframe"))
+        b.set_background(_SHADER)
         b._bg_clock = 5.0
-        b.set_background(Background3D(kind="wireframe", speed=2.0))
+        b.set_background(Shader(source=_SHADER.source, speed=2.0))
         assert b._bg_clock == 0.0 and b._bg_rate == 1.0
 
 

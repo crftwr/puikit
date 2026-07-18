@@ -1032,7 +1032,7 @@ class DrawContext:
         background = pane_bg if pane_bg is not None else self._background
         # Skip a redundant repaint: if the child's surface equals the background it
         # already sits on, filling it again is a no-op on an opaque frame — but under
-        # a Background3D reveal it would dissolve the *same* surface twice, compounding
+        # an active background reveal it would dissolve the *same* surface twice, compounding
         # to 1-(1-a)^2 and dimming the animated scene more than a singly-filled
         # neighbour (a pane nested in a same-surface parent would show the wallpaper
         # thinner than the bare log beside it). A grid backend can't composite, so it
@@ -1618,7 +1618,7 @@ class Panel:
             self.backend.dim_rect(0, 0, sw, sh, scrim=self.theme.dim_scrim(), per_cell=True)
         rect = self._interpolate_rect(slot.widget, slot.rect)
         # A floating overlay (dialog / menu) occludes the base UI: mark its group
-        # opaque so its surface fills stay solid under an active Background3D reveal
+        # opaque so its surface fills stay solid under an active background reveal
         # instead of dissolving to show the file manager behind it. A "cover" layer
         # is different — it replaces the base entirely (the base is not drawn, see
         # render), so it dissolves like the file manager did and the wallpaper shows
