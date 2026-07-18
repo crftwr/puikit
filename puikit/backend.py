@@ -410,7 +410,7 @@ class Backend(ABC):
         in base units. Backends that render per-widget effects (animation alpha,
         transforms, ...) use the markers; the default is a no-op. ``opaque`` marks
         an overlay group whose surface fills must occlude rather than dissolve
-        under an active ``Background3D`` reveal (see :meth:`set_background_3d`);
+        under an active ``Background3D`` reveal (see :meth:`set_background`);
         backends without that effect ignore it."""
 
     def end_group(self, key: Any) -> None:
@@ -509,34 +509,57 @@ class Backend(ABC):
         the call is always safe. A backend that implements it must re-apply the
         stored effect across window resizes on its own."""
 
-    # --- animated 3D background (capability "background_3d") ------------------
+    # --- background behind the UI (capability "background_3d") ----------------
 
-    def set_background_3d(self, effect: "Background3D | None") -> None:
-        """Render an animated 3D scene *behind* the display list, or clear it with
-        ``None``. See ``puikit.background``.
+    def set_background(self, background: "Background3D | Wallpaper | None") -> None:
+        """Set what is drawn *behind* the display list — the app's one background,
+        of three kinds (see ``puikit.background``):
+
+        * ``None`` → **solid**: nothing behind the UI but the surfaces' own color.
+        * a ``Background3D`` → **animation**: an animated scene (the cube), drawn
+          per frame with its own redraw tick.
+        * a ``Wallpaper`` → **wallpaper**: a single static image, drawn (no tick).
 
         Only backends with the ``background_3d`` capability act on this: a
-        pixel-owning GUI backend strokes the projected scene under every widget
-        and drives its own per-frame redraw; a character-grid terminal has no
-        sub-cell pixels, so the default no-ops. Apps set it once and never branch
-        on the backend — the call is always safe. A backend that implements it
-        must keep the scene animating and re-fit it across window resizes on its
-        own."""
+        pixel-owning GUI backend draws the background under every widget; a
+        character-grid terminal has no sub-cell pixels, so the default no-ops. Apps
+        set it once (from the active theme) and never branch on the backend — the
+        call is always safe. A backend that implements it keeps an animation running
+        and re-fits the background across window resizes on its own."""
 
-    def set_surface_reveal(self, reveal: float) -> None:
-        """How far the UI's *surface* fills (pane / row backgrounds) dissolve toward
-        translucent so a wallpaper behind them — an animated 3D scene, a future
-        static image — shows *through*, ``0``..``1``. ``0`` (the default) keeps the
-        UI fully opaque; ``1`` makes the surfaces fully transparent. Only flat
-        surface fills are affected; text, strokes, and framed dialog boxes stay
-        opaque so the UI stays legible, and an opaque overlay group (a modal dialog)
-        is exempt so it occludes rather than dissolves.
+    def set_surface_opacity(self, opacity: float) -> None:
+        """Opacity of the UI's *surface* fills (pane / row backgrounds), ``0``..``1``.
+        ``1`` (the default) keeps the UI fully opaque; lower values composite the
+        surfaces translucently so a wallpaper behind them — an animated 3D scene, a
+        future static image — shows *through*, and ``0`` makes them fully
+        transparent. Only flat surface fills are affected; text, strokes, and framed
+        dialog boxes stay opaque so the UI stays legible, and an opaque overlay group
+        (a modal dialog) is exempt so it occludes rather than dissolves.
 
-        This is deliberately separate from any one wallpaper (``set_background_3d``):
+        This is deliberately separate from any one background (``set_background``):
         it is the app/theme's single "how see-through is the UI" knob, reused across
-        wallpaper kinds. Only a pixel-owning backend that composites acts on it; a
-        character-grid terminal has no sub-cell alpha, so the default no-ops and the
+        wallpaper kinds. Only a pixel-owning backend that composites acts on a value
+        below ``1``; a character-grid terminal has no sub-cell alpha, so it draws
+        opaque. The value is stored either way (see :attr:`surface_opacity`) — the
         call is always safe."""
+        self._surface_opacity = 0.0 if opacity < 0.0 else 1.0 if opacity > 1.0 else float(opacity)
+
+    @property
+    def surface_opacity(self) -> float:
+        """The current surface opacity (0..1, see :meth:`set_surface_opacity`); 1.0
+        (fully opaque) when none was set."""
+        return getattr(self, "_surface_opacity", 1.0)
+
+    @property
+    def has_wallpaper(self) -> bool:
+        """Whether something is drawn *behind* the UI for a surface to reveal — an
+        animated 3D scene today (see :meth:`set_background`), a static image
+        later. The Panel reads it to decide whether a ``reveal_mode="transparent"``
+        slot skips its fill: that is gated on a wallpaper *existing*, not on the
+        surface opacity (which only governs how far the reveal-applied chrome
+        dissolves), so a pane stays transparent even at ``opacity == 1``. The base is
+        ``False`` — a backend that cannot composite draws every surface opaque."""
+        return False
 
     # --- text input / IME activation -----------------------------------------
 

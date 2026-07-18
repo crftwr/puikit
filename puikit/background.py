@@ -5,7 +5,7 @@ names a scene and carries a few normalized parameters. A backend that owns real
 pixels renders it *behind* the display list (macOS strokes the projected edges
 with CoreGraphics); a grid backend (curses) has no sub-cell pixels and ignores
 it. An app never branches on the backend — it builds one ``Background3D`` and
-hands it to ``backend.set_background_3d(...)``; backends without the
+hands it to ``backend.set_background(...)``; backends without the
 ``background_3d`` capability inherit the base no-op, so the call is always safe.
 
 The scene is drawn *first* (right after the frame is cleared, before any widget
@@ -23,19 +23,27 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Callable
 
 from .backend import Color
+
+#: One projected 2D line segment ``(x0, y0, x1, y1)`` in pixels (top-left origin).
+Segment = tuple[float, float, float, float]
+#: An animation frame generator: ``(width, height, t, *, speed) -> [Segment, ...]``.
+Segments = Callable[..., "list[Segment]"]
 
 
 @dataclass(frozen=True)
 class Background3D:
-    """An animated 3D background and its parameters.
+    """The **animation** background kind and its parameters — an animated scene
+    drawn behind the UI (see also :class:`Wallpaper` for the static-image kind and
+    ``None`` for the plain solid-color kind). Handed to :meth:`Backend.set_background`.
 
     Fields:
-      kind     Scene family. Only ``"wireframe"`` (a rotating cube) is defined
-               today; the field keeps the door open for richer scenes (a
-               starfield, a torus, a Metal/SceneKit surface) without changing the
-               call site.
+      kind     Animation type, resolved through :data:`ANIMATIONS`. ``"cube"`` (a
+               rotating wireframe cube, also spelled ``"wireframe"``) is the only
+               one defined today; the field keeps the door open for more (``"snow"``,
+               ``"particle"``, ...) without changing the call site.
       color    Edge/line color. ``None`` lets the backend derive one from the
                active theme's foreground, so the background stays on-palette.
       speed    Rotation-speed multiplier (1.0 = the tuned default).
@@ -51,7 +59,7 @@ class Background3D:
 
     How translucent the UI becomes so the scene shows *through* it is **not** a
     property of the scene: it is the backend-wide "surface reveal" set separately
-    with :meth:`Backend.set_surface_reveal`. Keeping it off the scene lets the same
+    with :meth:`Backend.set_surface_opacity`. Keeping it off the scene lets the same
     reveal apply to any wallpaper (a future static image, not just this cube) and be
     owned by the app's theme rather than baked into one background kind.
     """
@@ -72,6 +80,44 @@ class Background3D:
     def is_noop(self) -> bool:
         """True when the background would draw nothing (fully transparent)."""
         return self.opacity <= 0.0
+
+
+@dataclass(frozen=True)
+class Wallpaper:
+    """The **wallpaper** background kind: a single static image drawn behind the UI
+    (see :class:`Background3D` for the animation kind, ``None`` for solid). Handed to
+    :meth:`Backend.set_background`; a backend that owns pixels draws it under the
+    display list, a character-grid terminal ignores it.
+
+    Fields:
+      image    Filesystem path to the image (``~`` is expanded by the backend). A
+               path that fails to load draws nothing (the ``backdrop`` shows), so a
+               bad path degrades gracefully rather than raising.
+      fit      How the image is scaled into the window: ``"fill"`` (cover, cropping
+               overflow — the default), ``"fit"`` (contain, letterboxed to the
+               ``backdrop``), ``"stretch"`` (ignore aspect), or ``"center"`` (native
+               size, centered).
+      opacity  Image alpha, 0..1, composited over the ``backdrop``. ``1`` (default)
+               is fully opaque; lower blends the image toward the backdrop.
+      backdrop The color the frame is cleared to *under* the image — shown through a
+               translucent image, in the letterbox bars of ``"fit"``, or around a
+               ``"center"``. ``None`` uses the backend's neutral dark clear; pass the
+               theme background so it stays on-palette (mirrors ``Background3D``).
+    """
+
+    image: str
+    fit: str = "fill"
+    opacity: float = 1.0
+    backdrop: Color | None = None
+
+    def __post_init__(self) -> None:
+        v = self.opacity
+        object.__setattr__(self, "opacity", 0.0 if v < 0.0 else 1.0 if v > 1.0 else float(v))
+
+    @property
+    def is_noop(self) -> bool:
+        """True when the wallpaper would draw nothing (no path, or fully transparent)."""
+        return not self.image or self.opacity <= 0.0
 
 
 # A unit cube centered on the origin, vertices at (±1, ±1, ±1): four on the back
@@ -149,4 +195,16 @@ WIREFRAME = Background3D(kind="wireframe", speed=1.0, opacity=0.6)
 
 PRESETS: dict[str, Background3D] = {
     "wireframe": WIREFRAME,
+    "cube": WIREFRAME,
+}
+
+#: Animation type → the pure function that projects one frame to 2D line segments
+#: (see ``wireframe_segments``). ``Background3D.kind`` is looked up here by a
+#: backend that owns pixels, so a new animation is added by registering a segment
+#: function — no backend change. Only the wireframe cube exists today; a
+#: non-segment animation (falling ``"snow"``, a ``"particle"`` field) would extend
+#: this to a richer renderer interface when it lands.
+ANIMATIONS: dict[str, "Segments"] = {
+    "wireframe": wireframe_segments,
+    "cube": wireframe_segments,
 }

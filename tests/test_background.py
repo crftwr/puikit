@@ -4,8 +4,8 @@ import math
 
 import pytest
 
-from puikit import Background3D, WIREFRAME
-from puikit.background import PRESETS, wireframe_segments, _CUBE_EDGES
+from puikit import Background3D, WIREFRAME, Wallpaper
+from puikit.background import ANIMATIONS, PRESETS, wireframe_segments, _CUBE_EDGES
 from puikit.backends.memory_backend import MemoryBackend
 from puikit import PROFILE_TUI
 
@@ -27,8 +27,8 @@ def test_opacity_is_clamped_to_unit_range():
 
 
 def test_reveal_is_not_a_scene_property():
-    # The surface reveal is a backend-wide, wallpaper-agnostic knob
-    # (Backend.set_surface_reveal), not a field of any one scene — so it can be
+    # The surface opacity is a backend-wide, wallpaper-agnostic knob
+    # (Backend.set_surface_opacity), not a field of any one scene — so it can be
     # reused across wallpaper kinds and owned by the app's theme.
     import dataclasses
     assert "reveal" not in {f.name for f in dataclasses.fields(Background3D)}
@@ -45,8 +45,25 @@ def test_frozen():
 
 
 def test_presets():
-    assert PRESETS == {"wireframe": WIREFRAME}
+    assert PRESETS == {"wireframe": WIREFRAME, "cube": WIREFRAME}
     assert WIREFRAME.kind == "wireframe"
+
+
+def test_animation_registry_has_cube():
+    # "cube" and "wireframe" both resolve to the wireframe generator; a backend
+    # looks the animation type up here, so a new type is a registry entry.
+    assert ANIMATIONS["cube"] is wireframe_segments
+    assert ANIMATIONS["wireframe"] is wireframe_segments
+
+
+def test_wallpaper_descriptor():
+    wp = Wallpaper(image="~/pic.png")
+    assert wp.fit == "fill" and wp.opacity == 1.0        # defaults
+    assert Wallpaper(image="x", opacity=5.0).opacity == 1.0   # clamped
+    assert Wallpaper(image="x", opacity=-1.0).opacity == 0.0
+    assert Wallpaper(image="").is_noop                   # no path draws nothing
+    assert Wallpaper(image="x", opacity=0.0).is_noop     # transparent draws nothing
+    assert not Wallpaper(image="x").is_noop
 
 
 # --- the pure projection math --------------------------------------------------
@@ -107,9 +124,10 @@ def test_memory_backend_base_set_is_a_safe_noop():
     be = MemoryBackend()
     assert not be.capabilities.supports("background_3d")
     # Inherited base no-op: accepting a call without the capability must not raise.
-    be.set_background_3d(WIREFRAME)
-    be.set_background_3d(None)
-    be.set_surface_reveal(0.4)  # base no-op; a terminal has no sub-cell alpha
+    be.set_background(WIREFRAME)                  # animation kind
+    be.set_background(Wallpaper(image="x.png"))   # wallpaper kind
+    be.set_background(None)                        # solid kind
+    be.set_surface_opacity(0.6)  # base no-op; a terminal has no sub-cell alpha
 
 
 # --- macOS wiring (skipped where the backend module is unavailable) ------------
@@ -119,27 +137,74 @@ def test_macos_declares_background_3d():
     assert mb.MacOSBackend().capabilities.supports("background_3d")
 
 
-def test_macos_ui_fill_alpha_tracks_surface_reveal():
+def test_macos_set_background_dispatches_kinds():
+    # set_background accepts all three kinds; has_wallpaper is True for a set
+    # animation or image and False for solid. A no-op background clears it.
+    mb = pytest.importorskip("puikit.backends.macos_backend")
+    be = mb.MacOSBackend()
+    assert be.has_wallpaper is False                       # solid by default
+    be.set_background(Background3D(kind="cube"))
+    assert be.has_wallpaper is True                        # animation
+    be.set_background(Wallpaper(image="/some/pic.png"))
+    assert be.has_wallpaper is True                        # image
+    be.set_background(Wallpaper(image=""))                 # no-op wallpaper
+    assert be.has_wallpaper is False                       # cleared
+    be.set_background(WIREFRAME)
+    assert be.has_wallpaper is True
+
+
+class _Pt:
+    def __init__(self, x, y):
+        self.x, self.y = x, y
+
+
+class _Size:
+    def __init__(self, width, height):
+        self.width, self.height = width, height
+
+
+class _Rect:
+    def __init__(self, x, y, w, h):
+        self.origin, self.size = _Pt(x, y), _Size(w, h)
+
+
+def test_macos_wallpaper_rect_fit_modes():
+    # The destination rect for each fit, into a 200x100 window with a 100x100 image.
+    mb = pytest.importorskip("puikit.backends.macos_backend")
+    bounds, size = _Rect(0, 0, 200, 100), _Size(100, 100)
+
+    def rect(fit):
+        r = mb._wallpaper_rect(bounds, size, fit)
+        return (round(r.origin.x, 3), round(r.origin.y, 3),
+                round(r.size.width, 3), round(r.size.height, 3))
+
+    assert rect("stretch") == (0, 0, 200, 100)            # exact fill, aspect ignored
+    assert rect("fill") == (0, -50, 200, 200)             # cover: scaled to width, cropped
+    assert rect("fit") == (50, 0, 100, 100)               # contain: scaled to height, centered
+    assert rect("center") == (50, 0, 100, 100)            # native, centered
+
+
+def test_macos_ui_fill_alpha_tracks_surface_opacity():
     # The surface-fill opacity used by _render_fill: 1.0 (opaque) by default, and
-    # 1 - reveal once set_surface_reveal raises it (independent of any wallpaper).
-    # Exercised without a window (no open()), so it stays a headless unit test.
+    # the set surface opacity once lowered (independent of any wallpaper). Exercised
+    # without a window (no open()), so it stays a headless unit test.
     mb = pytest.importorskip("puikit.backends.macos_backend")
     be = mb.MacOSBackend()
     assert be._ui_fill_alpha() == 1.0                 # opaque UI by default
-    be.set_surface_reveal(0.0)
+    be.set_surface_opacity(1.0)
     assert be._ui_fill_alpha() == 1.0                 # still opaque
-    be.set_surface_reveal(0.4)
+    be.set_surface_opacity(0.6)
     assert be._ui_fill_alpha() == pytest.approx(0.6)  # panes go translucent
-    be.set_surface_reveal(5.0)                        # clamped to 1.0
+    be.set_surface_opacity(-1.0)                      # clamped to 0.0
     assert be._ui_fill_alpha() == pytest.approx(0.0)
 
 
 def test_macos_reveal_exempt_group_stays_opaque():
     # Inside a reveal-exempt (opaque) overlay group, surface fills ignore the
-    # active reveal so the layer occludes the base UI instead of dissolving it.
+    # surface opacity so the layer occludes the base UI instead of dissolving it.
     mb = pytest.importorskip("puikit.backends.macos_backend")
     be = mb.MacOSBackend()
-    be.set_surface_reveal(0.4)
+    be.set_surface_opacity(0.6)
     assert be._ui_fill_alpha() == pytest.approx(0.6)  # base pane: dissolves
     be._reveal_exempt_depth = 1
     assert be._ui_fill_alpha() == 1.0                 # overlay layer: opaque
@@ -157,6 +222,32 @@ def test_macos_begin_group_records_opaque_flag():
     be.begin_group(overlay_key, rect=None, opaque=True)
     assert be._back[0] == ("group_begin", id(base_key), None, False)
     assert be._back[1] == ("group_begin", id(overlay_key), None, True)
+
+
+def test_macos_transparent_slot_skips_fill_only_over_wallpaper():
+    # A reveal_mode="transparent" slot (the file/log panes) drops its surface fill
+    # whenever a wallpaper is present, so it shows at full strength — gated on the
+    # wallpaper existing, NOT on the surface opacity, so it stays transparent even at
+    # opacity 1. With no wallpaper (a plain theme) it fills opaquely like any pane.
+    mb = pytest.importorskip("puikit.backends.macos_backend")
+    from puikit import Panel
+    from puikit.widgets import Label
+
+    def content_fills(*, wallpaper: bool, opacity: float) -> int:
+        be = mb.MacOSBackend()  # compositing backend: supports transparency
+        be.set_surface_opacity(opacity)
+        if wallpaper:
+            be.set_background(Background3D(opacity=0.6, backdrop=(0, 0, 0)))
+        panel = Panel(be)
+        content = panel.theme.surface_bg("content")
+        panel.add(Label(""), x=0, y=0, w=10, h=3,
+                  hints={"surface": "content", "reveal_mode": "transparent"})
+        panel.render()
+        return sum(1 for c in be._front if c[0] == "fill" and c[-1].bg == content)
+
+    assert content_fills(wallpaper=False, opacity=0.6) == 1  # no wallpaper: opaque
+    assert content_fills(wallpaper=True, opacity=0.6) == 0   # wallpaper: transparent
+    assert content_fills(wallpaper=True, opacity=1.0) == 0   # opacity 1 still transparent
 
 
 def test_macos_nested_same_surface_fill_is_deduped():

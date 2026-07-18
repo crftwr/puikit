@@ -1557,6 +1557,21 @@ class Panel:
         else:
             self.backend.draw_text(rect.x, rect.y, "─" * int(rect.w), style)
 
+    def _wallpaper_transparent(self, hints: dict[str, Any]) -> bool:
+        """A slot hinted ``reveal_mode="transparent"`` skips its background fill
+        entirely while a wallpaper is present on a compositing backend, so it shows
+        at *full* strength (not merely dissolved like the reveal-applied chrome).
+        Gated on the wallpaper *existing*, not on the reveal amount — so the pane
+        stays transparent even at ``reveal == 0`` (that value only governs the
+        reveal-applied chrome). Off with no wallpaper (a plain theme keeps its opaque
+        surface) and on a grid backend (nothing to show through). The resolved bg is
+        still handed to the child context for inheritance / auto-ink."""
+        return (
+            hints.get("reveal_mode") == "transparent"
+            and self.backend.has_wallpaper
+            and self.backend.capabilities.supports("transparency")
+        )
+
     def _draw_slot(self, slot: _Slot) -> None:
         # Group markers let the backend apply per-widget effects (e.g. the
         # alpha or transform of a running transition) to exactly these
@@ -1564,7 +1579,7 @@ class Panel:
         rect = self._interpolate_rect(slot.widget, slot.rect)
         self.backend.begin_group(slot.widget, rect)
         background = self._pane_background(slot.hints)
-        if background is not None:
+        if background is not None and not self._wallpaper_transparent(slot.hints):
             # Drawn before the content clip is applied, across the widget's rect.
             self.backend.fill_rect(rect.x, rect.y, rect.w, rect.h, Style(bg=background))
         self.backend.push_clip(rect.x, rect.y, rect.w, rect.h)

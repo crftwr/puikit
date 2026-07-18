@@ -106,7 +106,7 @@ from Foundation import (
 import objc
 from PyObjCTools import AppHelper
 
-from ..background import wireframe_segments
+from ..background import ANIMATIONS, Background3D, Wallpaper
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, is_transparent
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..event import Event, EventType, char_key_event
@@ -468,6 +468,27 @@ def _fill_rect(rect, color) -> None:
         NSRectFillUsingOperation(rect, NSCompositingOperationSourceOver)
     else:
         NSRectFill(rect)
+
+
+def _wallpaper_rect(bounds, image_size, fit: str):
+    """Destination rect for a wallpaper image drawn into ``bounds``, centered and
+    scaled per ``fit``: ``"stretch"`` ignores aspect (fills exactly), ``"center"``
+    keeps native size, ``"fit"`` contains (letterboxed), and ``"fill"`` (the default,
+    and any unknown value) covers (cropping overflow)."""
+    bx, by = bounds.origin.x, bounds.origin.y
+    bw, bh = bounds.size.width, bounds.size.height
+    iw, ih = image_size.width, image_size.height
+    if fit == "stretch" or iw <= 0 or ih <= 0:
+        return NSMakeRect(bx, by, bw, bh)
+    if fit == "center":
+        w, h = iw, ih
+    elif fit == "fit":
+        scale = min(bw / iw, bh / ih)
+        w, h = iw * scale, ih * scale
+    else:  # "fill" — cover
+        scale = max(bw / iw, bh / ih)
+        w, h = iw * scale, ih * scale
+    return NSMakeRect(bx + (bw - w) / 2.0, by + (bh - h) / 2.0, w, h)
 
 
 def _ci_filter(name: str, **inputs: "Any") -> "Any":
@@ -979,8 +1000,8 @@ class MacOSBackend(Backend):
             "gpu_acceleration": False,
             "post_effects": True,    # Core Image content-filter composite; gated
                                      # on _HAS_COREIMAGE in `capabilities` below.
-            "background_3d": True,    # animated 3D scene stroked under the UI in
-                                     # the render pass (see set_background_3d).
+            "background_3d": True,    # a background (animation / image) drawn under
+                                     # the UI in the render pass (see set_background).
         }
     )
 
@@ -1040,16 +1061,20 @@ class MacOSBackend(Backend):
         # Rolling-band ("vertical hold") animation state, or None when the active
         # effect has no roll. Keys: active(bool), start, duration, next(start time).
         self._crt_roll: dict | None = None
-        # Active animated 3D background (set_background_3d), or None. When set, a
-        # permanent tick redraws the view each frame and the render pass strokes
-        # the scene under the display list. _bg_start anchors its animation clock.
-        self._background_3d: Any | None = None
+        # Active background behind the UI (set_background): a Background3D
+        # (animation), a Wallpaper (static image), or None (solid). An animation
+        # drives a per-frame redraw tick; the render pass draws whichever kind under
+        # the display list. _bg_start anchors an animation's clock.
+        self._background: Any | None = None
         self._bg_start: float = 0.0
-        # How far UI surface fills dissolve toward translucent so a wallpaper behind
-        # them shows through (0 = opaque UI). Backend-wide and wallpaper-agnostic —
-        # set from the active theme via set_surface_reveal, independent of which
-        # wallpaper (the 3D scene, a future static image) is active.
-        self._surface_reveal: float = 0.0
+        # Loaded NSImage per wallpaper path, so the file is decoded once (not every
+        # frame); keyed by the expanded path.
+        self._wallpaper_images: dict[str, Any] = {}
+        # Opacity of UI surface fills (1 = opaque UI); lower composites them
+        # translucently so a wallpaper behind them shows through. Backend-wide and
+        # wallpaper-agnostic — set from the active theme via set_surface_opacity,
+        # independent of which wallpaper (the 3D scene, a future static image).
+        self._surface_opacity: float = 1.0
         # Nesting depth of reveal-exempt (opaque overlay) groups during the render
         # pass; while > 0 a Background3D reveal does not dissolve surface fills, so
         # an overlay layer occludes the base instead of showing it through.
@@ -1158,7 +1183,7 @@ class MacOSBackend(Backend):
         self._animations.clear()
         self._tick_callbacks.clear()
         self._crt_roll = None
-        self._background_3d = None
+        self._background = None
         if self._window is not None:
             self._window.setDelegate_(None)
             self._window.orderOut_(None)
@@ -1523,12 +1548,12 @@ class MacOSBackend(Backend):
         actually changes, so steady state costs nothing."""
         if not self._animations and not self._tick_callbacks:
             return
-        # A live widget animation, an in-flight roll sweep, OR the continuously
-        # spinning 3D background wants smooth 60fps; otherwise the slow idle-poll
-        # rate (a roll only waiting to fire, or a bare filesystem pump, needs
-        # nothing faster).
+        # A live widget animation, an in-flight roll sweep, OR a continuously
+        # animating background wants smooth 60fps; otherwise the slow idle-poll
+        # rate (a roll only waiting to fire, a bare filesystem pump, or a *static*
+        # wallpaper needs nothing faster).
         fast = (bool(self._animations) or self._roll_active()
-                or self._background_3d is not None)
+                or isinstance(self._background, Background3D))
         interval = self._ANIM_INTERVAL if fast else self._IDLE_TICK_INTERVAL
         if self._anim_timer is not None and self._anim_timer_interval == interval:
             return
@@ -1610,23 +1635,25 @@ class MacOSBackend(Backend):
     # --- pixel rendering (called from the view's drawRect) --------------------
 
     def _render_into_view(self) -> None:
-        # Clear the frame. When an active 3D background names a backdrop, the
-        # reveal-dissolved surface fills (and any bare gaps) fall back to *that*
-        # color instead of the neutral dark default — so a light-theme app stays
-        # light where dissolved and a dark scene line reads against it, rather than
-        # muddying toward near-black. No effect when no background / no backdrop.
+        # Clear the frame. When the background names a backdrop, the opacity-dissolved
+        # surface fills (and any bare gaps) fall back to *that* color instead of the
+        # neutral dark default — so a light-theme app stays light where dissolved and
+        # a dark scene line reads against it, rather than muddying toward near-black.
+        # No effect when no background / no backdrop.
         clear = _DEFAULT_BG
-        bg = self._background_3d
+        bg = self._background
         if bg is not None and getattr(bg, "backdrop", None) is not None:
             clear = bg.backdrop
         _ns_color(clear).setFill()
         NSRectFill(self._view.bounds())
         now = time.monotonic()
-        # The animated 3D background is stroked *before* the display list, so every
-        # widget paints over it — it shows through only where the UI leaves the
-        # cleared background bare (or paints a translucent fill).
-        if self._background_3d is not None:
-            self._render_background_3d(now)
+        # The background is drawn *before* the display list, so every widget paints
+        # over it — it shows through only where the UI leaves the cleared background
+        # bare (or paints a translucent fill). Dispatch on the kind.
+        if isinstance(bg, Background3D):
+            self._render_animation(bg, now)
+        elif isinstance(bg, Wallpaper):
+            self._render_wallpaper(bg)
         group_stack: list[tuple] = []  # (group_state, reveal_exempt)
         # An overlay layer (modal viewer, dialog, menu) marks its group opaque so
         # its surface fills occlude rather than dissolve under an active reveal —
@@ -1689,16 +1716,19 @@ class MacOSBackend(Backend):
         if effect is not None and effect.roll > 0 and self._roll_active():
             self._render_roll_band(effect, now)
 
-    def _render_background_3d(self, now: float) -> None:
-        """Stroke the animated 3D scene under the display list. The projection is
-        pure math (see ``puikit.background.wireframe_segments``) — this only turns
-        the returned 2D segments into an NSBezierPath and strokes them, so the
-        backend stays free of any 3D. Fit to the live bounds, so it re-centers on
-        every resize. Time comes from ``_bg_start`` so the spin is wall-clock
-        smooth regardless of frame pacing."""
-        bg = self._background_3d
+    def _render_animation(self, bg: Any, now: float) -> None:
+        """Stroke the animation scene under the display list. The projection is pure
+        math — the animation ``kind`` is looked up in ``ANIMATIONS`` to get the
+        segment generator (only the wireframe cube today) — this only turns the
+        returned 2D segments into an NSBezierPath and strokes them, so the backend
+        stays free of any 3D. Fit to the live bounds, so it re-centers on every
+        resize. Time comes from ``_bg_start`` so the spin is wall-clock smooth
+        regardless of frame pacing."""
+        generator = ANIMATIONS.get(bg.kind)
+        if generator is None:
+            return
         bounds = self._view.bounds()
-        segments = wireframe_segments(
+        segments = generator(
             bounds.size.width, bounds.size.height, now - self._bg_start,
             speed=getattr(bg, "speed", 1.0),
         )
@@ -1713,6 +1743,29 @@ class MacOSBackend(Backend):
             path.moveToPoint_((x0, y0))
             path.lineToPoint_((x1, y1))
         path.stroke()
+
+    def _render_wallpaper(self, bg: Any) -> None:
+        """Draw the wallpaper image under the display list, scaled into the live
+        bounds per its ``fit``. The decoded NSImage is cached by path so only the
+        first frame pays the load; a path that fails to load draws nothing (the
+        backdrop clear already painted), so a bad path degrades gracefully."""
+        image = self._wallpaper_image(bg.image)
+        if image is None:
+            return
+        bounds = self._view.bounds()
+        dst = _wallpaper_rect(bounds, image.size(), bg.fit)
+        image.drawInRect_fromRect_operation_fraction_(
+            dst, NSMakeRect(0, 0, 0, 0), NSCompositingOperationSourceOver, bg.opacity
+        )
+
+    def _wallpaper_image(self, path: str) -> Any:
+        """The decoded, cached NSImage for ``path`` (``~`` expanded), or ``None`` if
+        it cannot be loaded. Cached (including the ``None`` miss) so a missing or
+        broken file is not re-read every frame."""
+        if path not in self._wallpaper_images:
+            expanded = os.path.expanduser(path)
+            self._wallpaper_images[path] = NSImage.alloc().initWithContentsOfFile_(expanded)
+        return self._wallpaper_images[path]
 
     def _render_scanlines(self, strength: float) -> None:
         """Paint dark horizontal rows every ``_SCANLINE_PERIOD`` points over the
@@ -2031,16 +2084,16 @@ class MacOSBackend(Backend):
 
     def _ui_fill_alpha(self) -> float:
         """Opacity for UI *surface* fills (pane / row backgrounds). ``1.0`` in
-        normal rendering; when the surface reveal is raised (set_surface_reveal, so
-        a wallpaper shows through) the surfaces composite translucently. Text,
-        strokes, and framed dialog boxes are unaffected — only the flat surface
-        fills routed through _render_fill — so the UI stays legible. Fills inside a
-        reveal-exempt (opaque) group — an overlay layer such as a full-window viewer
-        or a modal dialog — stay opaque so they occlude the base UI instead of
-        dissolving it into view."""
+        normal rendering; when the surface opacity is lowered (set_surface_opacity,
+        so a wallpaper shows through) the surfaces composite translucently at that
+        value. Text, strokes, and framed dialog boxes are unaffected — only the flat
+        surface fills routed through _render_fill — so the UI stays legible. Fills
+        inside a reveal-exempt (opaque) group — an overlay layer such as a
+        full-window viewer or a modal dialog — stay opaque so they occlude the base
+        UI instead of dissolving it into view."""
         if self._reveal_exempt_depth > 0:
             return 1.0
-        return 1.0 - self._surface_reveal
+        return self._surface_opacity
 
     def _render_fill(self, x: float, y: float, w: float, h: float, style: Style) -> None:
         rect = self._unit_rect(x, y, w, h)
@@ -2431,37 +2484,46 @@ class MacOSBackend(Backend):
         self._drop_shadow_obj = None  # rebuilt lazily for the new effect
         self._apply_post_effect()
 
-    def set_background_3d(self, effect: Any | None) -> None:
-        """Render an animated 3D scene behind the display list, or clear it with
-        ``None`` (see ``puikit.background.Background3D``). Registers a permanent
-        animation tick that drives a per-frame redraw while active; the render
-        pass strokes the scene under every widget. Idempotent to re-set (e.g. on a
-        theme switch): a no-op / cleared effect drops the tick and the next frame
-        paints without it. Survives window resizes — the scene re-fits to the live
-        bounds each frame."""
-        self._background_3d = None if (effect is None or effect.is_noop) else effect
-        if self._background_3d is not None:
+    def set_background(self, background: Any | None) -> None:
+        """Set the background behind the display list (see ``Backend.set_background``):
+        a ``Background3D`` (animation), a ``Wallpaper`` (static image), or ``None``
+        (solid). An animation registers a permanent redraw tick and the render pass
+        draws the scene under every widget; a wallpaper draws its image once per
+        frame (no tick). Idempotent to re-set (e.g. on a theme switch): a no-op /
+        cleared background drops any tick and the next frame paints without it.
+        Survives window resizes — the background re-fits to the live bounds."""
+        self._background = None if (background is None or background.is_noop) else background
+        if isinstance(self._background, Background3D):
             self._bg_start = time.monotonic()
             # Registers the callback and (re)arms the frame timer at the fast rate.
             self.request_animation_ticks(self._background_tick)
         if self._view is not None:
             self._view.setNeedsDisplay_(True)
 
-    def set_surface_reveal(self, reveal: float) -> None:
-        """Set how far UI surface fills dissolve so a wallpaper shows through (see
-        the base ``Backend.set_surface_reveal``). Clamped to ``0``..``1`` and read
-        by ``_ui_fill_alpha`` per fill. Wallpaper-agnostic: it does not start or stop
-        the 3D scene's animation tick (``set_background_3d`` owns that) — a static
-        wallpaper needs no tick — so a lone repaint applies the new value."""
-        self._surface_reveal = 0.0 if reveal < 0.0 else 1.0 if reveal > 1.0 else float(reveal)
+    def set_surface_opacity(self, opacity: float) -> None:
+        """Set the opacity of UI surface fills so a wallpaper shows through (see the
+        base ``Backend.set_surface_opacity``). Clamped to ``0``..``1`` and read by
+        ``_ui_fill_alpha`` per fill. Background-agnostic: it does not start or stop an
+        animation's tick (``set_background`` owns that) — a static wallpaper needs no
+        tick — so a lone repaint applies the new value."""
+        self._surface_opacity = 0.0 if opacity < 0.0 else 1.0 if opacity > 1.0 else float(opacity)
         if self._view is not None:
             self._view.setNeedsDisplay_(True)
 
+    @property
+    def has_wallpaper(self) -> bool:
+        """True while any background (animation or image) is set (see
+        ``Backend.has_wallpaper``) — a ``reveal_mode="transparent"`` pane then drops
+        its fill regardless of the surface opacity, so the background shows at full
+        strength even at ``opacity == 1``."""
+        return self._background is not None
+
     def _background_tick(self) -> bool:
-        """Frame callback for the 3D background: request a redraw each frame while
-        one is active, else return False to unregister (a bare tick callback does
-        not itself trigger a repaint — see _on_animation_tick — so it must ask)."""
-        if self._background_3d is None:
+        """Frame callback for an animation background: request a redraw each frame
+        while one is active, else return False to unregister (a bare tick callback
+        does not itself trigger a repaint — see _on_animation_tick — so it must ask).
+        A static wallpaper never registers this, so it does not spin the timer."""
+        if not isinstance(self._background, Background3D):
             return False
         if self._view is not None:
             self._view.setNeedsDisplay_(True)
