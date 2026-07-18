@@ -523,6 +523,21 @@ class Backend(ABC):
         must keep the scene animating and re-fit it across window resizes on its
         own."""
 
+    def set_surface_reveal(self, reveal: float) -> None:
+        """How far the UI's *surface* fills (pane / row backgrounds) dissolve toward
+        translucent so a wallpaper behind them — an animated 3D scene, a future
+        static image — shows *through*, ``0``..``1``. ``0`` (the default) keeps the
+        UI fully opaque; ``1`` makes the surfaces fully transparent. Only flat
+        surface fills are affected; text, strokes, and framed dialog boxes stay
+        opaque so the UI stays legible, and an opaque overlay group (a modal dialog)
+        is exempt so it occludes rather than dissolves.
+
+        This is deliberately separate from any one wallpaper (``set_background_3d``):
+        it is the app/theme's single "how see-through is the UI" knob, reused across
+        wallpaper kinds. Only a pixel-owning backend that composites acts on it; a
+        character-grid terminal has no sub-cell alpha, so the default no-ops and the
+        call is always safe."""
+
     # --- text input / IME activation -----------------------------------------
 
     def begin_text_input(self) -> None:

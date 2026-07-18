@@ -1045,6 +1045,11 @@ class MacOSBackend(Backend):
         # the scene under the display list. _bg_start anchors its animation clock.
         self._background_3d: Any | None = None
         self._bg_start: float = 0.0
+        # How far UI surface fills dissolve toward translucent so a wallpaper behind
+        # them shows through (0 = opaque UI). Backend-wide and wallpaper-agnostic —
+        # set from the active theme via set_surface_reveal, independent of which
+        # wallpaper (the 3D scene, a future static image) is active.
+        self._surface_reveal: float = 0.0
         # Nesting depth of reveal-exempt (opaque overlay) groups during the render
         # pass; while > 0 a Background3D reveal does not dissolve surface fills, so
         # an overlay layer occludes the base instead of showing it through.
@@ -2026,17 +2031,16 @@ class MacOSBackend(Backend):
 
     def _ui_fill_alpha(self) -> float:
         """Opacity for UI *surface* fills (pane / row backgrounds). ``1.0`` in
-        normal rendering; when an active 3D background asks to show through
-        (``reveal`` > 0) the surfaces composite translucently so the scene reads
-        behind them. Text, strokes, and framed dialog boxes are unaffected — only
-        the flat surface fills routed through _render_fill — so the UI stays
-        legible over the animation. Fills inside a reveal-exempt (opaque) group —
-        an overlay layer such as a full-window viewer or a modal dialog — stay
-        opaque so they occlude the base UI instead of dissolving it into view."""
-        bg = self._background_3d
-        if bg is None or self._reveal_exempt_depth > 0:
+        normal rendering; when the surface reveal is raised (set_surface_reveal, so
+        a wallpaper shows through) the surfaces composite translucently. Text,
+        strokes, and framed dialog boxes are unaffected — only the flat surface
+        fills routed through _render_fill — so the UI stays legible. Fills inside a
+        reveal-exempt (opaque) group — an overlay layer such as a full-window viewer
+        or a modal dialog — stay opaque so they occlude the base UI instead of
+        dissolving it into view."""
+        if self._reveal_exempt_depth > 0:
             return 1.0
-        return 1.0 - getattr(bg, "reveal", 0.0)
+        return 1.0 - self._surface_reveal
 
     def _render_fill(self, x: float, y: float, w: float, h: float, style: Style) -> None:
         rect = self._unit_rect(x, y, w, h)
@@ -2440,6 +2444,16 @@ class MacOSBackend(Backend):
             self._bg_start = time.monotonic()
             # Registers the callback and (re)arms the frame timer at the fast rate.
             self.request_animation_ticks(self._background_tick)
+        if self._view is not None:
+            self._view.setNeedsDisplay_(True)
+
+    def set_surface_reveal(self, reveal: float) -> None:
+        """Set how far UI surface fills dissolve so a wallpaper shows through (see
+        the base ``Backend.set_surface_reveal``). Clamped to ``0``..``1`` and read
+        by ``_ui_fill_alpha`` per fill. Wallpaper-agnostic: it does not start or stop
+        the 3D scene's animation tick (``set_background_3d`` owns that) — a static
+        wallpaper needs no tick — so a lone repaint applies the new value."""
+        self._surface_reveal = 0.0 if reveal < 0.0 else 1.0 if reveal > 1.0 else float(reveal)
         if self._view is not None:
             self._view.setNeedsDisplay_(True)
 

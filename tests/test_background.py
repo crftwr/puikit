@@ -21,17 +21,17 @@ def test_defaults():
     assert not b.is_noop
 
 
-def test_opacity_and_reveal_are_clamped_to_unit_range():
+def test_opacity_is_clamped_to_unit_range():
     assert Background3D(opacity=5.0).opacity == 1.0
     assert Background3D(opacity=-1.0).opacity == 0.0
-    assert Background3D(reveal=5.0).reveal == 1.0
-    assert Background3D(reveal=-1.0).reveal == 0.0
 
 
-def test_reveal_defaults_to_opaque_ui():
-    # Default 0.0 means "don't touch the UI" — the background only shows through
-    # bare surface, so enabling one never changes an existing layout's look.
-    assert Background3D().reveal == 0.0
+def test_reveal_is_not_a_scene_property():
+    # The surface reveal is a backend-wide, wallpaper-agnostic knob
+    # (Backend.set_surface_reveal), not a field of any one scene — so it can be
+    # reused across wallpaper kinds and owned by the app's theme.
+    import dataclasses
+    assert "reveal" not in {f.name for f in dataclasses.fields(Background3D)}
 
 
 def test_zero_opacity_is_a_noop():
@@ -109,6 +109,7 @@ def test_memory_backend_base_set_is_a_safe_noop():
     # Inherited base no-op: accepting a call without the capability must not raise.
     be.set_background_3d(WIREFRAME)
     be.set_background_3d(None)
+    be.set_surface_reveal(0.4)  # base no-op; a terminal has no sub-cell alpha
 
 
 # --- macOS wiring (skipped where the backend module is unavailable) ------------
@@ -118,17 +119,19 @@ def test_macos_declares_background_3d():
     assert mb.MacOSBackend().capabilities.supports("background_3d")
 
 
-def test_macos_ui_fill_alpha_tracks_reveal():
-    # The surface-fill opacity used by _render_fill: 1.0 (opaque) with no
-    # background or reveal=0, and 1 - reveal while one asks to show through.
+def test_macos_ui_fill_alpha_tracks_surface_reveal():
+    # The surface-fill opacity used by _render_fill: 1.0 (opaque) by default, and
+    # 1 - reveal once set_surface_reveal raises it (independent of any wallpaper).
     # Exercised without a window (no open()), so it stays a headless unit test.
     mb = pytest.importorskip("puikit.backends.macos_backend")
     be = mb.MacOSBackend()
-    assert be._ui_fill_alpha() == 1.0                 # no background
-    be._background_3d = Background3D(reveal=0.0)
     assert be._ui_fill_alpha() == 1.0                 # opaque UI by default
-    be._background_3d = Background3D(reveal=0.4)
+    be.set_surface_reveal(0.0)
+    assert be._ui_fill_alpha() == 1.0                 # still opaque
+    be.set_surface_reveal(0.4)
     assert be._ui_fill_alpha() == pytest.approx(0.6)  # panes go translucent
+    be.set_surface_reveal(5.0)                        # clamped to 1.0
+    assert be._ui_fill_alpha() == pytest.approx(0.0)
 
 
 def test_macos_reveal_exempt_group_stays_opaque():
@@ -136,7 +139,7 @@ def test_macos_reveal_exempt_group_stays_opaque():
     # active reveal so the layer occludes the base UI instead of dissolving it.
     mb = pytest.importorskip("puikit.backends.macos_backend")
     be = mb.MacOSBackend()
-    be._background_3d = Background3D(reveal=0.4)
+    be.set_surface_reveal(0.4)
     assert be._ui_fill_alpha() == pytest.approx(0.6)  # base pane: dissolves
     be._reveal_exempt_depth = 1
     assert be._ui_fill_alpha() == 1.0                 # overlay layer: opaque

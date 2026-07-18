@@ -52,8 +52,12 @@ def main() -> None:
             color=_COLORS[state["color_ix"]],
             speed=state["speed"],
             opacity=0.7,
-            reveal=_REVEALS[state["reveal_ix"]],
         ))
+
+    def apply_reveal() -> None:
+        # How see-through the UI is, is a backend-wide, wallpaper-agnostic knob set
+        # separately from the scene — the same value would dissolve any wallpaper.
+        backend.set_surface_reveal(_REVEALS[state["reveal_ix"]])
 
     with backend:
         cols, rows = backend.size_units
@@ -66,6 +70,7 @@ def main() -> None:
         panel.add(Label("q quit · +/- speed · space color · r reveal"), x=2, y=5, w=48, h=1)
         panel.render()
         apply_background()
+        apply_reveal()
 
         def on_event(event) -> None:
             if event.type is EventType.KEY:
@@ -86,7 +91,7 @@ def main() -> None:
                     return
                 if event.key == "r":
                     state["reveal_ix"] = (state["reveal_ix"] + 1) % len(_REVEALS)
-                    apply_background()
+                    apply_reveal()
                     return
             panel.dispatch_event(event)
             panel.render()

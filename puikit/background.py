@@ -41,35 +41,32 @@ class Background3D:
       speed    Rotation-speed multiplier (1.0 = the tuned default).
       opacity  Line alpha, 0..1. Low values keep the animation a subtle backdrop
                that does not fight the UI for attention.
-      reveal   How far the UI's *surface* fills (pane / row backgrounds) are made
-               translucent so the scene shows *through* them, 0..1. ``0`` (the
-               default) leaves the UI fully opaque — the background then shows only
-               where the layout leaves the surface bare. Raise it to dissolve the
-               panes toward the scene (``1`` = fully transparent surfaces). Only
-               surface fills are affected; text, strokes, and framed dialog boxes
-               stay opaque so the UI stays legible.
       backdrop The color the frame is cleared to *under* the scene — what the
-               ``reveal``-dissolved surfaces (and the bare gaps) fall back to.
-               ``None`` uses the backend's neutral dark clear, which suits a dark
-               UI but muddies a light one (the dissolved surfaces darken toward it)
-               and hides a dark scene line (drawn onto near-black). Pass the app's
-               theme background so a light theme stays light where dissolved and a
-               dark ``color`` reads against it.
+               reveal-dissolved surfaces (and the bare gaps) fall back to. ``None``
+               uses the backend's neutral dark clear, which suits a dark UI but
+               muddies a light one (the dissolved surfaces darken toward it) and
+               hides a dark scene line (drawn onto near-black). Pass the app's theme
+               background so a light theme stays light where dissolved and a dark
+               ``color`` reads against it.
+
+    How translucent the UI becomes so the scene shows *through* it is **not** a
+    property of the scene: it is the backend-wide "surface reveal" set separately
+    with :meth:`Backend.set_surface_reveal`. Keeping it off the scene lets the same
+    reveal apply to any wallpaper (a future static image, not just this cube) and be
+    owned by the app's theme rather than baked into one background kind.
     """
 
     kind: str = "wireframe"
     color: Color | None = None
     speed: float = 1.0
     opacity: float = 0.6
-    reveal: float = 0.0
     backdrop: Color | None = None
 
     def __post_init__(self) -> None:
-        # Clamp the 0..1 strengths on the frozen dataclass so config can't push a
+        # Clamp the 0..1 opacity on the frozen dataclass so config can't push a
         # backend out of range; speed is left free (a fast spin is a valid choice).
-        for f in ("opacity", "reveal"):
-            v = getattr(self, f)
-            object.__setattr__(self, f, 0.0 if v < 0.0 else 1.0 if v > 1.0 else float(v))
+        v = self.opacity
+        object.__setattr__(self, "opacity", 0.0 if v < 0.0 else 1.0 if v > 1.0 else float(v))
 
     @property
     def is_noop(self) -> bool:
