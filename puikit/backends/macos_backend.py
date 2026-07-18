@@ -106,6 +106,7 @@ from Foundation import (
 import objc
 from PyObjCTools import AppHelper
 
+from ..background import wireframe_segments
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, is_transparent
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..event import Event, EventType, char_key_event
@@ -204,6 +205,13 @@ except ImportError:  # bundled-font registration unavailable; use OS system font
 
 _DEFAULT_FG = (230, 230, 230)
 _DEFAULT_BG = (24, 24, 24)
+
+#: Fallback line color for the animated 3D background when the Background3D names
+#: none (a soft blue that reads over the dark default clear). An app normally
+#: passes a theme-derived color instead so the scene stays on-palette.
+_BG3D_DEFAULT_COLOR = (90, 140, 200)
+#: Stroke width (points) for the background wireframe edges.
+_BG3D_LINE_WIDTH = 1.5
 
 # Bundled default fonts (puikit/fonts): Noto Sans + Noto Sans Mono — the same
 # metrics-matched superfamily the Windows backend bundles, so an unnamed default
@@ -971,6 +979,8 @@ class MacOSBackend(Backend):
             "gpu_acceleration": False,
             "post_effects": True,    # Core Image content-filter composite; gated
                                      # on _HAS_COREIMAGE in `capabilities` below.
+            "background_3d": True,    # animated 3D scene stroked under the UI in
+                                     # the render pass (see set_background_3d).
         }
     )
 
@@ -1030,6 +1040,11 @@ class MacOSBackend(Backend):
         # Rolling-band ("vertical hold") animation state, or None when the active
         # effect has no roll. Keys: active(bool), start, duration, next(start time).
         self._crt_roll: dict | None = None
+        # Active animated 3D background (set_background_3d), or None. When set, a
+        # permanent tick redraws the view each frame and the render pass strokes
+        # the scene under the display list. _bg_start anchors its animation clock.
+        self._background_3d: Any | None = None
+        self._bg_start: float = 0.0
         # Wall-clock (monotonic) of the last user input, for the roll's active-use
         # gate (see _roll_user_active). Seeded to launch time so a roll can fire
         # right away if the window opens focused.
@@ -1134,6 +1149,7 @@ class MacOSBackend(Backend):
         self._animations.clear()
         self._tick_callbacks.clear()
         self._crt_roll = None
+        self._background_3d = None
         if self._window is not None:
             self._window.setDelegate_(None)
             self._window.orderOut_(None)
@@ -1498,10 +1514,12 @@ class MacOSBackend(Backend):
         actually changes, so steady state costs nothing."""
         if not self._animations and not self._tick_callbacks:
             return
-        # A live widget animation OR an in-flight roll sweep wants smooth 60fps;
-        # otherwise the slow idle-poll rate (a roll only waiting to fire, or a bare
-        # filesystem pump, needs nothing faster).
-        fast = bool(self._animations) or self._roll_active()
+        # A live widget animation, an in-flight roll sweep, OR the continuously
+        # spinning 3D background wants smooth 60fps; otherwise the slow idle-poll
+        # rate (a roll only waiting to fire, or a bare filesystem pump, needs
+        # nothing faster).
+        fast = (bool(self._animations) or self._roll_active()
+                or self._background_3d is not None)
         interval = self._ANIM_INTERVAL if fast else self._IDLE_TICK_INTERVAL
         if self._anim_timer is not None and self._anim_timer_interval == interval:
             return
@@ -1583,9 +1601,23 @@ class MacOSBackend(Backend):
     # --- pixel rendering (called from the view's drawRect) --------------------
 
     def _render_into_view(self) -> None:
-        _ns_color(_DEFAULT_BG).setFill()
+        # Clear the frame. When an active 3D background names a backdrop, the
+        # reveal-dissolved surface fills (and any bare gaps) fall back to *that*
+        # color instead of the neutral dark default — so a light-theme app stays
+        # light where dissolved and a dark scene line reads against it, rather than
+        # muddying toward near-black. No effect when no background / no backdrop.
+        clear = _DEFAULT_BG
+        bg = self._background_3d
+        if bg is not None and getattr(bg, "backdrop", None) is not None:
+            clear = bg.backdrop
+        _ns_color(clear).setFill()
         NSRectFill(self._view.bounds())
         now = time.monotonic()
+        # The animated 3D background is stroked *before* the display list, so every
+        # widget paints over it — it shows through only where the UI leaves the
+        # cleared background bare (or paints a translucent fill).
+        if self._background_3d is not None:
+            self._render_background_3d(now)
         group_stack: list[tuple] = []  # (anim, rect, gstate_saved, layer_opened)
         for command in self._front:
             kind = command[0]
@@ -1635,6 +1667,31 @@ class MacOSBackend(Backend):
         # to the whole layer afterward.
         if effect is not None and effect.roll > 0 and self._roll_active():
             self._render_roll_band(effect, now)
+
+    def _render_background_3d(self, now: float) -> None:
+        """Stroke the animated 3D scene under the display list. The projection is
+        pure math (see ``puikit.background.wireframe_segments``) — this only turns
+        the returned 2D segments into an NSBezierPath and strokes them, so the
+        backend stays free of any 3D. Fit to the live bounds, so it re-centers on
+        every resize. Time comes from ``_bg_start`` so the spin is wall-clock
+        smooth regardless of frame pacing."""
+        bg = self._background_3d
+        bounds = self._view.bounds()
+        segments = wireframe_segments(
+            bounds.size.width, bounds.size.height, now - self._bg_start,
+            speed=getattr(bg, "speed", 1.0),
+        )
+        if not segments:
+            return
+        color = getattr(bg, "color", None) or _BG3D_DEFAULT_COLOR
+        _ns_color(color, alpha=getattr(bg, "opacity", 1.0)).set()
+        path = NSBezierPath.bezierPath()
+        path.setLineWidth_(_BG3D_LINE_WIDTH)
+        path.setLineJoinStyle_(1)  # NSLineJoinStyleRound — clean vertex joins
+        for (x0, y0, x1, y1) in segments:
+            path.moveToPoint_((x0, y0))
+            path.lineToPoint_((x1, y1))
+        path.stroke()
 
     def _render_scanlines(self, strength: float) -> None:
         """Paint dark horizontal rows every ``_SCANLINE_PERIOD`` points over the
@@ -1951,8 +2008,29 @@ class MacOSBackend(Backend):
         path.setLineWidth_(1.0)
         path.stroke()
 
+    def _ui_fill_alpha(self) -> float:
+        """Opacity for UI *surface* fills (pane / row backgrounds). ``1.0`` in
+        normal rendering; when an active 3D background asks to show through
+        (``reveal`` > 0) the surfaces composite translucently so the scene reads
+        behind them. Text, strokes, and framed dialog boxes are unaffected — only
+        the flat surface fills routed through _render_fill — so the UI stays
+        legible over the animation."""
+        bg = self._background_3d
+        if bg is None:
+            return 1.0
+        return 1.0 - getattr(bg, "reveal", 0.0)
+
     def _render_fill(self, x: float, y: float, w: float, h: float, style: Style) -> None:
-        _fill_rect(self._unit_rect(x, y, w, h), style.bg or _DEFAULT_BG)
+        rect = self._unit_rect(x, y, w, h)
+        color = style.bg or _DEFAULT_BG
+        alpha = self._ui_fill_alpha()
+        if alpha >= 1.0:
+            _fill_rect(rect, color)  # opaque fast path (also handles RGBA colors)
+            return
+        # Reveal the 3D background: composite the surface over what is already
+        # drawn (the scene) at the reduced opacity.
+        _ns_color(color, alpha=alpha).setFill()
+        NSRectFillUsingOperation(rect, NSCompositingOperationSourceOver)
 
     def _rounded_path(self, rect, r: float, corners: tuple[str, ...] | None):
         """An NSBezierPath around ``rect`` with corner radius ``r`` on the named
@@ -2330,6 +2408,32 @@ class MacOSBackend(Backend):
         self._post_effect = None if (effect is None or effect.is_noop) else effect
         self._drop_shadow_obj = None  # rebuilt lazily for the new effect
         self._apply_post_effect()
+
+    def set_background_3d(self, effect: Any | None) -> None:
+        """Render an animated 3D scene behind the display list, or clear it with
+        ``None`` (see ``puikit.background.Background3D``). Registers a permanent
+        animation tick that drives a per-frame redraw while active; the render
+        pass strokes the scene under every widget. Idempotent to re-set (e.g. on a
+        theme switch): a no-op / cleared effect drops the tick and the next frame
+        paints without it. Survives window resizes — the scene re-fits to the live
+        bounds each frame."""
+        self._background_3d = None if (effect is None or effect.is_noop) else effect
+        if self._background_3d is not None:
+            self._bg_start = time.monotonic()
+            # Registers the callback and (re)arms the frame timer at the fast rate.
+            self.request_animation_ticks(self._background_tick)
+        if self._view is not None:
+            self._view.setNeedsDisplay_(True)
+
+    def _background_tick(self) -> bool:
+        """Frame callback for the 3D background: request a redraw each frame while
+        one is active, else return False to unregister (a bare tick callback does
+        not itself trigger a repaint — see _on_animation_tick — so it must ask)."""
+        if self._background_3d is None:
+            return False
+        if self._view is not None:
+            self._view.setNeedsDisplay_(True)
+        return True
 
     def _apply_post_effect(self) -> None:
         """(Re)attach the stored effect's filter chain to the view. Safe to call

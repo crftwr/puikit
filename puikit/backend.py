@@ -20,6 +20,7 @@ from .event import Event
 from .font import Font, FontMetrics
 
 if TYPE_CHECKING:
+    from .background import Background3D
     from .posteffect import PostEffect
 
 
@@ -504,6 +505,20 @@ class Backend(ABC):
         from the active theme's recommendation) and never branch on the backend —
         the call is always safe. A backend that implements it must re-apply the
         stored effect across window resizes on its own."""
+
+    # --- animated 3D background (capability "background_3d") ------------------
+
+    def set_background_3d(self, effect: "Background3D | None") -> None:
+        """Render an animated 3D scene *behind* the display list, or clear it with
+        ``None``. See ``puikit.background``.
+
+        Only backends with the ``background_3d`` capability act on this: a
+        pixel-owning GUI backend strokes the projected scene under every widget
+        and drives its own per-frame redraw; a character-grid terminal has no
+        sub-cell pixels, so the default no-ops. Apps set it once and never branch
+        on the backend — the call is always safe. A backend that implements it
+        must keep the scene animating and re-fit it across window resizes on its
+        own."""
 
     # --- text input / IME activation -----------------------------------------
 

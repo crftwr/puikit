@@ -17,6 +17,7 @@ from .capability import (
 )
 from .event import Event, EventType
 from .font import Font, FontSlant, FontWeight
+from .background import WIREFRAME, Background3D
 from .layout import HSplit, Item, VSplit
 from .menu import SEPARATOR, Menu, MenuItem, MenuSeparator
 from .panel import DrawContext, Panel, Rect
@@ -27,6 +28,8 @@ __version__ = "0.1.0"
 
 __all__ = [
     "Backend",
+    "Background3D",
+    "WIREFRAME",
     "CapabilityNotSupported",
     "CapabilityProfile",
     "DEFAULT_STYLE",

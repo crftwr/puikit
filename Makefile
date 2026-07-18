@@ -63,7 +63,7 @@ VENV_STAMP := $(VENV)/.installed
 # stamp depends on this so `make venv` / any run target populates the fonts.
 FONTS := puikit/fonts/NotoSans-Regular.ttf
 
-.PHONY: help venv install test fonts hello demo layout hello-gui demo-gui layout-gui clean
+.PHONY: help venv install test fonts hello demo layout bg3d hello-gui demo-gui layout-gui bg3d-gui clean
 
 help:
 	@echo "PuiKit utility commands:"
@@ -74,9 +74,11 @@ help:
 	@echo "  make hello     - run the hello_world example (TUI)"
 	@echo "  make demo      - run the demo_catalog example (TUI)"
 	@echo "  make layout    - run the layout demo (TUI)"
+	@echo "  make bg3d      - run the background_3d example (TUI)"
 	@echo "  make hello-gui - run the hello_world example (native GUI: macOS or Windows)"
 	@echo "  make demo-gui  - run the demo_catalog example (native GUI: macOS or Windows)"
 	@echo "  make layout-gui - run the layout demo (native GUI, pixel layout)"
+	@echo "  make bg3d-gui  - run the background_3d example (native GUI: macOS or Windows)"
 	@echo "  make clean     - remove build artifacts and caches"
 	@echo ""
 	@echo "  Run/test targets create the venv and install puikit automatically"
@@ -116,6 +118,12 @@ layout: $(VENV_STAMP)
 
 layout-gui: $(VENV_STAMP)
 	$(VENV_PYTHON) examples/layout_demo/main.py --backend gui
+
+bg3d: $(VENV_STAMP)
+	$(VENV_PYTHON) examples/background_3d/main.py
+
+bg3d-gui: $(VENV_STAMP)
+	$(VENV_PYTHON) examples/background_3d/main.py --backend gui $(FONT_SIZE_ARG)
 
 clean:
 	rm -rf build dist *.egg-info
