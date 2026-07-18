@@ -18,7 +18,7 @@ from .color import LC_BODY, LC_LARGE, LC_MIN_NONTEXT, legible_ink
 from . import easing as easing_mod
 from .event import Event, EventType
 from .focus import FocusContainer, focus_on_click, move_focus
-from .font import Font, FontMetrics, FontSlant, FontWeight
+from .font import Font, FontMetrics, FontSlant, FontWeight, grid_aligned
 from . import textfx
 from .theme import Theme, theme_for
 
@@ -133,6 +133,7 @@ class DrawContext:
         focused: bool = False,
         hit_rect: Rect | None = None,
         widget: Any = None,
+        text_variant: Any = None,
     ):
         self._backend = backend
         self._rect = rect
@@ -143,6 +144,12 @@ class DrawContext:
         # The widget this context draws, so it can look up its own animated
         # state (a running color tween) without the app threading an identity.
         self._widget = widget
+        # Arriving-text flavor for this subtree (puikit.textfx). A widget's own
+        # ``text_effect`` wins; failing that it inherits its parent's, so a
+        # viewer that delegates its body to a child widget still animates as one
+        # thing. Resolved here rather than at each draw_text so the lookup is
+        # once per widget, not once per string.
+        self._text_variant = getattr(widget, "text_effect", None) or text_variant
         # The region pointer operations (hover, press) test against, so they
         # match exactly what the Panel routes clicks and focus to. Defaults to the
         # visible rect clipped to the parent; a caller may override it.
@@ -517,14 +524,25 @@ class DrawContext:
         # every widget's text passes through, which is why a widget needs no code
         # to take part. Before the clip/slice below, so the effect transforms the
         # whole run rather than a truncated view of it.
-        if self._panel is not None:
-            text = self._panel._text_transform(self._widget, text, anim_key)
         resolved = self._text_style(style, ink=ink)
+        source = text
+        grid = grid_aligned(resolved.font)
+        if self._panel is not None:
+            text = self._panel._text_transform(
+                self._widget, text, anim_key, self._text_variant, grid=grid)
         if resolved.font is not None:
             # Proportional / sized flow text: a character is not one base unit
             # wide, so slicing by ceil(width) columns would chop trailing glyphs
             # that still fit. Hand the whole run to the backend and let the pane
             # clip rect trim it at the exact pixel edge instead.
+            if not grid and text is not source:
+                # Mid-reveal on a proportional run. The effect handed back one
+                # glyph per source character, so each is positioned by measuring
+                # the REAL text rather than by where the drawn string puts it —
+                # the only way a gap can hold its place when no glyph matches a
+                # proportional character's advance.
+                self._draw_measured(x, y, source, text, resolved)
+                return
             if text:
                 self._backend.draw_text(self._rect.x + x, self._rect.y + y, text, resolved)
             return
@@ -535,6 +553,47 @@ class DrawContext:
         if not text:
             return
         self._backend.draw_text(self._rect.x + x, self._rect.y + y, text, resolved)
+
+
+    def _draw_measured(self, x: float, y: float, source: str, shown: str,
+                       style: Style) -> None:
+        """Draw an index-aligned reveal frame on a **proportional** run, placing
+        every visible piece at the x its character will finally occupy.
+
+        ``shown[i]`` is the glyph for ``source[i]``: the character itself, a
+        substitution (a flash block, a scramble glyph), or ``textfx.HIDDEN`` for
+        one not yet revealed. Runs of untouched characters are drawn together;
+        every substitution is drawn alone, because its own advance differs from
+        the character it stands in for and would otherwise shift the rest of its
+        run. Hidden positions are simply not drawn — the gap needs no placeholder
+        because nothing after it depends on the drawn string's width.
+
+        Prefix widths are measured once per call and cached across frames: a
+        reveal redraws the same string ~15 times, and measuring a growing prefix
+        (which is how kerning is honored — see ``puikit.text.elide``) is the
+        expensive part.
+        """
+        widths = self._panel._prefix_widths(source, style) if self._panel else None
+        if widths is None:
+            widths = [0.0]
+            for i in range(1, len(source) + 1):
+                widths.append(self._backend.measure_text(source[:i], style))
+        bx, by = self._rect.x + x, self._rect.y + y
+        i, n = 0, len(source)
+        while i < n:
+            ch = shown[i]
+            if ch == textfx.HIDDEN:
+                i += 1
+                continue
+            if ch == source[i]:
+                j = i
+                while j < n and shown[j] == source[j]:
+                    j += 1
+                self._backend.draw_text(bx + widths[i], by, source[i:j], style)
+                i = j
+            else:
+                self._backend.draw_text(bx + widths[i], by, ch, style)
+                i += 1
 
     def draw_text_baseline(self, x: float, baseline_y: float, text: str,
                            style: Style = DEFAULT_STYLE, *, ink: bool = True) -> None:
@@ -1159,6 +1218,7 @@ class DrawContext:
             self._backend, rect, self._caps,
             clip=clip, panel=self._panel, background=background,
             focused=child_focused, widget=widget,
+            text_variant=self._text_variant,
         )
         widget.draw(child_ctx)
         child_ctx._close()
@@ -1376,6 +1436,13 @@ class Panel:
         self._text_seq: dict[int, int] = {}
         # Explicit override; None means "read the active theme" (the normal path).
         self._text_effect_override: Any = None
+        # Cumulative prefix widths for strings mid-reveal on a proportional run,
+        # keyed by (text, style). Measuring a *growing prefix* is how kerning is
+        # honored (see puikit.text.elide), which makes it O(n) backend calls per
+        # string — and a reveal redraws the same string every frame for its whole
+        # duration. Cached here and cleared when nothing is animating, so it
+        # holds only the handful of strings actually in flight.
+        self._prefix_cache: dict[tuple, list[float]] = {}
         # Running group optical effects (fade/highlight) keyed by widget, played
         # as a one-frame stand-in on non-compositing backends (see
         # _EffectAnimation and _apply_group_effect).
@@ -1933,6 +2000,19 @@ class Panel:
         self.backend.request_animation_ticks(self._animation_tick)
         return True
 
+    def _prefix_widths(self, text: str, style: Style) -> list[float]:
+        """Cumulative measured width of every prefix of ``text`` in ``style``:
+        ``widths[i]`` is where character ``i`` starts. Used to position a reveal
+        on a proportional run (see ``DrawContext._draw_measured``)."""
+        key = (text, style)
+        widths = self._prefix_cache.get(key)
+        if widths is None:
+            widths = [0.0]
+            for i in range(1, len(text) + 1):
+                widths.append(self.backend.measure_text(text[:i], style))
+            self._prefix_cache[key] = widths
+        return widths
+
     def _text_frame_reset(self) -> None:
         """Start-of-frame bookkeeping: this frame's drawn set becomes next
         frame's 'was drawn before', and the per-widget string counters clear."""
@@ -1940,7 +2020,8 @@ class Panel:
         self._text_drawn_now = set()
         self._text_seq.clear()
 
-    def _text_transform(self, widget: Any, text: str, anim_key: Any = None) -> str:
+    def _text_transform(self, widget: Any, text: str, anim_key: Any = None,
+                        variant: Any = None, grid: bool = True) -> str:
         """``text`` as the running arriving-text effect would draw it, or
         unchanged. Called from ``DrawContext.draw_text`` for every run.
 
@@ -1954,8 +2035,28 @@ class Panel:
         effect = self.text_effect
         if effect is None or not text or widget is None:
             return text
-        if not getattr(widget, "animates_text", True):
-            return text  # widget opted out (a text field, a live counter)
+        animates = getattr(widget, "animates_text", None)
+        if animates is None:
+            # A widget that engages the text-input system is showing *editable*
+            # content: a value the user is about to change, under a caret, that
+            # they may be mid-way through typing. Scrambling or withholding it is
+            # wrong in a way no theme should be able to ask for, so text input
+            # implies no text animation — and any future input widget inherits
+            # that without having to know this system exists. An explicit
+            # ``animates_text = True`` still wins.
+            animates = not getattr(widget, "wants_text_input", False)
+        if not animates:
+            return text  # opted out (a text field, a live counter)
+        # A widget may vary the *flavor* — a text viewer materializing a
+        # screenful rather than typing it out — while the theme keeps authority
+        # over whether text animates at all and over the timing. Reached only
+        # because ``effect`` above is non-None, so a widget preference can never
+        # animate anything a theme left off. Resolved (including inheritance from
+        # an ancestor) by the DrawContext; see its ``_text_variant``.
+        if variant is not None:
+            effect = textfx.merge(effect, variant)
+            if effect is None:
+                return text
         wid = id(widget)
         self._text_drawn_now.add(wid)
         staggered = True
@@ -2005,7 +2106,11 @@ class Panel:
         # Offsetting rather than reseeding keeps the churn rate intact, since
         # frame still advances at scramble_fps.
         frame = int(time.monotonic() * effect.scramble_fps) + seq * 7919
-        return fn(text, p, frame, effect.params)
+        # ``grid`` is injected rather than themed: whether a run is column-aligned
+        # is a property of the font it draws with, which only this layer knows.
+        # A kind that substitutes glyphs must degrade on a proportional run — see
+        # textfx._render_reveal.
+        return fn(text, p, frame, {**effect.params, "grid": grid})
 
     def _text_key_start(self, wid: int, key: Any) -> float | None:
         """Start time for a content-keyed string, or ``None`` if it should not
@@ -2229,6 +2334,8 @@ class Panel:
         for w in [w for w, a in self._effect_anims.items() if a.progress(now) >= 1.0]:
             del self._effect_anims[w]
         self._text_anims_done(now)
+        if not (self._text_anims or self._text_key_anims):
+            self._prefix_cache.clear()  # nothing in flight: drop the measurements
         return bool(self._size_anims or self._color_anims or self._effect_anims
                     or self._text_anims or self._text_key_anims)
 

@@ -73,3 +73,20 @@ class FontMetrics:
     @property
     def line_height(self) -> float:
         return self.ascent + self.descent
+
+
+def grid_aligned(font: "Font | None") -> bool:
+    """Whether ``font`` lays out **one glyph per base-unit column**.
+
+    True for the base grid font (``None``) and for an unsized, unnamed monospace
+    request — both resolve to the fixed-advance grid face. False for anything
+    proportional or sized, where a character's advance is its own and column
+    counting says nothing about where a glyph lands.
+
+    Two places need this and they need it for the same reason: text can only be
+    manipulated *by character position* when position and column agree. A log
+    line can be wrapped by counting columns (``log_view``), and an arriving-text
+    animation can stand a placeholder in for a character (``textfx``), only on a
+    grid-aligned run. On a proportional one both must measure instead.
+    """
+    return font is None or (font.monospace and font.family is None and font.size is None)

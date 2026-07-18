@@ -39,7 +39,7 @@ from dataclasses import replace
 
 from ..backend import DEFAULT_STYLE, Style, TextAttribute
 from ..event import Event, EventType
-from ..font import Font
+from ..font import Font, grid_aligned as _grid_aligned
 from ..panel import DrawContext
 from ..text import (
     attaches_to_base,
@@ -65,14 +65,6 @@ LogLine = tuple[str, Style]
 # to the same system monospace face as the base grid font, so it still tiles the
 # base unit one glyph per column — keeping the O(n) column wrap fast path valid.
 _LOG_FONT = Font(monospace=True)
-
-
-def _grid_aligned(font: Font | None) -> bool:
-    """Whether ``font`` lays out one glyph per base-unit column, so a line can be
-    wrapped by counting display columns instead of measuring it natively. True
-    for the base grid font (``None``) and for an unsized, unnamed monospace
-    request — both resolve to the fixed-advance grid face."""
-    return font is None or (font.monospace and font.family is None and font.size is None)
 
 
 def _as_mono(style: Style) -> Style:
