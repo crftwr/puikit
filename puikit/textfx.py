@@ -284,14 +284,20 @@ class TextEffect:
                     effect rather than raising — this arrives from theme and user
                     config, where a typo should cost the animation, not the app.
       duration_ms   How long one string takes to arrive.
-      stagger_ms    Delay added per string *within one widget*, so a pane's rows
-                    cascade instead of all resolving at once. ``0`` fires them
-                    together.
-      max_strings   Cap on how many strings a single widget animates in one pass;
-                    the rest appear complete. Bounds the cascade on a widget with
-                    hundreds of visible strings (a full file pane, a log view),
-                    where a long stagger would otherwise take seconds to settle.
-                    ``0`` means no cap.
+      stagger_ms    Delay added per *row* within one widget, so a pane's rows
+                    cascade instead of all resolving at once. Strings sharing a
+                    row step together — they are one visual unit. ``0`` fires
+                    everything together.
+      max_rows      Cap on how many *rows* of a single widget animate in one
+                    pass; the rest appear complete. Bounds the cascade on a tall
+                    widget, where a long stagger would otherwise take seconds to
+                    settle. ``0`` means no cap.
+
+                    Rows, not strings, because the ratio varies by an order of
+                    magnitude between widgets — a file pane draws about one
+                    string per row, a syntax-highlighted viewer about nine — so a
+                    string-based cap covered a whole pane but only five lines of
+                    a viewer, and cut a tall pane off half way down.
       scramble_fps  Churn rate of the noise glyphs. Deliberately well under the
                     frame rate: re-rolled every frame they are visual noise, and
                     fast luminance churn is what reduced motion exists to prevent.
@@ -305,7 +311,7 @@ class TextEffect:
     kind: str = "decode"
     duration_ms: int = 420
     stagger_ms: int = 0
-    max_strings: int = 0
+    max_rows: int = 0
     scramble_fps: float = 12.0
     easing: str | None = None
     params: dict = field(default_factory=dict)
@@ -367,7 +373,7 @@ def merge(base: "TextEffect", override: Any) -> "TextEffect | None":
     widgets would have preferred.
 
     Merging rather than replacing keeps the theme's *timing* — ``duration_ms``,
-    ``stagger_ms``, ``max_strings`` are how a theme paces the whole UI — so a
+    ``stagger_ms``, ``max_rows`` are how a theme paces the whole UI — so a
     widget naming only ``{"kind": "scatter"}`` inherits the rest. Anything the
     override does name wins, params included. An unusable override falls back to
     ``base`` rather than disabling the effect, matching ``coerce``'s rule that

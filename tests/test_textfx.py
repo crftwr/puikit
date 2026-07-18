@@ -452,15 +452,60 @@ class TestManyStrings:
         assert line(be, 0) == "row-00-content"      # done
         assert line(be, 5) != "row-05-content"      # not started
 
-    def test_max_strings_caps_the_cascade(self, caps):
+    def test_max_rows_caps_the_cascade(self, caps):
         panel, be = make_panel(caps, {"kind": "decode", "duration_ms": 400,
-                                      "max_strings": 3}, h=6)
+                                      "max_rows": 3}, h=6)
         panel.add(Rows(6), x=0, y=0, w=30, h=6)
         panel.render()
         assert all(line(be, i) != f"row-{i:02d}-content" for i in range(3))
         # Past the cap the text lands complete rather than queueing an animation
         # the user would wait seconds to see finish.
         assert all(line(be, i) == f"row-{i:02d}-content" for i in range(3, 6))
+
+    def test_the_cap_and_stagger_count_ROWS_not_strings(self, caps):
+        """The reported bug, twice over: a string-based cap animated only the
+        first ~5 lines of a syntax-highlighted viewer (9 strings a line) and cut
+        a tall file pane off half way down. Rows are the unit a user sees, and
+        the strings-per-row ratio varies by an order of magnitude between
+        widgets, so the cap has to be in rows for the number to mean anything."""
+        class Wide(Widget):
+            """4 strings per row — a pane row with name / ext / size / date."""
+            def draw(self, ctx):
+                for r in range(10):
+                    for c in range(4):
+                        ctx.draw_text(c * 7, r, f"r{r}c{c}xx", Style())
+
+        panel, be = make_panel(caps, {"kind": "typewriter", "duration_ms": 400,
+                                      "max_rows": 8}, w=40, h=10)
+        panel.add(Wide(), x=0, y=0, w=40, h=10)
+        panel.render()
+        rows = [be.snapshot()[r].rstrip() for r in range(10)]
+        # The first 8 ROWS animate (not the first 8 strings, which would be row 2).
+        assert all(r != "r{}c0xx".format(i) for i, r in enumerate(rows[:8]))
+        # ...and rows past the cap land complete.
+        assert rows[8].startswith("r8c0xx") and rows[9].startswith("r9c0xx")
+
+    def test_strings_sharing_a_row_share_one_cascade_step(self, caps):
+        # They are one visual unit; staggering within a row would ripple across
+        # a pane's columns instead of down its rows.
+        class Wide(Widget):
+            def draw(self, ctx):
+                for r in range(4):
+                    for c in range(3):
+                        ctx.draw_text(c * 10, r, f"row{r}col{c}", Style())
+
+        panel, be = make_panel(caps, {"kind": "typewriter", "duration_ms": 200,
+                                      "stagger_ms": 400}, w=40, h=4)
+        panel.add(Wide(), x=0, y=0, w=40, h=4)
+        panel.render()
+        for wid in list(panel._text_anims):
+            panel._text_anims[wid] -= 0.30
+        panel.render()
+        # Row 0 is past its window; rows 1+ have not started. Within row 0 every
+        # column resolved together rather than trailing one another.
+        row0 = be.snapshot()[0].rstrip()
+        assert row0.startswith("row0col0") and "row0col2" in row0
+        assert not be.snapshot()[1].strip()
 
     def test_equal_length_rows_get_distinct_noise(self, caps):
         # Without decorrelating per row, same-length strings scramble identically
@@ -641,9 +686,9 @@ class TestWidgetVariant:
     def test_variant_inherits_the_themes_timing(self, caps):
         # The theme paces the whole UI; a widget naming only a kind keeps that.
         panel, _be = make_panel(caps, {"kind": "typewriter", "duration_ms": 260,
-                                       "stagger_ms": 12, "max_strings": 40})
+                                       "stagger_ms": 12, "max_rows": 40})
         eff = self._effect_for(panel, self._Viewer())
-        assert (eff.duration_ms, eff.stagger_ms, eff.max_strings) == (260, 12, 40)
+        assert (eff.duration_ms, eff.stagger_ms, eff.max_rows) == (260, 12, 40)
 
     def test_a_variant_animates_nothing_when_the_theme_opts_out(self, caps):
         # The property that keeps a widget preference from overriding the user's

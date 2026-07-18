@@ -529,7 +529,8 @@ class DrawContext:
         grid = grid_aligned(resolved.font)
         if self._panel is not None:
             text = self._panel._text_transform(
-                self._widget, text, anim_key, self._text_variant, grid=grid)
+                self._widget, text, anim_key, self._text_variant, grid=grid,
+                row=math.floor(y))
         if resolved.font is not None:
             # Proportional / sized flow text: a character is not one base unit
             # wide, so slicing by ceil(width) columns would chop trailing glyphs
@@ -1432,8 +1433,11 @@ class Panel:
         self._text_marks: dict[int, Any] = {}
         self._text_key_anims: dict[int, dict[Any, float]] = {}
         # Per-frame count of strings each widget has drawn, for the stagger
-        # cascade and the max_strings cap. Cleared at the top of every render.
+        # cascade and the max_rows cap. Cleared at the top of every render.
         self._text_seq: dict[int, int] = {}
+        # Per-widget {row -> ordinal in draw order} for this frame, so every
+        # string on a row shares one cascade step. Cleared with _text_seq.
+        self._text_row_ords: dict[int, dict[int, int]] = {}
         # Explicit override; None means "read the active theme" (the normal path).
         self._text_effect_override: Any = None
         # Cumulative prefix widths for strings mid-reveal on a proportional run,
@@ -2019,9 +2023,11 @@ class Panel:
         self._text_drawn_prev = self._text_drawn_now
         self._text_drawn_now = set()
         self._text_seq.clear()
+        self._text_row_ords.clear()
 
     def _text_transform(self, widget: Any, text: str, anim_key: Any = None,
-                        variant: Any = None, grid: bool = True) -> str:
+                        variant: Any = None, grid: bool = True,
+                        row: int = 0) -> str:
         """``text`` as the running arriving-text effect would draw it, or
         unchanged. Called from ``DrawContext.draw_text`` for every run.
 
@@ -2083,9 +2089,18 @@ class Panel:
                 self.backend.request_animation_ticks(self._animation_tick)
         if start is None:
             return text
+        # Two counters, because they answer different questions. The ROW ordinal
+        # paces the cascade and bounds it: strings sharing a row are one visual
+        # unit, so they step together and cost one row against the cap. Keying
+        # either on the string count instead makes the answer depend on how many
+        # draw calls a widget happens to spend per row — a file pane spends about
+        # one, a syntax-highlighted viewer about nine — so the same cap covered a
+        # whole pane but only five lines of a viewer. The STRING index is kept
+        # only to decorrelate noise between strings that share a row.
+        row_ord = self._text_row_ordinal(wid, row)
         seq = self._text_seq.get(wid, 0)
         self._text_seq[wid] = seq + 1
-        if effect.max_strings and seq >= effect.max_strings:
+        if effect.max_rows and row_ord >= effect.max_rows:
             # Past the cascade cap: draw complete rather than queueing an
             # animation the user would wait seconds to see finish.
             return text
@@ -2093,7 +2108,7 @@ class Panel:
         if fn is None:
             return text
         stagger = effect.stagger_ms if staggered else 0
-        elapsed = (time.monotonic() - start) * 1000.0 - seq * stagger
+        elapsed = (time.monotonic() - start) * 1000.0 - row_ord * stagger
         if elapsed < 0:
             elapsed = 0.0 if stagger else elapsed
         p = elapsed / max(1, effect.duration_ms)
@@ -2146,6 +2161,20 @@ class Panel:
         self._text_marks[wid] = key
         self.backend.request_animation_ticks(self._animation_tick)
         return start
+
+
+    def _text_row_ordinal(self, wid: int, row: int) -> int:
+        """This row's position in the widget's draw order for this frame.
+
+        Rows are numbered as they are first drawn rather than by their ``y``, so
+        a scrolled pane cascades from its top visible row and a widget drawing
+        out of order still gets a monotonic sequence."""
+        ords = self._text_row_ords.setdefault(wid, {})
+        ordinal = ords.get(row)
+        if ordinal is None:
+            ordinal = len(ords)
+            ords[row] = ordinal
+        return ordinal
 
     def _text_anims_done(self, now: float) -> None:
         """Drop widgets whose text has fully arrived. A widget's animation ends
