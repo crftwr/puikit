@@ -28,6 +28,7 @@ import ctypes
 import math
 import os
 import random
+import sys
 import threading
 import time
 from ctypes import wintypes
@@ -37,6 +38,8 @@ from typing import Any
 
 from . import _win32_dragdrop, _win32_ime
 from . import _win32_native as native
+from ._d3d_shader import HAVE_D3D_SHADER, D3DShaderBackground
+from ..background import ANIMATIONS, Background3D, Shader, Wallpaper, group_by_alpha
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, is_transparent
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..event import Event, EventType, char_key_event
@@ -60,6 +63,65 @@ _BUNDLED_FONT_FILES = (
 
 _DEFAULT_FG = (230, 230, 230)
 _DEFAULT_BG = (24, 24, 24)
+
+# --- animated background behind the UI (see set_background) --------------------
+# Mirrors the MacOSBackend constants of the same names so a Background3D reads the
+# same on both platforms; see macos_backend.py for the full rationale.
+#: Fallback line color for a Background3D that names none (a soft blue over the
+#: dark default clear); an app normally passes a theme color so it stays on-palette.
+_BG3D_DEFAULT_COLOR = (90, 140, 200)
+#: Stroke width (dip at 96 dpi, scaled by _dpi_scale) for the wireframe edges.
+_BG3D_LINE_WIDTH = 1.5
+#: The animated background coasts to a stop when the app is idle or unfocused and
+#: spins back up on the next input — the same park/re-arm shape as the CRT roll.
+#: Seconds of no input before the animation begins slowing.
+_BG_IDLE_TIMEOUT = 15.0
+#: Seconds the coast-down and spin-up ramps take (see _approach / _smoothstep).
+_BG_RAMP_DOWN = 40.0
+_BG_RAMP_UP = 15.0
+#: Below this rate the scene is close enough to still to be parked outright.
+_BG_RATE_FLOOR = 0.02
+
+
+def _smoothstep(t: float) -> float:
+    """Ease ``t`` (0..1) so it leaves 0 and arrives at 1 with zero slope, so the
+    background's change in speed is itself gradual (see MacOSBackend._smoothstep)."""
+    t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _approach(current: float, target: float, dt: float, up: float, down: float) -> float:
+    """Move ``current`` toward ``target`` (both 0..1) by one ``dt`` step, using a
+    separate span for rising (``up``) and falling (``down``) so a background can
+    coast to a stop slowly while answering input briskly (see MacOSBackend)."""
+    span = up if target > current else down
+    if span <= 0.0:
+        return target
+    step = dt / span
+    if target > current:
+        return min(target, current + step)
+    return max(target, current - step)
+
+
+def _wallpaper_dest(bw: float, bh: float, iw: float, ih: float, fit: str
+                    ) -> tuple[float, float, float, float]:
+    """Destination rect (x, y, w, h) in pixels for a wallpaper image drawn into a
+    ``bw`` x ``bh`` client area, centered and scaled per ``fit`` — the Windows twin
+    of MacOSBackend._wallpaper_rect. ``"stretch"`` fills exactly, ``"center"`` keeps
+    native size, ``"fit"`` contains (letterboxed), ``"fill"`` (default) covers
+    (overflow is clipped by the swap-chain target)."""
+    if fit == "stretch" or iw <= 0 or ih <= 0:
+        return (0.0, 0.0, bw, bh)
+    if fit == "center":
+        w, h = iw, ih
+    elif fit == "fit":
+        scale = min(bw / iw, bh / ih)
+        w, h = iw * scale, ih * scale
+    else:  # "fill" — cover
+        scale = max(bw / iw, bh / ih)
+        w, h = iw * scale, ih * scale
+    return ((bw - w) / 2.0, (bh - h) / 2.0, w, h)
+
 
 # Drop-shadow tuning (see _render_shadow): matched to macOS's NSShadow values
 # in macos_backend.py (offset (0, -8), blur radius 24, black @ 0.33 alpha).
@@ -411,8 +473,21 @@ class WindowsBackend(Backend):
             "system_tray": False,
             "media_keys": False,
             "post_effects": True,  # Direct2D-effects CRT composite (set_post_effect)
+            "background_3d": True,  # animation / image drawn under the UI in the
+                                    # render pass (see set_background).
+            "background_shader": True,  # GPU (D3D11 + HLSL) fragment-shader
+                                        # background; gated on HAVE_D3D_SHADER below.
         }
     )
+
+    @property
+    def capabilities(self) -> CapabilityProfile:
+        # Declare the shader background only when the D3D11 shader-compile path is
+        # actually usable (d3dcompiler present); otherwise the app falls back to a
+        # segment background or a solid color, same as the macOS Metal gate.
+        if not HAVE_D3D_SHADER:
+            return CapabilityProfile({**self.PROFILE, "background_shader": False})
+        return self.PROFILE
 
     def __init__(
         self,
@@ -539,6 +614,32 @@ class WindowsBackend(Backend):
         # or None for a path that failed to decode (so a missing/corrupt
         # image doesn't retry-and-fail every single frame).
         self._image_cache: dict[str, tuple[Any, int, int] | None] = {}
+        # Active background behind the UI (set_background): a Background3D
+        # (animation), a Shader (GPU), a Wallpaper (static image), or None (solid).
+        # An animated kind drives a per-frame tick; the render pass draws whichever
+        # kind under the display list (the shader is composited beneath it instead).
+        self._background: Any | None = None
+        # The animation's own clock, in seconds of *animated* time — it advances
+        # only by what was actually drawn (dt x rate), so a background that coasted
+        # to a stop resumes where it left off (see MacOSBackend._bg_clock).
+        self._bg_clock: float = 0.0
+        # Current rate, 0..1, eased by _background_tick; and whether the tick is
+        # registered (False once parked, until _dispatch re-arms it).
+        self._bg_rate: float = 1.0
+        self._bg_running: bool = False
+        self._bg_last_tick: float = 0.0
+        # Opacity of UI surface fills (1 = opaque UI); lower composites them
+        # translucently so a background behind them shows through. Backend-wide and
+        # background-agnostic — set from the active theme via set_surface_opacity.
+        self._surface_opacity: float = 1.0
+        # Nesting depth of reveal-exempt (opaque overlay) groups during the render
+        # pass; while > 0 the surface reveal does not dissolve fills, so an overlay
+        # layer (a modal dialog) occludes the base instead of showing it through.
+        self._reveal_exempt_depth: int = 0
+        # GPU background (Shader kind): the D3D11 renderer + composition swap chain,
+        # created lazily the first time a shader background is set (see
+        # _sync_shader_layer), so an app that never uses one pays nothing.
+        self._d3d_shader: Any = None
 
     # --- lifecycle -----------------------------------------------------------
 
@@ -643,9 +744,20 @@ class WindowsBackend(Backend):
         # against the freshly created target — this also restores it after a
         # device-loss recreate, not just at first open.
         self._build_crt_chain()
+        # Rebuild the shader renderer against the fresh D3D device if a shader
+        # background is active (a device-loss recreate; at first open there is no
+        # background yet, so this no-ops). _release_render_resources dropped the
+        # stale one, which pointed at the now-freed device.
+        self._sync_shader_layer()
 
     def _release_render_resources(self) -> None:
         self._release_crt_chain()
+        # The shader renderer holds the D3D device's immediate context and its own
+        # textures — tear it down before the device it lives on. It is rebuilt by
+        # _create_render_resources when the device is recreated.
+        if self._d3d_shader is not None:
+            self._d3d_shader.close()
+            self._d3d_shader = None
         for attr in ("_shadow_effect", "_target_bitmap", "_brush", "_render_target", "_d2d_device", "_swap_chain", "_d3d_device"):
             obj = getattr(self, attr)
             if obj is not None:
@@ -1105,6 +1217,107 @@ class WindowsBackend(Backend):
         if self._hwnd:
             native.user32.InvalidateRect(self._hwnd, None, False)
 
+    # --- background behind the UI (set_background) ---------------------------
+
+    def set_background(self, background: Any | None) -> None:
+        """Set the background behind the display list (see ``Backend.set_background``):
+        a ``Background3D`` (animation), a ``Shader`` (GPU), a ``Wallpaper`` (static
+        image), or ``None`` (solid). An animation or shader registers a per-frame
+        tick; a wallpaper draws once per frame. Idempotent to re-set (a theme
+        switch); survives resizes — the background re-fits to the live client area."""
+        self._background = None if (background is None or background.is_noop) else background
+        if isinstance(self._background, (Background3D, Shader)):
+            # A new background starts from the beginning of its own clock at full
+            # rate — a theme switch is itself user activity, so it should not arrive
+            # mid-coast.
+            self._bg_clock = 0.0
+            self._bg_rate = 1.0
+            self._bg_running = False
+            self._ensure_background_ticker()
+        self._sync_shader_layer()
+        if self._hwnd:
+            native.user32.InvalidateRect(self._hwnd, None, False)
+
+    def set_surface_opacity(self, opacity: float) -> None:
+        """Opacity of UI surface fills so a background shows through (see the base
+        ``Backend.set_surface_opacity``). Clamped 0..1 and read per fill by
+        ``_ui_fill_alpha``; a lone repaint applies it (no tick — that's
+        set_background's job)."""
+        self._surface_opacity = 0.0 if opacity < 0.0 else 1.0 if opacity > 1.0 else float(opacity)
+        if self._hwnd:
+            native.user32.InvalidateRect(self._hwnd, None, False)
+
+    @property
+    def has_wallpaper(self) -> bool:
+        """True while any background (animation / shader / image) is set — a
+        ``reveal_mode="transparent"`` pane then drops its fill regardless of the
+        surface opacity (see ``Backend.has_wallpaper``)."""
+        return self._background is not None
+
+    def _bg_target(self, now: float) -> float:
+        """The rate the animated background heads toward: full while the app is in
+        use (our window active AND recent input), zero once it is not — an animation
+        the user cannot see is pure drain. Mirrors _roll_user_active."""
+        if not self._window_active:
+            return 0.0
+        return 1.0 if (now - self._last_input_time) < _BG_IDLE_TIMEOUT else 0.0
+
+    def _ensure_background_ticker(self) -> None:
+        """Re-arm the background tick if it parked while idle. Cheap to call on
+        every input: returns immediately once running."""
+        if self._bg_running or not isinstance(self._background, (Background3D, Shader)):
+            return
+        self._bg_running = True
+        self._bg_last_tick = time.monotonic()
+        self.request_animation_ticks(self._background_tick)
+
+    def _background_tick(self) -> bool:
+        """Frame callback for an animated background: ease the rate toward its
+        target, advance the scene's own clock by what was actually animated, and
+        park (return False) once fully coasted so the timer can stop — re-armed from
+        _dispatch on the next input. Mirrors MacOSBackend._background_tick; the
+        _on_animation_tick repaint covers both the segment scene (drawn in the
+        render pass) and the shader (whose texture is produced there too)."""
+        if not isinstance(self._background, (Background3D, Shader)):
+            self._bg_running = False
+            return False
+        now = time.monotonic()
+        dt = min(max(0.0, now - self._bg_last_tick), 0.25)
+        self._bg_last_tick = now
+        self._bg_rate = _approach(self._bg_rate, self._bg_target(now), dt,
+                                  _BG_RAMP_UP, _BG_RAMP_DOWN)
+        eased = _smoothstep(self._bg_rate)
+        self._bg_clock += dt * eased
+        if eased <= _BG_RATE_FLOOR and self._bg_rate <= 0.0:
+            # Fully coasted: drop the callback. The last frame drawn stays on screen.
+            self._bg_running = False
+            return False
+        return True
+
+    def _sync_shader_layer(self) -> None:
+        """Attach or detach the D3D shader renderer to match the active background.
+        Lazy: the renderer (and its D3D shaders) are created the first time a shader
+        background is set, reusing the backend's own D3D device so the offscreen
+        texture can be wrapped by the D2D context with no copy. A compile failure is
+        reported once and leaves the renderer with no pixel shader, so the frame
+        shows the plain backdrop rather than a stale scene."""
+        shader = self._background if isinstance(self._background, Shader) else None
+        if shader is None:
+            return
+        if not HAVE_D3D_SHADER or self._d3d_device is None:
+            return
+        if self._d3d_shader is None:
+            self._d3d_shader = D3DShaderBackground(self._d3d_device.addr)
+            if not self._d3d_shader.available:
+                self._d3d_shader = None
+                return
+        if not self._d3d_shader.set_shader(shader):
+            self._log_shader_error()
+
+    def _log_shader_error(self) -> None:
+        err = self._d3d_shader.error if self._d3d_shader is not None else None
+        sys.stderr.write(f"[puikit] background shader failed to compile: {err}\n")
+
     # --- CRT effect chain (color side: tint / glow / bloom) ------------------
 
     @staticmethod
@@ -1390,6 +1603,16 @@ class WindowsBackend(Backend):
         # goes straight to the back buffer as before. _frame_target tells
         # _render_shadow which target to restore to after its own retarget.
         use_effect = self._post_effect is not None and self._crt is not None
+        # A shader background renders on the shared D3D device into its own texture
+        # *before* the D2D frame opens: D3D and D2D share this device's immediate
+        # context, and issuing D3D draws between BeginDraw/EndDraw is illegal. The
+        # texture is then wrapped as a D2D bitmap and drawn as the backdrop below.
+        shader_tex = None
+        if isinstance(self._background, Shader) and self._d3d_shader is not None:
+            cw, ch = self._client_size_px()
+            scale = getattr(self._background, "resolution_scale", 1.0)
+            shader_tex = self._d3d_shader.render_to_texture(
+                max(1, int(cw * scale)), max(1, int(ch * scale)), self._bg_clock)
         frame_cl = None
         if use_effect:
             frame_cl = native.dc_create_command_list(rt)
@@ -1399,8 +1622,14 @@ class WindowsBackend(Backend):
             self._frame_target = self._target_bitmap
         native.rt_begin_draw(rt)
         native.rt_set_antialias_mode(rt, native.D2D1_ANTIALIAS_MODE_PER_PRIMITIVE)
-        bg = native.D2D1_COLOR_F(_DEFAULT_BG[0] / 255, _DEFAULT_BG[1] / 255, _DEFAULT_BG[2] / 255, 1.0)
-        native.rt_clear(rt, bg)
+        # Clear to the background's backdrop when it names one, so the opacity-
+        # dissolved surface fills (and bare gaps) fall back to that color instead of
+        # the neutral dark default — matching MacOSBackend._render_into_view.
+        clear = _DEFAULT_BG
+        if self._background is not None and getattr(self._background, "backdrop", None) is not None:
+            clear = self._background.backdrop
+        native.rt_clear(rt, native.D2D1_COLOR_F(clear[0] / 255, clear[1] / 255, clear[2] / 255, 1.0))
+        self._render_background(now, shader_tex)
         self._render_display_list(now)
         hr = native.rt_end_draw(rt)
         device_lost = (hr & 0xFFFFFFFF) == 0x8899000C  # D2DERR_RECREATE_TARGET
@@ -1435,7 +1664,11 @@ class WindowsBackend(Backend):
         open BeginDraw and a cleared target."""
         rt = self._render_target
         self._transform_stack = [native.D2D1_MATRIX_3X2_F.identity()]
-        group_stack: list[tuple] = []
+        group_stack: list[tuple] = []  # (group_state, reveal_exempt)
+        # An overlay layer (modal dialog, viewer) marks its group opaque so its
+        # surface fills occlude rather than dissolve under an active surface reveal;
+        # count nesting so a widget's own groups inside the layer inherit it.
+        self._reveal_exempt_depth = 0
         for command in self._front:
             kind = command[0]
             if kind == "text":
@@ -1459,10 +1692,17 @@ class WindowsBackend(Backend):
             elif kind == "shadow":
                 self._render_shadow(*command[1:])
             elif kind == "group_begin":
-                group_stack.append(self._begin_group_render(command[1], command[2], now))
+                exempt = len(command) > 3 and command[3]
+                if exempt:
+                    self._reveal_exempt_depth += 1
+                group_stack.append(
+                    (self._begin_group_render(command[1], command[2], now), exempt))
             elif kind == "group_end":
                 if group_stack:
-                    self._end_group_render(group_stack.pop(), now)
+                    state, exempt = group_stack.pop()
+                    self._end_group_render(state, now)
+                    if exempt:
+                        self._reveal_exempt_depth -= 1
             elif kind == "clip_push":
                 native.rt_push_axis_aligned_clip(rt, self._unit_rect(*command[1:]))
             elif kind == "clip_pop":
@@ -1612,8 +1852,93 @@ class WindowsBackend(Backend):
         native.rt_draw_rectangle(self._render_target, inset, self._brush, 1.0)
 
     def _render_fill(self, x: float, y: float, w: float, h: float, style: Style) -> None:
-        self._set_brush(style.bg or _DEFAULT_BG)
+        # UI surface fills composite at the surface opacity so a background shows
+        # through; a reveal-exempt (opaque overlay) group stays opaque. Text,
+        # strokes and framed boxes are unaffected, so the UI stays legible. See
+        # MacOSBackend._render_fill / _ui_fill_alpha.
+        self._set_brush(style.bg or _DEFAULT_BG, self._ui_fill_alpha())
         native.rt_fill_rectangle(self._render_target, self._unit_rect(x, y, w, h), self._brush)
+
+    def _ui_fill_alpha(self) -> float:
+        """Opacity for UI *surface* fills: the surface opacity (set_surface_opacity),
+        or 1.0 inside a reveal-exempt overlay group so it occludes the base instead
+        of dissolving it into view (mirrors MacOSBackend._ui_fill_alpha)."""
+        if self._reveal_exempt_depth > 0:
+            return 1.0
+        return self._surface_opacity
+
+    # --- background rendering (drawn under the display list) ------------------
+
+    def _render_background(self, now: float, shader_tex: Any) -> None:
+        """Draw the active background into the frame, under the display list, so
+        every widget paints over it. Dispatch on the kind; the backdrop clear in
+        _render already painted, so each kind only adds its own content."""
+        bg = self._background
+        if isinstance(bg, Background3D):
+            self._render_animation(bg)
+        elif isinstance(bg, Wallpaper):
+            self._render_wallpaper(bg)
+        elif isinstance(bg, Shader):
+            self._render_shader_backdrop(shader_tex)
+
+    def _render_animation(self, bg: Any) -> None:
+        """Stroke the animation scene under the display list. The projection is pure
+        math (``ANIMATIONS[bg.kind]`` returns 2D segments in pixels); this only turns
+        them into stroked lines, so the backend stays free of any 3D. Fit to the live
+        client area, so it re-centers on resize. Time is ``_bg_clock`` — animated
+        time — so motion is smooth regardless of frame pacing (see
+        MacOSBackend._render_animation)."""
+        generator = ANIMATIONS.get(bg.kind)
+        if generator is None:
+            return
+        cw, ch = self._client_size_px()
+        segments = generator(float(cw), float(ch), self._bg_clock,
+                             speed=getattr(bg, "speed", 1.0))
+        if not segments:
+            return
+        color = getattr(bg, "color", None) or _BG3D_DEFAULT_COLOR
+        opacity = getattr(bg, "opacity", 1.0)
+        width = _BG3D_LINE_WIDTH * self._dpi_scale
+        rt = self._render_target
+        # A segment may carry its own alpha (depth); grouping by it keeps this to one
+        # brush color per distinct level rather than one set-color per segment.
+        for alpha, group in group_by_alpha(segments):
+            self._set_brush(color, opacity * alpha)
+            for seg in group:
+                native.rt_draw_line(rt, native.D2D1_POINT_2F(seg[0], seg[1]),
+                                    native.D2D1_POINT_2F(seg[2], seg[3]), self._brush, width)
+
+    def _render_wallpaper(self, bg: Any) -> None:
+        """Draw the wallpaper image under the display list, scaled into the live
+        client area per its ``fit``. The decoded bitmap is cached by path (via
+        _get_image); a path that fails to load draws nothing (the backdrop clear
+        already painted), so a bad path degrades gracefully."""
+        cached = self._get_image(os.path.expanduser(bg.image))
+        if cached is None:
+            return
+        bitmap, iw, ih = cached
+        cw, ch = self._client_size_px()
+        dx, dy, dw, dh = _wallpaper_dest(float(cw), float(ch), float(iw), float(ih), bg.fit)
+        dest = native.D2D1_RECT_F(dx, dy, dx + dw, dy + dh)
+        native.rt_draw_bitmap(self._render_target, bitmap, dest, bg.opacity, None)
+
+    def _render_shader_backdrop(self, shader_tex: Any) -> None:
+        """Composite the shader's rendered texture as the frame's backdrop. The
+        texture was rendered on the shared D3D device in _render (before the D2D
+        frame opened); here it is wrapped as a D2D bitmap and stretched over the
+        whole client area (the shader may render below native resolution per its
+        ``resolution_scale`` — D2D's linear filter upscales it)."""
+        if shader_tex is None:
+            return
+        bitmap = native.dc_wrap_texture_as_bitmap(self._render_target, shader_tex.addr)
+        if bitmap is None:
+            return
+        try:
+            cw, ch = self._client_size_px()
+            dest = native.D2D1_RECT_F(0.0, 0.0, float(cw), float(ch))
+            native.rt_draw_bitmap(self._render_target, bitmap, dest, 1.0, None)
+        finally:
+            bitmap.release()
 
     def _render_round_rect(
         self, x: float, y: float, w: float, h: float, radius: float | None, style: Style, hints: dict[str, Any]
@@ -2014,6 +2339,7 @@ class WindowsBackend(Backend):
         self._last_input_time = time.monotonic()
         if self._crt_roll is not None:
             self._ensure_roll_ticker()
+        self._ensure_background_ticker()
         if self._handler is not None:
             self._handler(event)
 
@@ -2202,9 +2528,11 @@ class WindowsBackend(Backend):
             # Track focus so the CRT roll only fires while our window is active;
             # re-arm the parked ticker when we regain focus (e.g. Alt-Tab back).
             self._window_active = native.loword(wparam) != 0
-            if self._window_active and self._crt_roll is not None:
+            if self._window_active:
                 self._last_input_time = time.monotonic()
-                self._ensure_roll_ticker()
+                if self._crt_roll is not None:
+                    self._ensure_roll_ticker()
+                self._ensure_background_ticker()
             return 0
         if msg == _WM_CALL_ON_MAIN_THREAD:
             self._drain_main_thread_callbacks()

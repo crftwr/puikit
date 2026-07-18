@@ -200,6 +200,17 @@ class Shader:
                Compiled at ``set_background`` time. Source that fails to compile
                draws nothing and reports the compiler error — a broken shader
                degrades to the plain backdrop rather than raising.
+      source_hlsl
+               The same scene translated to **HLSL** for the Direct3D 11 backend,
+               defining a pixel function named ``puikit_bg_fragment`` (the Windows
+               ``HLSL_PRELUDE`` — its ``cbuffer`` uniforms + vertex stage — is
+               prepended). ``None`` (the default) means the scene has no Windows
+               translation, so the Windows backend draws the plain backdrop and the
+               macOS one is unaffected. Shader source is the one genuinely
+               backend-specific part of a background: MSL and HLSL are different
+               languages, so a cross-platform scene ships both, and each backend
+               compiles the dialect it speaks. ``speed``/``opacity``/``ink``/
+               ``backdrop`` are shared — only the ``source`` differs by platform.
       speed    Multiplier on the ``time`` uniform. ``0`` freezes the scene.
       opacity  Passed through as the ``opacity`` uniform, ``0``..``1``. Advisory:
                it is the shader that decides how to use it (unlike the segment
@@ -227,6 +238,7 @@ class Shader:
     ink: Color | None = None
     backdrop: Color | None = None
     resolution_scale: float = 1.0
+    source_hlsl: str | None = None
 
     def __post_init__(self) -> None:
         v = self.opacity
@@ -239,8 +251,10 @@ class Shader:
 
     @property
     def is_noop(self) -> bool:
-        """True when the shader would draw nothing (no source, or transparent)."""
-        return not self.source or self.opacity <= 0.0
+        """True when the shader would draw nothing: transparent, or no source for
+        *any* backend (a scene with only one language's source still renders on the
+        backend that speaks it)."""
+        return (not self.source and not self.source_hlsl) or self.opacity <= 0.0
 
     @property
     def program(self) -> str:

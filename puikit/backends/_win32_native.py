@@ -1382,6 +1382,41 @@ def swapchain_bind_target(dc: ComPtr, swap_chain: ComPtr, width: int, height: in
     return bitmap
 
 
+D2D1_ALPHA_MODE_IGNORE = 3
+
+
+def dc_wrap_texture_as_bitmap(dc: ComPtr, texture_addr: int) -> ComPtr | None:
+    """Wrap a D3D11 texture (given by its COM pointer address) as a *source*
+    ID2D1Bitmap the device context can DrawBitmap, via its IDXGISurface. Used to
+    composite the D3D shader background (rendered into that texture on the same
+    device this context wraps) as the frame's backdrop. The texture stays owned by
+    the caller; the returned bitmap must be released after the draw. Returns None
+    if the surface cannot be wrapped."""
+    tex = ComPtr(texture_addr)
+    try:
+        surface = com_query_interface(tex, IID_IDXGISurface)
+    except OSError:
+        return None
+    try:
+        # A plain (non-target) source bitmap; the shader writes opaque pixels, so
+        # ALPHA_MODE_IGNORE composites it straight without a premultiply.
+        props = D2D1_BITMAP_PROPERTIES1(
+            D2D1_PIXEL_FORMAT(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+            96.0, 96.0, 0, None,
+        )
+        out = ctypes.c_void_p()
+        hr = dc.call(
+            _IDX_DC_CREATE_BITMAP_FROM_DXGI_SURFACE, ctypes.c_int32,
+            [ctypes.c_void_p, ctypes.POINTER(D2D1_BITMAP_PROPERTIES1), ctypes.POINTER(ctypes.c_void_p)],
+            surface.addr, ctypes.byref(props), ctypes.byref(out),
+        )
+    finally:
+        surface.release()
+    if not hresult_ok(hr) or not out.value:
+        return None
+    return ComPtr(out.value)
+
+
 def swapchain_resize(dc: ComPtr, swap_chain: ComPtr, target_bitmap: ComPtr, width: int, height: int) -> ComPtr:
     dc_set_target(dc, None)
     target_bitmap.release()

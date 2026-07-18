@@ -94,7 +94,8 @@ class TestDescriptor:
         from puikit import Background3D
         assert not isinstance(Shader(source="x"), Background3D)
         assert {f.name for f in dataclasses.fields(Shader)} == {
-            "source", "speed", "opacity", "ink", "backdrop", "resolution_scale"}
+            "source", "speed", "opacity", "ink", "backdrop", "resolution_scale",
+            "source_hlsl"}
 
     def test_resolution_scale_is_clamped_above_zero(self):
         # Zero would ask for a zero-sized drawable, which is an error rather than
