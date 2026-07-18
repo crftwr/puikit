@@ -1030,7 +1030,16 @@ class DrawContext:
         if pane_bg is None and "surface" in hints and self._panel is not None:
             pane_bg = self._panel.theme.surface_bg(hints["surface"])
         background = pane_bg if pane_bg is not None else self._background
-        if pane_bg is not None:
+        # Skip a redundant repaint: if the child's surface equals the background it
+        # already sits on, filling it again is a no-op on an opaque frame — but under
+        # a Background3D reveal it would dissolve the *same* surface twice, compounding
+        # to 1-(1-a)^2 and dimming the animated scene more than a singly-filled
+        # neighbour (a pane nested in a same-surface parent would show the wallpaper
+        # thinner than the bare log beside it). A grid backend can't composite, so it
+        # keeps the fill (each cell owns its bg). Mirrors the text-bg dedup in
+        # _text_style.
+        redundant = pane_bg == self._background and self._caps.supports("transparency")
+        if pane_bg is not None and not redundant:
             self._backend.fill_rect(rect.x, rect.y, rect.w, rect.h, Style(bg=pane_bg))
         # A child is focused only if this context is focused and the parent
         # marked this child as its focused one (hints["focused"]).

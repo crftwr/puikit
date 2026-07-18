@@ -154,3 +154,34 @@ def test_macos_begin_group_records_opaque_flag():
     be.begin_group(overlay_key, rect=None, opaque=True)
     assert be._back[0] == ("group_begin", id(base_key), None, False)
     assert be._back[1] == ("group_begin", id(overlay_key), None, True)
+
+
+def test_macos_nested_same_surface_fill_is_deduped():
+    # A pane nested in a same-surface parent must not fill that surface twice: under
+    # a reveal the double-blend would dim the animated scene more there than under a
+    # singly-filled neighbour (the file panes vs the bare log). draw_child skips the
+    # redundant fill on a compositing backend; a *different* surface still fills.
+    mb = pytest.importorskip("puikit.backends.macos_backend")
+    from puikit import Panel
+    from puikit.widgets import Label
+
+    def content_fill_count(child_surface: str) -> int:
+        be = mb.MacOSBackend()  # compositing backend: supports transparency
+        panel = Panel(be)
+        content = panel.theme.surface_bg("content")
+
+        class Nest(Label):
+            def draw(self, ctx):
+                ctx.draw_child(Label(""), 0, 0, ctx.size_units[0], 1.0,
+                               hints={"surface": child_surface})
+
+        # The parent slot fills "content"; the nested child then claims a surface.
+        panel.add(Nest(""), x=0, y=0, w=10, h=3, hints={"surface": "content"})
+        panel.render()
+        return sum(1 for c in be._front if c[0] == "fill" and c[-1].bg == content)
+
+    # Child re-claims "content" → only the parent slot's fill survives (deduped).
+    assert content_fill_count("content") == 1
+    # Child claims a different surface → its own fill stays; the one "content" fill
+    # is still just the parent's.
+    assert content_fill_count("header") == 1
