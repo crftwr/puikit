@@ -221,10 +221,62 @@ _BG3D_DEFAULT_COLOR = (90, 140, 200)
 #: Stroke width (points) for the background wireframe edges.
 _BG3D_LINE_WIDTH = 1.5
 
+#: An animated background is the one thing that keeps a file manager redrawing
+#: while nobody is using it, so it coasts to a stop when the app goes idle or
+#: loses focus and spins back up on the next input — the same park/re-arm shape
+#: as the CRT roll ticker (see ``_ensure_roll_ticker``), which is re-armed from
+#: ``_dispatch``.
+#:
+#: The *ramp* matters as much as the parking. Cutting the motion dead would be as
+#: noticeable as the motion itself, so the rate eases between 0 and 1 over these
+#: spans rather than switching: the scene visibly coasts to a halt and glides back
+#: up. Resuming is quicker than stopping so input feels answered, and both ends of
+#: each ramp are smoothed (see ``_smoothstep``) so the speed never changes abruptly.
+#: Seconds of no input before the animation starts slowing.
+_BG_IDLE_TIMEOUT = 15.0
+#: Seconds the coast-down and the spin-up take. Long on purpose: at these spans the
+#: rate changes by under 0.2% of full speed per frame, which puts the change below
+#: the threshold where the eye reads it as the animation "doing" something. The
+#: cost is that the background keeps running for the ramp's length after you stop
+#: — parking is deferred, not skipped.
+_BG_RAMP_DOWN = 40.0
+_BG_RAMP_UP = 15.0
+#: Below this rate the scene is close enough to still to be parked outright — the
+#: remaining motion is imperceptible and not worth a 60Hz timer.
+_BG_RATE_FLOOR = 0.02
+
 #: NSView autoresizing masks (AppKit constants, spelled out so the import block
 #: does not have to carry two more names): the UI view tracks its container's size.
 _NS_VIEW_WIDTH_SIZABLE = 2
 _NS_VIEW_HEIGHT_SIZABLE = 16
+
+def _smoothstep(t: float) -> float:
+    """Ease ``t`` (0..1) so it leaves 0 and arrives at 1 with zero slope.
+
+    Applied to the background's rate: a linear ramp would start and stop the
+    motion with a visible kick at each end, which defeats the point of ramping at
+    all. This makes the change in speed itself gradual.
+    """
+    t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _approach(current: float, target: float, dt: float,
+              up: float, down: float) -> float:
+    """Move ``current`` toward ``target`` (both 0..1) by one ``dt`` step.
+
+    Separate spans for rising and falling, so a background can coast to a stop
+    slowly while still answering input briskly. A zero-length span snaps, which
+    keeps the helper total for degenerate configuration.
+    """
+    span = up if target > current else down
+    if span <= 0.0:
+        return target
+    step = dt / span
+    if target > current:
+        return min(target, current + step)
+    return max(target, current - step)
+
 
 #: ``PUIKIT_BG_PROFILE=1`` prints a timing summary for the animated background
 #: every :data:`_BG_PROFILE_FRAMES` frames: how long the scene's generator ran, how
@@ -1091,11 +1143,20 @@ class MacOSBackend(Backend):
         # effect has no roll. Keys: active(bool), start, duration, next(start time).
         self._crt_roll: dict | None = None
         # Active background behind the UI (set_background): a Background3D
-        # (animation), a Wallpaper (static image), or None (solid). An animation
-        # drives a per-frame redraw tick; the render pass draws whichever kind under
-        # the display list. _bg_start anchors an animation's clock.
+        # (animation), a Shader (GPU), a Wallpaper (static image), or None (solid).
+        # An animated kind drives a per-frame tick; the render pass draws whichever
+        # kind under the display list.
         self._background: Any | None = None
-        self._bg_start: float = 0.0
+        # The animation's own clock, in seconds of *animated* time. Deliberately not
+        # wall-clock: it advances only by what was actually drawn (dt x the current
+        # rate), so a background that coasted to a stop and parked resumes exactly
+        # where it left off instead of jumping ahead by the idle stretch.
+        self._bg_clock: float = 0.0
+        # Current speed, 0..1, eased between by _background_tick; and whether the
+        # tick is registered (False once parked, until _dispatch re-arms it).
+        self._bg_rate: float = 1.0
+        self._bg_running: bool = False
+        self._bg_last_tick: float = 0.0
         # Loaded NSImage per wallpaper path, so the file is decoded once (not every
         # frame); keyed by the expanded path.
         self._wallpaper_images: dict[str, Any] = {}
@@ -1604,8 +1665,7 @@ class MacOSBackend(Backend):
         # because it does not repaint the UI — but the tick is now the *only* thing
         # advancing it, so leaving it out drops it to the idle rate and it animates
         # at 10fps.
-        fast = (bool(self._animations) or self._roll_active()
-                or isinstance(self._background, (Background3D, Shader)))
+        fast = bool(self._animations) or self._roll_active() or self._bg_running
         interval = self._ANIM_INTERVAL if fast else self._IDLE_TICK_INTERVAL
         if self._anim_timer is not None and self._anim_timer_interval == interval:
             return
@@ -1840,15 +1900,16 @@ class MacOSBackend(Backend):
             ui = stats["ui"]
             ui_ms = stats["frame"] / ui * 1000 if ui else 0.0
             sys.stderr.write(
-                "[puikit bg] shader   {:5.1f} fps | tick {:5.2f}ms | UI repaints {:3d} "
-                "({:5.2f}ms each) | GPU paint async, not counted\n"
-                .format(fps, stats["stroke"] / n * 1000, ui, ui_ms))
+                "[puikit bg] shader   {:5.1f} fps | rate {:4.2f} | tick {:5.2f}ms | "
+                "UI repaints {:3d} ({:5.2f}ms each)\n"
+                .format(fps, self._bg_rate, stats["stroke"] / n * 1000, ui, ui_ms))
         else:
             scene = (stats["gen"] + stats["stroke"]) / n * 1000
             sys.stderr.write(
-                "[puikit bg] segments {:5.1f} fps | frame {:5.2f}ms | scene {:5.2f}ms "
-                "(generate {:5.2f} + stroke {:5.2f}) | {:5.0f} segments in {:3.0f} paths\n"
-                .format(fps, stats["frame"] / n * 1000, scene,
+                "[puikit bg] segments {:5.1f} fps | rate {:4.2f} | frame {:5.2f}ms | "
+                "scene {:5.2f}ms (generate {:5.2f} + stroke {:5.2f}) | {:5.0f} segments "
+                "in {:3.0f} paths\n"
+                .format(fps, self._bg_rate, stats["frame"] / n * 1000, scene,
                         stats["gen"] / n * 1000, stats["stroke"] / n * 1000,
                         stats["segs"] / n, stats["paths"] / n))
         sys.stderr.flush()
@@ -1862,15 +1923,16 @@ class MacOSBackend(Backend):
         segment generator (only the wireframe cube today) — this only turns the
         returned 2D segments into an NSBezierPath and strokes them, so the backend
         stays free of any 3D. Fit to the live bounds, so it re-centers on every
-        resize. Time comes from ``_bg_start`` so the spin is wall-clock smooth
-        regardless of frame pacing."""
+        resize. Time comes from ``_bg_clock`` — animated time, not wall clock — so
+        the motion is smooth regardless of frame pacing and does not jump across an
+        idle stretch the background spent parked."""
         generator = ANIMATIONS.get(bg.kind)
         if generator is None:
             return
         bounds = self._view.bounds()
         mark = time.perf_counter() if _BG_PROFILE else 0.0
         segments = generator(
-            bounds.size.width, bounds.size.height, now - self._bg_start,
+            bounds.size.width, bounds.size.height, self._bg_clock,
             speed=getattr(bg, "speed", 1.0),
         )
         if _BG_PROFILE:
@@ -1917,7 +1979,7 @@ class MacOSBackend(Backend):
         if self._metal is None or self._metal_layer is None:
             return
         mark = time.perf_counter() if _BG_PROFILE else 0.0
-        self._metal.render_to_layer(self._metal_layer, now - self._bg_start)
+        self._metal.render_to_layer(self._metal_layer, self._bg_clock)
         if _BG_PROFILE:
             self._bg_profile_tick(time.perf_counter() - mark)
 
@@ -2671,9 +2733,13 @@ class MacOSBackend(Backend):
         window resizes — the background re-fits to the live bounds."""
         self._background = None if (background is None or background.is_noop) else background
         if isinstance(self._background, (Background3D, Shader)):
-            self._bg_start = time.monotonic()
-            # Registers the callback and (re)arms the frame timer at the fast rate.
-            self.request_animation_ticks(self._background_tick)
+            # A new background starts from the beginning of its own clock, at full
+            # rate — switching theme is itself user activity, so it should not
+            # arrive mid-coast.
+            self._bg_clock = 0.0
+            self._bg_rate = 1.0
+            self._bg_running = False
+            self._ensure_background_ticker()
         # A shader draws on the GPU into its own layer beneath the UI, so it needs
         # that layer attached (and the UI view made transparent so it shows
         # through); anything else needs it gone so the UI is opaque again.
@@ -2772,21 +2838,68 @@ class MacOSBackend(Backend):
         does not itself trigger a repaint — see _on_animation_tick — so it must ask).
         A static wallpaper never registers this, so it does not spin the timer."""
         background = self._background
+        if not isinstance(background, (Background3D, Shader)):
+            self._bg_running = False
+            return False
+        now = time.monotonic()
+        # Clamp dt so a stalled main thread (a modal drag, a slow directory read)
+        # resumes by continuing the motion rather than lurching forward by the
+        # whole stall.
+        dt = min(max(0.0, now - self._bg_last_tick), 0.25)
+        self._bg_last_tick = now
+
+        self._bg_rate = _approach(self._bg_rate, self._bg_target(now), dt,
+                                  _BG_RAMP_UP, _BG_RAMP_DOWN)
+        eased = _smoothstep(self._bg_rate)
+        # The scene's clock advances only by what was actually animated, so it
+        # never jumps: park for ten minutes and it resumes exactly where it
+        # stopped, rather than teleporting ten minutes into the scene.
+        self._bg_clock += dt * eased
+
+        if eased <= _BG_RATE_FLOOR and self._bg_rate <= 0.0:
+            # Fully coasted: drop the callback so the frame timer can fall back to
+            # the idle rate (or stop). The last frame drawn stays on screen — a
+            # shader's layer keeps its last drawable, a segment scene its last
+            # paint — so parking freezes the scene rather than clearing it.
+            # _dispatch re-arms on the next input.
+            self._bg_running = False
+            return False
+
         if isinstance(background, Shader):
             # A shader owns its own layer *behind* the UI, so advancing it does not
             # touch a single UI pixel — draw straight into that layer and leave the
             # view alone. Marking the view dirty instead (as the segment kinds must)
             # would repaint the entire file manager 60 times a second purely to move
             # a background, which measured ~8ms/frame of pure waste.
-            self._render_shader(background, time.monotonic())
-            return True
-        if not isinstance(background, Background3D):
-            return False
-        # A segment scene is drawn *in* the UI's render pass, so it can only advance
-        # by repainting the view.
-        if self._view is not None:
+            self._render_shader(background, now)
+        elif self._view is not None:
+            # A segment scene is drawn *in* the UI's render pass, so it can only
+            # advance by repainting the view.
             self._view.setNeedsDisplay_(True)
         return True
+
+    def _bg_target(self, now: float) -> float:
+        """The rate the background should be heading toward: full while the app is
+        being used, zero once it is not.
+
+        "Being used" is the window holding focus *and* recent input — an animation
+        the user cannot see (another app is front) or has walked away from is pure
+        battery drain. Mirrors ``_roll_user_active``.
+        """
+        window = self._window
+        if window is not None and not window.isKeyWindow():
+            return 0.0
+        return 1.0 if (now - self._last_input_time) < _BG_IDLE_TIMEOUT else 0.0
+
+    def _ensure_background_ticker(self) -> None:
+        """Re-arm the background tick if it parked itself while idle. Cheap to call
+        on every input: returns immediately once running."""
+        if self._bg_running or not isinstance(self._background, (Background3D, Shader)):
+            return
+        self._bg_running = True
+        # Reset the tick baseline, or the first dt would be the whole idle stretch.
+        self._bg_last_tick = time.monotonic()
+        self.request_animation_ticks(self._background_tick)
 
     def _apply_post_effect(self) -> None:
         """(Re)attach the stored effect's filter chain to the view. Safe to call
@@ -2951,6 +3064,7 @@ class MacOSBackend(Backend):
         # activity and re-arm the roll ticker if it parked itself while idle.
         self._last_input_time = time.monotonic()
         self._ensure_roll_ticker()
+        self._ensure_background_ticker()
         if self._handler is not None:
             self._handler(event)
 
