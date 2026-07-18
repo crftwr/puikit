@@ -15,6 +15,7 @@ from .capability import (
     PROFILE_MOBILE,
     PROFILE_TUI,
 )
+from .easing import EASINGS, Easing, resolve as resolve_easing
 from .event import Event, EventType
 from .font import Font, FontSlant, FontWeight
 from .background import Shader, Wallpaper
@@ -34,6 +35,8 @@ __all__ = [
     "CapabilityProfile",
     "DEFAULT_STYLE",
     "DrawContext",
+    "EASINGS",
+    "Easing",
     "Event",
     "EventType",
     "Font",
@@ -63,6 +66,7 @@ __all__ = [
     "derive_theme",
     "lift",
     "mix",
+    "resolve_easing",
     "theme_for",
     "VSplit",
 ]

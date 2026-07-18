@@ -494,6 +494,47 @@ class Backend(ABC):
         never branches; the default no-ops, so backends without the capability
         need no override."""
 
+    # --- reduced motion -------------------------------------------------------
+
+    #: Class-level default so every backend has the attribute without being made
+    #: to call ``super().__init__()``; ``set_reduced_motion`` shadows it per
+    #: instance.
+    _reduced_motion: bool = False
+
+    @property
+    def reduced_motion(self) -> bool:
+        """Whether decorative motion is suppressed — the framework's
+        ``prefers-reduced-motion`` equivalent. Read by the Panel (which resolves
+        every transition to its final state instead of playing it) and by a
+        backend that owns self-driven motion (a background shader's clock, a post
+        effect's flicker/roll)."""
+        return self._reduced_motion
+
+    def set_reduced_motion(self, enabled: bool) -> None:
+        """Suppress or restore decorative motion across the whole app.
+
+        This is an accessibility/perf setting, not a rendering one, so it is
+        deliberately *not* a capability: a capability describes what a backend
+        *can* do, while this is what the user has asked it *not* to do, and it
+        can flip at runtime. Everything animated resolves to its **final state**
+        rather than freezing mid-transition, so the UI never lands in a
+        half-played pose.
+
+        What it must not touch: ``request_animation_ticks``. That tick drives
+        *functional* work as well as decoration — draining a background thread's
+        results into the UI, following a growing log — and silencing it would
+        turn a motion preference into a broken app. A decorative self-driven
+        widget instead reads ``reduced_motion`` and draws its resting frame.
+        """
+        self._reduced_motion = bool(enabled)
+        self._on_reduced_motion_changed()
+
+    def _on_reduced_motion_changed(self) -> None:
+        """Hook for a backend that must re-apply owned motion (re-issuing its
+        background with a frozen clock, dropping a post effect's animated
+        fields). The default does nothing, so a backend with no self-driven
+        motion needs no override."""
+
     # --- post-processing effect (capability "post_effects") ------------------
 
     def set_post_effect(self, effect: "PostEffect | None") -> None:

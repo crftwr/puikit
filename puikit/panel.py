@@ -15,9 +15,11 @@ from typing import Any
 from .backend import Backend, Color, DEFAULT_STYLE, Style, TextAttribute, TRANSPARENT, is_transparent
 from .capability import CapabilityProfile
 from .color import LC_BODY, LC_LARGE, LC_MIN_NONTEXT, legible_ink
+from . import easing as easing_mod
 from .event import Event, EventType
 from .focus import FocusContainer, focus_on_click, move_focus
 from .font import Font, FontMetrics, FontSlant, FontWeight
+from . import textfx
 from .theme import Theme, theme_for
 
 # Caret blink half-period (seconds); only matters on animation-capable backends.
@@ -279,6 +281,17 @@ class DrawContext:
         capability is resolved here, not by the widget."""
         return self._caps.supports("animation") or self._caps.supports("animation_ticks")
 
+    @property
+    def reduced_motion(self) -> bool:
+        """True when the user has asked for decorative motion to be suppressed.
+
+        Distinct from ``animated``, and both must be consulted: ``animated`` is
+        what the backend *can* drive, this is what the user has asked it *not*
+        to. A self-animating widget draws its **resting/final** frame when this
+        is set — fully revealed text, a still spinner glyph — rather than
+        freezing wherever it happened to be."""
+        return self._panel.reduced_motion if self._panel is not None else False
+
     def animated_color(self, default: Any = None, key: Any = None) -> Any:
         """Current value of a color transition started on this widget via
         ``panel.animate(widget, hints={"transition": "color", ...})``, or
@@ -476,11 +489,20 @@ class DrawContext:
         return self._backend.measure_text(text, self._resolve(style))
 
     def draw_text(self, x: float, y: float, text: str, style: Style = DEFAULT_STYLE,
-                  *, ink: bool = True) -> None:
+                  *, ink: bool = True, anim_key: Any = None) -> None:
         # ``ink=False`` opts this run out of auto-ink (see Panel.auto_ink): the
         # color is drawn exactly as given, for text whose palette a widget owns
         # deliberately — syntax highlighting, a color legend — and does not want
         # normalized to a contrast floor.
+        #
+        # ``anim_key`` identifies this run's *content* to the arriving-text effect
+        # (puikit.textfx), for a widget whose content arrives while the widget
+        # itself stays on screen — a log stream. Almost no widget needs it: the
+        # default trigger animates a widget's text when the widget appears, which
+        # covers panes, dialogs and viewers. Pass a value that INCREASES
+        # monotonically over the widget's lifetime and never repeats (an absolute
+        # line number, not a row index — a row index shifts when the buffer is
+        # trimmed, and old lines would animate again). See _text_key_start.
         # Gate on the exact (possibly fractional) extent and let the
         # backend's clip rect cut the overflow: a pane squeezed to 0.97
         # base units by pixel rounding must still render its row 0, clipped at
@@ -491,6 +513,12 @@ class DrawContext:
         # the slice math is taken in whole cells so truncation stays grid-safe.
         if not -1 < y < self._rect.h:
             return
+        # Arriving-text effect (puikit.textfx). Applied here, at the single seam
+        # every widget's text passes through, which is why a widget needs no code
+        # to take part. Before the clip/slice below, so the effect transforms the
+        # whole run rather than a truncated view of it.
+        if self._panel is not None:
+            text = self._panel._text_transform(self._widget, text, anim_key)
         resolved = self._text_style(style, ink=ink)
         if resolved.font is not None:
             # Proportional / sized flow text: a character is not one base unit
@@ -821,6 +849,89 @@ class DrawContext:
         self.draw_text(0, ty, "[", style)
         self.draw_text(iw - 1, ty, "]", style)
 
+    def draw_corner_brackets(
+        self,
+        w: float,
+        h: float,
+        style: Style = DEFAULT_STYLE,
+        *,
+        arm: float = 2.0,
+        thickness: float = 1.0,
+    ) -> None:
+        """Mark a *region's* four corners with L-shaped brackets — the
+        "tactical HUD" frame, as on a targeting reticle or a mission-select map.
+
+        Distinct from :meth:`draw_focus_brackets`, which stamps ``[`` / ``]``
+        around a one-row control: this frames a whole rectangular area (a pane, a
+        viewport) by drawing only its corners, leaving the edges open. Open edges
+        are the point — a full border boxes content in and costs a whole cell of
+        width on a grid, while corners imply the frame at a quarter of the ink.
+
+        ``arm`` is how far each leg runs from its corner, in base units;
+        ``thickness`` is the stroke weight in device pixels on a vector backend
+        (ignored on a grid, where a cell is the minimum).
+
+        Resolved by capability, not backend:
+
+        * ``vector_shapes`` — eight real strokes, sub-unit thin, so the frame is a
+          hairline that does not disturb the layout.
+        * character grid — one box-drawing glyph per corner (``┏ ┓ ┗ ┛``). A grid
+          cannot draw a partial cell, so an arm of one cell *is* the corner glyph;
+          longer arms extend it with line glyphs.
+
+        Drawn *inside* the region's own rect, so it never bleeds into a
+        neighbouring widget — a caller passes the size it was given.
+        """
+        if w < 2 or h < 2:
+            return  # too small to read as a frame; drawing it would just be noise
+        style = self._resolve(style)
+        if self._caps.supports("vector_shapes"):
+            bw, bh = self.base_size
+            t = thickness / bh if bh else 0.02   # stroke weight in base units
+            tw = thickness / bw if bw else 0.02
+            # Legs are capped so at least one base unit of gap always survives
+            # between opposite arms — an arm of half the span would let them meet
+            # and close the frame into the solid border it exists to avoid.
+            ah = min(arm, max(0.0, (w - 1.0) / 2.0))
+            av = min(arm, max(0.0, (h - 1.0) / 2.0))
+            fill = Style(bg=style.fg, fg=style.fg)
+            for cx, cy, sx, sy in (
+                (0.0, 0.0, 1.0, 1.0),            # top-left
+                (w, 0.0, -1.0, 1.0),             # top-right
+                (0.0, h, 1.0, -1.0),             # bottom-left
+                (w, h, -1.0, -1.0),              # bottom-right
+            ):
+                hx = cx if sx > 0 else cx - ah
+                self.fill_rect(hx, cy if sy > 0 else cy - t, ah, t, fill)
+                vy = cy if sy > 0 else cy - av
+                self.fill_rect(cx if sx > 0 else cx - tw, vy, tw, av, fill)
+            return
+        iw, ih = round(w), round(h)
+        for x, y, glyph in (
+            (0, 0, "┏"), (iw - 1, 0, "┓"), (0, ih - 1, "┗"), (iw - 1, ih - 1, "┛"),
+        ):
+            self.draw_text(x, y, glyph, style)
+        # Extend the legs with line glyphs when the caller asked for a longer arm
+        # than the corner cell itself. Clamped to half the span so opposite arms
+        # can never meet and close the frame into a box.
+        extra = int(arm) - 1
+        if extra > 0:
+            # ``(n - 3) // 2`` is the longest leg that still leaves a blank cell
+            # between opposite arms: a leg reaching the midpoint would meet the
+            # one coming back and close the frame into a solid border. (n - 2) // 2
+            # is off by one at even sizes — the two arms end up adjacent, filling
+            # the row edge to edge with no visible gap.
+            for i in range(1, min(extra, (iw - 3) // 2) + 1):
+                self.draw_text(i, 0, "━", style)
+                self.draw_text(iw - 1 - i, 0, "━", style)
+                self.draw_text(i, ih - 1, "━", style)
+                self.draw_text(iw - 1 - i, ih - 1, "━", style)
+            for i in range(1, min(extra, (ih - 3) // 2) + 1):
+                self.draw_text(0, i, "┃", style)
+                self.draw_text(0, ih - 1 - i, "┃", style)
+                self.draw_text(iw - 1, i, "┃", style)
+                self.draw_text(iw - 1, ih - 1 - i, "┃", style)
+
     def draw_check_mark(
         self, x: float, y: float, *, checked: bool, focused: bool, theme: "Theme",
         row_bg: tuple[int, int, int] | None = None, row_h: float = 1.0,
@@ -1090,12 +1201,23 @@ _TUI_ANIM_STEPS = 2
 def _anim_progress(anim: Any, now: float) -> float:
     """Progress 0..1 of an animation. A ``stepped`` (terminal) animation snaps
     to the 2-frame schedule; otherwise progress is continuous in wall-clock
-    time. The animation channels share this so every kind steps in lockstep."""
+    time. The animation channels share this so every kind steps in lockstep.
+
+    An animation carrying an ``easing`` curve (see ``puikit.easing``) has it
+    applied to the continuous case only. A stepped animation stays **linear on
+    purpose**: its single intermediate frame exists to be visibly intermediate,
+    and a sharp curve collapses it onto the target — ``ease_out_expo(0.5)`` is
+    ``0.999``, which would turn the 2-frame beat into one abrupt jump. Channels
+    with no ``easing`` attribute (the group fade/highlight effect, whose progress
+    is only ever read as a ``< 1`` binary) are unaffected.
+    """
     if anim.stepped:
         return min(1.0, anim.step / _TUI_ANIM_STEPS)
     if anim.duration <= 0:
         return 1.0
-    return min(1.0, max(0.0, (now - anim.start) / anim.duration))
+    p = min(1.0, max(0.0, (now - anim.start) / anim.duration))
+    curve = getattr(anim, "easing", None)
+    return p if curve is None else curve(p)
 
 
 @dataclass
@@ -1134,6 +1256,10 @@ class _GeometryAnimation:
     on_complete: Any | None = None
     stepped: bool = False
     step: int = 0
+    # Timing curve for the continuous case (``puikit.easing``). ``None`` keeps
+    # the historical constant-velocity motion, so an existing slide/size/scale
+    # is unchanged unless it names a curve.
+    easing: Any | None = None
 
     def progress(self, now: float) -> float:
         return _anim_progress(self, now)
@@ -1157,6 +1283,10 @@ class _ColorAnimation:
     to_color: tuple
     stepped: bool = False
     step: int = 0
+    # Usually left ``None`` (linear): an eased color tween spends most of its
+    # duration near the target color, which reads as the wrong color rather than
+    # as timing. Available for the case where a value should *flash* and settle.
+    easing: Any | None = None
 
     def progress(self, now: float) -> float:
         return _anim_progress(self, now)
@@ -1222,6 +1352,30 @@ class Panel:
         # Running color tweens keyed by (widget, key); the widget reads the
         # current value via DrawContext.animated_color (see _ColorAnimation).
         self._color_anims: dict[tuple[Any, Any], _ColorAnimation] = {}
+        # --- text animation (see puikit.textfx) ---------------------------------
+        # An arriving-text effect is theme-carried and applies inside draw_text,
+        # so widgets take part without knowing it exists. Two pieces of state:
+        # which widgets are mid-animation (id -> start time), and which were drawn
+        # in the PREVIOUS frame, which is how "this widget just appeared" is
+        # detected without diffing any strings.
+        self._text_anims: dict[int, float] = {}
+        self._text_drawn_prev: set[int] = set()
+        self._text_drawn_now: set[int] = set()
+        # Content-level trigger, for a widget whose content ARRIVES while it
+        # stays on screen (a log stream). Such a widget passes a monotonically
+        # increasing ``anim_key`` per string; the Panel remembers the highest it
+        # has seen per widget (``_text_marks``) and animates anything above it.
+        # A mark is one integer, not a set of every key ever drawn, which is what
+        # keeps this bounded for a stream that runs for days. In-flight keys are
+        # held separately and expire, so a key mid-animation is not mistaken for
+        # already-seen on the next frame.
+        self._text_marks: dict[int, Any] = {}
+        self._text_key_anims: dict[int, dict[Any, float]] = {}
+        # Per-frame count of strings each widget has drawn, for the stagger
+        # cascade and the max_strings cap. Cleared at the top of every render.
+        self._text_seq: dict[int, int] = {}
+        # Explicit override; None means "read the active theme" (the normal path).
+        self._text_effect_override: Any = None
         # Running group optical effects (fade/highlight) keyed by widget, played
         # as a one-frame stand-in on non-compositing backends (see
         # _EffectAnimation and _apply_group_effect).
@@ -1471,6 +1625,7 @@ class Panel:
 
     def render(self) -> None:
         self._sync_text_input()
+        self._text_frame_reset()
         if self._layout is not None:
             self._apply_layout()
         self.backend.clear()
@@ -1706,6 +1861,12 @@ class Panel:
         stepped = caps.supports("animation_ticks") and not smooth
         if not (smooth or stepped):
             return False  # still backend: the target state shows on next render
+        if self.reduced_motion:
+            # Same contract as a still backend: the target state is already what
+            # the next render draws, and returning False makes an ``on_complete``
+            # caller (a drawer popping its layer once closed) do its follow-up at
+            # once rather than wait on a transition that will never tick.
+            return False
 
         if transition == "color":
             self._start_color_animation(widget, hints, stepped)
@@ -1730,6 +1891,193 @@ class Panel:
         elif smooth:
             self.backend.animate(widget, hints)
         return True
+
+    # --- text animation -------------------------------------------------------
+
+    @property
+    def text_effect(self) -> Any:
+        """The active arriving-text effect (see :mod:`puikit.textfx`), or ``None``.
+
+        Read from the **theme** (``theme.extras['text_effect']``) unless an app
+        has set one explicitly, so turning the effect on is a theme data change
+        and no app code ever branches on which theme is active. ``None`` under
+        reduced motion, which is what makes every widget honor that setting
+        without a line of its own."""
+        if self.backend.reduced_motion:
+            return None
+        if self._text_effect_override is not None:
+            return textfx.coerce(self._text_effect_override)
+        theme = self.theme
+        extras = getattr(theme, "extras", None) if theme is not None else None
+        return textfx.coerce(extras.get("text_effect")) if extras else None
+
+    def set_text_effect(self, effect: Any) -> None:
+        """Force an arriving-text effect regardless of theme (a name, a params
+        dict, a ``TextEffect``, or ``None`` to go back to reading the theme)."""
+        self._text_effect_override = effect
+
+    def animate_text(self, widget: Any) -> bool:
+        """Replay the arriving-text effect over ``widget`` now.
+
+        The escape hatch beside the automatic trigger. Text animates on its own
+        when a widget *appears*; a widget that stays on screen while its content
+        is wholly replaced — a file pane changing directory, a viewer loading a
+        new file — calls this to say so. One call per widget, not per string.
+
+        Returns whether anything was scheduled: ``False`` when no effect is
+        active (no theme opted in, or reduced motion), so a caller can tell.
+        """
+        if self.text_effect is None:
+            return False
+        self._text_anims[id(widget)] = time.monotonic()
+        self.backend.request_animation_ticks(self._animation_tick)
+        return True
+
+    def _text_frame_reset(self) -> None:
+        """Start-of-frame bookkeeping: this frame's drawn set becomes next
+        frame's 'was drawn before', and the per-widget string counters clear."""
+        self._text_drawn_prev = self._text_drawn_now
+        self._text_drawn_now = set()
+        self._text_seq.clear()
+
+    def _text_transform(self, widget: Any, text: str, anim_key: Any = None) -> str:
+        """``text`` as the running arriving-text effect would draw it, or
+        unchanged. Called from ``DrawContext.draw_text`` for every run.
+
+        This is the whole per-widget cost of the text animation system: nothing.
+        A widget draws its string normally and the effect is applied here.
+
+        ``anim_key`` opts a widget into the finer, *content-level* trigger — see
+        ``_text_key_start``. Widgets that pass nothing (almost all of them) get
+        the plain appear trigger.
+        """
+        effect = self.text_effect
+        if effect is None or not text or widget is None:
+            return text
+        if not getattr(widget, "animates_text", True):
+            return text  # widget opted out (a text field, a live counter)
+        wid = id(widget)
+        self._text_drawn_now.add(wid)
+        staggered = True
+        if anim_key is not None:
+            start = self._text_key_start(wid, anim_key)
+            # Each key carries its own clock (it started when that content
+            # arrived), so a positional stagger would be wrong here: a lone new
+            # log line at the bottom of a screen would be delayed by one stagger
+            # step per row above it.
+            staggered = False
+        else:
+            start = self._text_anims.get(wid)
+            if start is None:
+                # Not animating. Trigger on APPEARANCE: a widget absent from the
+                # previous frame has just arrived, so its text animates in. A
+                # widget already on screen does NOT retrigger — which is what
+                # keeps scrolling a list, or a status bar counting up, from
+                # re-animating every frame. Content that changes in place
+                # announces itself through ``animate_text``.
+                if wid in self._text_drawn_prev:
+                    return text
+                start = time.monotonic()
+                self._text_anims[wid] = start
+                self.backend.request_animation_ticks(self._animation_tick)
+        if start is None:
+            return text
+        seq = self._text_seq.get(wid, 0)
+        self._text_seq[wid] = seq + 1
+        if effect.max_strings and seq >= effect.max_strings:
+            # Past the cascade cap: draw complete rather than queueing an
+            # animation the user would wait seconds to see finish.
+            return text
+        fn = effect.fn
+        if fn is None:
+            return text
+        stagger = effect.stagger_ms if staggered else 0
+        elapsed = (time.monotonic() - start) * 1000.0 - seq * stagger
+        if elapsed < 0:
+            elapsed = 0.0 if stagger else elapsed
+        p = elapsed / max(1, effect.duration_ms)
+        p = 0.0 if p < 0.0 else 1.0 if p > 1.0 else p
+        p = easing_mod.resolve(effect.easing, default=easing_mod.linear)(p)
+        # Decorrelate each string's noise by folding its position within the
+        # widget into the churn counter. Without this, two rows of the same
+        # length scramble to the *identical* junk on the same frame — a pane of
+        # equal-width rows then reads as a repeating pattern rather than as data.
+        # Offsetting rather than reseeding keeps the churn rate intact, since
+        # frame still advances at scramble_fps.
+        frame = int(time.monotonic() * effect.scramble_fps) + seq * 7919
+        return fn(text, p, frame, effect.params)
+
+    def _text_key_start(self, wid: int, key: Any) -> float | None:
+        """Start time for a content-keyed string, or ``None`` if it should not
+        animate.
+
+        The trigger for content that *arrives* while its widget stays on screen —
+        a log line appended to a running stream. The plain appear trigger cannot
+        see this (the widget never left), and ``animate_text`` is too coarse (it
+        would re-animate every visible line, not the new one).
+
+        Keys must increase monotonically over the widget's lifetime. That is what
+        lets "new" be a single comparison against a high-water mark instead of a
+        set of every key ever drawn — so a log running for days costs one integer,
+        and a line scrolled back into view is correctly recognized as old rather
+        than re-animating.
+        """
+        in_flight = self._text_key_anims.get(wid)
+        start = in_flight.get(key) if in_flight is not None else None
+        if start is not None:
+            return start  # mid-animation; keep its own clock
+        mark = self._text_marks.get(wid)
+        try:
+            already_seen = mark is not None and key <= mark
+        except TypeError:
+            already_seen = False  # non-orderable keys: treat every new one as new
+        if already_seen:
+            return None
+        # Created only on a real start, never merely on being drawn, so a settled
+        # widget leaves no empty entry behind and "is anything arriving?" stays a
+        # plain truth test on this map.
+        start = time.monotonic()
+        self._text_key_anims.setdefault(wid, {})[key] = start
+        self._text_marks[wid] = key
+        self.backend.request_animation_ticks(self._animation_tick)
+        return start
+
+    def _text_anims_done(self, now: float) -> None:
+        """Drop widgets whose text has fully arrived. A widget's animation ends
+        once its longest-staggered string has run its course."""
+        effect = self.text_effect
+        if effect is None:
+            self._text_anims.clear()
+            self._text_key_anims.clear()
+            return
+        for wid in [w for w, start in self._text_anims.items()
+                    if (now - start) * 1000.0 >= effect.duration_ms
+                    + effect.stagger_ms * max(1, self._text_seq.get(w, 1))]:
+            del self._text_anims[wid]
+        # Content-keyed strings each carry their own clock, so they expire
+        # individually. Dropping them is what bounds this map: only strings still
+        # arriving are held, never the whole history the mark stands for.
+        for wid, in_flight in list(self._text_key_anims.items()):
+            for key in [k for k, start in in_flight.items()
+                        if (now - start) * 1000.0 >= effect.duration_ms]:
+                del in_flight[key]
+            if not in_flight:
+                del self._text_key_anims[wid]
+
+    @property
+    def reduced_motion(self) -> bool:
+        """Whether decorative motion is suppressed (see
+        ``Backend.set_reduced_motion``). A self-animating widget reads this and
+        draws its resting frame instead of a moving one; transitions started
+        through ``animate`` are already resolved to their target for it."""
+        return self.backend.reduced_motion
+
+    def set_reduced_motion(self, enabled: bool) -> None:
+        """Suppress or restore decorative motion app-wide. Stored on the backend
+        (which owns background/post-effect motion) and read back through
+        ``Panel.reduced_motion``, so an app has one place to set it and widgets
+        one place to read it."""
+        self.backend.set_reduced_motion(enabled)
 
     def request_animation_ticks(self, callback: Any) -> bool:
         """Register a per-frame tick ``callback`` for a widget that animates
@@ -1781,6 +2129,8 @@ class Panel:
             out=bool(hints.get("out", False)),
             on_complete=hints.get("on_complete"),
             stepped=stepped,
+            easing=easing_mod.resolve(hints["easing"], default=easing_mod.linear)
+            if "easing" in hints else None,
         )
         self.backend.request_animation_ticks(self._animation_tick)
 
@@ -1796,6 +2146,8 @@ class Panel:
             from_color=tuple(hints["from"]),
             to_color=tuple(hints["to"]),
             stepped=stepped,
+            easing=easing_mod.resolve(hints["easing"], default=easing_mod.linear)
+            if "easing" in hints else None,
         )
         self.backend.request_animation_ticks(self._animation_tick)
 
@@ -1876,7 +2228,9 @@ class Panel:
             del self._color_anims[k]
         for w in [w for w, a in self._effect_anims.items() if a.progress(now) >= 1.0]:
             del self._effect_anims[w]
-        return bool(self._size_anims or self._color_anims or self._effect_anims)
+        self._text_anims_done(now)
+        return bool(self._size_anims or self._color_anims or self._effect_anims
+                    or self._text_anims or self._text_key_anims)
 
     def _interpolate_rect(self, widget: Any, rect: Rect) -> Rect:
         """The widget's rect with any running geometry transition applied: a

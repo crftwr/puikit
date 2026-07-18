@@ -117,6 +117,7 @@ except ImportError:  # pragma: no cover - older/partial PyObjC
     CAMetalLayer = None
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, is_transparent
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
+from ..easing import resolve as _resolve_easing
 from ..event import Event, EventType, char_key_event
 from ..font import Font, FontMetrics, FontWeight
 from ..text import display_width, glyph_runs as _glyph_runs
@@ -635,8 +636,11 @@ class Animation:
         return min(1.0, max(0.0, (now - self.start) / self.duration))
 
     def eased(self, now: float) -> float:
-        p = self.progress(now)
-        return 1.0 - (1.0 - p) ** 2  # ease-out
+        """Progress shaped by the transition's timing curve. The ``easing`` hint
+        names one from ``puikit.easing``; with none named this stays
+        ``ease_out_quad`` — the curve that was hardcoded here before easing became
+        selectable — so an existing transition is unchanged."""
+        return _resolve_easing(self.hints.get("easing"))(self.progress(now))
 
     def done(self, now: float) -> bool:
         return self.progress(now) >= 1.0
@@ -2064,10 +2068,22 @@ class MacOSBackend(Backend):
             cx = (rect.x + rect.w / 2.0) * self._base_w
             cy = (rect.y + rect.h / 2.0) * self._base_h
             CGContextSaveGState(cg)
+            # A scale may opt into fading in as it grows ("fade": True) — the
+            # "materialize" look a modal wants, where scaling alone reads as a
+            # fully-opaque box lurching to size. It needs the SAME offscreen
+            # transparency layer a plain fade does (see animation_compositing.md):
+            # compositing the group once at the group alpha, rather than
+            # multiplying each primitive's alpha, which double-blends where the
+            # dialog's own fills overlap. Opened before the CTM so the layer
+            # covers the transformed content.
+            fade = bool(animation.hints.get("fade", False))
+            if fade:
+                CGContextSetAlpha(cg, eased)
+                CGContextBeginTransparencyLayer(cg, None)
             CGContextTranslateCTM(cg, cx, cy)
             CGContextScaleCTM(cg, scale, scale)
             CGContextTranslateCTM(cg, -cx, -cy)
-            return (animation, rect, True, False)
+            return (animation, rect, True, fade)
         # "highlight" draws its color overlay at group end; unknown kinds no-op.
         return (animation, rect, False, False)
 
@@ -2825,11 +2841,39 @@ class MacOSBackend(Backend):
         "Being used" is the window holding focus *and* recent input — an animation
         the user cannot see (another app is front) or has walked away from is pure
         battery drain. Mirrors ``_roll_user_active``.
+
+        Reduced motion targets zero for the same reason idleness does, and reuses
+        the same ramp: the scene *decelerates* to a stop and holds its last frame
+        as a still backdrop, rather than cutting out mid-motion. An endlessly
+        looping ambient scene has no "final frame" to resolve to, so its rest
+        state is a still one.
         """
+        if self.reduced_motion:
+            return 0.0
         window = self._window
         if window is not None and not window.isKeyWindow():
             return 0.0
         return 1.0 if (now - self._last_input_time) < _BG_IDLE_TIMEOUT else 0.0
+
+    def _on_reduced_motion_changed(self) -> None:
+        """Re-arm the ticker so the change is acted on now: turning reduced motion
+        *on* needs a tick to ramp the scene down (it may have been parked), and
+        turning it *off* needs one to ramp back up. Re-applying the post effect
+        starts or stops its rolling band to match."""
+        self._ensure_background_ticker()
+        self._apply_post_effect()
+
+    @property
+    def _live_post_effect(self) -> Any | None:
+        """The stored effect as it should actually be composited *right now* —
+        stripped of its moving parts while reduced motion is on (see
+        ``PostEffect.without_motion``). The stored value is left untouched, so
+        turning the setting back off restores the full effect without the app
+        re-issuing it."""
+        effect = self._post_effect
+        if effect is None or not self.reduced_motion:
+            return effect
+        return effect.without_motion()
 
     def _ensure_background_ticker(self) -> None:
         """Re-arm the background tick if it parked itself while idle. Cheap to call
@@ -2847,7 +2891,7 @@ class MacOSBackend(Backend):
         self._sync_roll()  # start/stop the rolling-band animation (view-independent)
         if self._view is None or not _HAS_COREIMAGE:
             return
-        filters = _build_ci_filters(self._post_effect)
+        filters = _build_ci_filters(self._live_post_effect)
         # layerUsesCoreImageFilters lets a layer-backed NSView run CI filters over
         # its own drawn content; contentFilters is that chain (empty = cleared).
         self._view.setWantsLayer_(True)
@@ -2860,7 +2904,8 @@ class MacOSBackend(Backend):
         The ticker (see _crt_roll_tick) schedules rolls and drives the per-frame
         redraw while one sweeps; it also parks itself when the app goes idle and
         is re-armed from _dispatch on the next input (see _ensure_roll_ticker)."""
-        wants = self._post_effect is not None and self._post_effect.roll > 0
+        effect = self._live_post_effect  # no roll at all under reduced motion
+        wants = effect is not None and effect.roll > 0
         if wants:
             if self._crt_roll is None:
                 self._crt_roll = {"active": False, "start": 0.0, "duration": 0.0,

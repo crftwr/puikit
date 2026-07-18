@@ -42,6 +42,7 @@ from ._d3d_shader import HAVE_D3D_SHADER, D3DShaderBackground
 from ..background import Shader, Wallpaper
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, is_transparent
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
+from ..easing import resolve as _resolve_easing
 from ..event import Event, EventType, char_key_event
 from ..font import Font, FontMetrics
 from ..text import display_width, glyph_runs as _glyph_runs
@@ -324,8 +325,10 @@ class Animation:
         return min(1.0, max(0.0, (now - self.start) / self.duration))
 
     def eased(self, now: float) -> float:
-        p = self.progress(now)
-        return 1.0 - (1.0 - p) ** 2  # ease-out
+        """Progress shaped by the transition's timing curve — see the macOS
+        backend's ``Animation.eased``; the two must stay identical so a named
+        curve plays the same on both."""
+        return _resolve_easing(self.hints.get("easing"))(self.progress(now))
 
     def done(self, now: float) -> bool:
         return self.progress(now) >= 1.0
@@ -1249,10 +1252,30 @@ class WindowsBackend(Backend):
     def _bg_target(self, now: float) -> float:
         """The rate the animated background heads toward: full while the app is in
         use (our window active AND recent input), zero once it is not — an animation
-        the user cannot see is pure drain. Mirrors _roll_user_active."""
-        if not self._window_active:
+        the user cannot see is pure drain. Mirrors _roll_user_active.
+
+        Reduced motion targets zero through the same ramp, so the scene
+        decelerates to a stop and holds its last frame as a still backdrop (see
+        the macOS backend's ``_bg_target`` — the two must agree)."""
+        if self.reduced_motion or not self._window_active:
             return 0.0
         return 1.0 if (now - self._last_input_time) < _BG_IDLE_TIMEOUT else 0.0
+
+    def _on_reduced_motion_changed(self) -> None:
+        """Re-arm the ticker so the ramp (down or back up) runs now, and re-sync
+        the roll band. Mirrors the macOS backend."""
+        self._ensure_background_ticker()
+        self._sync_roll()
+
+    @property
+    def _live_post_effect(self) -> Any | None:
+        """The stored effect as it should be composited right now — stripped of
+        its moving parts while reduced motion is on (see
+        ``PostEffect.without_motion``). Mirrors the macOS backend."""
+        effect = self._post_effect
+        if effect is None or not self.reduced_motion:
+            return effect
+        return effect.without_motion()
 
     def _ensure_background_ticker(self) -> None:
         """Re-arm the background tick if it parked while idle. Cheap to call on
@@ -1413,7 +1436,7 @@ class WindowsBackend(Backend):
         """Paint the scanline / vignette / roll overlays over the composited frame
         on the swap-chain target. Drawn after the glow/bloom so the bloom (which
         blurs content only) can't wash the scanlines out."""
-        effect = self._post_effect
+        effect = self._live_post_effect
         if effect.scanline > 0:
             self._render_scanlines(effect.scanline)
         if effect.vignette > 0:
@@ -1507,7 +1530,8 @@ class WindowsBackend(Backend):
         The ticker (see _crt_roll_tick) schedules rolls and drives the per-frame
         redraw while one sweeps; it parks itself when the app goes idle and is
         re-armed from _dispatch on the next input (see _ensure_roll_ticker)."""
-        wants = self._post_effect is not None and self._post_effect.roll > 0
+        effect = self._live_post_effect  # no roll at all under reduced motion
+        wants = effect is not None and effect.roll > 0
         if wants:
             if self._crt_roll is None:
                 self._crt_roll = {"active": False, "start": 0.0, "duration": 0.0, "next": 0.0}
@@ -2166,17 +2190,49 @@ class WindowsBackend(Backend):
             scale = from_scale + (1.0 - from_scale) * eased
             cx = (rect.x + rect.w / 2.0) * self._base_w
             cy = (rect.y + rect.h / 2.0) * self._base_h
+            # A scale may opt into fading in as it grows ("fade": True) — the
+            # "materialize" look a modal wants. It needs the same offscreen layer
+            # a plain fade does, for the same reason (composite the group once at
+            # the group opacity, rather than double-blending overlapping fills).
+            # Matches the macOS backend's scale branch; the two must stay in step.
+            fade = bool(animation.hints.get("fade", False))
+            if fade:
+                params = native.D2D1_LAYER_PARAMETERS(
+                    # Pushed BEFORE the transform, so these bounds are in
+                    # untransformed space — the plain widget rect. That is the
+                    # right bound for a grow-into-place scale (from_scale < 1),
+                    # where the content is inset toward the center and always
+                    # inside the rect. A from_scale ABOVE 1 would start larger
+                    # than the rect and be clipped to it on the way in; no caller
+                    # does that today, and a shrink-into-place entrance would need
+                    # these bounds widened by from_scale first.
+                    contentBounds=self._unit_rect(rect.x, rect.y, rect.w, rect.h),
+                    geometricMask=None,
+                    maskAntialiasMode=native.D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                    maskTransform=native.D2D1_MATRIX_3X2_F.identity(),
+                    opacity=eased,
+                    opacityBrush=None,
+                    layerOptions=native.D2D1_LAYER_OPTIONS_NONE,
+                )
+                native.rt_push_layer(self._render_target, params, None)
             m = native.D2D1_MATRIX_3X2_F.scale_about(scale, scale, cx, cy)
             self._transform_stack[-1] = m
             native.rt_set_transform(self._render_target, m)
-            return (animation, rect, "transform")
+            return (animation, rect, "layer+transform" if fade else "transform")
         # "highlight" draws its color overlay at group end; unknown kinds no-op.
         return (animation, rect, None)
 
     def _end_group_render(self, state: tuple, now: float) -> None:
-        animation, rect, marker = state  # marker ∈ {None, "transform", "layer"}
+        # marker ∈ {None, "transform", "layer", "layer+transform"}
+        animation, rect, marker = state
         self._transform_stack.pop()
-        if marker == "layer":
+        if marker == "layer+transform":
+            # A fading scale: undo in the reverse order it was set up — restore
+            # the transform first, then composite the layer back at its opacity,
+            # so the pop happens in the same space the push did.
+            native.rt_set_transform(self._render_target, self._transform_stack[-1])
+            native.rt_pop_layer(self._render_target)
+        elif marker == "layer":
             # Composite the fade group's offscreen layer back at its opacity.
             native.rt_pop_layer(self._render_target)
         elif marker == "transform":

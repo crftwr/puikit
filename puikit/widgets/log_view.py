@@ -273,6 +273,13 @@ class LogView(Widget):
         self.padding_units = padding_units
 
         self.lines: list[LogLine] = []
+        # How many lines have been dropped off the front by _trim. A line's
+        # position in ``self.lines`` shifts every time that happens, so
+        # ``_dropped + position`` is the only identity that stays put for the
+        # life of the stream — which is what the arriving-text effect needs to
+        # tell a genuinely new line from an old one scrolled back into view
+        # (see DrawContext.draw_text's anim_key).
+        self._dropped = 0
         if lines is not None:
             self.extend(lines)
 
@@ -335,6 +342,10 @@ class LogView(Widget):
         self._trim()
 
     def clear(self) -> None:
+        # Advance the identity counter past the discarded lines, so a line
+        # appended after a clear can never reuse a key the arriving-text effect
+        # has already retired (it would then be treated as old and not animate).
+        self._dropped += len(self.lines)
         self.lines = []
         self.offset = 0.0
         self._follow = self.auto_scroll
@@ -342,6 +353,7 @@ class LogView(Widget):
         self._invalidate()
 
     def set_lines(self, lines: Iterable[str | LogLine]) -> None:
+        self._dropped += len(self.lines)  # see clear()
         self.lines = []
         self._reset_selection()
         self.extend(lines)
@@ -358,7 +370,9 @@ class LogView(Widget):
         # pay that O(n) rebuild once per chunk rather than once per append.
         chunk = max(64, cap // 8)
         if len(self.lines) > cap + chunk:
-            del self.lines[: len(self.lines) - cap]
+            dropped = len(self.lines) - cap
+            del self.lines[:dropped]
+            self._dropped += dropped
             self._reset_selection()
             self._invalidate()
 
@@ -413,6 +427,21 @@ class LogView(Widget):
                 acc += len(rows)
                 self._row_starts.append(acc)
             self._total_rows = acc
+
+    def _row_key(self, index: int) -> int:
+        """Stable identity of the *logical line* display row ``index`` belongs to,
+        for the arriving-text effect (see ``DrawContext.draw_text``'s ``anim_key``).
+
+        Keyed on the logical line rather than the display row for two reasons: a
+        wrapped line's rows then share one key and reveal together as one line,
+        and the key survives a re-wrap on resize, which renumbers display rows but
+        not logical lines. ``_dropped`` absorbs buffer trimming, so this only ever
+        increases over the widget's lifetime — the property the Panel relies on to
+        tell a new line from an old one scrolled back into view.
+        """
+        if not self.wrap or not self._row_starts:
+            return self._dropped + index
+        return self._dropped + bisect.bisect_right(self._row_starts, index) - 1
 
     def _row_at(self, index: int) -> LogLine:
         """The (text, style) of global display row ``index``."""
@@ -506,7 +535,12 @@ class LogView(Widget):
         self, ctx: DrawContext, index: int, text: str, y: float, style: Style, width: int, theme
     ) -> None:
         clipped = truncate_to_width(text, width)
-        ctx.draw_text(self._pad_x, y, clipped, style)
+        # A log stream is the case the default "animate when the widget appears"
+        # trigger cannot serve: the view stays on screen for the life of the app
+        # while its content keeps arriving. Naming each line's stable identity
+        # lets the effect play on genuinely new lines only — not on the ones
+        # already read, and not again when the user scrolls back over them.
+        ctx.draw_text(self._pad_x, y, clipped, style, anim_key=self._row_key(index))
         if not self.selectable:
             return
         span = self._row_highlight_span(index)

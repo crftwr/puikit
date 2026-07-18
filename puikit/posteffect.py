@@ -98,6 +98,20 @@ class PostEffect:
         active theme's foreground when a preset leaves it unset)."""
         return replace(self, tint=tint)
 
+    def without_motion(self) -> "PostEffect":
+        """A copy with the *self-driven* fields dropped, keeping the static look.
+
+        This is what a backend composites while reduced motion is on. Only
+        ``flicker`` (per-frame brightness wobble) and ``roll`` (the sweeping
+        vertical-hold band) actually move; ``bloom``/``scanline``/``vignette``/
+        ``curvature``/``glow``/``drop_shadow`` are fixed properties of the
+        surface, so the screen keeps its material identity — a CRT theme still
+        looks like a CRT — and only the moving parts stop. Defining that split
+        here rather than per backend keeps macOS and Windows from disagreeing
+        about which fields count as motion.
+        """
+        return replace(self, flicker=0.0, roll=0.0)
+
 
 #: The default CRT screen effect — a soft phosphor glow: a tight bloom halo on
 #: bright text, subtle scanlines, a light vignette, and an occasional rolling

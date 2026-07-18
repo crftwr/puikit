@@ -355,3 +355,4 @@ def show_message_box(
     )
     panel.animate(box, hints={"transition": "fade", "duration_ms": 150})
     return box
+

@@ -334,3 +334,33 @@ def wrap_text(text: str, width: float, measure, *, word: bool = True) -> list[st
     if cur:
         lines.append(cur)
     return lines or [""]
+
+
+# --- scramble primitives (used by puikit.textfx) ---------------------------------
+#
+# Junk glyphs for the un-revealed tail of a text reveal, split by rendered width
+# so a substituted glyph always occupies exactly the columns its target does.
+# Picking from one ASCII pool would make a Japanese filename visibly reflow while
+# it decodes — and reflow differently in Windows Terminal than in Terminal.app,
+# whose East Asian Width judgments differ. Deliberately drawn from the "technical
+# junk" end of ASCII: digits, brackets, slashes, operators read as *data being
+# decoded*, whereas letters read as misspelled words.
+_SCRAMBLE_NARROW = "!<>-_\\/[]{}=+*^?#01234567890ABCDEF$%&@"
+#: Full-width counterparts for wide targets: katakana plus full-width symbols,
+#: every one of which is East-Asian-Wide, so it stands in for a wide glyph 1:1.
+_SCRAMBLE_WIDE = "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホ０１２３４５６７８９＃＄％＆＠"
+
+
+def scramble_char(index: int, frame: int, wide: bool) -> str:
+    """A junk glyph for column ``index`` on churn-frame ``frame``.
+
+    Deterministic — a cheap integer hash rather than ``random`` — for three
+    reasons: the same frame redrawn (a resize, an expose) shows the same junk
+    instead of flickering to something new; it touches no global RNG state a
+    caller might rely on for their own reproducibility; and it makes a reveal
+    testable, since a test can assert an exact frame.
+    """
+    pool = _SCRAMBLE_WIDE if wide else _SCRAMBLE_NARROW
+    h = (index * 2654435761 + frame * 40503) & 0xFFFFFFFF
+    h ^= h >> 13
+    return pool[h % len(pool)]
