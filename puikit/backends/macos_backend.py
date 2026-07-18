@@ -19,6 +19,7 @@ from __future__ import annotations
 import math
 import os
 import random
+import sys
 import time
 import warnings
 from dataclasses import dataclass, field, replace
@@ -67,6 +68,7 @@ from AppKit import (
     NSShadowAttributeName,
     NSMutableParagraphStyle,
     NSParagraphStyleAttributeName,
+    NSCompositingOperationCopy,
     NSCompositingOperationSourceOver,
     NSGraphicsContext,
     NSRectClip,
@@ -106,7 +108,13 @@ from Foundation import (
 import objc
 from PyObjCTools import AppHelper
 
-from ..background import ANIMATIONS, Background3D, Wallpaper, group_by_alpha
+from ..background import ANIMATIONS, Background3D, Shader, Wallpaper, group_by_alpha
+from ._metal import HAVE_METAL as _HAS_METAL, MetalBackground, PIXEL_FORMAT as _METAL_PIXEL_FORMAT
+
+try:
+    from Quartz import CAMetalLayer
+except ImportError:  # pragma: no cover - older/partial PyObjC
+    CAMetalLayer = None
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, is_transparent
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..event import Event, EventType, char_key_event
@@ -212,6 +220,21 @@ _DEFAULT_BG = (24, 24, 24)
 _BG3D_DEFAULT_COLOR = (90, 140, 200)
 #: Stroke width (points) for the background wireframe edges.
 _BG3D_LINE_WIDTH = 1.5
+
+#: NSView autoresizing masks (AppKit constants, spelled out so the import block
+#: does not have to carry two more names): the UI view tracks its container's size.
+_NS_VIEW_WIDTH_SIZABLE = 2
+_NS_VIEW_HEIGHT_SIZABLE = 16
+
+#: ``PUIKIT_BG_PROFILE=1`` prints a timing summary for the animated background
+#: every :data:`_BG_PROFILE_FRAMES` frames: how long the scene's generator ran, how
+#: long stroking it took, and the whole frame for comparison. Off by default and
+#: costs nothing when off — the timing calls are behind this flag, not merely
+#: discarded — so it can be left in place. Aimed at answering "is a dense scene
+#: affordable on the real window context?", which an offscreen bitmap benchmark
+#: cannot: this measures the layer-backed view the app actually draws into.
+_BG_PROFILE = bool(os.environ.get("PUIKIT_BG_PROFILE"))
+_BG_PROFILE_FRAMES = 60
 
 # Bundled default fonts (puikit/fonts): Noto Sans + Noto Sans Mono — the same
 # metrics-matched superfamily the Windows backend bundles, so an unnamed default
@@ -1002,6 +1025,8 @@ class MacOSBackend(Backend):
                                      # on _HAS_COREIMAGE in `capabilities` below.
             "background_3d": True,    # a background (animation / image) drawn under
                                      # the UI in the render pass (see set_background).
+            "background_shader": True,  # GPU fragment-shader background; gated on
+                                        # _HAS_METAL in `capabilities` below.
         }
     )
 
@@ -1014,6 +1039,10 @@ class MacOSBackend(Backend):
             overrides["animation"] = False
         if not _HAS_COREIMAGE:
             overrides["post_effects"] = False
+        if not _HAS_METAL or CAMetalLayer is None:
+            # No Metal bindings (or no CAMetalLayer): a shader background cannot be
+            # composited, so declare it unsupported and let the app fall back.
+            overrides["background_shader"] = False
         if overrides:
             return CapabilityProfile({**self.PROFILE, **overrides})
         return self.PROFILE
@@ -1070,6 +1099,14 @@ class MacOSBackend(Backend):
         # Loaded NSImage per wallpaper path, so the file is decoded once (not every
         # frame); keyed by the expanded path.
         self._wallpaper_images: dict[str, Any] = {}
+        # GPU background (Shader kind): the container view holding the UI view, the
+        # Metal renderer, and the CAMetalLayer composited beneath the UI. All three
+        # stay None until a shader background is actually set — see
+        # _sync_shader_layer — so an app that never uses one creates no Metal
+        # objects, and a machine without Metal never gets past the guard.
+        self._container: Any = None
+        self._metal: Any = None
+        self._metal_layer: Any = None
         # Opacity of UI surface fills (1 = opaque UI); lower composites them
         # translucently so a wallpaper behind them shows through. Backend-wide and
         # wallpaper-agnostic — set from the active theme via set_surface_opacity,
@@ -1149,7 +1186,18 @@ class MacOSBackend(Backend):
         self._view.marked_range = NSMakeRange(NSNotFound, 0)
         self._view.selected_range = NSMakeRange(0, 0)
         self._view._input_context = NSTextInputContext.alloc().initWithClient_(self._view)
-        self._window.setContentView_(self._view)
+        # A container holds the UI view so a shader background can be composited
+        # *under* it. A CALayer draws its sublayers above its own contents, so the
+        # GPU layer cannot live inside _view — it has to be a sibling behind it,
+        # which is what the container provides. _view fills the container and
+        # autoresizes with it, so every bounds-based call site is unaffected (they
+        # all read _view.bounds(), never the content view).
+        container = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, w_px, h_px))
+        container.setAutoresizesSubviews_(True)
+        self._view.setAutoresizingMask_(_NS_VIEW_WIDTH_SIZABLE | _NS_VIEW_HEIGHT_SIZABLE)
+        container.addSubview_(self._view)
+        self._container = container
+        self._window.setContentView_(container)
         self._window.setAcceptsMouseMovedEvents_(True)
         self._window.makeFirstResponder_(self._view)
         # A post effect set before open() (e.g. from the launch theme) now has a
@@ -1552,8 +1600,12 @@ class MacOSBackend(Backend):
         # animating background wants smooth 60fps; otherwise the slow idle-poll
         # rate (a roll only waiting to fire, a bare filesystem pump, or a *static*
         # wallpaper needs nothing faster).
+        # Both animated background kinds count. A shader is easy to forget here
+        # because it does not repaint the UI — but the tick is now the *only* thing
+        # advancing it, so leaving it out drops it to the idle rate and it animates
+        # at 10fps.
         fast = (bool(self._animations) or self._roll_active()
-                or isinstance(self._background, Background3D))
+                or isinstance(self._background, (Background3D, Shader)))
         interval = self._ANIM_INTERVAL if fast else self._IDLE_TICK_INTERVAL
         if self._anim_timer is not None and self._anim_timer_interval == interval:
             return
@@ -1635,6 +1687,7 @@ class MacOSBackend(Backend):
     # --- pixel rendering (called from the view's drawRect) --------------------
 
     def _render_into_view(self) -> None:
+        frame_start = time.perf_counter() if _BG_PROFILE else 0.0
         # Clear the frame. When the background names a backdrop, the opacity-dissolved
         # surface fills (and any bare gaps) fall back to *that* color instead of the
         # neutral dark default — so a light-theme app stays light where dissolved and
@@ -1644,8 +1697,21 @@ class MacOSBackend(Backend):
         bg = self._background
         if bg is not None and getattr(bg, "backdrop", None) is not None:
             clear = bg.backdrop
-        _ns_color(clear).setFill()
-        NSRectFill(self._view.bounds())
+        if isinstance(bg, Shader) and self._metal_layer is not None:
+            # A shader paints the GPU layer *behind* this view, so the view must
+            # not lay down an opaque backdrop over it. Clear to transparent with
+            # Copy (not the default source-over, which would leave the previous
+            # frame's pixels), then let the UI composite onto the layer showing
+            # through. The shader itself clears to the backdrop on its side.
+            NSGraphicsContext.currentContext().setCompositingOperation_(
+                NSCompositingOperationCopy)
+            NSColor.clearColor().setFill()
+            NSRectFill(self._view.bounds())
+            NSGraphicsContext.currentContext().setCompositingOperation_(
+                NSCompositingOperationSourceOver)
+        else:
+            _ns_color(clear).setFill()
+            NSRectFill(self._view.bounds())
         now = time.monotonic()
         # The background is drawn *before* the display list, so every widget paints
         # over it — it shows through only where the UI leaves the cleared background
@@ -1654,6 +1720,10 @@ class MacOSBackend(Backend):
             self._render_animation(bg, now)
         elif isinstance(bg, Wallpaper):
             self._render_wallpaper(bg)
+        # A Shader is deliberately absent here: it paints its own layer from the
+        # frame tick (see _background_tick), not from the UI's render pass, so a
+        # UI repaint neither needs nor triggers one. The transparent clear above is
+        # all this pass owes it.
         group_stack: list[tuple] = []  # (group_state, reveal_exempt)
         # An overlay layer (modal viewer, dialog, menu) marks its group opaque so
         # its surface fills occlude rather than dissolve under an active reveal —
@@ -1715,6 +1785,76 @@ class MacOSBackend(Backend):
         # to the whole layer afterward.
         if effect is not None and effect.roll > 0 and self._roll_active():
             self._render_roll_band(effect, now)
+        if _BG_PROFILE:
+            self._bg_profile_frame(time.perf_counter() - frame_start)
+
+    def _bg_profile_stats(self) -> dict:
+        """The profiling accumulator, created on first use."""
+        stats = getattr(self, "_bg_stats", None)
+        if stats is None:
+            stats = self._bg_stats = {"n": 0, "frame": 0.0, "gen": 0.0,
+                                      "stroke": 0.0, "segs": 0, "paths": 0,
+                                      "ui": 0, "kind": "none",
+                                      "t0": time.perf_counter()}
+        return stats
+
+    def _bg_profile_frame(self, frame_seconds: float) -> None:
+        """Record one UI repaint. Only called while PUIKIT_BG_PROFILE is set.
+
+        For a segment background this *is* the animation's frame — the scene is
+        drawn inside this pass — so it also drives the report. A shader's animation
+        is decoupled from UI repaints, so there it only counts how often the UI
+        actually redrew, and the tick drives the report instead.
+        """
+        stats = self._bg_profile_stats()
+        stats["ui"] += 1
+        stats["frame"] += frame_seconds
+        if stats["kind"] != "shader":
+            stats["n"] += 1
+            if stats["n"] >= _BG_PROFILE_FRAMES:
+                self._bg_profile_report()
+
+    def _bg_profile_tick(self, seconds: float) -> None:
+        """Record one shader tick — the background's real per-frame CPU cost."""
+        stats = self._bg_profile_stats()
+        stats["kind"] = "shader"
+        stats["stroke"] += seconds
+        stats["n"] += 1
+        if stats["n"] >= _BG_PROFILE_FRAMES:
+            self._bg_profile_report()
+
+    def _bg_profile_report(self) -> None:
+        """Print the averages since the last report and start a fresh window."""
+        stats = self._bg_stats
+        n = max(1, stats["n"])
+        # Measured, not assumed: the achieved rate is the number that says whether
+        # the animation is actually smooth. Cost per frame looks identical whether
+        # the timer is running at 60Hz or 10Hz, which is exactly how a background
+        # stuck at the idle rate goes unnoticed.
+        elapsed = max(1e-6, time.perf_counter() - stats["t0"])
+        fps = n / elapsed
+        if stats["kind"] == "shader":
+            # Two separate numbers, because they are no longer the same thing: what
+            # the background costs per animated frame, and how often the UI had to
+            # repaint at all. A healthy idle app shows a near-zero repaint count.
+            ui = stats["ui"]
+            ui_ms = stats["frame"] / ui * 1000 if ui else 0.0
+            sys.stderr.write(
+                "[puikit bg] shader   {:5.1f} fps | tick {:5.2f}ms | UI repaints {:3d} "
+                "({:5.2f}ms each) | GPU paint async, not counted\n"
+                .format(fps, stats["stroke"] / n * 1000, ui, ui_ms))
+        else:
+            scene = (stats["gen"] + stats["stroke"]) / n * 1000
+            sys.stderr.write(
+                "[puikit bg] segments {:5.1f} fps | frame {:5.2f}ms | scene {:5.2f}ms "
+                "(generate {:5.2f} + stroke {:5.2f}) | {:5.0f} segments in {:3.0f} paths\n"
+                .format(fps, stats["frame"] / n * 1000, scene,
+                        stats["gen"] / n * 1000, stats["stroke"] / n * 1000,
+                        stats["segs"] / n, stats["paths"] / n))
+        sys.stderr.flush()
+        stats.update({"n": 0, "frame": 0.0, "gen": 0.0, "stroke": 0.0,
+                      "segs": 0, "paths": 0, "ui": 0,
+                      "t0": time.perf_counter()})
 
     def _render_animation(self, bg: Any, now: float) -> None:
         """Stroke the animation scene under the display list. The projection is pure
@@ -1728,10 +1868,18 @@ class MacOSBackend(Backend):
         if generator is None:
             return
         bounds = self._view.bounds()
+        mark = time.perf_counter() if _BG_PROFILE else 0.0
         segments = generator(
             bounds.size.width, bounds.size.height, now - self._bg_start,
             speed=getattr(bg, "speed", 1.0),
         )
+        if _BG_PROFILE:
+            stats = getattr(self, "_bg_stats", None)
+            if stats is not None:
+                stats["kind"] = "segments"
+                stats["gen"] += time.perf_counter() - mark
+                stats["segs"] += len(segments)
+            mark = time.perf_counter()
         if not segments:
             return
         color = getattr(bg, "color", None) or _BG3D_DEFAULT_COLOR
@@ -1740,7 +1888,9 @@ class MacOSBackend(Backend):
         # trail). Grouping by that alpha keeps this to one stroked path per distinct
         # level rather than one per segment, and a scene that uses no per-segment
         # alpha collapses to the single 1.0 bucket — the plain uniform stroke.
+        paths = 0
         for alpha, group in group_by_alpha(segments):
+            paths += 1
             _ns_color(color, alpha=opacity * alpha).set()
             path = NSBezierPath.bezierPath()
             path.setLineWidth_(_BG3D_LINE_WIDTH)
@@ -1749,6 +1899,27 @@ class MacOSBackend(Backend):
                 path.moveToPoint_((seg[0], seg[1]))
                 path.lineToPoint_((seg[2], seg[3]))
             path.stroke()
+        if _BG_PROFILE:
+            stats = getattr(self, "_bg_stats", None)
+            if stats is not None:
+                stats["stroke"] += time.perf_counter() - mark
+                stats["paths"] += paths
+
+    def _render_shader(self, bg: Any, now: float) -> None:
+        """Draw one frame of the shader background onto its GPU layer.
+
+        Called from the render pass so the GPU frame is produced in step with the
+        UI frame that composites over it, rather than on a timer of its own (which
+        would let the two drift and tear). The whole cost here is packing 64 bytes
+        of uniforms and encoding a three-vertex draw — it does not scale with what
+        the shader actually paints, which is the entire reason this kind exists.
+        """
+        if self._metal is None or self._metal_layer is None:
+            return
+        mark = time.perf_counter() if _BG_PROFILE else 0.0
+        self._metal.render_to_layer(self._metal_layer, now - self._bg_start)
+        if _BG_PROFILE:
+            self._bg_profile_tick(time.perf_counter() - mark)
 
     def _render_wallpaper(self, bg: Any) -> None:
         """Draw the wallpaper image under the display list, scaled into the live
@@ -2492,19 +2663,90 @@ class MacOSBackend(Backend):
 
     def set_background(self, background: Any | None) -> None:
         """Set the background behind the display list (see ``Backend.set_background``):
-        a ``Background3D`` (animation), a ``Wallpaper`` (static image), or ``None``
-        (solid). An animation registers a permanent redraw tick and the render pass
-        draws the scene under every widget; a wallpaper draws its image once per
-        frame (no tick). Idempotent to re-set (e.g. on a theme switch): a no-op /
-        cleared background drops any tick and the next frame paints without it.
-        Survives window resizes — the background re-fits to the live bounds."""
+        a ``Background3D`` (animation), a ``Shader`` (GPU fragment shader), a
+        ``Wallpaper`` (static image), or ``None`` (solid). An animation or shader
+        registers a permanent redraw tick; a wallpaper draws once per frame (no
+        tick). Idempotent to re-set (e.g. on a theme switch): a no-op / cleared
+        background drops any tick and the next frame paints without it. Survives
+        window resizes — the background re-fits to the live bounds."""
         self._background = None if (background is None or background.is_noop) else background
-        if isinstance(self._background, Background3D):
+        if isinstance(self._background, (Background3D, Shader)):
             self._bg_start = time.monotonic()
             # Registers the callback and (re)arms the frame timer at the fast rate.
             self.request_animation_ticks(self._background_tick)
+        # A shader draws on the GPU into its own layer beneath the UI, so it needs
+        # that layer attached (and the UI view made transparent so it shows
+        # through); anything else needs it gone so the UI is opaque again.
+        self._sync_shader_layer()
         if self._view is not None:
             self._view.setNeedsDisplay_(True)
+
+    def _sync_shader_layer(self) -> None:
+        """Attach or detach the GPU background layer to match the active background.
+
+        Attaching is lazy — the Metal device, renderer and layer are created the
+        first time a shader background is actually set, so an app that never uses
+        one pays nothing and a machine without Metal simply never gets here. On
+        detach the layer is removed and the UI view goes back to being opaque, so
+        the ordinary render path is byte-for-byte what it was before.
+        """
+        shader = self._background if isinstance(self._background, Shader) else None
+        if shader is None:
+            if self._metal_layer is not None:
+                self._metal_layer.removeFromSuperlayer()
+                self._metal_layer = None
+                # Also give up layer backing. Hosting the GPU layer requires it,
+                # but leaving it on afterwards makes every *other* background pay
+                # whatever it costs for the rest of the session — and quietly
+                # skews any before/after comparison between kinds.
+                if self._container is not None:
+                    self._container.setWantsLayer_(False)
+            return
+        if not _HAS_METAL:
+            return
+        if self._metal is None:
+            self._metal = MetalBackground()
+            if not self._metal.available:
+                return
+        if not self._metal.set_shader(shader):
+            # Compile failure: report once and leave the layer off, so the frame
+            # shows the plain backdrop rather than a stale or garbage scene.
+            sys.stderr.write(f"[puikit] background shader failed to compile: "
+                             f"{self._metal.error}\n")
+            if self._metal_layer is not None:
+                self._metal_layer.removeFromSuperlayer()
+                self._metal_layer = None
+            return
+        if self._metal_layer is None and self._container is not None:
+            layer = CAMetalLayer.layer()
+            layer.setDevice_(self._metal.device)
+            layer.setPixelFormat_(_METAL_PIXEL_FORMAT)
+            layer.setFramebufferOnly_(True)
+            # The compositor, not a timer, decides when this is presented; drawing
+            # is driven from the same frame tick as the UI so the two stay in step.
+            layer.setPresentsWithTransaction_(False)
+            self._container.setWantsLayer_(True)
+            self._container.layer().insertSublayer_atIndex_(layer, 0)
+            self._metal_layer = layer
+        self._fit_shader_layer()
+
+    def _fit_shader_layer(self) -> None:
+        """Match the GPU layer to the container's size in *pixels* (the layer is
+        addressed in device pixels, the view in points), so the shader gets the
+        real resolution on a Retina display and re-fits across a resize."""
+        if self._metal_layer is None or self._container is None:
+            return
+        bounds = self._container.bounds()
+        scale = self._window.backingScaleFactor() if self._window is not None else 1.0
+        # A shader's cost is per pixel, so a scene that declares itself soft enough
+        # renders below native resolution and lets the compositor scale it up — on a
+        # Retina display that is the difference between affordable and not.
+        shader_scale = getattr(self._background, "resolution_scale", 1.0)
+        self._metal_layer.setFrame_(bounds)
+        self._metal_layer.setContentsScale_(scale)
+        self._metal_layer.setDrawableSize_(
+            NSMakeSize(max(1.0, bounds.size.width * scale * shader_scale),
+                       max(1.0, bounds.size.height * scale * shader_scale)))
 
     def set_surface_opacity(self, opacity: float) -> None:
         """Set the opacity of UI surface fills so a wallpaper shows through (see the
@@ -2529,8 +2771,19 @@ class MacOSBackend(Backend):
         while one is active, else return False to unregister (a bare tick callback
         does not itself trigger a repaint — see _on_animation_tick — so it must ask).
         A static wallpaper never registers this, so it does not spin the timer."""
-        if not isinstance(self._background, Background3D):
+        background = self._background
+        if isinstance(background, Shader):
+            # A shader owns its own layer *behind* the UI, so advancing it does not
+            # touch a single UI pixel — draw straight into that layer and leave the
+            # view alone. Marking the view dirty instead (as the segment kinds must)
+            # would repaint the entire file manager 60 times a second purely to move
+            # a background, which measured ~8ms/frame of pure waste.
+            self._render_shader(background, time.monotonic())
+            return True
+        if not isinstance(background, Background3D):
             return False
+        # A segment scene is drawn *in* the UI's render pass, so it can only advance
+        # by repainting the view.
         if self._view is not None:
             self._view.setNeedsDisplay_(True)
         return True
@@ -2702,6 +2955,10 @@ class MacOSBackend(Backend):
             self._handler(event)
 
     def _on_resize(self) -> None:
+        # The GPU background layer does not autoresize with the container (it is a
+        # CALayer, not a view), so it is refitted here — otherwise the shader would
+        # keep rendering at the old resolution and stretch.
+        self._fit_shader_layer()
         w, h = self.size
         self._dispatch(Event(type=EventType.RESIZE, hints={"w": w, "h": h}))
 

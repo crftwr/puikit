@@ -518,6 +518,10 @@ class Backend(ABC):
         * ``None`` → **solid**: nothing behind the UI but the surfaces' own color.
         * a ``Background3D`` → **animation**: an animated scene (the cube), drawn
           per frame with its own redraw tick.
+        * a ``Shader`` → **shader**: a GPU fragment shader painted across the
+          window, with its own redraw tick. Gated on the separate
+          ``background_shader`` capability, since it needs a GPU path the
+          segment kinds do not; a backend without it no-ops on this kind alone.
         * a ``Wallpaper`` → **wallpaper**: a single static image, drawn (no tick).
 
         Only backends with the ``background_3d`` capability act on this: a
