@@ -27,10 +27,22 @@ from typing import Callable
 
 from .backend import Color
 
-#: One projected 2D line segment ``(x0, y0, x1, y1)`` in pixels (top-left origin).
-Segment = tuple[float, float, float, float]
+#: One projected 2D line segment in pixels (top-left origin), in either of two
+#: forms: ``(x0, y0, x1, y1)`` strokes at the scene's own ``opacity``, while the
+#: 5-tuple ``(x0, y0, x1, y1, alpha)`` scales it by a per-segment ``alpha``
+#: (``0``..``1``, clamped by the backend). The optional fifth element is what lets
+#: a scene express *depth*: a starfield dims its distant stars, a trail fades along
+#: its length, an edge fades in as two nodes approach. A generator may mix both
+#: forms in one frame; the 4-tuple is exactly the 5-tuple with ``alpha=1``.
+Segment = tuple[float, ...]
 #: An animation frame generator: ``(width, height, t, *, speed) -> [Segment, ...]``.
 Segments = Callable[..., "list[Segment]"]
+
+#: Per-segment alphas are rounded to this many levels before the backend groups
+#: segments into one stroked path per level. A scene with smoothly varying alpha
+#: (a 400-star field) would otherwise cost one path per segment; quantizing caps
+#: it at this many paths per frame while staying visually continuous.
+ALPHA_LEVELS = 64
 
 
 @dataclass(frozen=True)
@@ -189,6 +201,35 @@ def wireframe_segments(
     ]
 
 
+def group_by_alpha(segments: "list[Segment]") -> "list[tuple[float, list[Segment]]]":
+    """Bucket ``segments`` by their per-segment alpha, so a backend strokes one path
+    per distinct alpha instead of one per segment.
+
+    Pure function, kept here beside the contract it implements rather than in a
+    backend: every pixel backend needs the same grouping, and here it is testable
+    with no window. A plain 4-tuple segment has no alpha and lands in the ``1.0``
+    bucket (the scene's own opacity, unscaled). Alphas are clamped to ``0``..``1``
+    and rounded to :data:`ALPHA_LEVELS` levels so a continuously-shaded scene costs
+    a bounded number of strokes; fully transparent segments are dropped entirely.
+
+    Returns ``[(alpha, [segment, ...]), ...]`` ordered by ascending alpha, so a
+    backend paints dim segments first and bright ones last — where strokes overlap,
+    the brighter one wins.
+    """
+    buckets: dict[float, list[Segment]] = {}
+    for seg in segments:
+        if len(seg) > 4:
+            a = seg[4]
+            a = 0.0 if a < 0.0 else 1.0 if a > 1.0 else float(a)
+            a = round(a * ALPHA_LEVELS) / ALPHA_LEVELS
+            if a <= 0.0:
+                continue  # invisible — never reaches the backend
+        else:
+            a = 1.0
+        buckets.setdefault(a, []).append(seg)
+    return sorted(buckets.items())
+
+
 #: A ready-made default (subtle spinning cube). Apps can address it by name via a
 #: preset table, mirroring ``posteffect.PRESETS``.
 WIREFRAME = Background3D(kind="wireframe", speed=1.0, opacity=0.6)
@@ -200,10 +241,21 @@ PRESETS: dict[str, Background3D] = {
 
 #: Animation type → the pure function that projects one frame to 2D line segments
 #: (see ``wireframe_segments``). ``Background3D.kind`` is looked up here by a
-#: backend that owns pixels, so a new animation is added by registering a segment
-#: function — no backend change. Only the wireframe cube exists today; a
-#: non-segment animation (falling ``"snow"``, a ``"particle"`` field) would extend
-#: this to a richer renderer interface when it lands.
+#: backend that owns pixels, so a new animation is added by *registering a segment
+#: function* — no backend change and no PuiKit change.
+#:
+#: This is the intended extension point for applications: PuiKit ships only the
+#: wireframe cube (a reference scene that exercises the projection path), and an
+#: app defines its own scenes in its own codebase and registers them at import::
+#:
+#:     from puikit.background import ANIMATIONS
+#:     ANIMATIONS["starfield"] = starfield_segments
+#:
+#: after which any theme naming ``kind="starfield"`` resolves to it. A generator
+#: must be a pure function of ``(width, height, t, *, speed)`` — it is called once
+#: per frame with wall-clock ``t``, so all of its motion must derive from ``t``
+#: rather than from frame-to-frame state or fresh randomness (which would make a
+#: particle jump every frame instead of travelling).
 ANIMATIONS: dict[str, "Segments"] = {
     "wireframe": wireframe_segments,
     "cube": wireframe_segments,

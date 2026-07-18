@@ -5,7 +5,8 @@ import math
 import pytest
 
 from puikit import Background3D, WIREFRAME, Wallpaper
-from puikit.background import ANIMATIONS, PRESETS, wireframe_segments, _CUBE_EDGES
+from puikit.background import (ALPHA_LEVELS, ANIMATIONS, PRESETS, group_by_alpha,
+                               wireframe_segments, _CUBE_EDGES)
 from puikit.backends.memory_backend import MemoryBackend
 from puikit import PROFILE_TUI
 
@@ -112,6 +113,67 @@ def test_speed_zero_is_static():
     a = wireframe_segments(800, 600, 0.0, speed=0.0)
     b = wireframe_segments(800, 600, 5.0, speed=0.0)
     assert a == b
+
+
+# --- the per-segment alpha contract --------------------------------------------
+
+def test_plain_segments_land_in_the_opaque_bucket():
+    # A 4-tuple carries no alpha, so it strokes at the scene's own opacity: one
+    # bucket at 1.0 holding every segment (the pre-alpha uniform-stroke behavior).
+    segs = [(0.0, 0.0, 1.0, 1.0), (2.0, 2.0, 3.0, 3.0)]
+    assert group_by_alpha(segs) == [(1.0, segs)]
+
+
+def test_the_cube_still_collapses_to_one_stroke():
+    grouped = group_by_alpha(wireframe_segments(800, 600, 1.0))
+    assert len(grouped) == 1 and grouped[0][0] == 1.0
+
+
+def test_segments_are_bucketed_by_alpha():
+    a = (0.0, 0.0, 1.0, 1.0, 0.5)
+    b = (2.0, 2.0, 3.0, 3.0, 0.5)
+    c = (4.0, 4.0, 5.0, 5.0, 1.0)
+    assert group_by_alpha([a, c, b]) == [(0.5, [a, b]), (1.0, [c])]
+
+
+def test_buckets_are_ordered_dim_to_bright():
+    # Ascending, so a backend paints dim first and bright last — where strokes
+    # overlap the brighter one wins rather than being buried.
+    grouped = group_by_alpha([
+        (0, 0, 1, 1, 0.9), (0, 0, 1, 1, 0.1), (0, 0, 1, 1, 0.5),
+    ])
+    assert [alpha for alpha, _ in grouped] == sorted(alpha for alpha, _ in grouped)
+
+
+def test_mixed_forms_coexist_in_one_frame():
+    plain = (0.0, 0.0, 1.0, 1.0)
+    faded = (2.0, 2.0, 3.0, 3.0, 0.25)
+    assert group_by_alpha([plain, faded]) == [(0.25, [faded]), (1.0, [plain])]
+
+
+def test_transparent_segments_are_dropped():
+    # A scene fading a trail to nothing emits alpha 0 rather than special-casing
+    # its own tail; those never reach the backend at all.
+    assert group_by_alpha([(0, 0, 1, 1, 0.0), (0, 0, 1, 1, -0.5)]) == []
+
+
+def test_out_of_range_alpha_is_clamped():
+    assert group_by_alpha([(0, 0, 1, 1, 5.0)]) == [(1.0, [(0, 0, 1, 1, 5.0)])]
+
+
+def test_alpha_is_quantized_to_bounded_buckets():
+    # A continuously-shaded scene (every star a slightly different alpha) must not
+    # cost one stroked path per segment.
+    segs = [(0, 0, 1, 1, i / 500.0) for i in range(1, 501)]
+    assert len(group_by_alpha(segs)) <= ALPHA_LEVELS
+
+
+def test_quantization_preserves_every_visible_segment():
+    segs = [(0, 0, 1, 1, i / 500.0) for i in range(1, 501)]
+    kept = sum(len(group) for _, group in group_by_alpha(segs))
+    # Only those quantizing to 0 are dropped; the rest all survive their bucket.
+    dropped = sum(1 for s in segs if round(s[4] * ALPHA_LEVELS) == 0)
+    assert kept == len(segs) - dropped
 
 
 # --- capability gating ---------------------------------------------------------

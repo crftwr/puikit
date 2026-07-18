@@ -106,7 +106,7 @@ from Foundation import (
 import objc
 from PyObjCTools import AppHelper
 
-from ..background import ANIMATIONS, Background3D, Wallpaper
+from ..background import ANIMATIONS, Background3D, Wallpaper, group_by_alpha
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, is_transparent
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..event import Event, EventType, char_key_event
@@ -1735,14 +1735,20 @@ class MacOSBackend(Backend):
         if not segments:
             return
         color = getattr(bg, "color", None) or _BG3D_DEFAULT_COLOR
-        _ns_color(color, alpha=getattr(bg, "opacity", 1.0)).set()
-        path = NSBezierPath.bezierPath()
-        path.setLineWidth_(_BG3D_LINE_WIDTH)
-        path.setLineJoinStyle_(1)  # NSLineJoinStyleRound — clean vertex joins
-        for (x0, y0, x1, y1) in segments:
-            path.moveToPoint_((x0, y0))
-            path.lineToPoint_((x1, y1))
-        path.stroke()
+        opacity = getattr(bg, "opacity", 1.0)
+        # A segment may carry its own alpha to express depth (a far star, a fading
+        # trail). Grouping by that alpha keeps this to one stroked path per distinct
+        # level rather than one per segment, and a scene that uses no per-segment
+        # alpha collapses to the single 1.0 bucket — the plain uniform stroke.
+        for alpha, group in group_by_alpha(segments):
+            _ns_color(color, alpha=opacity * alpha).set()
+            path = NSBezierPath.bezierPath()
+            path.setLineWidth_(_BG3D_LINE_WIDTH)
+            path.setLineJoinStyle_(1)  # NSLineJoinStyleRound — clean vertex joins
+            for seg in group:
+                path.moveToPoint_((seg[0], seg[1]))
+                path.lineToPoint_((seg[2], seg[3]))
+            path.stroke()
 
     def _render_wallpaper(self, bg: Any) -> None:
         """Draw the wallpaper image under the display list, scaled into the live
