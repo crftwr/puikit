@@ -186,6 +186,29 @@ def test_cover_layer_replaces_base_content():
     assert "VIEW" in lines[4]
 
 
+def test_stacked_cover_layer_replaces_the_one_below():
+    # A cover layer pushed over another cover layer (a file diff opened from the
+    # directory diff) fully replaces it: only the top-most cover — and anything
+    # above it — draws, so the lower one does not show through.
+    backend = MemoryBackend(width=20, height=5)
+    panel = Panel(backend)
+    panel.add(Label("BASE"), x=0, y=0, w=6, h=1)
+    # Each viewer writes on its own row so "see-through" would leave both visible.
+    panel.push_layer(Label("DIRDIFF"), z=80,
+                     hints={"x": 0, "y": 1, "w": 8, "h": 1, "cover": True})
+    panel.push_layer(Label("FILEDIFF"), z=80,
+                     hints={"x": 0, "y": 2, "w": 9, "h": 1, "cover": True})
+    lines = render(panel, backend)
+    assert "FILEDIFF" in lines[2]     # top cover draws
+    assert "DIRDIFF" not in lines[1]  # lower cover is not drawn behind it
+    assert "BASE" not in lines[0]     # base still replaced too
+
+    # Closing the top cover brings the lower one back.
+    panel.pop_layer()
+    lines = render(panel, backend)
+    assert "DIRDIFF" in lines[1]
+
+
 def test_file_drop_is_routed_to_widget_under_pointer():
     # A FILE_DROP is a positioned event: it routes to the widget under its point
     # like a mouse event, translated to widget-local coordinates, carrying the

@@ -1488,16 +1488,22 @@ class Panel:
         # change here and redo layout + drawing once against the corrected
         # size, so the first frame is already right (MenuBar only installs
         # once, so this can only recurse one level deep).
-        # A "cover" layer (a full-window modal viewer) replaces the base content
-        # rather than floating over it: skip drawing the base children/dividers so
-        # they don't sit behind it. This lets the cover layer dissolve to the
-        # animated background (see _render_layer) — the wallpaper shows through the
-        # viewer just as it does through the file manager — without the base UI
-        # bleeding through. A partial overlay (dialog / menu) carries no such hint,
-        # so the base still draws around it.
-        cover = any(slot.hints.get("cover") for slot in self._layers)
+        # A "cover" layer (a full-window modal viewer) replaces everything beneath
+        # it — the base UI *and* any lower layers — rather than floating over it. So
+        # skip the base children/dividers and start the layer pass at the top-most
+        # cover layer: a full-window viewer opened from another (a file diff from
+        # the directory diff) then fully replaces it instead of dissolving to reveal
+        # the one underneath. The cover layer and whatever floats above it (e.g. a
+        # help overlay) draw; the cover layer itself dissolves to the animated
+        # background (see _render_layer) — the wallpaper shows through it just as it
+        # does through the file manager. A partial overlay (dialog / menu) carries
+        # no such hint, so the base still draws around it.
+        cover_ix = max(
+            (i for i, s in enumerate(self._layers) if s.hints.get("cover")),
+            default=-1,
+        )
         size_before = self.backend.size_units
-        if not cover:
+        if cover_ix < 0:
             for slot in self._children:
                 self._draw_slot(slot)
             if self._layout is not None and self.backend.size_units != size_before:
@@ -1508,7 +1514,8 @@ class Panel:
                     self._draw_slot(slot)
             for divider in self._dividers:
                 self._draw_divider(divider)
-        for i, slot in enumerate(self._layers):
+        for i in range(max(cover_ix, 0), len(self._layers)):
+            slot = self._layers[i]
             # The topmost layer is modal — it owns events exclusively (see
             # dispatch_event), so it must own the pointer shape too. Discard any
             # cursor a widget *beneath* it requested right before it draws, so a
