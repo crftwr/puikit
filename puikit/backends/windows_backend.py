@@ -562,6 +562,11 @@ class WindowsBackend(Backend):
         # _render_shadow restores to *this* (not the swap-chain bitmap) after its
         # own retarget, so shadows land in the captured frame when the effect is on.
         self._frame_target: Any = None
+        # The display list recorded into an ID2D1CommandList, replayed on frames
+        # where only the background moved (see _acquire_ui_cache). None = nothing
+        # recorded; _invalidate_ui_cache drops it whenever the recorded pass would
+        # no longer be faithful.
+        self._ui_cache: Any = None
         # Rolling "vertical hold" band animation state (None = no roll running);
         # see _sync_roll / _crt_roll_tick.
         self._crt_roll: dict[str, Any] | None = None
@@ -717,6 +722,7 @@ class WindowsBackend(Backend):
         self._width_cache.clear()
         self._line_height_cache.clear()
         self._font_metrics_cache.clear()
+        self._invalidate_ui_cache()  # recorded glyphs are at the old DPI
         self._init_fonts()
 
     def _create_render_resources(self) -> None:
@@ -747,6 +753,8 @@ class WindowsBackend(Backend):
 
     def _release_render_resources(self) -> None:
         self._release_crt_chain()
+        # Recorded against this device context, so it cannot outlive it.
+        self._invalidate_ui_cache()
         # The shader renderer holds the D3D device's immediate context and its own
         # textures — tear it down before the device it lives on. It is rebuilt by
         # _create_render_resources when the device is recreated.
@@ -1179,6 +1187,7 @@ class WindowsBackend(Backend):
     def present(self) -> None:
         self._front = self._back
         self._back = []
+        self._invalidate_ui_cache()  # a new display list to record
         if self._hwnd:
             native.user32.InvalidateRect(self._hwnd, None, False)
 
@@ -1209,6 +1218,7 @@ class WindowsBackend(Backend):
         )
         self._build_crt_chain()
         self._sync_roll()
+        self._invalidate_ui_cache()  # _drop_shadow is painted into the recorded text
         if self._hwnd:
             native.user32.InvalidateRect(self._hwnd, None, False)
 
@@ -1239,6 +1249,7 @@ class WindowsBackend(Backend):
         ``_ui_fill_alpha``; a lone repaint applies it (no tick — that's
         set_background's job)."""
         self._surface_opacity = 0.0 if opacity < 0.0 else 1.0 if opacity > 1.0 else float(opacity)
+        self._invalidate_ui_cache()  # _ui_fill_alpha feeds every recorded surface fill
         if self._hwnd:
             native.user32.InvalidateRect(self._hwnd, None, False)
 
@@ -1608,6 +1619,64 @@ class WindowsBackend(Backend):
             r, g, b = color
         native.brush_set_color(self._brush, native.D2D1_COLOR_F(r / 255, g / 255, b / 255, alpha))
 
+    # --- display-list cache ---------------------------------------------------
+
+    #: Class-level default so the cache is safe to invalidate on an instance that
+    #: skipped __init__ (the unit tests build one via __new__ and set only the
+    #: handful of attributes they exercise).
+    _ui_cache: Any = None
+
+    def _invalidate_ui_cache(self) -> None:
+        """Drop the recorded display list, so the next frame re-runs the Python
+        pass and re-records. Called from every place the recorded content would
+        otherwise go stale (a new display list, a change to how it paints, or the
+        device context it was recorded on going away)."""
+        if self._ui_cache is not None:
+            self._ui_cache.release()
+            self._ui_cache = None
+
+    def _acquire_ui_cache(self, now: float) -> Any:
+        """The display list recorded as a replayable ID2D1CommandList, recording
+        it first if needed — or None when this frame must run the Python pass.
+
+        An animated background repaints the whole window on every tick, but the
+        *display list* is unchanged between those ticks: only the background moved.
+        Re-running _render_display_list for it costs one ctypes DrawText call per
+        glyph (the grid-locked text path, see _render_text), which dominates the
+        frame at any real UI size. Recording that pass once and replaying the
+        command list drops a background-only tick to a fraction of its cost; the
+        recording itself costs exactly one normal pass, so a frame that *does*
+        change the UI is no worse off than before.
+
+        Bypassed (and the cache dropped) while any group transition is running:
+        _begin_group_render reads ``now`` through self._animations, so the pass is
+        time-dependent then and a recording would freeze the transition mid-fade.
+        """
+        if self._animations:
+            self._invalidate_ui_cache()
+            return None
+        if self._ui_cache is not None:
+            return self._ui_cache
+        rt = self._render_target
+        cl = native.dc_create_command_list(rt)
+        # Record with the frame's own target pointed at the command list, so a
+        # draw_shadow inside the pass restores to *it* after its retarget rather
+        # than to the swap chain (the same contract the CRT capture relies on).
+        native.dc_set_target(rt, cl)
+        self._frame_target = cl
+        native.rt_begin_draw(rt)
+        native.rt_set_antialias_mode(rt, native.D2D1_ANTIALIAS_MODE_PER_PRIMITIVE)
+        self._render_display_list(now)
+        hr = native.rt_end_draw(rt)
+        native.command_list_close(cl)
+        native.dc_set_target(rt, self._target_bitmap)
+        self._frame_target = self._target_bitmap
+        if (hr & 0xFFFFFFFF) == 0x8899000C:  # D2DERR_RECREATE_TARGET
+            cl.release()
+            return None
+        self._ui_cache = cl
+        return cl
+
     def _render(self) -> None:
         if self._render_target is None:
             return
@@ -1629,6 +1698,10 @@ class WindowsBackend(Backend):
             scale = getattr(self._background, "resolution_scale", 1.0)
             shader_tex = self._d3d_shader.render_to_texture(
                 max(1, int(cw * scale)), max(1, int(ch * scale)), self._bg_clock)
+        # Record (or reuse) the display list before the frame's own BeginDraw —
+        # recording retargets the device context, which is illegal inside an open
+        # draw batch. None means this frame runs the Python pass inline.
+        ui_cl = self._acquire_ui_cache(now)
         frame_cl = None
         if use_effect:
             frame_cl = native.dc_create_command_list(rt)
@@ -1646,7 +1719,10 @@ class WindowsBackend(Backend):
             clear = self._background.backdrop
         native.rt_clear(rt, native.D2D1_COLOR_F(clear[0] / 255, clear[1] / 255, clear[2] / 255, 1.0))
         self._render_background(now, shader_tex)
-        self._render_display_list(now)
+        if ui_cl is not None:
+            native.dc_draw_image(rt, ui_cl)
+        else:
+            self._render_display_list(now)
         hr = native.rt_end_draw(rt)
         device_lost = (hr & 0xFFFFFFFF) == 0x8899000C  # D2DERR_RECREATE_TARGET
         if use_effect and not device_lost:
@@ -2510,6 +2586,7 @@ class WindowsBackend(Backend):
         if msg == native.WM_SIZE:
             cw, ch = native.loword(lparam), native.hiword(lparam)
             if self._render_target is not None and cw and ch:
+                self._invalidate_ui_cache()  # target bitmap is being replaced
                 self._target_bitmap = native.swapchain_resize(self._render_target, self._swap_chain, self._target_bitmap, cw, ch)
             sw, sh = self.size
             self._dispatch(Event(type=EventType.RESIZE, hints={"w": sw, "h": sh}))

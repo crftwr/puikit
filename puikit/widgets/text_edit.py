@@ -86,6 +86,10 @@ class TextEdit(Widget):
         self._field_w = float("inf")  # field width; set at draw (permissive until then)
         self._focused_now = False  # last-drawn focus state, read by the blink tick
         self._blinking = False     # whether a caret-blink tick is registered
+        # Blink phase the caret was last *rendered* at, so the tick can re-render
+        # on the phase flip alone rather than on every frame (see _blink_tick).
+        # None until the tick adopts the current phase.
+        self._blink_phase: bool | None = None
         # Text measurement bound at draw time (proportional on GUI, columns on a
         # grid), so hit-testing between frames maps clicks the same way the glyphs
         # were laid out. A column-count fallback covers events before the first draw.
@@ -241,6 +245,7 @@ class TextEdit(Widget):
             # own hardware cursor, so re-rendering for a blink we don't draw would
             # be wasted work.
             if ctx.vector_shapes and ctx.animated and not self._blinking and ctx.panel is not None:
+                self._blink_phase = None  # re-adopt the phase for this focus run
                 self._blinking = ctx.panel.request_animation_ticks(self._blink_tick)
             self._draw_caret(ctx, theme, disp, caret, caret_col, field_w, bg, ty)
             self._notify_input_position(ctx, anchor_col, field_h, disp, view, pre_start)
@@ -274,13 +279,32 @@ class TextEdit(Widget):
         # Tree-exit is the important case: when the field's dialog closes, draw
         # (which sets _focused_now) stops running, so _focused_now would stay a
         # stale True and this tick would re-render *forever* — a permanent
-        # CPU-burning render loop leaked on every dialog open/close. So clear the
-        # flag first; render re-runs draw only if the field is still on screen,
-        # which re-sets it. If it wasn't drawn, _focused_now stays False and the
-        # tick retires.
+        # CPU-burning render loop leaked on every dialog open/close.
         if not self._focused_now or self._panel is None:
             self._blinking = False
             return False
+        # Retire the moment the field stops being the focus leaf, which covers
+        # both tree-exit and a plain focus move. Asking the focus chain directly
+        # costs a short walk; the previous form inferred it from whether a full
+        # render re-set _focused_now, which is why this tick used to have to
+        # render every frame to stay correct.
+        if self._panel.focused_leaf() is not self:
+            self._focused_now = False
+            self._blinking = False
+            return False
+        # The caret is a ~_CARET_BLINK second square wave, but this tick fires
+        # every frame. Re-rendering on frames where the phase did not change
+        # rebuilds the whole display list (and invalidates the backend's recorded
+        # copy of it) ~30x per visible blink for no visible difference — which is
+        # what made a focused field the most expensive thing on screen. Render on
+        # the flip only; the first tick adopts the current phase silently.
+        phase = self._panel.caret_visible
+        if phase == self._blink_phase:
+            return True
+        if self._blink_phase is None:
+            self._blink_phase = phase
+            return True
+        self._blink_phase = phase
         self._focused_now = False
         self._panel.render()
         if not self._focused_now:
