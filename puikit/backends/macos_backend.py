@@ -1045,6 +1045,10 @@ class MacOSBackend(Backend):
         # the scene under the display list. _bg_start anchors its animation clock.
         self._background_3d: Any | None = None
         self._bg_start: float = 0.0
+        # Nesting depth of reveal-exempt (opaque overlay) groups during the render
+        # pass; while > 0 a Background3D reveal does not dissolve surface fills, so
+        # an overlay layer occludes the base instead of showing it through.
+        self._reveal_exempt_depth: int = 0
         # Wall-clock (monotonic) of the last user input, for the roll's active-use
         # gate (see _roll_user_active). Seeded to launch time so a roll can fire
         # right away if the window opens focused.
@@ -1462,8 +1466,8 @@ class MacOSBackend(Backend):
     ) -> None:
         self._back.append(("shadow", x, y, w, h, radius, corners, bg))
 
-    def begin_group(self, key: Any, rect: Any = None) -> None:
-        self._back.append(("group_begin", id(key), rect))
+    def begin_group(self, key: Any, rect: Any = None, opaque: bool = False) -> None:
+        self._back.append(("group_begin", id(key), rect, opaque))
 
     def end_group(self, key: Any) -> None:
         self._back.append(("group_end", id(key)))
@@ -1618,7 +1622,12 @@ class MacOSBackend(Backend):
         # cleared background bare (or paints a translucent fill).
         if self._background_3d is not None:
             self._render_background_3d(now)
-        group_stack: list[tuple] = []  # (anim, rect, gstate_saved, layer_opened)
+        group_stack: list[tuple] = []  # (group_state, reveal_exempt)
+        # An overlay layer (modal viewer, dialog, menu) marks its group opaque so
+        # its surface fills occlude rather than dissolve under an active reveal —
+        # otherwise the base file manager behind it would show through. Counts
+        # nesting so a widget's own groups inside the layer inherit the exemption.
+        self._reveal_exempt_depth = 0
         for command in self._front:
             kind = command[0]
             if kind == "text":
@@ -1642,10 +1651,17 @@ class MacOSBackend(Backend):
             elif kind == "shadow":
                 self._render_shadow(*command[1:])
             elif kind == "group_begin":
-                group_stack.append(self._begin_group_render(command[1], command[2], now))
+                exempt = len(command) > 3 and command[3]
+                if exempt:
+                    self._reveal_exempt_depth += 1
+                group_stack.append(
+                    (self._begin_group_render(command[1], command[2], now), exempt))
             elif kind == "group_end":
                 if group_stack:
-                    self._end_group_render(group_stack.pop(), now)
+                    state, exempt = group_stack.pop()
+                    self._end_group_render(state, now)
+                    if exempt:
+                        self._reveal_exempt_depth -= 1
             elif kind == "clip_push":
                 # NSRectClip works in the current transform, so a clip set
                 # inside an animated group travels with the transition.
@@ -2014,9 +2030,11 @@ class MacOSBackend(Backend):
         (``reveal`` > 0) the surfaces composite translucently so the scene reads
         behind them. Text, strokes, and framed dialog boxes are unaffected — only
         the flat surface fills routed through _render_fill — so the UI stays
-        legible over the animation."""
+        legible over the animation. Fills inside a reveal-exempt (opaque) group —
+        an overlay layer such as a full-window viewer or a modal dialog — stay
+        opaque so they occlude the base UI instead of dissolving it into view."""
         bg = self._background_3d
-        if bg is None:
+        if bg is None or self._reveal_exempt_depth > 0:
             return 1.0
         return 1.0 - getattr(bg, "reveal", 0.0)
 

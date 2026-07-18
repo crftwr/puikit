@@ -290,7 +290,7 @@ def test_animation_kinds_carry_their_hints():
     backend.begin_group(scale_w, rect)
     backend.end_group(scale_w)
     backend.present()
-    assert backend._front[0] == ("group_begin", id(scale_w), rect)
+    assert backend._front[0] == ("group_begin", id(scale_w), rect, False)
     backend.close()
 
 

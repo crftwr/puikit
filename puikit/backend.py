@@ -405,10 +405,13 @@ class Backend(ABC):
 
     # --- command grouping ----------------------------------------------------
 
-    def begin_group(self, key: Any, rect: Any = None) -> None:
+    def begin_group(self, key: Any, rect: Any = None, opaque: bool = False) -> None:
         """Called by the Panel before a widget draws, with the widget's rect
         in base units. Backends that render per-widget effects (animation alpha,
-        transforms, ...) use the markers; the default is a no-op."""
+        transforms, ...) use the markers; the default is a no-op. ``opaque`` marks
+        an overlay group whose surface fills must occlude rather than dissolve
+        under an active ``Background3D`` reveal (see :meth:`set_background_3d`);
+        backends without that effect ignore it."""
 
     def end_group(self, key: Any) -> None:
         """Counterpart of begin_group."""

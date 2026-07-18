@@ -985,8 +985,8 @@ class WindowsBackend(Backend):
     ) -> None:
         self._back.append(("shadow", x, y, w, h, radius, corners, bg))
 
-    def begin_group(self, key: Any, rect: Any = None) -> None:
-        self._back.append(("group_begin", id(key), rect))
+    def begin_group(self, key: Any, rect: Any = None, opaque: bool = False) -> None:
+        self._back.append(("group_begin", id(key), rect, opaque))
 
     def end_group(self, key: Any) -> None:
         self._back.append(("group_end", id(key)))

@@ -164,6 +164,28 @@ def test_non_interactive_layer_is_transparent_to_events_and_focus():
     assert panel.focused_leaf() is dialog
 
 
+def test_cover_layer_replaces_base_content():
+    # A layer pushed with a "cover" hint stands in for the base content: the base
+    # children are not drawn behind it, so it can dissolve to an animated background
+    # without the base UI bleeding through. A plain overlay leaves the base drawn.
+    backend = MemoryBackend(width=20, height=5)
+    panel = Panel(backend)
+    panel.add(Label("BASE"), x=0, y=0, w=6, h=1)
+
+    # A plain overlay (no cover hint), clear of row 0: the base still shows.
+    panel.push_layer(Label("OV"), z=10, hints={"x": 0, "y": 4, "w": 2, "h": 1})
+    assert "BASE" in render(panel, backend)[0]
+
+    # A cover layer, also clear of row 0: the base is skipped entirely, proving the
+    # skip is driven by the hint, not by the cover layer overpainting the base.
+    panel.pop_layer()
+    panel.push_layer(Label("VIEW"), z=10,
+                     hints={"x": 0, "y": 4, "w": 4, "h": 1, "cover": True})
+    lines = render(panel, backend)
+    assert "BASE" not in lines[0]
+    assert "VIEW" in lines[4]
+
+
 def test_file_drop_is_routed_to_widget_under_pointer():
     # A FILE_DROP is a positioned event: it routes to the widget under its point
     # like a mouse event, translated to widget-local coordinates, carrying the

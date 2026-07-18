@@ -1479,17 +1479,26 @@ class Panel:
         # change here and redo layout + drawing once against the corrected
         # size, so the first frame is already right (MenuBar only installs
         # once, so this can only recurse one level deep).
+        # A "cover" layer (a full-window modal viewer) replaces the base content
+        # rather than floating over it: skip drawing the base children/dividers so
+        # they don't sit behind it. This lets the cover layer dissolve to the
+        # animated background (see _render_layer) — the wallpaper shows through the
+        # viewer just as it does through the file manager — without the base UI
+        # bleeding through. A partial overlay (dialog / menu) carries no such hint,
+        # so the base still draws around it.
+        cover = any(slot.hints.get("cover") for slot in self._layers)
         size_before = self.backend.size_units
-        for slot in self._children:
-            self._draw_slot(slot)
-        if self._layout is not None and self.backend.size_units != size_before:
-            self._apply_layout()
-            self.backend.clear()
-            self._pointer_shape = None
+        if not cover:
             for slot in self._children:
                 self._draw_slot(slot)
-        for divider in self._dividers:
-            self._draw_divider(divider)
+            if self._layout is not None and self.backend.size_units != size_before:
+                self._apply_layout()
+                self.backend.clear()
+                self._pointer_shape = None
+                for slot in self._children:
+                    self._draw_slot(slot)
+            for divider in self._dividers:
+                self._draw_divider(divider)
         for i, slot in enumerate(self._layers):
             # The topmost layer is modal — it owns events exclusively (see
             # dispatch_event), so it must own the pointer shape too. Discard any
@@ -1577,7 +1586,13 @@ class Panel:
             # hints and composite a real overlay.
             self.backend.dim_rect(0, 0, sw, sh, scrim=self.theme.dim_scrim(), per_cell=True)
         rect = self._interpolate_rect(slot.widget, slot.rect)
-        self.backend.begin_group(slot.widget, rect)
+        # A floating overlay (dialog / menu) occludes the base UI: mark its group
+        # opaque so its surface fills stay solid under an active Background3D reveal
+        # instead of dissolving to show the file manager behind it. A "cover" layer
+        # is different — it replaces the base entirely (the base is not drawn, see
+        # render), so it dissolves like the file manager did and the wallpaper shows
+        # through it. Hence: opaque unless it is a cover layer.
+        self.backend.begin_group(slot.widget, rect, opaque=not slot.hints.get("cover"))
         # The shadow blurs beyond the rect, so it is drawn before clipping. A
         # layer that paints a rounded face (e.g. a Drawer) passes "radius" /
         # "corners" hints so the shadow silhouette matches the rounding.

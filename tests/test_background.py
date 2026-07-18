@@ -129,3 +129,28 @@ def test_macos_ui_fill_alpha_tracks_reveal():
     assert be._ui_fill_alpha() == 1.0                 # opaque UI by default
     be._background_3d = Background3D(reveal=0.4)
     assert be._ui_fill_alpha() == pytest.approx(0.6)  # panes go translucent
+
+
+def test_macos_reveal_exempt_group_stays_opaque():
+    # Inside a reveal-exempt (opaque) overlay group, surface fills ignore the
+    # active reveal so the layer occludes the base UI instead of dissolving it.
+    mb = pytest.importorskip("puikit.backends.macos_backend")
+    be = mb.MacOSBackend()
+    be._background_3d = Background3D(reveal=0.4)
+    assert be._ui_fill_alpha() == pytest.approx(0.6)  # base pane: dissolves
+    be._reveal_exempt_depth = 1
+    assert be._ui_fill_alpha() == 1.0                 # overlay layer: opaque
+    be._reveal_exempt_depth = 0
+    assert be._ui_fill_alpha() == pytest.approx(0.6)  # back to dissolving
+
+
+def test_macos_begin_group_records_opaque_flag():
+    # The Panel marks overlay-layer groups opaque; base slots leave it False. The
+    # flag rides the group_begin command so the render pass can scope the reveal.
+    mb = pytest.importorskip("puikit.backends.macos_backend")
+    be = mb.MacOSBackend()
+    base_key, overlay_key = object(), object()
+    be.begin_group(base_key)
+    be.begin_group(overlay_key, rect=None, opaque=True)
+    assert be._back[0] == ("group_begin", id(base_key), None, False)
+    assert be._back[1] == ("group_begin", id(overlay_key), None, True)
