@@ -174,6 +174,41 @@ def test_macos_transparent_slot_skips_fill_only_over_wallpaper():
     assert content_fills(wallpaper=True, opacity=1.0) == 0   # opacity 1 still transparent
 
 
+def test_draw_context_wallpaper_gates_a_self_painted_page_fill():
+    # The self_paint counterpart of reveal_mode="transparent": a widget that paints
+    # its own full-window page (a modal viewer) asks ctx.wallpaper whether to drop
+    # it, so the scene shows at full strength rather than through one more surface.
+    # Gated on the wallpaper existing, not on the surface opacity — and always False
+    # on a grid backend, which has nothing to show through.
+    mb = pytest.importorskip("puikit.backends.macos_backend")
+    from puikit import Panel
+    from puikit.widgets import Widget
+
+    class _Probe(Widget):
+        seen = None
+
+        def draw(self, ctx):
+            _Probe.seen = ctx.wallpaper
+
+    def probe(backend, *, wallpaper: bool, opacity: float = 1.0) -> bool:
+        backend.set_surface_opacity(opacity)
+        if wallpaper:
+            backend.set_background(Shader(source=_SHADER.source, opacity=0.6,
+                                          backdrop=(0, 0, 0)))
+        panel = Panel(backend)
+        panel.add(_Probe(), x=0, y=0, w=10, h=3)
+        panel.render()
+        return _Probe.seen
+
+    assert probe(mb.MacOSBackend(), wallpaper=False) is False
+    assert probe(mb.MacOSBackend(), wallpaper=True) is True
+    assert probe(mb.MacOSBackend(), wallpaper=True, opacity=1.0) is True
+    # No compositing: the widget keeps filling opaquely even when asked for a
+    # background (a grid backend has no "background" capability, so the set is a
+    # no-op and there is nothing to reveal).
+    assert probe(MemoryBackend(20, 6), wallpaper=True) is False
+
+
 def test_macos_nested_same_surface_fill_is_deduped():
     # A pane nested in a same-surface parent must not fill that surface twice: under
     # a reveal the double-blend would dim the animated scene more there than under a

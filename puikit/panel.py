@@ -330,6 +330,20 @@ class DrawContext:
         return self._caps.supports("transparency")
 
     @property
+    def wallpaper(self) -> bool:
+        """True when something is drawn *behind* the UI for a surface to reveal (an
+        animated scene / an image) and the backend can composite over it. A widget
+        that paints its own full-surface page fill — a ``self_paint`` layer such as a
+        full-window viewer — reads it to drop that fill, so the scene shows at *full*
+        strength instead of being dimmed by one more surface. This is the self-painted
+        counterpart of ``reveal_mode="transparent"`` on a Panel-filled slot (see
+        ``Panel._wallpaper_transparent``), and is gated the same way: on the wallpaper
+        *existing*, not on the surface opacity — so the page stays transparent even at
+        ``opacity == 1``. False with no wallpaper and on a grid backend (nothing to
+        show through), where the widget keeps filling opaquely."""
+        return self._backend.has_wallpaper and self._caps.supports("transparency")
+
+    @property
     def focused(self) -> bool:
         """True when this widget holds the keyboard focus. Interactive widgets
         use it to draw a focus cue (a reversed marker, a cursor); the value is
@@ -1791,7 +1805,11 @@ class Panel:
         stays transparent even at ``reveal == 0`` (that value only governs the
         reveal-applied chrome). Off with no wallpaper (a plain theme keeps its opaque
         surface) and on a grid backend (nothing to show through). The resolved bg is
-        still handed to the child context for inheritance / auto-ink."""
+        still handed to the child context for inheritance / auto-ink.
+
+        This covers the fill the *Panel* paints. A widget that paints its own page
+        fill (a ``self_paint`` layer) asks ``DrawContext.wallpaper`` instead — same
+        gating, same effect, decided in the widget."""
         return (
             hints.get("reveal_mode") == "transparent"
             and self.backend.has_wallpaper

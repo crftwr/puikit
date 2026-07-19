@@ -2,7 +2,7 @@
 
 import pytest
 
-from puikit import (CapabilityProfile, Event, EventType, Panel,
+from puikit import (CapabilityProfile, Event, EventType, Panel, Style,
                    PROFILE_GUI_DESKTOP, PROFILE_TUI)
 from puikit.backends.memory_backend import MemoryBackend
 from puikit.widgets import TableView
@@ -238,3 +238,50 @@ def test_search_no_match_restores_scroll(backend):
     view.search_begin()
     assert view.search_set("zzz") == 0
     assert view.offset == 1.0
+
+
+class _FillRecordingBackend(MemoryBackend):
+    """Records every fill_rect so a redundant page fill can be counted."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fills = []
+
+    def fill_rect(self, x, y, w, h, style=None):
+        self.fills.append((round(x), round(y), round(w), round(h),
+                           getattr(style, "bg", None)))
+        super().fill_rect(x, y, w, h, style if style is not None else Style())
+
+
+def _page_fills(backend, bg):
+    return [f for f in backend.fills if f == (0, 0, 24, 8, bg)]
+
+
+@pytest.mark.parametrize(
+    "profile,expected", [(PROFILE_GUI_DESKTOP, 1), (PROFILE_TUI, 2)],
+    ids=["compositing-dedupes", "grid-keeps-both"])
+def test_page_fill_skipped_when_it_repeats_the_inherited_background(profile, expected):
+    # The view's page fill is dropped when it only repeats the surface it already
+    # sits on: on a compositing backend that second blend would dissolve the same
+    # surface twice under a background reveal — and paint over the scene entirely on
+    # a page its owner deliberately left unpainted (a full-window viewer over a
+    # wallpaper). A character grid can't composite, so both fills stay.
+    backend = _FillRecordingBackend(width=24, height=8, capabilities=profile)
+    panel = Panel(backend)
+    content = panel.theme.surface_bg("content")
+    panel.add(TableView(["id"], [["1"]], style=Style(bg=content)),
+              x=0, y=0, w=24, h=8, hints={"surface": "content"})
+    panel.render()
+    assert len(_page_fills(backend, content)) == expected
+
+
+def test_page_fill_kept_when_the_view_is_its_own_surface():
+    # A view that deliberately paints a *different* surface than the page it sits on
+    # still fills — the dedup is only for a repeat of the same color.
+    backend = _FillRecordingBackend(width=24, height=8, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    own = (12, 34, 56)
+    panel.add(TableView(["id"], [["1"]], style=Style(bg=own)),
+              x=0, y=0, w=24, h=8, hints={"surface": "content"})
+    panel.render()
+    assert len(_page_fills(backend, own)) == 1

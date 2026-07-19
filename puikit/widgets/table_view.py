@@ -217,7 +217,15 @@ class TableView(Widget):
         base_fg = self.style.fg or (theme.text if theme is not None else (212, 212, 212))
         bg = self.style.bg
         stripe_bg = lift(bg, 0.06) if bg is not None else None
-        ctx.fill_rect(0, 0, view_w, view_h, Style(bg=bg))
+        # Skip a page fill that merely repeats the background this view already sits
+        # on — the same dedup DrawContext.draw_child applies to a nested pane. On an
+        # opaque frame it is a no-op; under an active background reveal it would
+        # dissolve the same surface twice (dimming the scene more than a singly
+        # filled neighbour); and on a page a transparent owner deliberately left
+        # unpainted (a full-window viewer over a wallpaper) it would paint the scene
+        # out. A grid backend can't composite, so it keeps the fill.
+        if not (bg == ctx.background and ctx.transparency):
+            ctx.fill_rect(0, 0, view_w, view_h, Style(bg=bg))
 
         # Body rows, virtualized vertically, and only within the body track (above
         # the horizontal scroll bar). A row mid-scroll may start under the header
