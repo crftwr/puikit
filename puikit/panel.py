@@ -256,6 +256,15 @@ class DrawContext:
         return self._backend.base_size
 
     @property
+    def base_pixel_size(self) -> tuple[float, float]:
+        """The *true physical* pixel size of one base unit, for aspect-sensitive
+        math. Equals ``base_size`` on pixel backends; on a character grid
+        ``base_size`` is ``(1, 1)`` but a cell is not square, so this reports the
+        cell's real pixel dimensions. Read this (not ``base_size``) when the
+        aspect ratio must be correct — e.g. fitting an image to the client area."""
+        return self._backend.base_pixel_size
+
+    @property
     def pixel_layout(self) -> bool:
         """True when the backend resolves layout at pixel granularity, so a
         widget that subdivides its own pane (a Splitter, a nested layout) may

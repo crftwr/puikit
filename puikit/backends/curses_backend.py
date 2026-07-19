@@ -614,6 +614,20 @@ class CursesBackend(Backend):
         h, w = self._stdscr.getmaxyx()
         return (w, h)
 
+    @property
+    def base_pixel_size(self) -> tuple[float, float]:
+        """The real pixel size of one cell. ``base_size`` is ``(1, 1)`` because
+        the cell is the grid's layout unit, but a cell is taller than it is wide,
+        so image-fit math needs the true dimensions from here — otherwise a
+        square-cell assumption crops to the wrong aspect and the terminal
+        letterboxes the picture (leaving blank space). Resolved from the kernel
+        (TIOCGWINSZ) and cached; a nominal ``8x16`` (1:2) stands in when the
+        terminal will not report a pixel size, matching the fallback
+        ``_present_images`` uses for the same reason."""
+        if self._cell_px is None:
+            self._cell_px = _terminal_graphics.cell_pixels() or (8, 16)
+        return self._cell_px
+
     # --- drawing -------------------------------------------------------------
 
     def clear(self) -> None:

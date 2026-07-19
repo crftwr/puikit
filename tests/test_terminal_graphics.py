@@ -289,6 +289,21 @@ def test_curses_advertises_images_when_a_protocol_is_present(kitty_backend):
     assert kitty_backend.PROFILE.supports("images")
 
 
+def test_base_pixel_size_reports_the_real_cell_not_one_by_one(kitty_backend):
+    # base_size stays (1, 1) — the grid's layout unit — but a cell is not square,
+    # so base_pixel_size must report its true pixel dimensions or aspect-sensitive
+    # code (image fit) crops to the wrong aspect and the terminal letterboxes it.
+    kitty_backend._cell_px = (7, 15)
+    assert kitty_backend.base_size == (1, 1)
+    assert kitty_backend.base_pixel_size == (7, 15)
+
+
+def test_base_pixel_size_falls_back_when_the_terminal_is_silent(kitty_backend, monkeypatch):
+    monkeypatch.setattr(tg, "cell_pixels", lambda fd=None: None)
+    kitty_backend._cell_px = None
+    assert kitty_backend.base_pixel_size == (8, 16)  # nominal 1:2, not (1, 1)
+
+
 def test_curses_without_a_protocol_keeps_images_off(monkeypatch):
     monkeypatch.setenv("PUIKIT_TERM_GRAPHICS", "none")
     from puikit.backends.curses_backend import CursesBackend

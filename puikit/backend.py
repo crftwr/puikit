@@ -134,6 +134,16 @@ class Backend(ABC):
         return (1, 1)
 
     @property
+    def base_pixel_size(self) -> tuple[float, float]:
+        """The *true physical* pixel size of one base unit, for aspect-sensitive
+        math (e.g. image-fit geometry). On pixel backends this equals
+        ``base_size``. A character-grid backend reports ``base_size == (1, 1)``
+        because the cell is its layout unit, but a cell is not square, so it
+        overrides this to report the cell's real pixel dimensions — code that
+        needs the correct aspect ratio must read this, not ``base_size``."""
+        return self.base_size
+
+    @property
     def scrollbar_units(self) -> float:
         """Backend's fixed scrollbar thickness, in base units. Font-independent:
         a scrollbar that asks the layout to size it (size="content") gets this
