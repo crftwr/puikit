@@ -380,6 +380,23 @@ class CursesBackend(Backend):
             overrides["images"] = True
         if overrides:
             self.PROFILE = CapabilityProfile({**PROFILE_TUI, **overrides})
+        _terminal_graphics.debug(
+            f"[init] protocol={self._term_graphics} images_cap="
+            f"{self.PROFILE.supports('images')} "
+            f"TERM_PROGRAM={os.environ.get('TERM_PROGRAM')!r} "
+            f"TERM={os.environ.get('TERM')!r} TMUX={bool(os.environ.get('TMUX'))}"
+        )
+        # Where out-of-band terminal control (mouse tracking, pointer shape,
+        # inline images) is written. It must reach the real terminal even when
+        # the host app has replaced ``sys.stdout`` — TFM routes stdout to its log
+        # pane through a capture shim that never forwards to the tty, so an escape
+        # sequence written via ``sys.stdout`` would be swallowed (worse, an image
+        # escape has no newline, so the line-buffering shim holds it forever and
+        # the picture simply never appears). ``sys.__stdout__`` is the
+        # interpreter's original stream and is never reassigned, so it still
+        # targets the terminal; fall back to ``sys.stdout`` only if it is missing
+        # (pythonw / embedded). Overridable in tests.
+        self._raw_out = sys.__stdout__ or sys.stdout
         # Images drawn this frame and last, as {id: (col, row, cols, rows, path,
         # src)}. present() diffs them: a placement that moved or vanished must be
         # erased, which curses' cell diff cannot see (it has no idea pixels were
@@ -532,8 +549,8 @@ class CursesBackend(Backend):
                 _terminal_graphics.clear(self._term_graphics, k) for k in self._images
             )
             if erase:
-                sys.stdout.write(erase)
-                sys.stdout.flush()
+                self._raw_out.write(erase)
+                self._raw_out.flush()
         self._images = {}
         self._set_mouse_tracking(False)
         self._stdscr.keypad(False)
@@ -584,8 +601,8 @@ class CursesBackend(Backend):
         verb = "h" if on else "l"
         motion = 1003 if self._pointer_shape_enabled else 1002
         try:
-            sys.stdout.write(f"\x1b[?1000{verb}\x1b[?{motion}{verb}\x1b[?1006{verb}")
-            sys.stdout.flush()
+            self._raw_out.write(f"\x1b[?1000{verb}\x1b[?{motion}{verb}\x1b[?1006{verb}")
+            self._raw_out.flush()
         except (OSError, ValueError):
             pass
 
@@ -656,8 +673,10 @@ class CursesBackend(Backend):
         self._clipboard = text
         self._emit_osc52(text)
 
-    @staticmethod
-    def _emit_osc52(text: str) -> None:
+    def _emit_osc52(self, text: str) -> None:
+        # Instance method (not static) so it writes through ``self._raw_out``, the
+        # real terminal — a host app that redirected sys.stdout (e.g. to a log
+        # pane) would otherwise swallow the clipboard escape.
         try:
             payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
             seq = f"\x1b]52;c;{payload}\x07"
@@ -666,8 +685,8 @@ class CursesBackend(Backend):
             # it to the outer terminal.
             if os.environ.get("TMUX"):
                 seq = "\x1bPtmux;" + seq.replace("\x1b", "\x1b\x1b") + "\x1b\\"
-            sys.stdout.write(seq)
-            sys.stdout.flush()
+            self._raw_out.write(seq)
+            self._raw_out.flush()
         except (OSError, ValueError):
             pass
 
@@ -685,8 +704,9 @@ class CursesBackend(Backend):
         self._pointer_shape = shape
         self._emit_osc22(shape)
 
-    @staticmethod
-    def _emit_osc22(shape: str | None) -> None:
+    def _emit_osc22(self, shape: str | None) -> None:
+        # Instance method (not static) so it writes through ``self._raw_out``, the
+        # real terminal — see _emit_osc52.
         try:
             # Empty payload resets the emulator to its default pointer.
             seq = f"\x1b]22;{shape or ''}\x07"
@@ -694,8 +714,8 @@ class CursesBackend(Backend):
             # inside a passthrough envelope with its own ESCs doubled.
             if os.environ.get("TMUX"):
                 seq = "\x1bPtmux;" + seq.replace("\x1b", "\x1b\x1b") + "\x1b\\"
-            sys.stdout.write(seq)
-            sys.stdout.flush()
+            self._raw_out.write(seq)
+            self._raw_out.flush()
         except (OSError, ValueError):
             pass
 
@@ -1179,6 +1199,10 @@ class CursesBackend(Backend):
         # draw order, so the same screen redrawn reuses the same ids.
         image_id = len(self._images) + 1
         self._images[image_id] = (x, y, cols, rows, path, hints.get("src"))
+        _terminal_graphics.debug(
+            f"[draw_image] id={image_id} cell=({x},{y}) size=({cols}x{rows}) "
+            f"src={hints.get('src')} path={path}"
+        )
 
     def _present_images(self, force: bool = False) -> None:
         """Phase 3 of present(): erase stale placements, then paint this frame's.
@@ -1197,12 +1221,21 @@ class CursesBackend(Backend):
         assert self._stdscr is not None
         protocol = self._term_graphics
         if protocol is None or (not self._images and not self._prev_images):
+            if protocol is None and self._images:
+                _terminal_graphics.debug(
+                    f"[present] {len(self._images)} image(s) recorded but NO "
+                    "protocol — nothing emitted (this is the bug if you expected one)"
+                )
             return
+        _terminal_graphics.debug(
+            f"[present] protocol={protocol} images={len(self._images)} "
+            f"prev={len(self._prev_images)} force={force}"
+        )
         stale = [k for k, v in self._prev_images.items() if self._images.get(k) != v]
         if stale:
             erase = "".join(_terminal_graphics.clear(protocol, k) for k in stale)
             if erase:
-                sys.stdout.write(erase)
+                self._raw_out.write(erase)
             else:
                 # No delete verb (iTerm2 / sixel): repaint the whole grid so the
                 # cells the image covered are re-sent as text, overwriting it.
@@ -1211,7 +1244,7 @@ class CursesBackend(Backend):
         fresh = {k: v for k, v in self._images.items()
                  if force or self._prev_images.get(k) != v}
         if not fresh:
-            sys.stdout.flush()
+            self._raw_out.flush()
             return
         if self._cell_px is None:
             # Fall back to a nominal 8x16 cell when the terminal does not report
@@ -1219,20 +1252,48 @@ class CursesBackend(Backend):
             # the payload's resolution is a guess.
             self._cell_px = _terminal_graphics.cell_pixels() or (8, 16)
         cell_w, cell_h = self._cell_px
-        for image_id, (x, y, cols, rows, path, src) in fresh.items():
-            rendered = _terminal_graphics.render(path, cols * cell_w, rows * cell_h, src)
-            if rendered is None:
-                continue
-            image, png = rendered
-            sequence = _terminal_graphics.encode(
-                protocol, image, png, cols, rows, image_id
-            )
-            if not sequence:
-                continue
-            # Address the cell in the terminal's own 1-based coordinates rather
-            # than through curses, which does not know these writes happen.
-            sys.stdout.write(f"\x1b[{y + 1};{x + 1}H{sequence}")
-        sys.stdout.flush()
+        _terminal_graphics.debug(
+            f"[present] emitting {len(fresh)} image(s) cell_px={self._cell_px}"
+        )
+        # Save the cursor once around the whole batch (DECSC), restore after
+        # (DECRC). iTerm2 and sixel advance the cursor when they draw and have no
+        # "keep it put" option (unlike kitty's C=1); left unchecked, an image low
+        # on the screen scrolls the alternate screen and the picture is pushed
+        # out of view — the exact "no image appears" symptom. Absolute cursor
+        # addressing per image means one image's drift never offsets the next, so
+        # a single save/restore around the batch is enough.
+        self._raw_out.write("\x1b7")
+        try:
+            for image_id, (x, y, cols, rows, path, src) in fresh.items():
+                rendered = _terminal_graphics.render(
+                    path, cols * cell_w, rows * cell_h, src
+                )
+                if rendered is None:
+                    _terminal_graphics.debug(
+                        f"[present]   id={image_id} render()=None (Pillow could "
+                        f"not open {path}) — skipped"
+                    )
+                    continue
+                image, png = rendered
+                sequence = _terminal_graphics.encode(
+                    protocol, image, png, cols, rows, image_id
+                )
+                if not sequence:
+                    _terminal_graphics.debug(
+                        f"[present]   id={image_id} encode() empty — skipped"
+                    )
+                    continue
+                # Address the cell in the terminal's own 1-based coordinates
+                # rather than through curses, which does not know these writes
+                # happen.
+                self._raw_out.write(f"\x1b[{y + 1};{x + 1}H{sequence}")
+                _terminal_graphics.debug(
+                    f"[present]   id={image_id} wrote {len(sequence)} bytes at "
+                    f"cell ({x + 1},{y + 1})"
+                )
+        finally:
+            self._raw_out.write("\x1b8")
+            self._raw_out.flush()
 
     def present(self) -> None:
         assert self._stdscr is not None

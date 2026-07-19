@@ -196,23 +196,35 @@ def test_sgr_mouse_shift_click_and_wheel():
     assert down.type is EventType.MOUSE_SCROLL and down.scroll == -1
 
 
-def test_set_clipboard_emits_osc52(monkeypatch, capsys):
+def _capture_raw(be):
+    """Redirect the backend's real-terminal output to a buffer. The backend
+    writes escapes to _raw_out (sys.__stdout__), not sys.stdout, so a plain
+    capsys/capfd would miss them — inject a StringIO instead."""
+    import io
+
+    buffer = io.StringIO()
+    be._raw_out = buffer
+    return buffer
+
+
+def test_set_clipboard_emits_osc52(monkeypatch):
     monkeypatch.delenv("TMUX", raising=False)
     be = CursesBackend()
+    out = _capture_raw(be)
     be.set_clipboard("hi")
-    out = capsys.readouterr().out
     # OSC 52 to selection "c" with base64("hi") == "aGk=", BEL-terminated.
-    assert out == "\x1b]52;c;aGk=\x07"
+    assert out.getvalue() == "\x1b]52;c;aGk=\x07"
     assert be.get_clipboard() == "hi"  # process-local buffer kept for paste
 
 
-def test_set_clipboard_wraps_for_tmux(monkeypatch, capsys):
+def test_set_clipboard_wraps_for_tmux(monkeypatch):
     monkeypatch.setenv("TMUX", "/tmp/tmux-1/default,123,0")
     be = CursesBackend()
+    out = _capture_raw(be)
     be.set_clipboard("hi")
-    out = capsys.readouterr().out
-    assert out.startswith("\x1bPtmux;") and out.endswith("\x1b\\")
-    assert "aGk=" in out
+    text = out.getvalue()
+    assert text.startswith("\x1bPtmux;") and text.endswith("\x1b\\")
+    assert "aGk=" in text
 
 
 def test_pointer_shape_capability_is_opt_in():
@@ -222,19 +234,20 @@ def test_pointer_shape_capability_is_opt_in():
     assert CursesBackend(pointer_shape=True).capabilities.supports("pointer_shape") is True
 
 
-def test_set_pointer_shape_emits_osc22_only_on_change(capsys):
+def test_set_pointer_shape_emits_osc22_only_on_change():
     be = CursesBackend(pointer_shape=True)
+    out = _capture_raw(be)
     be.set_pointer_shape("text")
     be.set_pointer_shape("text")  # unchanged: no second emit
     be.set_pointer_shape(None)    # reset to default arrow
-    out = capsys.readouterr().out
-    assert out == "\x1b]22;text\x07\x1b]22;\x07"
+    assert out.getvalue() == "\x1b]22;text\x07\x1b]22;\x07"
 
 
-def test_set_pointer_shape_noop_when_disabled(capsys):
+def test_set_pointer_shape_noop_when_disabled():
     be = CursesBackend()  # capability off
+    out = _capture_raw(be)
     be.set_pointer_shape("text")
-    assert capsys.readouterr().out == ""
+    assert out.getvalue() == ""
 
 
 def test_bare_motion_is_mouse_move_only_under_all_motion_tracking():

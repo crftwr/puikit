@@ -44,6 +44,23 @@ KITTY = "kitty"
 ITERM2 = "iterm2"
 SIXEL = "sixel"
 
+#: When ``PUIKIT_TERM_GRAPHICS_DEBUG`` names a file, the inline-image path appends
+#: a trace line per step to it (detection, each placement, each emission). Off by
+#: default and zero-cost; a diagnostic hook for "images don't show" reports.
+_DEBUG_PATH = os.environ.get("PUIKIT_TERM_GRAPHICS_DEBUG")
+
+
+def debug(message: str) -> None:
+    """Append ``message`` to the debug trace file if ``PUIKIT_TERM_GRAPHICS_DEBUG``
+    is set, else do nothing. Never raises — a diagnostic must not break rendering."""
+    if not _DEBUG_PATH:
+        return
+    try:
+        with open(_DEBUG_PATH, "a") as handle:
+            handle.write(message + "\n")
+    except OSError:
+        pass
+
 #: Protocols in the order they are preferred when an emulator supports several
 #: (WezTerm implements all three; kitty's delete verb makes it the best fit).
 PROTOCOLS = (KITTY, ITERM2, SIXEL)
@@ -233,11 +250,17 @@ def _kitty(png: bytes, cols: int, rows: int, image_id: int) -> str:
 def _iterm2(png: bytes, cols: int, rows: int) -> str:
     """iTerm2 inline image: OSC 1337 with the file inline. ``width``/``height``
     are given in cells (bare integers) and aspect ratio is preserved, so the
-    picture letterboxes inside the box instead of stretching."""
+    picture letterboxes inside the box instead of stretching.
+
+    Only the documented ``File`` arguments are sent — ``inline``, ``size``,
+    ``width``, ``height``, ``preserveAspectRatio``. iTerm2 has no "keep the
+    cursor put" argument (kitty's ``C=1`` has no analog here), so the cursor
+    advances after the draw; the caller brackets the emission in DECSC/DECRC so
+    that movement can't scroll the alternate screen out from under curses."""
     payload = base64.b64encode(png).decode("ascii")
     args = (
         f"inline=1;size={len(png)};width={cols};height={rows};"
-        "preserveAspectRatio=1;doNotMoveCursor=1"
+        "preserveAspectRatio=1"
     )
     return f"\x1b]1337;File={args}:{payload}\a"
 

@@ -142,6 +142,11 @@ def test_iterm2_encodes_inline_file(quadrants):
     assert f"size={len(png)}" in sequence
     assert "width=8;height=4" in sequence
     assert "preserveAspectRatio=1" in sequence
+    assert "inline=1" in sequence
+    # doNotMoveCursor is NOT a real iTerm2 File argument (kitty's C=1 has no
+    # analog); sending it stopped the image rendering. Cursor drift is handled
+    # by the backend bracketing emission in DECSC/DECRC instead.
+    assert "doNotMoveCursor" not in sequence
 
 
 def test_protocols_without_a_delete_verb_report_it():
@@ -263,19 +268,19 @@ def kitty_backend(monkeypatch):
 
 
 def _frame(backend, draws, force=False):
-    """Run one clear/draw/present-images cycle, returning what was written."""
+    """Run one clear/draw/present-images cycle, returning what was written.
+
+    The backend writes escapes to ``_raw_out`` (the real terminal, bypassing any
+    sys.stdout redirection), so the buffer is injected there — not by swapping
+    sys.stdout, which the backend deliberately no longer uses."""
     import io
-    import sys
 
     backend.clear()
     for draw in draws:
         backend.draw_image(*draw)
     buffer = io.StringIO()
-    saved, sys.stdout = sys.stdout, buffer
-    try:
-        backend._present_images(force=force)
-    finally:
-        sys.stdout = saved
+    backend._raw_out = buffer
+    backend._present_images(force=force)
     return buffer.getvalue()
 
 
@@ -293,11 +298,68 @@ def test_curses_without_a_protocol_keeps_images_off(monkeypatch):
     assert not backend.PROFILE.supports("images")
 
 
+def test_images_go_to_the_real_terminal_not_a_redirected_stdout(monkeypatch, quadrants):
+    # THE reason images never appeared in iTerm2: a host app (TFM) replaces
+    # sys.stdout with a log-capture shim that never forwards to the tty — and an
+    # image escape has no newline, so a line-buffering shim holds it forever. The
+    # backend must write to the real terminal (captured as _raw_out from
+    # sys.__stdout__, which no host reassigns), never the live sys.stdout.
+    import io
+    import sys
+
+    monkeypatch.setenv("PUIKIT_TERM_GRAPHICS", "iterm2")
+    from puikit.backends.curses_backend import CursesBackend
+
+    backend = CursesBackend()
+    assert backend._raw_out is (sys.__stdout__ or sys.stdout)  # the original stream
+
+    real_terminal = io.StringIO()
+    backend._raw_out = real_terminal  # stand-in for the tty
+    backend._stdscr = _FakeScreen()
+    backend._cell_px = (8, 16)
+
+    # A host redirects sys.stdout AFTER the backend was built, to a sink that
+    # never reaches the terminal (like TFM's LogCapture).
+    swallowed: list[str] = []
+
+    class _Shim:
+        def write(self, text):
+            swallowed.append(text)
+
+        def flush(self):
+            pass
+
+    monkeypatch.setattr(sys, "stdout", _Shim())
+
+    backend.clear()
+    backend.draw_image(2, 1, quadrants, {"w": 20, "h": 10})
+    backend._present_images()
+
+    assert "\x1b]1337;File=" in real_terminal.getvalue()  # reached the terminal
+    assert not any("1337" in text for text in swallowed)  # NOT the redirected sink
+
+
 def test_placement_transmits_at_the_right_cell(kitty_backend, quadrants):
     out = _frame(kitty_backend, [(2, 1, quadrants, {"w": 20, "h": 10})])
     assert "\x1b_G" in out and "a=T" in out
     # The cell is addressed in the terminal's own 1-based coordinates.
     assert "\x1b[2;3H" in out
+
+
+def test_emission_brackets_images_in_save_restore_cursor(monkeypatch, quadrants):
+    # iTerm2 and sixel advance the cursor when they draw; the whole batch is
+    # bracketed by DECSC (\x1b7) / DECRC (\x1b8) so that drift can't scroll the
+    # alternate screen out from under curses.
+    monkeypatch.setenv("PUIKIT_TERM_GRAPHICS", "iterm2")
+    from puikit.backends.curses_backend import CursesBackend
+
+    backend = CursesBackend()
+    backend._stdscr = _FakeScreen()
+    backend._cell_px = (8, 16)
+    out = _frame(backend, [(2, 1, quadrants, {"w": 20, "h": 10})])
+    assert "\x1b]1337;File=" in out  # the image really was emitted
+    assert out.index("\x1b7") < out.index("\x1b]1337")  # save before the image
+    assert out.rindex("\x1b8") > out.rindex("\x1b]1337")  # restore after it
 
 
 def test_unchanged_placement_is_not_retransmitted(kitty_backend, quadrants):
@@ -344,16 +406,13 @@ def test_zero_sized_placement_is_ignored(kitty_backend, quadrants):
 
 def test_close_erases_images_left_on_screen(kitty_backend, quadrants):
     import io
-    import sys
 
     _frame(kitty_backend, [(2, 1, quadrants, {"w": 20, "h": 10})])
     buffer = io.StringIO()
-    saved, sys.stdout = sys.stdout, buffer
+    kitty_backend._raw_out = buffer  # capture the real-terminal writes
     try:
         kitty_backend.close()
     except Exception:
         pass  # the rest of close() needs a real terminal; the erase came first
-    finally:
-        sys.stdout = saved
     # Images live outside the grid, so endwin() would leave them in scrollback.
     assert "a=d" in buffer.getvalue()
