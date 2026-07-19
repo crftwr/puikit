@@ -16,6 +16,8 @@ from typing import Any
 from ..backend import Backend, Color, DEFAULT_STYLE, EventHandler, Style, TextAttribute
 from ..capability import CapabilityProfile, PROFILE_TUI
 from ..event import Event, EventType, char_key_event
+from ..image import CONTAIN, COVER, contain_box, cover_source
+from ..image import image_size as _natural_size
 from ..text import display_width as _display_width
 from ..text import glyph_runs as _glyph_runs
 from ..text import is_emoji_glyph as _is_emoji_glyph
@@ -1210,6 +1212,31 @@ class CursesBackend(Backend):
         if cols <= 0 or rows <= 0:
             return
         src = hints.get("src")
+        # Object-fit, for a widget that did not pre-resolve the geometry itself.
+        # An explicit ``src`` is the pan/zoom escape hatch — when it is present
+        # the caller already chose the crop and the destination box, so leave it
+        # be. Otherwise resolve fill / contain / cover the way the GUI backends'
+        # _fit_rects do, using the cell's *physical* aspect (base_pixel_size), so
+        # the three fits read distinctly on the terminal too:
+        #   fill    -> stretch the whole image across the box (may distort)
+        #   contain -> whole image in a centered, aspect-locked sub-box
+        #   cover   -> crop the image to the box aspect, then fill
+        if src is None:
+            fit = hints.get("fit", "fill")
+            size = _natural_size(path) if fit in (CONTAIN, COVER) else None
+            if size is not None:
+                iw, ih = size
+                cw, ch = self.base_pixel_size
+                tw, th = cols * cw, rows * ch  # target in device pixels
+                if fit == CONTAIN:
+                    ox, oy, bw, bh = contain_box(tw, th, iw, ih)
+                    x, y = x + ox / cw, y + oy / ch
+                    cols, rows = bw / cw, bh / ch
+                else:  # COVER: sample the centered crop that matches the box aspect
+                    sx, sy, sw, sh = cover_source(iw, ih, tw, th)
+                    src = (sx / iw, sy / ih, sw / iw, sh / ih)
+            # fill (and contain, now in an aspect-locked box) show the whole image.
+            src = src if src is not None else (0.0, 0.0, 1.0, 1.0)
         # Clip to the visible region. The image is painted out-of-band (not
         # through curses cells), so push_clip — which trims text — does not trim
         # it; an oversized ImageView (say a fit=width picture in a short pane)

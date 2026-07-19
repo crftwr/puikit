@@ -1451,12 +1451,13 @@ ASSETS = os.path.join(os.path.dirname(__file__), "assets")
 
 
 def build_images_page(panel: Panel) -> VSplit:
-    # One image intent, two fidelities — and five object-fits, all resolved by
-    # the layout, never by the page. GUI renders the real picture (scaled,
-    # letterboxed, or cropped per fit); TUI has no `images` capability, so the
-    # Panel layer stamps each image's alt emoji in its place. The page never
-    # branches on the backend.
-    # The asset is a 16:9 scene, so the fits read distinctly on GUI.
+    # One image intent, five object-fits, all resolved by the layout, never by
+    # the page. A GUI backend renders the real picture (scaled, letterboxed, or
+    # cropped per fit); a terminal that speaks an inline-image protocol (kitty /
+    # iTerm2 / WezTerm / sixel, with Pillow installed) draws it too; any other
+    # TUI has no `images` capability, so the Panel layer stamps each image's alt
+    # emoji in its place. The page never branches on the backend.
+    # The asset is a 16:9 scene, so the fits read distinctly.
     status = Label("Resize the window to watch each fit re-resolve", DIM)
 
     scene = os.path.join(ASSETS, "scene.png")
@@ -1512,7 +1513,7 @@ def build_images_page(panel: Panel) -> VSplit:
     )
 
     return VSplit(
-        Item(Label("ImageView object-fits — GUI draws them, TUI shows alt emoji", DIM), size=1),
+        Item(Label("ImageView object-fits — drawn on GUI and image-capable terminals", DIM), size=1),
         Item(box_fits, weight=1, hints={"surface": "content"}),
         Item(aspect_fits, weight=1, hints={"surface": "sidebar"}),
         Item(status, size=1),

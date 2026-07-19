@@ -24,8 +24,13 @@ dependencies = ["numpy"]
 # windows-curses backports the _curses C extension CPython omits on Windows, so
 # the curses (TUI) backend and its tests run there; the marker keeps it off
 # macOS/Linux, which already ship _curses.
-dev = ["pytest>=8", "pytest-timeout>=2", "windows-curses>=2.4; sys_platform == 'win32'"]
+dev = ["pytest>=8", "pytest-timeout>=2", "pillow>=9", "windows-curses>=2.4; sys_platform == 'win32'"]
 macos = ["pyobjc-framework-Cocoa>=10", "pyobjc-framework-Quartz>=10"]
+# Pillow decodes/crops/scales images for the terminal inline-image protocols
+# (kitty / iTerm2 / sixel), so ImageView draws real pictures in a graphics-
+# capable terminal instead of the alt-glyph fallback. Optional: without it a
+# terminal shows the alt glyph and GUI backends are unaffected.
+images = ["pillow>=9"]
 
 [project.urls]
 Homepage = "https://github.com/crftwr/puikit"

@@ -364,6 +364,38 @@ def test_fully_offscreen_image_is_dropped(kitty_backend):
     assert kitty_backend._images == {}
 
 
+def test_object_fits_resolve_distinctly_on_the_terminal(kitty_backend, tmp_path):
+    # fill / contain / cover must read differently, like the GUI backends. A 16:9
+    # image in a portrait-ish cell box: fill stretches the whole image across it;
+    # contain centers the whole image in an aspect-locked sub-box (letterbox);
+    # cover crops a centered slice to fill the box.
+    from tests.test_image_widgets import _png
+
+    kitty_backend._stdscr = _FakeScreen()  # 80 cols x 24 rows
+    kitty_backend._cell_px = (8, 16)
+    scene = _png(tmp_path / "scene.png", 1600, 900)  # 16:9
+
+    def place(fit):
+        kitty_backend._images = {}
+        # A 30x20-cell (8x16px) box is 240x320px — portrait — so the 16:9 scene
+        # fits the three ways distinctly. Kept inside the 24-row screen (no clip).
+        kitty_backend.draw_image(5, 1, scene, {"w": 30, "h": 20, "fit": fit})
+        return next(iter(kitty_backend._images.values()))
+
+    fx, fy, fcols, frows, _, fsrc = place("fill")
+    cx, cy, ccols, crows, _, csrc = place("contain")
+    vx, vy, vcols, vrows, _, vsrc = place("cover")
+
+    # fill: whole image, whole box.
+    assert (fcols, frows) == (30, 20) and fsrc == (0.0, 0.0, 1.0, 1.0)
+    # contain: whole image (src unchanged) but a shorter, centered box (letterbox).
+    assert csrc == (0.0, 0.0, 1.0, 1.0)
+    assert crows < 20 and cy > 1  # shrunk and pushed down to centre
+    # cover: full box, but a cropped source (narrower than the whole image).
+    assert (vcols, vrows) == (30, 20)
+    assert vsrc[2] < 1.0  # a horizontal crop of the 16:9 scene
+
+
 def test_crop_src_narrows_an_existing_window():
     # Clipping composes with a pan/zoom crop: the fraction is of the current
     # window, not the whole image.
