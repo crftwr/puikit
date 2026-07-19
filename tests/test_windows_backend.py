@@ -328,6 +328,49 @@ def test_draw_shadow_renders_with_blur_effect():
         backend.close()
 
 
+def test_shadow_inside_a_fading_group_keeps_the_device():
+    """The exact shape of a modal opening: a drop shadow drawn *inside* a group
+    that is mid-transition, so an offscreen layer (PushLayer) is open around it.
+
+    The shadow used to record its caster by splitting the frame's batch —
+    EndDraw, retarget to a command list, retarget back, BeginDraw. That holds
+    only while nothing else is open on the context. With a fading group's layer
+    unbalanced, the interposed EndDraw put the device context into an error
+    state; the backend read the failure as device loss and answered with a full
+    _recreate_render_target(), ~280ms, on the first frame of every shadowed
+    modal — the one frame the user is actually waiting for.
+
+    The caster is now recorded before the frame opens, so this frame must
+    complete on the same device it started on.
+    """
+    backend = WindowsBackend(width=40, height=20, title="puikit-shadow-fade-test")
+    backend.open()
+    try:
+        # A post effect is part of the repro, not decoration: it captures the
+        # frame into a command list, so the error state left by the interposed
+        # EndDraw surfaces as a failure to close that capture. This is the Cyber
+        # theme's shape (bloom + glow + vignette).
+        backend.set_post_effect(PostEffect(bloom=0.78, glow=0.60, vignette=0.30))
+        device, target = backend._d3d_device, backend._target_bitmap
+        widget = object()
+        backend.animate(widget, {"transition": "scale", "from_scale": 0.92,
+                                 "fade": True, "duration_ms": 200})
+        rect = Rect(5, 5, 20, 10)
+        backend.begin_group(widget, rect)
+        backend.draw_shadow(5, 5, 20, 10, radius=4.0, bg=(40, 40, 40))
+        backend.draw_box(5, 5, 20, 10, hints={"fill": True}, style=Style(bg=(40, 40, 40)))
+        backend.draw_text(6, 6, "opening")
+        backend.end_group(widget)
+        backend.present()
+        backend._render()
+        # A recreate swaps both of these for fresh COM objects, so identity here
+        # is the observable for "the frame was not dropped".
+        assert backend._d3d_device is device
+        assert backend._target_bitmap is target
+    finally:
+        backend.close()
+
+
 def test_fade_group_renders_through_pushlayer():
     """A fade transition composites its group through an offscreen layer
     (ID2D1RenderTarget::PushLayer[40] / PopLayer[41] with

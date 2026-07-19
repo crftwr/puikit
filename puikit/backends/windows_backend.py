@@ -38,6 +38,7 @@ from typing import Any
 
 from . import _win32_dragdrop, _win32_ime
 from . import _win32_native as native
+from .. import _profile
 from ._d3d_shader import HAVE_D3D_SHADER, D3DShaderBackground
 from ..background import Shader, Wallpaper
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, is_transparent
@@ -541,6 +542,11 @@ class WindowsBackend(Backend):
         # reconfigured, not recreated every frame, same reasoning as the one
         # reusable `_brush` below.
         self._shadow_effect: Any = None
+        # Recorded caster silhouettes feeding that blur, keyed by geometry (see
+        # _prepare_shadows). Built outside the frame's draw batch and held across
+        # frames, because a recorded _ui_cache replays a DrawImage that still
+        # references its input.
+        self._shadow_casters: dict[tuple, Any] = {}
         # Active CRT post-processing effect (set_post_effect), or None. When set,
         # _render routes the frame through a Direct2D-effects composite pass
         # (_composite_post_effect); a terminal backend has no such pass and this
@@ -559,8 +565,6 @@ class WindowsBackend(Backend):
         self._drop_shadow: tuple[float, float, float, float] | None = None
         # The current frame's render target: the swap-chain bitmap normally, or a
         # command list while the CRT pass captures the frame for compositing.
-        # _render_shadow restores to *this* (not the swap-chain bitmap) after its
-        # own retarget, so shadows land in the captured frame when the effect is on.
         self._frame_target: Any = None
         # The display list recorded into an ID2D1CommandList, replayed on frames
         # where only the background moved (see _acquire_ui_cache). None = nothing
@@ -753,8 +757,11 @@ class WindowsBackend(Backend):
 
     def _release_render_resources(self) -> None:
         self._release_crt_chain()
-        # Recorded against this device context, so it cannot outlive it.
+        # Recorded against this device context, so they cannot outlive it.
         self._invalidate_ui_cache()
+        for caster in self._shadow_casters.values():
+            caster.release()
+        self._shadow_casters.clear()
         # The shader renderer holds the D3D device's immediate context and its own
         # textures — tear it down before the device it lives on. It is rebuilt by
         # _create_render_resources when the device is recreated.
@@ -1659,9 +1666,6 @@ class WindowsBackend(Backend):
             return self._ui_cache
         rt = self._render_target
         cl = native.dc_create_command_list(rt)
-        # Record with the frame's own target pointed at the command list, so a
-        # draw_shadow inside the pass restores to *it* after its retarget rather
-        # than to the swap chain (the same contract the CRT capture relies on).
         native.dc_set_target(rt, cl)
         self._frame_target = cl
         native.rt_begin_draw(rt)
@@ -1682,11 +1686,16 @@ class WindowsBackend(Backend):
             return
         rt = self._render_target
         now = time.monotonic()
+        # Frame-phase profiling (PUIKIT_FRAME_PROFILE). Every timer below is
+        # guarded on the flag, so a normal frame pays nothing. See puikit._profile.
+        prof = _profile.ENABLED
+        t_frame = time.perf_counter() if prof else 0.0
+        t_shader = t_ui = t_list = t_composite = t_present = 0.0
+        ui_mode = "-"
         # With a CRT effect active, the frame is drawn into a command list first
         # so the composite pass (below) can run it through the Direct2D effect
         # chain before it reaches the swap chain. Without one, the display list
-        # goes straight to the back buffer as before. _frame_target tells
-        # _render_shadow which target to restore to after its own retarget.
+        # goes straight to the back buffer as before.
         use_effect = self._post_effect is not None and self._crt is not None
         # A shader background renders on the shared D3D device into its own texture
         # *before* the D2D frame opens: D3D and D2D share this device's immediate
@@ -1694,14 +1703,29 @@ class WindowsBackend(Backend):
         # texture is then wrapped as a D2D bitmap and drawn as the backdrop below.
         shader_tex = None
         if isinstance(self._background, Shader) and self._d3d_shader is not None:
+            t0 = time.perf_counter() if prof else 0.0
             cw, ch = self._client_size_px()
             scale = getattr(self._background, "resolution_scale", 1.0)
             shader_tex = self._d3d_shader.render_to_texture(
                 max(1, int(cw * scale)), max(1, int(ch * scale)), self._bg_clock)
+            if prof:
+                t_shader = (time.perf_counter() - t0) * 1000.0
+        # Both passes below (the recording and the frame itself) may draw shadows,
+        # and neither may retarget the device context once its batch is open.
+        self._prepare_shadows()
         # Record (or reuse) the display list before the frame's own BeginDraw —
         # recording retargets the device context, which is illegal inside an open
         # draw batch. None means this frame runs the Python pass inline.
+        if prof:
+            # Distinguish the three costs the cache exists to separate: a replay
+            # of an existing recording, a fresh recording (one full pass), and
+            # the bypass a running animation forces (a full pass every frame).
+            ui_mode = ("bypass" if self._animations
+                       else "replay" if self._ui_cache is not None else "record")
+        t0 = time.perf_counter() if prof else 0.0
         ui_cl = self._acquire_ui_cache(now)
+        if prof:
+            t_ui = (time.perf_counter() - t0) * 1000.0
         frame_cl = None
         if use_effect:
             frame_cl = native.dc_create_command_list(rt)
@@ -1719,13 +1743,26 @@ class WindowsBackend(Backend):
             clear = self._background.backdrop
         native.rt_clear(rt, native.D2D1_COLOR_F(clear[0] / 255, clear[1] / 255, clear[2] / 255, 1.0))
         self._render_background(now, shader_tex)
+        t0 = time.perf_counter() if prof else 0.0
         if ui_cl is not None:
             native.dc_draw_image(rt, ui_cl)
         else:
             self._render_display_list(now)
         hr = native.rt_end_draw(rt)
+        if prof:
+            # EndDraw is where the GPU work for this batch is actually flushed,
+            # so it belongs to the pass, not to Present.
+            t_list = (time.perf_counter() - t0) * 1000.0
         device_lost = (hr & 0xFFFFFFFF) == 0x8899000C  # D2DERR_RECREATE_TARGET
+        if prof and (hr & 0xFFFFFFFF) != 0:
+            # Any non-zero HRESULT here means the frame was dropped. Worth its own
+            # line: a recreate costs ~280ms, so a trace must not leave the reader
+            # inferring one from missing phases. D2DERR_WRONG_STATE (0x88990001)
+            # is the signature of an unbalanced layer or a retarget inside a batch.
+            _profile.write(f"!!! EndDraw failed hr=0x{hr & 0xFFFFFFFF:08X} "
+                           f"device_lost={device_lost}")
         if use_effect and not device_lost:
+            t0 = time.perf_counter() if prof else 0.0
             try:
                 native.command_list_close(frame_cl)
                 native.dc_set_target(rt, self._target_bitmap)
@@ -1737,6 +1774,8 @@ class WindowsBackend(Backend):
                 device_lost = (hr & 0xFFFFFFFF) == 0x8899000C
             except OSError:
                 device_lost = True  # a lost device surfaces mid-composite; recreate below
+            if prof:
+                t_composite = (time.perf_counter() - t0) * 1000.0
         if frame_cl is not None:
             # Re-bind the swap-chain target and drop the command list before any
             # recreate, so a device-loss frame doesn't leak it or leave the DC
@@ -1745,10 +1784,28 @@ class WindowsBackend(Backend):
             self._frame_target = self._target_bitmap
             frame_cl.release()
         if not device_lost:
+            t0 = time.perf_counter() if prof else 0.0
             present_hr = native.swapchain_present(self._swap_chain) & 0xFFFFFFFF
             device_lost = present_hr in (0x887A0005, 0x887A0007)  # DXGI_ERROR_DEVICE_REMOVED / _RESET
+            if prof:
+                # Present blocks on vsync, so a large value here is the frame
+                # waiting for the display, not work — read it as the floor a
+                # frame cannot go below, not as a cost to optimize.
+                t_present = (time.perf_counter() - t0) * 1000.0
+        if prof:
+            _profile.write(
+                f"frame total={(time.perf_counter() - t_frame) * 1000:6.1f}  "
+                f"shader={t_shader:5.1f} ui[{ui_mode}]={t_ui:6.1f} "
+                f"list={t_list:6.1f} composite={t_composite:5.1f} "
+                f"present={t_present:5.1f}  cmds={len(self._front)} "
+                f"anim={len(self._animations)} ticks={len(self._tick_callbacks)}"
+            )
         if device_lost:
+            t0 = time.perf_counter() if prof else 0.0
             self._recreate_render_target()
+            if prof:
+                _profile.write(
+                    f"!!! recreate_render_target {(time.perf_counter() - t0) * 1000:.1f} ms")
 
     def _render_display_list(self, now: float) -> None:
         """Rasterize the front display list to the current target (the swap-chain
@@ -2064,52 +2121,90 @@ class WindowsBackend(Backend):
         self._set_brush((0, 0, 0), 0.45)
         native.rt_fill_rectangle(self._render_target, self._unit_rect(x, y, w, h), self._brush)
 
-    def _render_shadow(
-        self, x: int, y: int, w: int, h: int, radius: float | None = None,
-        corners: tuple[str, ...] | None = None, bg: tuple[int, ...] | None = None,
-    ) -> None:
-        # A real blurred drop shadow via ID2D1Effect (Gaussian Blur), not the
-        # old concentric-hard-rect approximation: draw the caster shape
-        # (shifted down by _SHADOW_Y_OFFSET, in the shadow's own color/alpha)
-        # into a command list, blur that command list's output, and composite
-        # it. `corners` (a rounded panel's subset of rounded corners) is not
-        # honored; the shadow always uses a uniform radius.
-        #
-        # Retargeting the device context requires ending the frame's open
-        # BeginDraw/EndDraw batch first (confirmed live: retargeting to a
-        # command list while a batch is open raises D2DERR_WRONG_STATE,
-        # despite this being the MSDN-documented command-list recording
-        # sequence -- nesting a second Begin/EndDraw inside an already-open
-        # one is not actually legal on the same device context). BeginDraw is
-        # reopened once the retarget is done, resuming the same frame -- only
-        # Clear is a one-time-per-frame operation (already done once in
-        # _render()), so splitting one frame across multiple Begin/EndDraw
-        # pairs onto the same target is safe.
+    def _shadow_key(self, x: int, y: int, w: int, h: int, radius, corners, bg) -> tuple:
+        """Identity of a shadow caster — everything its recorded silhouette
+        depends on. ``bg`` is excluded: it colors the re-fill drawn *after* the
+        blur, not the caster."""
+        return (x, y, w, h, radius)
+
+    def _prepare_shadows(self) -> None:
+        """Record each shadow's caster silhouette into a command list, ready for
+        :meth:`_render_shadow` to blur without touching the device context.
+
+        Called once per frame *before* any BeginDraw, for the same reason
+        _acquire_ui_cache records there: retargeting the device context is illegal
+        inside an open draw batch. The shadow path used to split the frame's batch
+        instead — EndDraw, retarget, record, retarget back, BeginDraw — which held
+        as long as a shadow was drawn at rest, and broke the moment one was drawn
+        inside a *transition*: a fading group has an unbalanced rt_push_layer open
+        (see _begin_group_render), so the interposed EndDraw put the context into
+        an error state. The backend then read that as device loss and rebuilt the
+        whole D3D device — ~280ms, on the first frame of every modal that opens
+        with a shadow, which is exactly the frame the user is waiting on.
+
+        The caster is recorded in *untransformed* space and the blurred output is
+        drawn under whatever transform is live, so a shadow now scales with the box
+        during a scale transition instead of having the transform applied twice.
+
+        Casters are cached by geometry across frames and rebuilt only as the
+        display list changes: a recorded ``_ui_cache`` replays a DrawImage that
+        still references its input, so a caster must outlive the recording that
+        names it. Stale entries are dropped here, at a point where any recording
+        that referenced them has already been invalidated (a changed display list
+        invalidates the UI cache in present()).
+        """
+        if self._render_target is None:
+            return
+        needed = {self._shadow_key(*cmd[1:]) for cmd in self._front if cmd[0] == "shadow"}
+        for key in [k for k in self._shadow_casters if k not in needed]:
+            self._shadow_casters.pop(key).release()
+        for key in needed:
+            if key not in self._shadow_casters:
+                self._shadow_casters[key] = self._record_shadow_caster(*key)
+
+    def _record_shadow_caster(self, x: int, y: int, w: int, h: int, radius: float | None):
+        """The caster silhouette (shifted down by _SHADOW_Y_OFFSET, in the
+        shadow's own color/alpha) as a closed command list. No batch may be open."""
         rt = self._render_target
         rect = self._unit_rect(x, y, w, h)
-        shadow_rect = native.D2D1_RECT_F(rect.left, rect.top + _SHADOW_Y_OFFSET, rect.right, rect.bottom + _SHADOW_Y_OFFSET)
-        native.rt_end_draw(rt)
+        shadow_rect = native.D2D1_RECT_F(
+            rect.left, rect.top + _SHADOW_Y_OFFSET, rect.right, rect.bottom + _SHADOW_Y_OFFSET)
         cmd_list = native.dc_create_command_list(rt)
         native.dc_set_target(rt, cmd_list)
         native.rt_begin_draw(rt)
+        # Recorded in untransformed space; the group's transform is applied once,
+        # when the blurred output is drawn.
+        native.rt_set_transform(rt, native.D2D1_MATRIX_3X2_F.identity())
         self._set_brush((0, 0, 0), _SHADOW_ALPHA)
         if radius:
-            r = max(0.0, min(radius, (shadow_rect.right - shadow_rect.left) / 2.0, (shadow_rect.bottom - shadow_rect.top) / 2.0))
+            r = max(0.0, min(radius, (shadow_rect.right - shadow_rect.left) / 2.0,
+                             (shadow_rect.bottom - shadow_rect.top) / 2.0))
             native.rt_fill_rounded_rectangle(rt, native.D2D1_ROUNDED_RECT(shadow_rect, r, r), self._brush)
         else:
             native.rt_fill_rectangle(rt, shadow_rect, self._brush)
         native.rt_end_draw(rt)
         native.command_list_close(cmd_list)
-        # Restore the frame's own target — the swap-chain bitmap normally, or the
-        # frame command list while a CRT effect captures the frame — not always
-        # the swap chain, or the shadow would land outside the captured frame.
-        native.dc_set_target(rt, self._frame_target)
-        native.rt_begin_draw(rt)
-        native.effect_set_input(self._shadow_effect, 0, cmd_list)
-        output_image = native.effect_get_output(self._shadow_effect)
-        native.dc_draw_image(rt, output_image)
-        output_image.release()
-        cmd_list.release()
+        native.dc_set_target(rt, self._target_bitmap)
+        return cmd_list
+
+    def _render_shadow(
+        self, x: int, y: int, w: int, h: int, radius: float | None = None,
+        corners: tuple[str, ...] | None = None, bg: tuple[int, ...] | None = None,
+    ) -> None:
+        # A real blurred drop shadow via ID2D1Effect (Gaussian Blur), not the old
+        # concentric-hard-rect approximation. The caster was recorded before the
+        # frame opened (see _prepare_shadows); all that happens inside the batch is
+        # blurring it and drawing the result, so the frame's layer/transform stack
+        # is left exactly as it was found. `corners` (a rounded panel's subset of
+        # rounded corners) is not honored; the shadow always uses a uniform radius.
+        rt = self._render_target
+        rect = self._unit_rect(x, y, w, h)
+        cmd_list = self._shadow_casters.get(self._shadow_key(x, y, w, h, radius, corners, bg))
+        if cmd_list is not None:
+            native.effect_set_input(self._shadow_effect, 0, cmd_list)
+            output_image = native.effect_get_output(self._shadow_effect)
+            native.dc_draw_image(rt, output_image)
+            output_image.release()
         # Re-fill the layer's own silhouette with its surface color so the shadow
         # only shows around its edges, not through translucent content. Use the
         # layer's ``bg`` (not the window-dark default) so a sub-unit sliver left
@@ -2435,8 +2530,18 @@ class WindowsBackend(Backend):
         if self._crt_roll is not None:
             self._ensure_roll_ticker()
         self._ensure_background_ticker()
-        if self._handler is not None:
+        if self._handler is None:
+            return
+        if not _profile.ENABLED:
             self._handler(event)
+            return
+        # The keystroke's own timestamp, and what the app's handler cost
+        # synchronously before returning — so a trace separates "the app took
+        # this long to decide" from "the frames after it were slow".
+        _profile.write(f">>> event {event.type.name} key={getattr(event, 'key', None)!r}")
+        t0 = time.perf_counter()
+        self._handler(event)
+        _profile.write(f"<<< event handled in {(time.perf_counter() - t0) * 1000:.1f} ms")
 
     def _mouse_xy(self, lparam: int) -> tuple[float, float]:
         x = native.signed_word(native.loword(lparam))
