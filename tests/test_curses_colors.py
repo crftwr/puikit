@@ -46,19 +46,34 @@ def test_bind_palette_redefines_slots_on_ccc_terminal(monkeypatch):
     # On a can-change-color terminal we must NOT trust the existing palette
     # (a ccc terminal owns indices >= 16, e.g. macOS Terminal.app does not hold
     # the standard xterm cube there). Each curated color is written to its own
-    # slot above the 16 ANSI colors, so rendering is exact.
-    calls = []
+    # slot above the 16 ANSI colors, so rendering is exact. The whole palette
+    # ships as ONE OSC-4 escape (not one init_color per color) so a terminal
+    # that re-renders on palette changes (iTerm2) pays a single invalidation.
+    import io
+
     monkeypatch.setattr(curses, "can_change_color", lambda: True)
     monkeypatch.setattr(curses, "COLORS", 256, raising=False)
-    monkeypatch.setattr(curses, "init_color", lambda *a: calls.append(a))
+    # A stray init_color would defeat the batching — make it fail loudly.
+    monkeypatch.setattr(
+        curses, "init_color",
+        lambda *a: pytest.fail("init_color must not be called"),
+    )
 
     backend = CursesBackend()
+    out = io.StringIO()
+    backend._raw_out = out
     backend._bind_palette()
 
     assert backend._palette_term == list(range(16, 16 + len(_TUI_PALETTE)))
-    assert len(calls) == len(_TUI_PALETTE)
+    written = out.getvalue()
+    # Exactly one OSC-4 sequence: ESC ] 4 ; <index;rgb pairs> ESC \
+    assert written.startswith("\x1b]4;")
+    assert written.endswith("\x1b\\")
+    assert written.count("\x1b]4;") == 1
+    assert written.count(";rgb:") == len(_TUI_PALETTE)
+    # Slot 0's color appears at index 16, hex straight from its 0-255 channels.
     r, g, b = _TUI_PALETTE[0]
-    assert calls[0] == (16, r * 1000 // 255, g * 1000 // 255, b * 1000 // 255)
+    assert f"16;rgb:{r:02x}/{g:02x}/{b:02x}" in written
 
 
 def test_bind_palette_falls_back_to_existing_without_ccc(monkeypatch):

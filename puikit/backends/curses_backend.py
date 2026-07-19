@@ -1572,8 +1572,9 @@ class CursesBackend(Backend):
         """Bind the curated palette to terminal color slots, once, at open().
 
         Preferred: on terminals that can redefine colors (``ccc`` capability),
-        write each curated color into its own slot above the 16 ANSI colors via
-        init_color. This is exact and does not trust the terminal's default
+        write each curated color into its own slot above the 16 ANSI colors (in
+        a single batched OSC-4 escape — see the body). This is exact and does
+        not trust the terminal's default
         palette for indices >= 16 — which is the right call precisely because a
         ``ccc`` terminal (e.g. macOS Terminal.app) owns that palette and does
         not guarantee the standard xterm-256 cube there. Every curated color
@@ -1599,11 +1600,31 @@ class CursesBackend(Backend):
         except curses.error:
             pass
         mode = os.environ.get("PUIKIT_TUI_PALETTE", "init").lower()
+        bound = False
         if mode != "native" and can_change and colors >= base + len(_TUI_PALETTE):
-            for i, (r, g, b) in enumerate(_TUI_PALETTE):
-                curses.init_color(base + i, r * 1000 // 255, g * 1000 // 255, b * 1000 // 255)
-            self._palette_term = [base + i for i in range(len(_TUI_PALETTE))]
-        else:
+            # Redefine every curated color in ONE OSC-4 escape. ncurses'
+            # init_color() does the same via the terminfo ``initc`` string, but
+            # emits one OSC-4 per color — 240 of them — and iTerm2 re-renders the
+            # screen on each palette change, so 240 back-to-back sets cost ~2-3s
+            # at launch (Terminal.app coalesces and stays instant). OSC-4 accepts
+            # many ``index;spec`` pairs in a single sequence, which the terminal
+            # applies as one change. Bypassing init_color() is safe: cells draw
+            # through init_pair(), which passes the slot INDEX and lets the
+            # terminal resolve it against the palette set here — ncurses never
+            # needs these RGBs. Hex comes straight from the 0-255 authored
+            # channels (init_color's 0-1000 round-trip loses up to 1/255 each).
+            pairs = ";".join(
+                f"{base + i};rgb:{r:02x}/{g:02x}/{b:02x}"
+                for i, (r, g, b) in enumerate(_TUI_PALETTE)
+            )
+            try:
+                self._raw_out.write(f"\x1b]4;{pairs}\x1b\\")
+                self._raw_out.flush()
+                self._palette_term = [base + i for i in range(len(_TUI_PALETTE))]
+                bound = True
+            except (OSError, ValueError):
+                pass
+        if not bound:
             self._palette_term = [self._nearest_color(c) for c in _TUI_PALETTE]
 
     def _term_index(self, rgb: tuple[int, int, int]) -> int:
