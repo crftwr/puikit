@@ -209,6 +209,26 @@ def test_imageview_fit_height_derives_width(backend, tmp_path):
     assert rect.w == pytest.approx(6)  # 12 * 50/100
 
 
+def test_imageview_intrinsic_uses_the_physical_cell_aspect(tmp_path):
+    # On a character grid base_w/base_h are (1, 1) but a cell is ~1:2 (tall). The
+    # intrinsic size must use the cell's *real* pixels (ctx.pixel_base), or a
+    # fit=width image comes out ~2x too tall and overflows its pane (a broken
+    # layout once the terminal actually draws the picture). On a pixel-layout
+    # backend the two agree, so this only bites the grid.
+    from puikit.image import image_size
+    from puikit.layout import LayoutContext
+
+    path = _png(tmp_path / "scene.png", 1600, 900)  # 16:9
+    grid = LayoutContext(base_w=1, base_h=1, snap=True, image_size=image_size,
+                         base_pixel_w=8, base_pixel_h=16)  # real cell 8x16 px
+    height = ImageView(path, fit="width").measure(grid, "y", 90).preferred
+    # 90 cells x 8px = 720px wide; 16:9 -> 405px tall; / 16px per cell ~= 25.3.
+    assert height == pytest.approx(90 * 8 * 900 / (16 * 1600))
+    # The old square-cell assumption (no physical size) doubles it -> overflow.
+    square = LayoutContext(base_w=1, base_h=1, snap=True, image_size=image_size)
+    assert ImageView(path, fit="width").measure(square, "y", 90).preferred > 50
+
+
 # --- Button image face (image-only and image+text) --------------------------
 
 

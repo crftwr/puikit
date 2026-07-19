@@ -82,7 +82,12 @@ class ImageView(Widget):
         size = ctx.measure_image(self.path)
         if size is None:
             return SizeRequest()
+        # Use the base unit's *physical* pixel size (ctx.pixel_base), not base_w/
+        # base_h: on a character grid those are (1, 1) but a cell is ~1:2, so a
+        # square-cell assumption would make the intrinsic extent ~2x too large and
+        # overflow the pane. On a pixel-layout backend the two are identical.
+        base_w, base_h = ctx.pixel_base
         extent = aspect_extent(
-            available, self.fit == WIDTH, size[0], size[1], ctx.base_w, ctx.base_h
+            available, self.fit == WIDTH, size[0], size[1], base_w, base_h
         )
         return SizeRequest(min=extent, preferred=extent, max=extent)

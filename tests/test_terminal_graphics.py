@@ -339,6 +339,41 @@ def test_base_pixel_size_falls_back_when_the_terminal_is_silent(kitty_backend, m
     assert kitty_backend.base_pixel_size == (8, 16)  # nominal 1:2, not (1, 1)
 
 
+def test_oversized_image_is_clipped_to_the_screen(kitty_backend):
+    # A picture is painted out-of-band, so push_clip does not trim it like text.
+    # An ImageView taller than the screen must be clipped here, or it draws off
+    # the bottom (over the status bar, etc.). The source is cropped to match.
+    kitty_backend._stdscr = _FakeScreen()  # 80 cols x 24 rows
+    kitty_backend.draw_image(10, 20, "img.png", {"w": 30, "h": 30, "src": None})
+    x, y, cols, rows, _, src = next(iter(kitty_backend._images.values()))
+    assert (x, y, cols, rows) == (10, 20, 30, 4)  # 30 rows -> 4 (screen bottom)
+    assert src == pytest.approx((0.0, 0.0, 1.0, 4 / 30))  # only the visible top
+
+
+def test_image_clipped_to_a_pushed_clip_rect(kitty_backend):
+    kitty_backend._stdscr = _FakeScreen()
+    kitty_backend.push_clip(0, 0, 40, 15)  # a pane
+    kitty_backend.draw_image(5, 5, "img.png", {"w": 50, "h": 50})
+    x, y, cols, rows, _, _ = next(iter(kitty_backend._images.values()))
+    assert (x, y, cols, rows) == (5, 5, 35, 10)  # trimmed to the pane
+
+
+def test_fully_offscreen_image_is_dropped(kitty_backend):
+    kitty_backend._stdscr = _FakeScreen()
+    kitty_backend.draw_image(10, 30, "img.png", {"w": 10, "h": 10})  # below row 24
+    assert kitty_backend._images == {}
+
+
+def test_crop_src_narrows_an_existing_window():
+    # Clipping composes with a pan/zoom crop: the fraction is of the current
+    # window, not the whole image.
+    from puikit.backends.curses_backend import CursesBackend
+
+    assert CursesBackend._crop_src(None, 0.25, 0.0, 0.5, 1.0) == (0.25, 0.0, 0.5, 1.0)
+    # Within a window already covering the middle half, take its right half.
+    assert CursesBackend._crop_src((0.25, 0.0, 0.5, 1.0), 0.5, 0.0, 0.5, 1.0) == (0.5, 0.0, 0.25, 1.0)
+
+
 def test_curses_without_a_protocol_keeps_images_off(monkeypatch):
     monkeypatch.setenv("PUIKIT_TERM_GRAPHICS", "none")
     from puikit.backends.curses_backend import CursesBackend
@@ -387,6 +422,33 @@ def test_images_go_to_the_real_terminal_not_a_redirected_stdout(monkeypatch, qua
 
     assert "\x1b]1337;File=" in real_terminal.getvalue()  # reached the terminal
     assert not any("1337" in text for text in swallowed)  # NOT the redirected sink
+
+
+def test_iterm2_resize_reemits_every_image_not_just_the_changed_one(monkeypatch, quadrants):
+    # iTerm2/sixel have no delete verb, so a stale image is erased by repainting
+    # the whole grid — which wipes EVERY image. All must then be re-sent, or an
+    # image that did not move (common while resizing, when only some shift)
+    # vanishes. Regression for "images disappear when I change the terminal size".
+    import io
+
+    monkeypatch.setenv("PUIKIT_TERM_GRAPHICS", "iterm2")
+    from puikit.backends.curses_backend import CursesBackend
+
+    backend = CursesBackend()
+    backend._stdscr = _FakeScreen()
+    backend._cell_px = (8, 16)
+
+    def frame(placements):
+        backend.clear()
+        for x, y, w, h in placements:
+            backend.draw_image(x, y, quadrants, {"w": w, "h": h})
+        buf = io.StringIO()
+        backend._raw_out = buf
+        backend._present_images()
+        return buf.getvalue().count("\x1b]1337;File=")
+
+    assert frame([(2, 2, 20, 10), (30, 2, 20, 10)]) == 2   # both new
+    assert frame([(2, 2, 20, 10), (30, 3, 20, 10)]) == 2   # only 2nd moved -> BOTH resent
 
 
 def test_placement_transmits_at_the_right_cell(kitty_backend, quadrants):

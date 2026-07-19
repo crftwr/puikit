@@ -83,8 +83,25 @@ class LayoutContext:
     # loading the file. Backend-independent (a file's dimensions are a fact),
     # but routed through the backend like measure, so a backend can override.
     image_size: Callable[[str], tuple[int, int] | None] | None = None
+    # Physical pixel size of a base unit, for aspect-sensitive measurement — an
+    # ImageView's fit=width/height sizes itself from the image's pixel aspect.
+    # base_w/base_h are the *layout* unit (1,1 on a character grid), but a cell is
+    # not square, so a widget that reasons about on-screen aspect must use these
+    # (the cell's real pixels) instead. 0 -> fall back to base_w/base_h (they are
+    # already physical pixels on a pixel-layout backend). See pixel_base.
+    base_pixel_w: float = 0.0
+    base_pixel_h: float = 0.0
     # Divider rects emitted during resolve, for the Panel to draw.
     dividers: list[Divider] = field(default_factory=list)
+
+    @property
+    def pixel_base(self) -> tuple[float, float]:
+        """The physical pixel size of a base unit as ``(w, h)`` — the aspect a
+        widget must use to size itself to an image. Falls back to the layout base
+        unit where the backend does not distinguish (``base_size`` is already the
+        physical size on a pixel-layout backend); a character grid supplies the
+        real, non-square cell pixels."""
+        return (self.base_pixel_w or self.base_w, self.base_pixel_h or self.base_h)
 
     def measure_text(self, text: str, style: Any = None) -> float:
         """Width of ``text`` in base units. Falls back to the column count when the

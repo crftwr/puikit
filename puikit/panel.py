@@ -491,6 +491,7 @@ class DrawContext:
         from .layout import LayoutContext
 
         cw, ch = self._backend.base_size
+        pw, ph = self._backend.base_pixel_size
         return LayoutContext(
             cw, ch,
             snap=not self._caps.supports("pixel_layout"),
@@ -500,6 +501,7 @@ class DrawContext:
             line_height=self._backend.measure_line_height,
             scrollbar_units=self._backend.scrollbar_units,
             image_size=self._backend.image_size,
+            base_pixel_w=pw, base_pixel_h=ph,
         )
 
     def line_height(self, style: Style = DEFAULT_STYLE) -> float:
@@ -1551,6 +1553,7 @@ class Panel:
         # layout tracks window resizes pixel by pixel, not base unit by base unit.
         sw, sh = self.backend.size_units
         cw, ch = self.backend.base_size
+        pw, ph = self.backend.base_pixel_size
         snap = not self.backend.capabilities.supports("pixel_layout")
         ctx = LayoutContext(
             cw, ch, snap,
@@ -1561,6 +1564,7 @@ class Panel:
             metrics=self.backend.font_metrics,
             scrollbar_units=self.backend.scrollbar_units,
             image_size=self.backend.image_size,
+            base_pixel_w=pw, base_pixel_h=ph,
         )
         placements = self._layout.resolve(0.0, 0.0, sw, sh, ctx)
         self._dividers = list(ctx.dividers)

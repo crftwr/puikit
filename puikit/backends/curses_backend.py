@@ -1204,19 +1204,56 @@ class CursesBackend(Backend):
         if self._term_graphics is None:
             return
         hints = hints or {}
-        x, y = int(x), int(y)
-        cols = int(hints.get("w", self.size[0] - x))
-        rows = int(hints.get("h", self.size[1] - y))
+        x, y = float(x), float(y)
+        cols = float(hints.get("w", self.size[0] - x))
+        rows = float(hints.get("h", self.size[1] - y))
+        if cols <= 0 or rows <= 0:
+            return
+        src = hints.get("src")
+        # Clip to the visible region. The image is painted out-of-band (not
+        # through curses cells), so push_clip — which trims text — does not trim
+        # it; an oversized ImageView (say a fit=width picture in a short pane)
+        # would otherwise draw over its neighbours and off the bottom of the
+        # screen. Intersect the footprint with the current clip rect (and the
+        # screen), and crop the source to match so the visible part shows the
+        # right region rather than the whole image squashed into it. GUI gets
+        # this free from the backend's hardware clip.
+        gw, gh = self.size
+        cx0, cy0, cx1, cy1 = 0.0, 0.0, float(gw), float(gh)
+        if self._clip_stack:
+            sx0, sy0, sx1, sy1 = self._clip_stack[-1]
+            cx0, cy0 = max(cx0, sx0), max(cy0, sy0)
+            cx1, cy1 = min(cx1, sx1), min(cy1, sy1)
+        vx0, vy0 = max(x, cx0), max(y, cy0)
+        vx1, vy1 = min(x + cols, cx1), min(y + rows, cy1)
+        if vx1 - vx0 < 1.0 or vy1 - vy0 < 1.0:
+            return  # clipped away (nothing at least a cell wide/tall remains)
+        if (vx0, vy0, vx1, vy1) != (x, y, x + cols, y + rows):
+            src = self._crop_src(src, (vx0 - x) / cols, (vy0 - y) / rows,
+                                 (vx1 - vx0) / cols, (vy1 - vy0) / rows)
+            x, y, cols, rows = vx0, vy0, vx1 - vx0, vy1 - vy0
+        x, y, cols, rows = int(x), int(y), int(cols), int(rows)
         if cols <= 0 or rows <= 0:
             return
         # Ids start at 1 (kitty treats 0 as "unspecified") and are assigned in
         # draw order, so the same screen redrawn reuses the same ids.
         image_id = len(self._images) + 1
-        self._images[image_id] = (x, y, cols, rows, path, hints.get("src"))
+        self._images[image_id] = (x, y, cols, rows, path, src)
         _terminal_graphics.debug(
             f"[draw_image] id={image_id} cell=({x},{y}) size=({cols}x{rows}) "
-            f"src={hints.get('src')} path={path}"
+            f"src={src} path={path}"
         )
+
+    @staticmethod
+    def _crop_src(src, fx: float, fy: float, fw: float, fh: float):
+        """Narrow a normalized source window to the sub-fraction ``(fx, fy, fw,
+        fh)`` of itself — used to crop an image to a clipped destination so the
+        visible cells show the matching part of the picture, not the whole thing
+        squashed. ``None`` (the whole image) narrows to just that fraction."""
+        if src is None:
+            return (fx, fy, fw, fh)
+        sx, sy, sw, sh = src
+        return (sx + fx * sw, sy + fy * sh, fw * sw, fh * sh)
 
     def _present_images(self, force: bool = False) -> None:
         """Phase 3 of present(): erase stale placements, then paint this frame's.
@@ -1253,8 +1290,14 @@ class CursesBackend(Backend):
             else:
                 # No delete verb (iTerm2 / sixel): repaint the whole grid so the
                 # cells the image covered are re-sent as text, overwriting it.
+                # That repaint wipes EVERY image, not just the stale ones, so all
+                # of them must be re-sent this frame — force it. Otherwise an
+                # image whose placement did not change (common mid-resize, when
+                # only some images move) is erased by the repaint and never
+                # redrawn, and it vanishes.
                 self._stdscr.redrawwin()
                 self._stdscr.refresh()
+                force = True
         fresh = {k: v for k, v in self._images.items()
                  if force or self._prev_images.get(k) != v}
         if not fresh:
