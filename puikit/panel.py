@@ -15,7 +15,6 @@ from typing import Any
 from .backend import Backend, Color, DEFAULT_STYLE, Style, TextAttribute, TRANSPARENT, is_transparent
 from .capability import CapabilityProfile
 from .color import LC_BODY, LC_LARGE, LC_MIN_NONTEXT, legible_ink
-from . import _profile
 from . import easing as easing_mod
 from .event import Event, EventType
 from .focus import FocusContainer, focus_on_click, move_focus
@@ -1567,10 +1566,6 @@ class Panel:
         rect = self._layer_rect(hints)
         self._layers.append(_Slot(widget, rect, hints, z, reflow=reflow, interactive=interactive))
         self._layers.sort(key=lambda s: s.z)
-        if _profile.ENABLED:
-            # The marker that anchors a trace: everything after this line, until
-            # the frames settle, is what opening this layer cost.
-            _profile.write(f">>> push_layer {type(widget).__name__} rect={rect}")
 
     def pop_layer(self) -> Any | None:
         if not self._layers:
@@ -1714,11 +1709,6 @@ class Panel:
             self.backend.end_text_input()
 
     def render(self) -> None:
-        # The Python draw pass, separated from the backend's rasterization: the
-        # two are charged to different frames (a widget's draw builds a display
-        # list; the backend rasterizes it on the next WM_PAINT), so a trace that
-        # merged them could not say which half a slow open belongs to.
-        t_render = time.perf_counter() if _profile.ENABLED else 0.0
         self._sync_text_input()
         self._text_frame_reset()
         if self._layout is not None:
@@ -1780,11 +1770,6 @@ class Panel:
         if self.backend.capabilities.supports("pointer_shape"):
             self.backend.set_pointer_shape(self._pointer_shape)
         self.backend.present()
-        if _profile.ENABLED:
-            _profile.write(
-                f"panel.render  py={(time.perf_counter() - t_render) * 1000:6.1f}  "
-                f"layers={len(self._layers)} text_anims={len(self._text_anims)}"
-            )
 
     def _pane_background(self, hints: dict[str, Any]) -> tuple[int, int, int] | None:
         """Pane background: explicit "bg" hint, else the theme color of the

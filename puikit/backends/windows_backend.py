@@ -38,7 +38,6 @@ from typing import Any
 
 from . import _win32_dragdrop, _win32_ime
 from . import _win32_native as native
-from .. import _profile
 from ._d3d_shader import HAVE_D3D_SHADER, D3DShaderBackground
 from ..background import Shader, Wallpaper
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, is_transparent
@@ -1686,12 +1685,6 @@ class WindowsBackend(Backend):
             return
         rt = self._render_target
         now = time.monotonic()
-        # Frame-phase profiling (PUIKIT_FRAME_PROFILE). Every timer below is
-        # guarded on the flag, so a normal frame pays nothing. See puikit._profile.
-        prof = _profile.ENABLED
-        t_frame = time.perf_counter() if prof else 0.0
-        t_shader = t_ui = t_list = t_composite = t_present = 0.0
-        ui_mode = "-"
         # With a CRT effect active, the frame is drawn into a command list first
         # so the composite pass (below) can run it through the Direct2D effect
         # chain before it reaches the swap chain. Without one, the display list
@@ -1703,29 +1696,17 @@ class WindowsBackend(Backend):
         # texture is then wrapped as a D2D bitmap and drawn as the backdrop below.
         shader_tex = None
         if isinstance(self._background, Shader) and self._d3d_shader is not None:
-            t0 = time.perf_counter() if prof else 0.0
             cw, ch = self._client_size_px()
             scale = getattr(self._background, "resolution_scale", 1.0)
             shader_tex = self._d3d_shader.render_to_texture(
                 max(1, int(cw * scale)), max(1, int(ch * scale)), self._bg_clock)
-            if prof:
-                t_shader = (time.perf_counter() - t0) * 1000.0
         # Both passes below (the recording and the frame itself) may draw shadows,
         # and neither may retarget the device context once its batch is open.
         self._prepare_shadows()
         # Record (or reuse) the display list before the frame's own BeginDraw —
         # recording retargets the device context, which is illegal inside an open
         # draw batch. None means this frame runs the Python pass inline.
-        if prof:
-            # Distinguish the three costs the cache exists to separate: a replay
-            # of an existing recording, a fresh recording (one full pass), and
-            # the bypass a running animation forces (a full pass every frame).
-            ui_mode = ("bypass" if self._animations
-                       else "replay" if self._ui_cache is not None else "record")
-        t0 = time.perf_counter() if prof else 0.0
         ui_cl = self._acquire_ui_cache(now)
-        if prof:
-            t_ui = (time.perf_counter() - t0) * 1000.0
         frame_cl = None
         if use_effect:
             frame_cl = native.dc_create_command_list(rt)
@@ -1743,26 +1724,13 @@ class WindowsBackend(Backend):
             clear = self._background.backdrop
         native.rt_clear(rt, native.D2D1_COLOR_F(clear[0] / 255, clear[1] / 255, clear[2] / 255, 1.0))
         self._render_background(now, shader_tex)
-        t0 = time.perf_counter() if prof else 0.0
         if ui_cl is not None:
             native.dc_draw_image(rt, ui_cl)
         else:
             self._render_display_list(now)
         hr = native.rt_end_draw(rt)
-        if prof:
-            # EndDraw is where the GPU work for this batch is actually flushed,
-            # so it belongs to the pass, not to Present.
-            t_list = (time.perf_counter() - t0) * 1000.0
         device_lost = (hr & 0xFFFFFFFF) == 0x8899000C  # D2DERR_RECREATE_TARGET
-        if prof and (hr & 0xFFFFFFFF) != 0:
-            # Any non-zero HRESULT here means the frame was dropped. Worth its own
-            # line: a recreate costs ~280ms, so a trace must not leave the reader
-            # inferring one from missing phases. D2DERR_WRONG_STATE (0x88990001)
-            # is the signature of an unbalanced layer or a retarget inside a batch.
-            _profile.write(f"!!! EndDraw failed hr=0x{hr & 0xFFFFFFFF:08X} "
-                           f"device_lost={device_lost}")
         if use_effect and not device_lost:
-            t0 = time.perf_counter() if prof else 0.0
             try:
                 native.command_list_close(frame_cl)
                 native.dc_set_target(rt, self._target_bitmap)
@@ -1774,8 +1742,6 @@ class WindowsBackend(Backend):
                 device_lost = (hr & 0xFFFFFFFF) == 0x8899000C
             except OSError:
                 device_lost = True  # a lost device surfaces mid-composite; recreate below
-            if prof:
-                t_composite = (time.perf_counter() - t0) * 1000.0
         if frame_cl is not None:
             # Re-bind the swap-chain target and drop the command list before any
             # recreate, so a device-loss frame doesn't leak it or leave the DC
@@ -1784,28 +1750,10 @@ class WindowsBackend(Backend):
             self._frame_target = self._target_bitmap
             frame_cl.release()
         if not device_lost:
-            t0 = time.perf_counter() if prof else 0.0
             present_hr = native.swapchain_present(self._swap_chain) & 0xFFFFFFFF
             device_lost = present_hr in (0x887A0005, 0x887A0007)  # DXGI_ERROR_DEVICE_REMOVED / _RESET
-            if prof:
-                # Present blocks on vsync, so a large value here is the frame
-                # waiting for the display, not work — read it as the floor a
-                # frame cannot go below, not as a cost to optimize.
-                t_present = (time.perf_counter() - t0) * 1000.0
-        if prof:
-            _profile.write(
-                f"frame total={(time.perf_counter() - t_frame) * 1000:6.1f}  "
-                f"shader={t_shader:5.1f} ui[{ui_mode}]={t_ui:6.1f} "
-                f"list={t_list:6.1f} composite={t_composite:5.1f} "
-                f"present={t_present:5.1f}  cmds={len(self._front)} "
-                f"anim={len(self._animations)} ticks={len(self._tick_callbacks)}"
-            )
         if device_lost:
-            t0 = time.perf_counter() if prof else 0.0
             self._recreate_render_target()
-            if prof:
-                _profile.write(
-                    f"!!! recreate_render_target {(time.perf_counter() - t0) * 1000:.1f} ms")
 
     def _render_display_list(self, now: float) -> None:
         """Rasterize the front display list to the current target (the swap-chain
@@ -2530,18 +2478,8 @@ class WindowsBackend(Backend):
         if self._crt_roll is not None:
             self._ensure_roll_ticker()
         self._ensure_background_ticker()
-        if self._handler is None:
-            return
-        if not _profile.ENABLED:
+        if self._handler is not None:
             self._handler(event)
-            return
-        # The keystroke's own timestamp, and what the app's handler cost
-        # synchronously before returning — so a trace separates "the app took
-        # this long to decide" from "the frames after it were slow".
-        _profile.write(f">>> event {event.type.name} key={getattr(event, 'key', None)!r}")
-        t0 = time.perf_counter()
-        self._handler(event)
-        _profile.write(f"<<< event handled in {(time.perf_counter() - t0) * 1000:.1f} ms")
 
     def _mouse_xy(self, lparam: int) -> tuple[float, float]:
         x = native.signed_word(native.loword(lparam))
