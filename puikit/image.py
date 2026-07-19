@@ -121,3 +121,38 @@ def cover_source(
     scale = max(tw / iw, th / ih)
     sw, sh = tw / scale, th / scale
     return ((iw - sw) / 2.0, (ih - sh) / 2.0, sw, sh)
+
+
+def zoom_window(
+    zoom: float, cx: float = 0.5, cy: float = 0.5
+) -> tuple[float, float, float, float]:
+    """The source window a pan/zoom viewer is looking at, as **normalized**
+    ``(x, y, w, h)`` fractions of the image (each ``0..1``, top-left origin) —
+    the ``src`` hint ``draw_image`` accepts.
+
+    Normalized on purpose: the crop must be independent of the units a backend
+    measures the image in, which differ (a macOS ``NSImage`` reports *points*,
+    derived from the file's DPI, while Direct2D and Pillow use *pixels*). Each
+    backend multiplies these fractions by its own image size, so a Retina image
+    — whose point size is half its pixel size — crops correctly everywhere.
+
+    ``zoom`` is the magnification: ``1.0`` shows the whole image, ``2.0`` shows
+    half of each axis (twice as big on screen). ``cx``/``cy`` are the pan center
+    in normalized image coordinates (``0.5`` = centered).
+
+    The window is square in *fraction* space (``w == h == 1/zoom``), so scaling
+    both axes by the same factor keeps the image's own aspect ratio at every
+    zoom: paired with ``CONTAIN`` (whose destination box is aspect-locked to the
+    image) the view is undistorted throughout, and magnification changes only how
+    much of the source is sampled.
+
+    Panning past an edge *slides* the window back inside the image rather than
+    shrinking it, so the zoom level survives a clamp. A ``zoom`` at or below 1
+    simply pins to the whole image."""
+    zoom = max(1e-6, zoom)
+    w = h = min(1.0, 1.0 / zoom)
+    # Center on the requested point, then slide (not shrink) back into bounds so
+    # the visible extent — and therefore the zoom — is preserved at the edges.
+    x = min(max(cx - w / 2.0, 0.0), 1.0 - w)
+    y = min(max(cy - h / 2.0, 0.0), 1.0 - h)
+    return (x, y, w, h)

@@ -2224,12 +2224,14 @@ class WindowsBackend(Backend):
         w_units = hints.get("w", max(1, round(iw / self._base_w)))
         h_units = hints.get("h", max(1, round(ih / self._base_h)))
         target = self._unit_rect(x, y, w_units, h_units)
-        dest, source_rect = self._fit_image_rects(hints.get("fit", "fill"), target, iw, ih)
+        dest, source_rect = self._fit_image_rects(
+            hints.get("fit", "fill"), target, iw, ih, hints.get("src")
+        )
         opacity = float(hints.get("alpha", 1.0))
         native.rt_draw_bitmap(self._render_target, bitmap, dest, opacity, source_rect)
 
     def _fit_image_rects(
-        self, fit: str, target: Any, iw: int, ih: int
+        self, fit: str, target: Any, iw: int, ih: int, src=None
     ) -> tuple[Any, Any | None]:
         """Destination and source rects for an object-fit, mirroring
         MacOSBackend._fit_rects: CONTAIN letterboxes the destination (source
@@ -2237,18 +2239,33 @@ class WindowsBackend(Backend):
         crops the source to the target's aspect; FILL stretches the whole
         image across the whole target (the source crop puikit.image computes
         for the aspect-locked fits is already baked into ``target``, so they
-        draw the same as FILL here)."""
+        draw the same as FILL here).
+
+        An explicit ``src`` crop — normalized ``(x, y, w, h)`` fractions, from
+        the ``src`` hint (see ``puikit.image.zoom_window``) — replaces the source
+        the fit would derive, so a pan/zoom viewer can roam a magnified image
+        without re-encoding it. The fractions are scaled by the image's pixel
+        size here; unlike Cocoa, D2D's source rect is already top-left origin
+        pixels, so the crop maps across unflipped."""
         from ..image import CONTAIN, COVER, contain_box, cover_source
 
         tw, th = target.right - target.left, target.bottom - target.top
+        source = None
+        if src is not None:
+            fx, fy, fw, fh = src
+            source = native.D2D1_RECT_F(
+                fx * iw, fy * ih, (fx + fw) * iw, (fy + fh) * ih
+            )
         if fit == CONTAIN:
             ox, oy, bw, bh = contain_box(tw, th, iw, ih)
             dest = native.D2D1_RECT_F(target.left + ox, target.top + oy, target.left + ox + bw, target.top + oy + bh)
-            return dest, None
+            return dest, source
         if fit == COVER:
+            if source is not None:
+                return target, source
             sx, sy, sw, sh = cover_source(iw, ih, tw, th)
             return target, native.D2D1_RECT_F(sx, sy, sx + sw, sy + sh)
-        return target, None  # FILL
+        return target, source  # FILL
 
     # --- animation rendering (transform/opacity per group) ---------------------
 

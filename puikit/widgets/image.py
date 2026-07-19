@@ -35,7 +35,8 @@ from .base import Widget
 
 class ImageView(Widget):
     def __init__(
-        self, path: str, fit: str = FILL, alt: str | None = None, alpha: float = 1.0
+        self, path: str, fit: str = FILL, alt: str | None = None, alpha: float = 1.0,
+        src: tuple[float, float, float, float] | None = None,
     ):
         if fit not in FITS:
             raise ValueError(f"unknown image fit {fit!r}; expected one of {sorted(FITS)}")
@@ -48,6 +49,14 @@ class ImageView(Widget):
         # per-pixel alpha. 1.0 = fully opaque. Composited by transparency-
         # capable backends; ignored on TUI (the alt glyph stands in).
         self.alpha = alpha
+        # Source crop as normalized (x, y, w, h) fractions of the image (0..1,
+        # top-left origin), or None for the whole image. This is the pan/zoom
+        # window: the fit still shapes the destination, while src picks how much
+        # of the source feeds it. Normalized so it is independent of the units a
+        # backend measures the image in (points vs pixels); each backend scales
+        # by its own image size. puikit.image.zoom_window computes one from a
+        # zoom + pan center.
+        self.src = src
 
     def draw(self, ctx: DrawContext) -> None:
         # The aspect modes have already shaped the rect (via measure), so they
@@ -56,7 +65,8 @@ class ImageView(Widget):
         wu, hu = ctx.size_units
         ctx.draw_image(
             0, 0, self.path,
-            hints={"w": wu, "h": hu, "fit": draw_fit, "alt": self.alt, "alpha": self.alpha},
+            hints={"w": wu, "h": hu, "fit": draw_fit, "alt": self.alt,
+                   "alpha": self.alpha, "src": self.src},
         )
 
     def measure(self, ctx: LayoutContext, axis: str, available: float) -> SizeRequest:

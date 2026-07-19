@@ -18,7 +18,7 @@ from puikit import (
     VSplit,
 )
 from puikit.backends.memory_backend import MemoryBackend
-from puikit.image import aspect_extent, contain_box, cover_source, image_size
+from puikit.image import aspect_extent, contain_box, cover_source, image_size, zoom_window
 from puikit.widgets import Button, ImageView, Label
 
 
@@ -84,6 +84,30 @@ def test_contain_box_letterboxes_and_cover_crops():
     assert (round(sx), round(sy)) == (0, 5)
 
 
+def test_zoom_window_is_normalized_and_tracks_zoom():
+    # Normalized fractions of the image, not pixels: zoom 1 (or below) shows the
+    # whole image; 2x samples half of each axis, centered.
+    assert zoom_window(1.0) == (0.0, 0.0, 1.0, 1.0)
+    assert zoom_window(0.5) == (0.0, 0.0, 1.0, 1.0)
+    assert zoom_window(2.0) == (0.25, 0.25, 0.5, 0.5)
+    # The window is square in fraction space (w == h == 1/zoom), so scaling both
+    # axes by the same factor keeps any image's aspect ratio -- CONTAIN never
+    # distorts. Multiplying back by a 2:1 image's pixels proves it.
+    for zoom in (1.0, 1.5, 3.0, 8.0):
+        _, _, w, h = zoom_window(zoom)
+        assert w == pytest.approx(h)
+        assert (w * 1000) / (h * 500) == pytest.approx(1000 / 500)
+
+
+def test_zoom_window_clamps_by_sliding_not_shrinking():
+    # Panning to either corner slides the window fully inside the image while
+    # preserving its extent -- the zoom level must survive hitting an edge.
+    for cx, cy, expect_xy in ((0.0, 0.0, (0.0, 0.0)), (1.0, 1.0, (0.5, 0.5))):
+        x, y, w, h = zoom_window(2.0, cx, cy)
+        assert (x, y) == expect_xy
+        assert (w, h) == (0.5, 0.5)
+
+
 # --- ImageView draw / fallback ----------------------------------------------
 
 
@@ -135,6 +159,27 @@ def test_imageview_cover_fit_flows_to_draw(backend):
     panel.render()
     if _has_images(backend):
         assert backend.image_calls[0][3]["fit"] == "cover"
+
+
+def test_imageview_src_crop_flows_to_draw(backend):
+    # The pan/zoom window reaches the backend as the "src" hint; the fit still
+    # shapes the destination, so the two stay orthogonal.
+    crop = zoom_window(2.0)
+    panel = Panel(backend)
+    panel.add(ImageView("logo.png", fit="contain", src=crop), x=0, y=0, w=10, h=4)
+    panel.render()
+    if _has_images(backend):
+        hints = backend.image_calls[0][3]
+        assert hints["src"] == crop
+        assert hints["fit"] == "contain"
+
+
+def test_imageview_src_defaults_to_none(backend):
+    panel = Panel(backend)
+    panel.add(ImageView("logo.png"), x=0, y=0, w=10, h=4)
+    panel.render()
+    if _has_images(backend):
+        assert backend.image_calls[0][3]["src"] is None
 
 
 # --- ImageView aspect sizing (resolves the same on both backends) -----------

@@ -20,6 +20,7 @@ from ..text import display_width as _display_width
 from ..text import glyph_runs as _glyph_runs
 from ..text import is_emoji_glyph as _is_emoji_glyph
 from ..text import truncate_to_width as _truncate_to_width
+from . import _terminal_graphics
 from ..theme import DEFAULT_THEME, THEME_TUI
 
 # RGB values of the 8 basic curses colors, used for nearest-color mapping.
@@ -367,8 +368,27 @@ class CursesBackend(Backend):
         # report is an input flood the input loop coalesces per frame, so it is
         # only paid when the caller asks for it.
         self._pointer_shape_enabled = bool(pointer_shape)
+        # Inline-image protocol this terminal speaks (kitty / iTerm2 / sixel), or
+        # None. When one is present the backend advertises "images" like a GUI
+        # backend and paints real pixels in present(); otherwise the capability
+        # stays off and the Panel substitutes the alt glyph, exactly as before.
+        self._term_graphics = _terminal_graphics.detect_protocol()
+        overrides: dict[str, bool] = {}
         if self._pointer_shape_enabled:
-            self.PROFILE = CapabilityProfile({**PROFILE_TUI, "pointer_shape": True})
+            overrides["pointer_shape"] = True
+        if self._term_graphics is not None:
+            overrides["images"] = True
+        if overrides:
+            self.PROFILE = CapabilityProfile({**PROFILE_TUI, **overrides})
+        # Images drawn this frame and last, as {id: (col, row, cols, rows, path,
+        # src)}. present() diffs them: a placement that moved or vanished must be
+        # erased, which curses' cell diff cannot see (it has no idea pixels were
+        # painted over its grid). See _present_images.
+        self._images: dict[int, tuple] = {}
+        self._prev_images: dict[int, tuple] = {}
+        # Cell pixel size, resolved lazily on first image draw (TIOCGWINSZ), so a
+        # session that never shows one pays nothing.
+        self._cell_px: tuple[int, int] | None = None
         # Last shape requested, so set_pointer_shape only emits on a change
         # rather than once per frame.
         self._pointer_shape: str | None = None
@@ -504,6 +524,17 @@ class CursesBackend(Backend):
             return
         # Reset any requested pointer shape so the shell inherits the default.
         self.set_pointer_shape(None)
+        # Drop any inline images still on screen. They are painted outside the
+        # grid, so endwin() does not take them with it — without this they would
+        # be left burned into the shell's scrollback after exit.
+        if self._term_graphics is not None and self._images:
+            erase = "".join(
+                _terminal_graphics.clear(self._term_graphics, k) for k in self._images
+            )
+            if erase:
+                sys.stdout.write(erase)
+                sys.stdout.flush()
+        self._images = {}
         self._set_mouse_tracking(False)
         self._stdscr.keypad(False)
         curses.noraw()
@@ -576,6 +607,10 @@ class CursesBackend(Backend):
         self._deferred_emoji.clear()
         self._cell_color.clear()
         self._wide_lead.clear()
+        # Keep the previous frame's placements (fresh dict, not .clear(), so the
+        # saved reference survives) so present() can diff against them.
+        self._prev_images = self._images
+        self._images = {}
         # Recycle color pairs every frame. ``erase()`` discards the whole screen,
         # so this frame redraws every cell and re-requests exactly the pairs it
         # needs — nothing from the previous frame is still referenced. Without
@@ -1121,6 +1156,84 @@ class CursesBackend(Backend):
             cell = thumb_style if thumb_off <= i < thumb_off + thumb_len else track_style
             self.draw_text(x, y + i, " ", cell)
 
+    def draw_image(
+        self, x: int, y: int, path: str, hints: dict[str, Any] | None = None
+    ) -> None:
+        """Record an inline-image placement for this frame.
+
+        Nothing is emitted yet: the pixels must land *after* curses has committed
+        its text, or the next refresh would paint the grid over them. present()
+        flushes the grid first and then draws every recorded placement, the same
+        two-phase order the deferred color emoji use. Placements are keyed by
+        cell position so a viewer redrawing the same image at the same spot keeps
+        one stable kitty image id (and so one erase clears it)."""
+        if self._term_graphics is None:
+            return
+        hints = hints or {}
+        x, y = int(x), int(y)
+        cols = int(hints.get("w", self.size[0] - x))
+        rows = int(hints.get("h", self.size[1] - y))
+        if cols <= 0 or rows <= 0:
+            return
+        # Ids start at 1 (kitty treats 0 as "unspecified") and are assigned in
+        # draw order, so the same screen redrawn reuses the same ids.
+        image_id = len(self._images) + 1
+        self._images[image_id] = (x, y, cols, rows, path, hints.get("src"))
+
+    def _present_images(self, force: bool = False) -> None:
+        """Phase 3 of present(): erase stale placements, then paint this frame's.
+
+        Curses' diff refresh cannot clear an image — it only tracks cells, and
+        the pixels were painted over the grid out-of-band. So any placement that
+        moved, changed source, or disappeared is erased explicitly: kitty by its
+        delete verb, the other two by forcing curses to repaint the covered cells
+        (redrawwin on the frame that already ran, which is why this runs after
+        the refresh above). Unchanged placements are left alone — re-transmitting
+        a multi-hundred-KB payload every frame would make scrolling crawl.
+
+        ``force`` re-sends every placement regardless: the caller repainted the
+        whole grid (recolored pairs / IME), which has already wiped the images
+        off the screen even though none of them *changed*."""
+        assert self._stdscr is not None
+        protocol = self._term_graphics
+        if protocol is None or (not self._images and not self._prev_images):
+            return
+        stale = [k for k, v in self._prev_images.items() if self._images.get(k) != v]
+        if stale:
+            erase = "".join(_terminal_graphics.clear(protocol, k) for k in stale)
+            if erase:
+                sys.stdout.write(erase)
+            else:
+                # No delete verb (iTerm2 / sixel): repaint the whole grid so the
+                # cells the image covered are re-sent as text, overwriting it.
+                self._stdscr.redrawwin()
+                self._stdscr.refresh()
+        fresh = {k: v for k, v in self._images.items()
+                 if force or self._prev_images.get(k) != v}
+        if not fresh:
+            sys.stdout.flush()
+            return
+        if self._cell_px is None:
+            # Fall back to a nominal 8x16 cell when the terminal does not report
+            # its pixel size; the image still lands in the right cell box, only
+            # the payload's resolution is a guess.
+            self._cell_px = _terminal_graphics.cell_pixels() or (8, 16)
+        cell_w, cell_h = self._cell_px
+        for image_id, (x, y, cols, rows, path, src) in fresh.items():
+            rendered = _terminal_graphics.render(path, cols * cell_w, rows * cell_h, src)
+            if rendered is None:
+                continue
+            image, png = rendered
+            sequence = _terminal_graphics.encode(
+                protocol, image, png, cols, rows, image_id
+            )
+            if not sequence:
+                continue
+            # Address the cell in the terminal's own 1-based coordinates rather
+            # than through curses, which does not know these writes happen.
+            sys.stdout.write(f"\x1b[{y + 1};{x + 1}H{sequence}")
+        sys.stdout.flush()
+
     def present(self) -> None:
         assert self._stdscr is not None
         # Phase 1 — commit all text and boxes. Color emoji were deferred by
@@ -1140,7 +1253,8 @@ class CursesBackend(Backend):
         #    pair's stale color (a single out-of-place cell in a gradient). When
         #    any pair's color changed since last frame, repaint everything so the
         #    recolored cells are re-sent.
-        if self._input_pos is not None or self._pair_rgb != self._prev_pair_rgb:
+        repainted = self._input_pos is not None or self._pair_rgb != self._prev_pair_rgb
+        if repainted:
             self._stdscr.redrawwin()
         self._stdscr.refresh()
         # Phase 2 — overlay each deferred emoji as an isolated write. Because its
@@ -1170,6 +1284,12 @@ class CursesBackend(Backend):
             pass
         if self._deferred_emoji or self._input_pos is not None:
             self._stdscr.refresh()
+        # Phase 3 — inline images last of all, so the pixels sit on top of a grid
+        # curses has fully committed. A refresh after this point would paint text
+        # cells back over them, which is exactly why nothing follows. A frame that
+        # repainted the whole grid above has just erased every image with it, so
+        # they all have to be re-sent, not just the ones that changed.
+        self._present_images(force=repainted)
 
     # --- colors / attributes ----------------------------------------------------
 

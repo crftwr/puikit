@@ -2488,7 +2488,9 @@ class MacOSBackend(Backend):
         w_units = hints.get("w", max(1, round(iw / self._base_w)))
         h_units = hints.get("h", max(1, round(ih / self._base_h)))
         target = self._unit_rect(x, y, w_units, h_units)
-        dest, source = self._fit_rects(hints.get("fit", "fill"), target, iw, ih)
+        dest, source = self._fit_rects(
+            hints.get("fit", "fill"), target, iw, ih, hints.get("src")
+        )
         # SourceOver already honors the image's own per-pixel alpha (an RGBA
         # PNG); the "alpha" hint is an extra global opacity (the fraction).
         opacity = float(hints.get("alpha", 1.0))
@@ -2501,20 +2503,41 @@ class MacOSBackend(Backend):
             None,
         )
 
-    def _fit_rects(self, fit: str, target, iw: float, ih: float):
+    def _fit_rects(self, fit: str, target, iw: float, ih: float, src=None):
         """Destination and source rects for an object-fit. The geometry lives
         in puikit.image (shared with the TUI placeholder); here it is mapped
-        onto the pixel target rect. A zero source rect means the whole image."""
+        onto the pixel target rect. A zero source rect means the whole image.
+
+        An explicit ``src`` crop — normalized ``(x, y, w, h)`` fractions, from
+        the ``src`` hint (see ``puikit.image.zoom_window``) — replaces the source
+        the fit would derive, which is how a pan/zoom viewer scrolls around a
+        magnified image without re-encoding it. The fractions are scaled by the
+        image's own size *here*, so the DPI-dependent gap between an NSImage's
+        point size and its pixel size never leaks into the caller. The fit still
+        shapes the *destination*, so ``CONTAIN`` keeps letterboxing the
+        aspect-locked box it always did."""
         from ..image import CONTAIN, COVER, contain_box, cover_source
 
         whole = NSMakeRect(0, 0, 0, 0)
         tw, th = target.size.width, target.size.height
+        # Scale the normalized crop by the image's point size, then flip Y:
+        # Cocoa's source rect is bottom-left origin, so a top-left fraction band
+        # (y..y+h from the top) sits at (1 - y - h) from the bottom.
+        if src is None:
+            source = whole
+        else:
+            fx, fy, fw, fh = src
+            source = NSMakeRect(fx * iw, ih * (1.0 - fy - fh), fw * iw, fh * ih)
         if fit == CONTAIN:
             ox, oy, bw, bh = contain_box(tw, th, iw, ih)
-            return NSMakeRect(target.origin.x + ox, target.origin.y + oy, bw, bh), whole
+            return NSMakeRect(target.origin.x + ox, target.origin.y + oy, bw, bh), source
         if fit == COVER:
+            if src is not None:
+                return target, source
             sx, sy, sw, sh = cover_source(iw, ih, tw, th)
             return target, NSMakeRect(sx, sy, sw, sh)
+        if src is not None:
+            return target, source
         # FILL (and the aspect modes, whose rect is already aspect-correct):
         # stretch the whole image across the whole target.
         return target, whole

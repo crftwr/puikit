@@ -277,6 +277,20 @@ class DrawContext:
         return self._caps.supports("vector_shapes")
 
     @property
+    def images(self) -> bool:
+        """True when the backend can draw real pixel images, so ``draw_image``
+        renders a picture rather than falling back to the centered alt glyph.
+        True on GUI backends and in a terminal that speaks an inline-image
+        protocol (kitty / iTerm2 / sixel).
+
+        Most widgets should NOT read this — ``ImageView`` states the intent and
+        the Panel picks the fidelity. It exists for the case where the fallback
+        should be something richer than one glyph: an image viewer, say, that
+        would rather show a metadata card (format, dimensions, size) than a lone
+        ``●`` when the terminal cannot show the picture itself."""
+        return self._caps.supports("images")
+
+    @property
     def animated(self) -> bool:
         """True when the backend drives per-frame animation ticks. A widget that
         drives its own motion (a busy spinner, a blinking caret) reads it to
