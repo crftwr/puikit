@@ -126,11 +126,17 @@ def detect_protocol(env: dict[str, str] | None = None) -> str | None:
     return None
 
 
-def cell_pixels(fd: int | None = None) -> tuple[int, int] | None:
+def cell_pixels(fd: int | None = None) -> tuple[float, float] | None:
     """Pixel size of one character cell as ``(w, h)``, from the kernel's window
     size (``TIOCGWINSZ``'s ``ws_xpixel``/``ws_ypixel``), or ``None`` when the
     terminal does not report it. Needed to turn a cell box into the pixel box
-    an image should be scaled to; callers fall back to a nominal cell."""
+    an image should be scaled to; callers fall back to a nominal cell.
+
+    The division is **fractional**, not integer: ``ws_ypixel`` is rarely an exact
+    multiple of the row count, and truncating the remainder (e.g. 16.125 → 16)
+    loses a pixel per row — a couple of blank rows across a tall image, and a cell
+    aspect that no longer matches the emulator's, so it letterboxes the picture.
+    Keeping the fraction makes a scaled image line up with the real cell grid."""
     try:
         import fcntl
         import struct
@@ -144,7 +150,7 @@ def cell_pixels(fd: int | None = None) -> tuple[int, int] | None:
         return None
     if not (rows and cols and xpixel and ypixel):
         return None
-    return (xpixel // cols, ypixel // rows)
+    return (xpixel / cols, ypixel / rows)
 
 
 def render(
@@ -189,12 +195,23 @@ def render(
     if image.mode not in ("RGB", "RGBA"):
         image = image.convert("RGBA" if "A" in image.mode or image.mode == "P" else "RGB")
     px_w, px_h = max(1, int(px_w)), max(1, int(px_h))
-    scale = min(px_w / image.width, px_h / image.height)
-    if scale < 1.0:  # only ever downscale; magnification is the emulator's job
-        image = image.resize(
-            (max(1, int(image.width * scale)), max(1, int(image.height * scale))),
-            Image.LANCZOS,
-        )
+    if src is not None:
+        # A crop was requested: the caller sized it to match this pixel box's
+        # aspect, so resize to fill the box *exactly*. Preserving aspect here
+        # would leave a within-box letterbox that the terminal top-left-aligns,
+        # so the blank space piles up at the bottom instead of splitting evenly
+        # around a centered image. Any residual distortion is sub-cell.
+        if (image.width, image.height) != (px_w, px_h):
+            image = image.resize((px_w, px_h), Image.LANCZOS)
+    else:
+        # No crop (the size-unknown fallback): show the whole image letterboxed,
+        # aspect preserved, downscaling only.
+        scale = min(px_w / image.width, px_h / image.height)
+        if scale < 1.0:
+            image = image.resize(
+                (max(1, int(image.width * scale)), max(1, int(image.height * scale))),
+                Image.LANCZOS,
+            )
     import io
 
     buffer = io.BytesIO()
@@ -203,16 +220,24 @@ def render(
 
 
 def encode(
-    protocol: str, image: Any, png: bytes, cols: int, rows: int, image_id: int = 1
+    protocol: str, image: Any, png: bytes, cols: int, rows: int, image_id: int = 1,
+    fill: bool = False
 ) -> str:
     """The escape sequence that draws ``image`` at the cursor in a ``cols`` x
     ``rows`` cell box. The caller positions the cursor first; every protocol
     here is told (or asked) to leave it where it found it, so the sequence does
-    not disturb the grid curses believes it is managing."""
+    not disturb the grid curses believes it is managing.
+
+    ``fill`` means the image was already resized to exactly this cell box (a
+    crop was applied — see :func:`render`), so the protocol should stretch it to
+    fill the box rather than re-fit it with its own letterbox: the emulator's own
+    cell-size rounding would otherwise reintroduce a bottom band. iTerm2 honours
+    this via ``preserveAspectRatio=0``; kitty's ``c``/``r`` placement fills the
+    box regardless."""
     if protocol == KITTY:
         return _kitty(png, cols, rows, image_id)
     if protocol == ITERM2:
-        return _iterm2(png, cols, rows)
+        return _iterm2(png, cols, rows, fill)
     if protocol == SIXEL:
         return _sixel(image)
     return ""
@@ -247,10 +272,13 @@ def _kitty(png: bytes, cols: int, rows: int, image_id: int) -> str:
     return "".join(out)
 
 
-def _iterm2(png: bytes, cols: int, rows: int) -> str:
+def _iterm2(png: bytes, cols: int, rows: int, fill: bool = False) -> str:
     """iTerm2 inline image: OSC 1337 with the file inline. ``width``/``height``
-    are given in cells (bare integers) and aspect ratio is preserved, so the
-    picture letterboxes inside the box instead of stretching.
+    are given in cells (bare integers). ``preserveAspectRatio`` is ``0`` when the
+    caller already sized the image to the cell box (``fill``) so iTerm2 stretches
+    it to fill exactly — otherwise its own cell rounding re-letterboxes and blank
+    rows creep back in — and ``1`` for the whole-image fallback, which should
+    letterbox.
 
     Only the documented ``File`` arguments are sent — ``inline``, ``size``,
     ``width``, ``height``, ``preserveAspectRatio``. iTerm2 has no "keep the
@@ -260,7 +288,7 @@ def _iterm2(png: bytes, cols: int, rows: int) -> str:
     payload = base64.b64encode(png).decode("ascii")
     args = (
         f"inline=1;size={len(png)};width={cols};height={rows};"
-        "preserveAspectRatio=1"
+        f"preserveAspectRatio={0 if fill else 1}"
     )
     return f"\x1b]1337;File={args}:{payload}\a"
 

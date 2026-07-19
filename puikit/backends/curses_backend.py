@@ -1289,8 +1289,11 @@ class CursesBackend(Backend):
                     )
                     continue
                 image, png = rendered
+                # render() sized the image to the cell box when a crop was given,
+                # so tell the protocol to fill (stretch), not re-fit with its own
+                # letterbox.
                 sequence = _terminal_graphics.encode(
-                    protocol, image, png, cols, rows, image_id
+                    protocol, image, png, cols, rows, image_id, fill=src is not None
                 )
                 if not sequence:
                     _terminal_graphics.debug(

@@ -72,6 +72,22 @@ def test_detect_protocol_is_none_without_pillow(monkeypatch):
 # --- render (crop + scale) ---------------------------------------------------
 
 
+def test_cell_pixels_divides_fractionally(monkeypatch):
+    # Integer division truncated the sub-pixel remainder (ws_ypixel is rarely an
+    # exact multiple of the row count), losing a pixel per row -> a couple of
+    # blank rows across a tall image and a mismatched cell aspect. Keep the
+    # fraction so a scaled image lines up with the emulator's real cell grid.
+    import fcntl
+    import struct
+
+    # rows=80, cols=100, xpixel=805, ypixel=1290 -> cell 8.05 x 16.125 (not 8x16).
+    packed = struct.pack("HHHH", 80, 100, 805, 1290)
+    monkeypatch.setattr(fcntl, "ioctl", lambda *a, **k: packed)
+    w, h = tg.cell_pixels(fd=1)
+    assert w == pytest.approx(805 / 100)
+    assert h == pytest.approx(1290 / 80)  # 16.125, not truncated to 16
+
+
 def test_render_returns_image_and_png(quadrants):
     image, png = tg.render(quadrants, 24, 12)
     assert image.size == (24, 12)
@@ -80,10 +96,20 @@ def test_render_returns_image_and_png(quadrants):
 
 def test_render_applies_src_crop(quadrants):
     # The bottom-right quadrant is solid yellow; cropping to it (normalized: the
-    # far half of each axis) must leave no trace of the other three.
+    # far half of each axis) must leave no trace of the other three. With a crop
+    # the image is resized to fill the pixel box exactly (the caller matched the
+    # aspect), so it comes back box-sized, still all one colour.
     image, _ = tg.render(quadrants, 24, 12, src=(0.5, 0.5, 0.5, 0.5))
-    assert image.size == (12, 6)
+    assert image.size == (24, 12)
     assert [color for _, color in image.getcolors()] == [(255, 255, 0)]
+
+
+def test_render_fills_the_box_exactly_for_a_crop(quadrants):
+    # A crop whose aspect does NOT match the box is still resized to the full box
+    # (fill), because the caller guarantees the match; the terminal must not add a
+    # letterbox that piles blank space at the bottom.
+    image, _ = tg.render(quadrants, 30, 10, src=(0.0, 0.0, 1.0, 1.0))
+    assert image.size == (30, 10)
 
 
 def test_render_downscales_to_pixel_box_but_never_upscales(quadrants):
@@ -141,12 +167,21 @@ def test_iterm2_encodes_inline_file(quadrants):
     assert sequence.endswith("\a")
     assert f"size={len(png)}" in sequence
     assert "width=8;height=4" in sequence
-    assert "preserveAspectRatio=1" in sequence
+    assert "preserveAspectRatio=1" in sequence  # fallback: whole image, letterboxed
     assert "inline=1" in sequence
     # doNotMoveCursor is NOT a real iTerm2 File argument (kitty's C=1 has no
     # analog); sending it stopped the image rendering. Cursor drift is handled
     # by the backend bracketing emission in DECSC/DECRC instead.
     assert "doNotMoveCursor" not in sequence
+
+
+def test_iterm2_fill_stretches_to_the_cell_box(quadrants):
+    # When the image was already sized to the cell box (a crop was applied),
+    # iTerm2 must stretch it to fill — preserveAspectRatio=0 — or its own cell
+    # rounding re-letterboxes and blank rows return at the bottom.
+    image, png = tg.render(quadrants, 24, 12, src=(0.0, 0.0, 1.0, 1.0))
+    sequence = tg.encode(tg.ITERM2, image, png, cols=8, rows=4, fill=True)
+    assert "preserveAspectRatio=0" in sequence
 
 
 def test_protocols_without_a_delete_verb_report_it():
