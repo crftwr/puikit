@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,24 +7,33 @@ name = "puikit"
 version = "0.1.0"
 description = "Capability-based Python UI framework with TUI and GUI backends"
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
 authors = [{ name = "crftwr" }]
 requires-python = ">=3.10"
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: User Interfaces",
+    "Topic :: Terminals",
 ]
-# numpy vectorizes WindowsBackend's WIC->D2D alpha premultiply (~12-14x
-# faster on large images; see _win32_native._premultiply_bgra).
-dependencies = ["numpy"]
+dependencies = [
+    # numpy vectorizes WindowsBackend's WIC->D2D alpha premultiply (~12-14x
+    # faster on large images; see _win32_native._premultiply_bgra).
+    "numpy>=1.21",
+    # windows-curses backports the _curses C extension CPython omits on Windows,
+    # so the curses (TUI) backend runs there out of the box. The marker keeps it
+    # off macOS/Linux, which already ship _curses.
+    "windows-curses>=2.4; sys_platform == 'win32'",
+]
 
 [project.optional-dependencies]
-# windows-curses backports the _curses C extension CPython omits on Windows, so
-# the curses (TUI) backend and its tests run there; the marker keeps it off
-# macOS/Linux, which already ship _curses.
-dev = ["pytest>=8", "pytest-timeout>=2", "pillow>=9", "windows-curses>=2.4; sys_platform == 'win32'"]
+dev = ["pytest>=8", "pytest-timeout>=2", "pillow>=9"]
 macos = ["pyobjc-framework-Cocoa>=10", "pyobjc-framework-Quartz>=10"]
 # Pillow decodes/crops/scales images for the terminal inline-image protocols
 # (kitty / iTerm2 / sixel), so ImageView draws real pictures in a graphics-
@@ -34,6 +43,8 @@ images = ["pillow>=9"]
 
 [project.urls]
 Homepage = "https://github.com/crftwr/puikit"
+Repository = "https://github.com/crftwr/puikit"
+Issues = "https://github.com/crftwr/puikit/issues"
 
 [tool.setuptools.packages.find]
 include = ["puikit*"]
