@@ -79,6 +79,9 @@ PROFILE_WEB = CapabilityProfile(
         # A shader background is rendered in WebGL behind the UI canvas; surface
         # fills dissolve at set_surface_opacity so it shows through.
         "background_shader": True,
+        # A CRT/phosphor post effect is composited over the whole frame by a
+        # WebGL pass in the client (see set_post_effect / client.js fx).
+        "post_effects": True,
     }
 )
 
@@ -241,6 +244,8 @@ class WebBackend(Backend):
         self._background: Any = None
         self._reveal_exempt_depth = 0
         self._group_opaque: list[bool] = []
+        # Active full-screen post effect (a PostEffect, or None).
+        self._post_effect: Any = None
 
         # Animation ticks: callbacks driven by a repeating enqueue of _TICK.
         self._tick_callbacks: list[Any] = []
@@ -716,8 +721,37 @@ class WebBackend(Backend):
         return self._shader_program() is not None
 
     def _on_reduced_motion_changed(self) -> None:
-        # Re-issue the background so the client freezes / resumes its clock.
+        # Re-issue the background and post effect so the client freezes / resumes
+        # their motion (a shader's clock, the effect's roll/flicker).
         self._send_background()
+        self._send_post_effect()
+
+    # --- post effect (CRT/phosphor look) -----------------------------------
+
+    def set_post_effect(self, effect: Any) -> None:
+        """Composite a full-screen CRT/phosphor effect over the frame (a WebGL
+        post pass in the client), or clear it with ``None`` / a no-op effect."""
+        self._post_effect = effect
+        self._send_post_effect()
+
+    def _send_post_effect(self) -> None:
+        if self._server is None:
+            return
+        eff = self._post_effect
+        if eff is None or eff.is_noop:
+            self._server.send(json.dumps({"type": "posteffect", "on": False}))
+            return
+        # Reduced motion drops the self-driven fields (roll / flicker), keeping
+        # the static look — the same split PostEffect.without_motion() defines,
+        # so web matches macOS/Windows.
+        if self.reduced_motion:
+            eff = eff.without_motion()
+        self._server.send(json.dumps({
+            "type": "posteffect", "on": True,
+            "tint": list(eff.tint[:3]) if eff.tint else None,
+            "bloom": eff.bloom, "scanline": eff.scanline, "vignette": eff.vignette,
+            "glow": eff.glow, "flicker": eff.flicker, "roll": eff.roll,
+        }))
 
     # --- text input / IME --------------------------------------------------
 
@@ -795,6 +829,7 @@ class WebBackend(Backend):
         self._sent_images.clear()
         self._pointer_shape = None
         self._send_background()
+        self._send_post_effect()
 
     def _on_message(self, text: str) -> None:
         try:

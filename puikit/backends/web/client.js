@@ -19,6 +19,9 @@
   let ime = null;
   let imeActive = false;
   let shuttingDown = false;
+  // Set on every UI render so the post-effect pass re-uploads the UI canvas as
+  // a texture only when it actually changed (its own clock still runs each frame).
+  let fxUiDirty = true;
 
   // --- websocket ---------------------------------------------------------
 
@@ -94,6 +97,10 @@
         if (msg.kind === "shader") bg.setShader(msg);
         else bg.clear();
         break;
+      case "posteffect":
+        if (msg.on) fx.setEffect(msg);
+        else fx.clear();
+        break;
     }
   }
 
@@ -105,6 +112,7 @@
     if (shuttingDown) return;
     shuttingDown = true;
     bg.clear();
+    fx.clear();
     try {
       window.close();
     } catch (e) {
@@ -159,6 +167,7 @@
       paint(ops[i]);
     }
     resetClips();
+    fxUiDirty = true; // the UI changed; the post-effect pass should re-sample it
   }
 
   function roundRectPath(x, y, w, h, r) {
@@ -577,7 +586,11 @@
 
     function ensureGl() {
       if (gl) return gl;
-      gl = bgCanvas.getContext("webgl2", { premultipliedAlpha: false, antialias: false });
+      // preserveDrawingBuffer so the post-effect pass can sample this canvas as
+      // a texture (its content would otherwise be cleared after compositing).
+      gl = bgCanvas.getContext("webgl2", {
+        premultipliedAlpha: false, antialias: false, preserveDrawingBuffer: true,
+      });
       if (gl) {
         buf = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -677,6 +690,191 @@
     }
 
     return { setShader, clear };
+  })();
+
+  // --- WebGL post effect (CRT / phosphor) --------------------------------
+  //
+  // A full-frame effect composited over everything: it samples the shader
+  // background canvas and the UI canvas as textures, blends them, and applies
+  // the CRT look (bloom, scanlines, vignette, tint, glow, roll, flicker) to its
+  // own canvas on top. That canvas is pointer-events:none, so input still
+  // reaches the UI canvas beneath it.
+
+  const fxCanvas = document.createElement("canvas");
+  Object.assign(fxCanvas.style, {
+    position: "fixed", left: "0", top: "0", zIndex: "2",
+    display: "none", pointerEvents: "none",
+  });
+  document.body.appendChild(fxCanvas);
+
+  const FX_VERT =
+    "#version 300 es\nin vec2 p; out vec2 vUV;" +
+    "void main(){ vUV = p*0.5+0.5; gl_Position = vec4(p,0.0,1.0); }";
+  const FX_FRAG = `#version 300 es
+precision highp float;
+uniform sampler2D uUI;
+uniform sampler2D uBg;
+uniform vec2 uRes;
+uniform float uTime;
+uniform vec3 uTint;
+uniform float uHasTint, uHasBg;
+uniform float uBloom, uScanline, uVignette, uGlow, uFlicker, uRoll;
+in vec2 vUV;
+out vec4 outColor;
+const vec3 LUMA = vec3(0.299, 0.587, 0.114);
+vec3 frameAt(vec2 uv) {
+  vec4 ui = texture(uUI, uv);
+  vec3 bg = uHasBg > 0.5 ? texture(uBg, uv).rgb : vec3(0.094);
+  return mix(bg, ui.rgb, ui.a);
+}
+void main() {
+  vec2 uv = vUV;
+  vec3 col = frameAt(uv);
+  if (uBloom > 0.0) {
+    vec3 b = vec3(0.0);
+    vec2 px = 1.0 / uRes;
+    for (int i = 0; i < 8; i++) {
+      float a = float(i) / 8.0 * 6.2831853;
+      vec2 o = vec2(cos(a), sin(a));
+      b += max(frameAt(uv + o * px * 3.0) - 0.55, 0.0);
+      b += max(frameAt(uv + o * px * 6.0) - 0.55, 0.0);
+    }
+    col += uBloom * b * 0.35;
+  }
+  col *= 1.0 + uGlow * 0.35;
+  if (uHasTint > 0.5) { float l = dot(col, LUMA); col = uTint * l * 1.15; }
+  float scan = 0.5 + 0.5 * cos(uv.y * uRes.y * 3.14159 * 0.5);
+  col *= 1.0 - uScanline * scan * 0.65;
+  float d = distance(uv, vec2(0.5));
+  col *= 1.0 - uVignette * smoothstep(0.35, 0.9, d);
+  if (uRoll > 0.0) {
+    float bandY = fract(uTime * 0.09);
+    float band = smoothstep(0.06, 0.0, abs(uv.y - bandY));
+    float noise = 0.5 + 0.5 * sin(uv.x * uRes.x * 0.7 + uTime * 60.0);
+    col += uRoll * band * 0.6 * noise;
+  }
+  col *= 1.0 - uFlicker * 0.08 * (0.5 + 0.5 * sin(uTime * 47.0));
+  outColor = vec4(col, 1.0);
+}`;
+
+  const fx = (function () {
+    let gl = null, prog = null, buf = null, loc = {}, uiTex = null, bgTex = null;
+    let current = null, startTime = 0, rafId = 0;
+
+    function makeTex() {
+      const t = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+        new Uint8Array([24, 24, 24, 255]));
+      return t;
+    }
+    function compile(type, src) {
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src); gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+        console.warn("PuiKit post-effect shader failed:", gl.getShaderInfoLog(s));
+        return null;
+      }
+      return s;
+    }
+    function ensureGl() {
+      if (gl) return gl;
+      gl = fxCanvas.getContext("webgl2", { premultipliedAlpha: false, antialias: false });
+      if (!gl) return null;
+      buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+      const vs = compile(gl.VERTEX_SHADER, FX_VERT);
+      const fs = compile(gl.FRAGMENT_SHADER, FX_FRAG);
+      const p = gl.createProgram();
+      gl.attachShader(p, vs); gl.attachShader(p, fs); gl.linkProgram(p);
+      if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+        console.warn("PuiKit post-effect link failed:", gl.getProgramInfoLog(p));
+        gl = null; return null;
+      }
+      prog = p;
+      for (const u of ["uUI", "uBg", "uRes", "uTime", "uTint", "uHasTint", "uHasBg",
+        "uBloom", "uScanline", "uVignette", "uGlow", "uFlicker", "uRoll"]) {
+        loc[u] = gl.getUniformLocation(prog, u);
+      }
+      loc.p = gl.getAttribLocation(prog, "p");
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true); // canvas top row -> texture top
+      uiTex = makeTex();
+      bgTex = makeTex();
+      return gl;
+    }
+
+    function setEffect(msg) {
+      if (!ensureGl()) {
+        console.warn("PuiKit: WebGL2 unavailable — no post effect.");
+        return;
+      }
+      current = {
+        tint: msg.tint ? [msg.tint[0] / 255, msg.tint[1] / 255, msg.tint[2] / 255] : null,
+        bloom: msg.bloom || 0, scanline: msg.scanline || 0, vignette: msg.vignette || 0,
+        glow: msg.glow || 0, flicker: msg.flicker || 0, roll: msg.roll || 0,
+      };
+      startTime = performance.now();
+      fxUiDirty = true;
+      fxCanvas.style.display = "block";
+      if (!rafId) rafId = requestAnimationFrame(frame);
+    }
+    function clear() {
+      current = null;
+      fxCanvas.style.display = "none";
+      if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+    }
+
+    function frame(now) {
+      rafId = 0;
+      if (!current || !gl) return;
+      const w = Math.max(1, Math.round(window.innerWidth * dpr));
+      const h = Math.max(1, Math.round(window.innerHeight * dpr));
+      if (fxCanvas.width !== w || fxCanvas.height !== h) { fxCanvas.width = w; fxCanvas.height = h; }
+      fxCanvas.style.width = window.innerWidth + "px";
+      fxCanvas.style.height = window.innerHeight + "px";
+
+      const hasBg = bgCanvas.style.display !== "none";
+      // Re-upload the UI only when it changed; the background animates, so refresh
+      // it every frame while it is active.
+      if (fxUiDirty) {
+        gl.bindTexture(gl.TEXTURE_2D, uiTex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
+        fxUiDirty = false;
+      }
+      if (hasBg) {
+        gl.bindTexture(gl.TEXTURE_2D, bgTex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bgCanvas);
+      }
+
+      gl.viewport(0, 0, w, h);
+      gl.useProgram(prog);
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.enableVertexAttribArray(loc.p);
+      gl.vertexAttribPointer(loc.p, 2, gl.FLOAT, false, 0, 0);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, uiTex); gl.uniform1i(loc.uUI, 0);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, bgTex); gl.uniform1i(loc.uBg, 1);
+      const t = current;
+      gl.uniform2f(loc.uRes, w, h);
+      gl.uniform1f(loc.uTime, (now - startTime) / 1000);
+      gl.uniform3fv(loc.uTint, t.tint || [0, 0, 0]);
+      gl.uniform1f(loc.uHasTint, t.tint ? 1 : 0);
+      gl.uniform1f(loc.uHasBg, hasBg ? 1 : 0);
+      gl.uniform1f(loc.uBloom, t.bloom);
+      gl.uniform1f(loc.uScanline, t.scanline);
+      gl.uniform1f(loc.uVignette, t.vignette);
+      gl.uniform1f(loc.uGlow, t.glow);
+      gl.uniform1f(loc.uFlicker, t.flicker);
+      gl.uniform1f(loc.uRoll, t.roll);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      rafId = requestAnimationFrame(frame);
+    }
+
+    return { setEffect, clear };
   })();
 
   // --- go ----------------------------------------------------------------

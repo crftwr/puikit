@@ -238,6 +238,38 @@ def test_shader_background_capability_and_message():
     assert b._server.msgs[-1]["kind"] == "none"
 
 
+def test_post_effect_capability_and_message():
+    from puikit.posteffect import CRT
+
+    b = _backend()
+
+    class FakeServer:
+        def __init__(self):
+            self.msgs = []
+
+        def send(self, text):
+            self.msgs.append(json.loads(text))
+            return True
+
+    b._server = FakeServer()
+    assert b.capabilities.supports("post_effects")
+    b.set_post_effect(CRT)
+    msg = [m for m in b._server.msgs if m.get("type") == "posteffect"][-1]
+    assert msg["on"] is True
+    assert msg["bloom"] == CRT.bloom and msg["scanline"] == CRT.scanline
+    assert msg["glow"] == CRT.glow and msg["roll"] == CRT.roll
+    # Reduced motion drops the self-driven fields (roll / flicker).
+    b.set_reduced_motion(True)
+    msg = [m for m in b._server.msgs if m.get("type") == "posteffect"][-1]
+    assert msg["roll"] == 0.0 and msg["flicker"] == 0.0
+    b.set_reduced_motion(False)
+    # A tint carries through; clearing sends on:False.
+    b.set_post_effect(CRT.with_tint((51, 245, 121)))
+    assert b._server.msgs[-1]["tint"] == [51, 245, 121]
+    b.set_post_effect(None)
+    assert b._server.msgs[-1] == {"type": "posteffect", "on": False}
+
+
 def test_surface_opacity_dissolves_base_but_not_overlays():
     b = _backend()
     b.set_surface_opacity(0.3)

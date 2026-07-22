@@ -221,6 +221,7 @@ its documented fallback and never calls a primitive this backend does not serve:
 | `layering`, `transparency`, `shadow`, `images`, `hover`, `pointer_shape`, `os_open` | on | |
 | `ime` | on | composition via a hidden, caret-positioned page `<input>` |
 | `background_shader` | on | a WebGL fragment shader behind the UI canvas (§6) |
+| `post_effects` | on | a WebGL CRT/phosphor pass composited over the frame (§6) |
 | `animation` | **off** | composited fade/scale apply immediately; geometry/blink still animate via `animation_ticks` |
 | `animation_ticks` | on | timer-driven re-render, 30 fps, coalesced |
 | `drag_and_drop` | **off** | no OS file drop-*in* |
@@ -280,6 +281,23 @@ background), just as a missing `source_hlsl` does on Windows.
 ships all three dialects). TFM's themed scenes ship GLSL too — generated from
 their MSL by `tools/generate_shader_glsl.py` and validated with
 `glslangValidator` — so its animated backgrounds render on web.
+
+### Post effects (CRT / phosphor)
+
+`set_post_effect` composites a full-frame CRT look (`puikit.posteffect`) in a
+second WebGL pass (`post_effects` capability). A third canvas sits on top
+(`z-index: 2`, `pointer-events: none` so input still reaches the UI), samples
+the **UI canvas and the shader-background canvas as textures**, blends them, and
+applies bloom / scanlines / vignette / tint / glow / roll / flicker in one
+fragment shader. The UI texture is re-uploaded only when the UI actually
+re-renders (a dirty flag); the pass runs its own clock so the animated fields
+move. `reduced_motion` drops `roll`/`flicker` (the backend sends
+`PostEffect.without_motion()`), matching macOS/Windows. `bloom` is an
+approximation (a ring-sampled bright-pass halo, not the native Core Image /
+Direct2D blur) and `curvature` (barrel distortion) and the text-only
+`drop_shadow` are not yet applied. TFM's **Phosphor** theme pairs its
+`post_effect: 'crt'` with the rain shader background, so both render together on
+web (`make run-web`, switch to Phosphor).
 
 ---
 
