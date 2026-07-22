@@ -36,6 +36,12 @@ _CHECK_MARK = "✓"
 # padding, so labels and shortcuts line up across rows.
 _MARKER_W = 2
 _PAD = 1
+# Horizontal padding on each side of a top-level MenuBar title, in base units.
+# Real padding, NOT space glyphs: a space is a full cell on a terminal but only
+# ~a quarter of one in a proportional GUI font, so space-padded titles crowd
+# together on GUI. One whole base unit each side reads as one cell on a grid and
+# the same gap on GUI, so the bar stays evenly spaced on both.
+_TITLE_PAD = 1.0
 
 
 def popup_geometry(
@@ -319,18 +325,21 @@ class MenuBar(Widget):
         if entries:
             self.highlight = max(0, min(self.highlight, len(entries) - 1))
         self._entry_x = []
-        x = _PAD
+        x = float(_PAD)
         for i, item in enumerate(entries):
-            label = f" {item.label} "
-            w = int(ctx.measure_text(label))
+            # Pad with real base units, not surrounding spaces (which collapse to
+            # a thin gap under a proportional font); the span the title occupies
+            # is the padding plus the measured label.
+            w = ctx.measure_text(item.label)
+            span = _TITLE_PAD + w + _TITLE_PAD
             focused_here = ctx.focused and i == self.highlight
             if focused_here:
-                ctx.fill_rect(x, 0, w, hu, Style(bg=theme.selection_bg))
+                ctx.fill_rect(x, 0, span, hu, Style(bg=theme.selection_bg))
             fg = theme.text if item.is_enabled() else theme.muted_text
             bg = theme.selection_bg if focused_here else theme.popup_bg
-            ctx.draw_text(x, ty, label, Style(fg=fg, bg=bg))
-            self._entry_x.append((x, x + w, item))
-            x += w
+            ctx.draw_text(x + _TITLE_PAD, ty, item.label, Style(fg=fg, bg=bg))
+            self._entry_x.append((x, x + span, item))
+            x += span
 
         # A pointing hand over an enabled top-level title, so the bar reads as
         # clickable. Pointer taken in widget-local coords (screen pointer minus
