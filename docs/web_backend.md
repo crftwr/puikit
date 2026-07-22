@@ -269,8 +269,9 @@ background), just as a missing `source_hlsl` does on Windows.
   strokes, and framed dialogs never dissolve, so the UI stays legible.
 
 `examples/background_shader/main.py --backend web` is the end-to-end demo (it
-ships all three dialects). TFM's themed scenes need a `source_glsl` added per
-scene to appear on web; until then those themes fall back to a solid background.
+ships all three dialects). TFM's themed scenes ship GLSL too — generated from
+their MSL by `tools/generate_shader_glsl.py` and validated with
+`glslangValidator` — so its animated backgrounds render on web.
 
 ---
 

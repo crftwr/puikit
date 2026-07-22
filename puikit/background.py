@@ -108,24 +108,30 @@ SHADER_ENTRY = "puikit_bg_fragment"
 #: **web (WebGL) backend**. The counterpart of :data:`SHADER_PRELUDE` (Metal) and
 #: ``_d3d_shader.HLSL_PRELUDE`` (Direct3D): it fixes the uniform layout and a ``main``
 #: that a scene must not restate, so ``source_glsl`` is just the one fragment
-#: function. WebGL 1.0 / GLSL ES 1.00, so uniforms are declared individually (no
-#: uniform block), the entry is a prototype the app defines below, and the fullscreen
-#: triangle lives in the client's own vertex shader. ``gl_FragCoord`` is bottom-left
-#: origin in GL while Metal/D3D ``position`` is top-left, so ``main`` flips Y — a scene
-#: written for the other dialects then maps unchanged (``pos`` is top-left everywhere).
+#: function. **GLSL ES 3.00 (WebGL2)** — chosen over ES 1.00 because real scenes use
+#: integer bit-hashes (``uint`` xorshift) and dynamically indexed arrays, neither legal
+#: in ES 1.00. Uniforms are declared individually (no uniform block), the fragment
+#: output is a declared ``out``, the entry is a prototype the app defines below, and
+#: the fullscreen triangle lives in the client's own vertex shader. ``gl_FragCoord`` is
+#: bottom-left origin in GL while Metal/D3D ``position`` is top-left, so ``main`` flips
+#: Y — a scene written for the other dialects then maps unchanged (``pos`` is top-left
+#: everywhere). The ``#version`` directive must stay the very first line.
 GLSL_PRELUDE = """\
+#version 300 es
 precision highp float;
+precision highp int;
 uniform vec2 resolution;   // drawable size in pixels
 uniform float time;        // seconds since the background was set, scaled by speed
 uniform float opacity;     // the descriptor's opacity, 0..1
 uniform vec4 ink;          // theme foreground, rgba 0..1
 uniform vec4 backdrop;     // theme background, rgba 0..1
+out vec4 fragColor;
 
 vec4 puikit_bg_fragment(vec2 pos);
 
 void main() {
     vec2 pos = vec2(gl_FragCoord.x, resolution.y - gl_FragCoord.y);
-    gl_FragColor = puikit_bg_fragment(pos);
+    fragColor = puikit_bg_fragment(pos);
 }
 """
 

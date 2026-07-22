@@ -34,11 +34,23 @@ body {
   width: 100%;
   height: 100%;
   overflow: hidden;
+}
+
+/* The fallback page background goes on <html> only. If it were also on <body>,
+ * the body — in-flow content — would paint OVER a z-index:0 shader canvas behind
+ * it, hiding the background. Keeping it off the body lets the WebGL canvas show. */
+html {
   background: #181818;
 }
 
+/* The UI canvas sits above the shader background canvas (z-index 0), positioned
+ * so the ordering is explicit rather than relying on in-flow vs. positioned
+ * paint order. It clears transparent, so the shader shows through it. */
 #screen {
-  display: block;
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 1;
   width: 100vw;
   height: 100vh;
   /* Match the Python measurement: no kerning, no discretionary ligatures. */

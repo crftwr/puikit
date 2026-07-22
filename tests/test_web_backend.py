@@ -229,7 +229,7 @@ def test_shader_background_capability_and_message():
     assert b.has_wallpaper is True
     msg = [m for m in b._server.msgs if m.get("type") == "background"][-1]
     assert msg["kind"] == "shader"
-    assert msg["source"].startswith("precision")  # GLSL prelude prepended
+    assert msg["source"].startswith("#version 300 es")  # GLSL ES 3.00 prelude prepended
     assert msg["speed"] == 2.0
     assert msg["ink"][0] == pytest.approx(90 / 255)
     # A scene with no web (GLSL) translation clears — nothing to render on web.

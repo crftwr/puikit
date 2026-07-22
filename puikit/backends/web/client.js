@@ -562,20 +562,22 @@
   // drops them (reveal_mode), this scene shows through.
 
   const bgCanvas = document.createElement("canvas");
+  // z-index 0 (not -1): a negative z-index would paint behind the body's own
+  // in-flow content and be hidden. The UI canvas is z-index 1, above this.
   Object.assign(bgCanvas.style, {
-    position: "fixed", left: "0", top: "0", zIndex: "-1", display: "none",
+    position: "fixed", left: "0", top: "0", zIndex: "0", display: "none",
   });
   document.body.appendChild(bgCanvas);
 
   const bg = (function () {
     let gl = null, prog = null, buf = null, loc = {};
     let current = null, startTime = 0, rafId = 0;
-    const VERT = "attribute vec2 p; void main(){ gl_Position = vec4(p,0.0,1.0); }";
+    // GLSL ES 3.00 (WebGL2): scenes use uint bit-hashes and indexed arrays.
+    const VERT = "#version 300 es\nin vec2 p;\nvoid main(){ gl_Position = vec4(p,0.0,1.0); }";
 
     function ensureGl() {
       if (gl) return gl;
-      gl = bgCanvas.getContext("webgl", { premultipliedAlpha: false, antialias: false })
-        || bgCanvas.getContext("experimental-webgl");
+      gl = bgCanvas.getContext("webgl2", { premultipliedAlpha: false, antialias: false });
       if (gl) {
         buf = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -613,7 +615,10 @@
     }
 
     function setShader(msg) {
-      if (!ensureGl()) return; // no WebGL — leave the plain page background
+      if (!ensureGl()) {
+        console.warn("PuiKit: WebGL2 unavailable — no shader background.");
+        return; // leave the plain page background
+      }
       const np = build(msg.source);
       if (!np) return; // a broken shader degrades to no background, never throws
       if (prog) gl.deleteProgram(prog);
