@@ -416,8 +416,19 @@ class Panel:
 2. `MacOSBackend` — macOS native GUI (PyObjC; AppKit, CoreGraphics, CoreText, and other frameworks as needed)
 3. `WindowsBackend` — Windows native GUI (raw `ctypes`, no `pywin32`/`comtypes` dependency; `user32`/`kernel32` for the window and message loop, Direct2D + DirectWrite for rendering — antialiased vector shapes and real proportional/sized fonts, called by walking each COM interface's vtable by hand rather than declaring full per-interface bindings; see `puikit/backends/_win32_native.py`). Text is measured through DirectWrite's own layout engine (`IDWriteTextLayout.GetMetrics`), not GDI — GDI disagreed with DirectWrite's actual rendering by a wide margin for the same font/text; GDI is used only for the monospace base/grid font's cell size. Images decode via WIC (`IWICImagingFactory` → raw pixels via `CopyPixels`, alpha-premultiplied by hand with `numpy` since neither WIC's format converter nor `ID2D1RenderTarget.CreateBitmap` will do it themselves, then handed to `CreateBitmap` directly — not `CreateBitmapFromWicBitmap`, see `_win32_native._premultiply_bgra`). IME (mode-gated, inline preedit) and both drag-and-drop directions are implemented — see `_win32_ime.py` and `_win32_dragdrop.py` (the latter hand-builds `IDropSource`/`IDropTarget`/`IDataObject` COM objects directly in ctypes rather than relying on shell helpers, which turned out not to work for an arbitrary OLE source/data object). `clipboard_rich`, `native_file_dialog`, `system_tray`, `media_keys` remain unimplemented on both `WindowsBackend` and `MacOSBackend` — unused by any PuiKit app so far.
 
+### Implemented (beyond MVP)
+4. `WebBackend` — Web (browser `<canvas>`). Launches the OS browser with the
+   stdlib `webbrowser` module and drives it over a local HTTP + hand-rolled
+   WebSocket server (`_web_server.py`, no dependencies), streaming one
+   serialized display list per frame to a canvas replayer (`backends/web/`) and
+   receiving normalized input back. Advertises `PROFILE_GUI_WEB`. Text is
+   measured **in Python** — the layout seam runs before anything reaches the
+   browser — via a from-scratch TrueType advance reader (`_ttf.py`) over the
+   bundled Noto faces, which the page renders with `font-kerning: none` so the
+   widths agree. Composited `animate`, IME, and drop-in drag are deferred (off
+   in the profile). See `docs/web_backend.md`.
+
 ### Future
-4. `CanvasBackend` — Web (browser Canvas)
 5. `GTKBackend` — Linux GUI
 
 ### Further future

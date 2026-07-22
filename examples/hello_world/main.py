@@ -16,17 +16,19 @@ from puikit.widgets import Label
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="PuiKit hello world")
-    parser.add_argument("--backend", default="tui", help="backend name (tui, gui, memory)")
+    parser.add_argument("--backend", default="tui", help="backend name (tui, gui, web, memory)")
     parser.add_argument(
         "--font-size",
         type=float,
         default=None,
-        help="base font size in points (GUI only; sets the base unit grid)",
+        help="base font size in points (GUI/web only; sets the base unit grid)",
     )
     args = parser.parse_args()
 
     kwargs = {}
-    if args.font_size is not None and args.backend in ("gui", "macos", "windows", "win32"):
+    if args.font_size is not None and args.backend in (
+        "gui", "macos", "windows", "win32", "web", "webbrowser", "browser"
+    ):
         kwargs["base_font"] = Font(size=args.font_size, monospace=True)
     backend = create_backend(args.backend, **kwargs)
     with backend:

@@ -63,7 +63,7 @@ VENV_STAMP := $(VENV)/.installed
 # stamp depends on this so `make venv` / any run target populates the fonts.
 FONTS := puikit/fonts/NotoSans-Regular.ttf
 
-.PHONY: help venv install test fonts hello demo layout bg3d hello-gui demo-gui layout-gui bg3d-gui clean
+.PHONY: help venv install test fonts hello demo layout bg3d hello-gui demo-gui layout-gui bg3d-gui hello-web demo-web clean
 
 help:
 	@echo "PuiKit utility commands:"
@@ -77,6 +77,8 @@ help:
 	@echo "  make bg3d      - run the background_3d example (TUI)"
 	@echo "  make hello-gui - run the hello_world example (native GUI: macOS or Windows)"
 	@echo "  make demo-gui  - run the demo_catalog example (native GUI: macOS or Windows)"
+	@echo "  make hello-web - run the hello_world example (web backend, in a browser)"
+	@echo "  make demo-web  - run the demo_catalog example (web backend, in a browser)"
 	@echo "  make layout-gui - run the layout demo (native GUI, pixel layout)"
 	@echo "  make bg3d-gui  - run the background_3d example (native GUI: macOS or Windows)"
 	@echo "  make clean     - remove build artifacts and caches"
@@ -112,6 +114,12 @@ hello-gui: $(VENV_STAMP)
 
 demo-gui: $(VENV_STAMP)
 	$(VENV_PYTHON) examples/demo_catalog/main.py --backend gui $(FONT_SIZE_ARG)
+
+hello-web: $(VENV_STAMP)
+	$(VENV_PYTHON) examples/hello_world/main.py --backend web $(FONT_SIZE_ARG)
+
+demo-web: $(VENV_STAMP)
+	$(VENV_PYTHON) examples/demo_catalog/main.py --backend web $(FONT_SIZE_ARG)
 
 layout: $(VENV_STAMP)
 	$(VENV_PYTHON) examples/layout_demo/main.py

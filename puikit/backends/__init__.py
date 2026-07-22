@@ -9,9 +9,10 @@ from ..backend import Backend
 
 def create_backend(name: str, **kwargs) -> Backend:
     """Create a backend by name: "curses" (alias "tui"), "macos",
-    "windows" (alias "win32"), "memory", or "gui" — the native GUI backend
-    for the running platform (MacOSBackend on darwin, WindowsBackend on
-    win32), so an app written against "gui" runs unmodified on either.
+    "windows" (alias "win32"), "web" (aliases "webbrowser"/"browser"),
+    "memory", or "gui" — the native GUI backend for the running platform
+    (MacOSBackend on darwin, WindowsBackend on win32), so an app written
+    against "gui" runs unmodified on either.
 
     Backends are imported lazily so that platform-specific modules are only
     loaded when actually requested.
@@ -23,6 +24,10 @@ def create_backend(name: str, **kwargs) -> Backend:
         from .curses_backend import CursesBackend
 
         return CursesBackend(**kwargs)
+    if name in ("web", "webbrowser", "browser"):
+        from .web_backend import WebBackend
+
+        return WebBackend(**kwargs)
     if name == "macos":
         from .macos_backend import MacOSBackend
 

@@ -54,7 +54,8 @@ include = ["puikit*"]
 # superfamily whose mono and proportional faces share metrics, so the base unit
 # fits both and text does not clip). Shipped so the GUI backends render the same
 # on any machine without the fonts installed; OFL.txt is their SIL OFL license.
-puikit = ["fonts/*.ttf", "fonts/*.txt"]
+# The web backend also serves the client page assets (backends/web/*) from disk.
+puikit = ["fonts/*.ttf", "fonts/*.txt", "backends/web/*.html", "backends/web/*.js", "backends/web/*.css"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

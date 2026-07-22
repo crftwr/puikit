@@ -29,8 +29,11 @@ Early development. Currently implemented:
 - Backends:
   - `CursesBackend` — TUI, all platforms
   - `MacOSBackend` — macOS native GUI (PyObjC; install with `pip install -e ".[macos]"`)
+  - `WindowsBackend` — Windows native GUI (raw ctypes; Direct2D/DirectWrite)
+  - `WebBackend` — runs in a web browser, launched with `webbrowser` over a
+    local WebSocket (`--backend web`; see `docs/web_backend.md`)
   - `MemoryBackend` — headless, for tests
-- Planned next: C++ CoreText render extension, `CanvasBackend` (web)
+- Planned next: C++ CoreText render extension
 
 ## Quick start
 
@@ -45,6 +48,9 @@ python3.14 -m venv .venv
 # On macOS, the same examples in a native window
 .venv/bin/python examples/hello_world/main.py --backend gui
 .venv/bin/python examples/demo_catalog/main.py --backend gui
+
+# Or in a web browser (opens a tab; works on any platform)
+.venv/bin/python examples/demo_catalog/main.py --backend web
 
 # Run the tests
 .venv/bin/python -m pytest

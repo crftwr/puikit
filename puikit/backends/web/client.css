@@ -1,0 +1,48 @@
+/* Web backend client styles.
+ *
+ * The @font-face rules bind the SAME bundled Noto faces the Python side
+ * measures with (puikit/fonts, served at /fonts). `font-kerning: none` on the
+ * canvas is what makes the browser's rendered advances equal the plain sum of
+ * hmtx advances the backend measured, so text lands where the layout expects.
+ */
+
+@font-face {
+  font-family: "PuiMono";
+  font-weight: 400;
+  src: url("/fonts/NotoSansMono-Regular.ttf") format("truetype");
+}
+@font-face {
+  font-family: "PuiMono";
+  font-weight: 700;
+  src: url("/fonts/NotoSansMono-Bold.ttf") format("truetype");
+}
+@font-face {
+  font-family: "PuiSans";
+  font-weight: 400;
+  src: url("/fonts/NotoSans-Regular.ttf") format("truetype");
+}
+@font-face {
+  font-family: "PuiSans";
+  font-weight: 700;
+  src: url("/fonts/NotoSans-Bold.ttf") format("truetype");
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #181818;
+}
+
+#screen {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+  /* Match the Python measurement: no kerning, no discretionary ligatures. */
+  font-kerning: none;
+  font-variant-ligatures: none;
+  outline: none;
+}
