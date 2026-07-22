@@ -44,7 +44,7 @@ from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..easing import resolve as _resolve_easing
 from ..event import Event, EventType, char_key_event
-from ..font import Font, FontMetrics
+from ..font import Font, FontMetrics, grid_aligned
 from ..text import display_width, glyph_runs as _glyph_runs, is_cjk, cjk_segments
 
 # Bundled default fonts (puikit/fonts): Noto Sans + Noto Sans Mono, a
@@ -1028,7 +1028,14 @@ class WindowsBackend(Backend):
         return [(seg, cjk if seg_cjk else primary) for seg, seg_cjk in cjk_segments(text)]
 
     def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
-        if style.font is None:
+        # A grid-aligned font (font=None, or an unsized/unnamed monospace
+        # request) tiles one glyph per base-unit column, so it measures in
+        # columns (display_width) — NOT by DirectWrite's natural advance. This
+        # mirrors the macOS backend's _is_grid_font test (grid_aligned here);
+        # measuring an explicit Font(monospace=True) by natural advance instead
+        # made a wide (CJK) glyph 1.67 columns rather than 2, so it rendered and
+        # wrapped unlike the same run on macOS (and unlike the base grid font).
+        if grid_aligned(style.font):
             return float(display_width(text))
         # Measured through DirectWrite itself (the same system that renders
         # it via DrawText), not GDI: GDI's metrics for the same font/text can
@@ -1920,20 +1927,36 @@ class WindowsBackend(Backend):
         underline = bool(style.attr & TextAttribute.UNDERLINE)
         strike = bool(style.attr & TextAttribute.STRIKETHROUGH)
 
-        if style.font is not None:
+        # Only a proportional/sized font flows at its natural advance; a
+        # grid-aligned font (font=None, or an unsized/unnamed monospace request)
+        # tiles the base-unit grid, exactly as measure_text and the macOS
+        # backend (grid_aligned / _is_grid_font) decide. Routing an explicit
+        # Font(monospace=True) through the flow path here (as `font is not None`
+        # did) let a wide CJK glyph land at 1.67 columns, so the mono block
+        # rendered identically to the proportional one instead of grid-locked.
+        if not grid_aligned(style.font):
             self._render_flow_text(x, y, text, style, fg, bg, alpha, underline, strike)
             return
 
         weight = TextAttribute.BOLD if style.attr & TextAttribute.BOLD else TextAttribute.NORMAL
-        text_format = self._fonts[weight]
+        # font=None uses the prebuilt base (mono/grid) formats; an explicit
+        # grid-aligned monospace Font resolves its own format so its weight/slant
+        # are honored (mirrors the macOS grid path). Both resolve to the same
+        # fixed-advance face, so the column grid stays exact either way.
+        if style.font is None:
+            text_format = self._fonts[weight]
+            cjk_format = self._cjk_fonts.get(weight) if self._cjk_fonts else None
+        else:
+            text_format = self._resolve_style_font(style)
+            cjk_format = self._resolve_style_cjk_font(style) if self._cjk_available else None
 
         def _glyph_fmt(glyph: str) -> Any:
             # A CJK cell draws with the embedded CJK format (same size/weight),
             # so a Japanese file name shows the bundled face, not the OS's. Grid
             # cells are column-positioned, so this changes only the face — never
             # the layout — and needs no measurement change.
-            if self._cjk_available and self._cjk_fonts and is_cjk(glyph[0]):
-                return self._cjk_fonts[weight]
+            if cjk_format is not None and is_cjk(glyph[0]):
+                return cjk_format
             return text_format
 
         # Grid-locked text: each glyph gets its own DrawText call clipped to
