@@ -76,6 +76,9 @@ PROFILE_WEB = CapabilityProfile(
         "drag_and_drop": False,
         # draw_icon falls back to a text/emoji glyph — no icon set is bundled.
         "icons": False,
+        # A shader background is rendered in WebGL behind the UI canvas; surface
+        # fills dissolve at set_surface_opacity so it shows through.
+        "background_shader": True,
     }
 )
 
@@ -125,6 +128,15 @@ def translate_key(key: str, mods: dict) -> Event | None:
     if len(key) == 1 and key.isprintable():
         return char_key_event(key, modifiers)
     return None
+
+
+def _rgba01(color: tuple[int, ...] | None, default: tuple[int, ...]) -> list[float]:
+    """A shader uniform ``[r, g, b, a]`` in 0..1 from an RGB(A) 0..255 color, or
+    the default when ``color`` is None."""
+    c = color if color is not None else default
+    if len(c) == 4:
+        return [c[0] / 255.0, c[1] / 255.0, c[2] / 255.0, c[3] / 255.0]
+    return [c[0] / 255.0, c[1] / 255.0, c[2] / 255.0, 1.0]
 
 
 def _css_color(color: tuple[int, ...] | None, alpha: float = 1.0) -> str | None:
@@ -210,6 +222,12 @@ class WebBackend(Backend):
         self._pressed_button: str | None = None
         self._sent_images: set[str] = set()
         self._pointer_shape: str | None = None
+        # Active background (a Shader, or None), and the surface-reveal machinery
+        # that lets it show through: fills recorded inside a reveal-exempt
+        # (opaque overlay) group stay solid, others dissolve at surface_opacity.
+        self._background: Any = None
+        self._reveal_exempt_depth = 0
+        self._group_opaque: list[bool] = []
 
         # Animation ticks: callbacks driven by a repeating enqueue of _TICK.
         self._tick_callbacks: list[Any] = []
@@ -375,7 +393,12 @@ class WebBackend(Backend):
         self._back.append(("box", x, y, w, h, style, hints or {}))
 
     def fill_rect(self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE) -> None:
-        self._back.append(("fill", x, y, w, h, style))
+        # Surface fills dissolve at the surface opacity so a shader background
+        # shows through — except inside a reveal-exempt (opaque overlay) group,
+        # which stays solid to occlude the base. Captured now, at draw time, when
+        # the group depth is live (mirrors macOS _ui_fill_alpha).
+        alpha = 1.0 if self._reveal_exempt_depth > 0 else self.surface_opacity
+        self._back.append(("fill", x, y, w, h, style, alpha))
 
     def draw_round_rect(
         self, x: float, y: float, w: float, h: float, radius: float | None,
@@ -428,6 +451,19 @@ class WebBackend(Backend):
     def pop_clip(self) -> None:
         self._back.append(("unclip",))
 
+    def begin_group(self, key: Any, rect: Any = None, opaque: bool = False) -> None:
+        # Track opaque-overlay nesting so fills inside it keep their solid alpha
+        # (a modal / full-window layer occludes the shader background instead of
+        # dissolving into it). Not a drawing op — state only.
+        self._group_opaque.append(bool(opaque))
+        if opaque:
+            self._reveal_exempt_depth += 1
+
+    def end_group(self, key: Any) -> None:
+        if self._group_opaque:
+            if self._group_opaque.pop():
+                self._reveal_exempt_depth -= 1
+
     # --- frame serialization ----------------------------------------------
 
     def _px_rect(self, x, y, w, h):
@@ -443,8 +479,8 @@ class WebBackend(Backend):
         return ops
 
     def _ser_fill(self, cmd, ops):
-        _, x, y, w, h, style = cmd
-        col = _css_color(style.bg)
+        _, x, y, w, h, style, alpha = cmd
+        col = _css_color(style.bg, alpha)
         if col:
             ops.append(["fill", *self._px_rect(x, y, w, h), col])
 
@@ -612,6 +648,55 @@ class WebBackend(Backend):
             return True
         return super().open_url(url)
 
+    # --- background (shader) ------------------------------------------------
+
+    def set_background(self, background: Any) -> None:
+        """Install a shader background rendered in WebGL behind the UI canvas, or
+        clear it with ``None`` / a scene with no ``source_glsl``. Only the
+        ``Shader`` kind is handled (a scene ships GLSL like it ships HLSL for
+        Windows); anything else clears to solid."""
+        self._background = background
+        self._send_background()
+
+    def _send_background(self) -> None:
+        if self._server is None:
+            return
+        prog = self._shader_program()
+        if prog is None:
+            self._server.send(json.dumps({"type": "background", "kind": "none"}))
+            return
+        bg = self._background
+        self._server.send(json.dumps({
+            "type": "background", "kind": "shader",
+            "source": prog,
+            "speed": float(bg.speed),
+            "opacity": float(bg.opacity),
+            "ink": _rgba01(bg.ink, (255, 255, 255)),
+            "backdrop": _rgba01(bg.backdrop, (10, 10, 14)),
+            "resolution_scale": float(bg.resolution_scale),
+            "reduced_motion": self.reduced_motion,
+        }))
+
+    def _shader_program(self) -> str | None:
+        """The active shader's GLSL program, or None when nothing renders on web
+        (no background, not a Shader, no ``source_glsl``, or a no-op)."""
+        from ..background import Shader
+
+        bg = self._background
+        if isinstance(bg, Shader) and not bg.is_noop:
+            return bg.program_glsl
+        return None
+
+    @property
+    def has_wallpaper(self) -> bool:
+        # True when a shader actually renders behind the UI, so a
+        # reveal_mode="transparent" pane drops its fill to expose it.
+        return self._shader_program() is not None
+
+    def _on_reduced_motion_changed(self) -> None:
+        # Re-issue the background so the client freezes / resumes its clock.
+        self._send_background()
+
     # --- text input / IME --------------------------------------------------
 
     def begin_text_input(self) -> None:
@@ -682,10 +767,12 @@ class WebBackend(Backend):
     # --- incoming client messages -----------------------------------------
 
     def _on_connect(self) -> None:
-        # A reconnected tab (a reload) starts with an empty image cache and a
-        # default cursor, so forget what the previous page was told.
+        # A reconnected tab (a reload) starts with an empty image cache, a
+        # default cursor, and no WebGL background, so forget what the previous
+        # page was told and re-issue the background.
         self._sent_images.clear()
         self._pointer_shape = None
+        self._send_background()
 
     def _on_message(self, text: str) -> None:
         try:

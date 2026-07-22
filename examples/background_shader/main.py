@@ -45,6 +45,19 @@ float4 puikit_bg_fragment(float4 pos : SV_Position) : SV_Target {
 }
 """
 
+# GLSL ES (WebGL) for the web backend. Same math; `mix` is GLSL's `lerp`, and the
+# reversed-edge fade is written as `1.0 - smoothstep(lo, hi, d)` since GLSL leaves
+# smoothstep with edge0 >= edge1 undefined.
+_GLSL = """
+vec4 puikit_bg_fragment(vec2 pos) {
+    vec2 uv = (pos - resolution * 0.5) / resolution.y;
+    float d = length(uv);
+    float wave = 0.5 + 0.5 * sin(d * 24.0 - time * 2.0);
+    float ring = pow(wave, 6.0) * (1.0 - smoothstep(0.05, 0.75, d));
+    return vec4(mix(backdrop.rgb, ink.rgb, ring * opacity), 1.0);
+}
+"""
+
 # A few ink colors to cycle with space, so the on-palette `ink=` path is
 # exercised (None would let the backend fill in the theme foreground).
 _COLORS = [
@@ -63,7 +76,9 @@ def main() -> None:
     args = parser.parse_args()
 
     kwargs = {}
-    if args.font_size is not None and args.backend in ("gui", "macos", "windows", "win32"):
+    if args.font_size is not None and args.backend in (
+        "gui", "macos", "windows", "win32", "web", "webbrowser", "browser"
+    ):
         kwargs["base_font"] = Font(size=args.font_size, monospace=True)
     backend = create_backend(args.backend, **kwargs)
 
@@ -75,6 +90,7 @@ def main() -> None:
         backend.set_background(Shader(
             source=_MSL,
             source_hlsl=_HLSL,
+            source_glsl=_GLSL,
             ink=_COLORS[state["color_ix"]],
             backdrop=(12, 14, 20),
             speed=state["speed"],

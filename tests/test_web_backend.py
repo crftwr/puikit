@@ -207,6 +207,50 @@ def test_profile_is_web_gui_with_v1_overrides():
     assert not caps.supports("icons")
 
 
+def test_shader_background_capability_and_message():
+    from puikit.background import Shader
+
+    b = _backend()
+
+    class FakeServer:
+        def __init__(self):
+            self.msgs = []
+
+        def send(self, text):
+            self.msgs.append(json.loads(text))
+            return True
+
+    b._server = FakeServer()
+    assert b.capabilities.supports("background_shader")
+    assert b.has_wallpaper is False
+    sh = Shader(source="msl", source_glsl="vec4 puikit_bg_fragment(vec2 p){return vec4(1.0);}",
+                ink=(90, 140, 200), backdrop=(12, 14, 20), speed=2.0, opacity=0.7)
+    b.set_background(sh)
+    assert b.has_wallpaper is True
+    msg = [m for m in b._server.msgs if m.get("type") == "background"][-1]
+    assert msg["kind"] == "shader"
+    assert msg["source"].startswith("precision")  # GLSL prelude prepended
+    assert msg["speed"] == 2.0
+    assert msg["ink"][0] == pytest.approx(90 / 255)
+    # A scene with no web (GLSL) translation clears — nothing to render on web.
+    b.set_background(Shader(source="msl", source_hlsl="hlsl"))
+    assert b.has_wallpaper is False
+    assert b._server.msgs[-1]["kind"] == "none"
+
+
+def test_surface_opacity_dissolves_base_but_not_overlays():
+    b = _backend()
+    b.set_surface_opacity(0.3)
+    b.clear()
+    b.fill_rect(0, 0, 10, 2, Style(bg=(50, 60, 70)))       # base surface -> dissolves
+    b.begin_group("dlg", None, opaque=True)
+    b.fill_rect(0, 0, 10, 2, Style(bg=(50, 60, 70)))       # opaque overlay -> solid
+    b.end_group("dlg")
+    fills = [o for o in b._serialize(b._back) if o[0] == "fill"]
+    assert fills[0][-1].endswith("0.300)")   # surface fill translucent
+    assert fills[1][-1].endswith("1.000)")   # overlay fill opaque
+
+
 def test_factory_aliases():
     for name in ("web", "webbrowser", "browser"):
         b = create_backend(name, open_browser=False)

@@ -90,6 +90,10 @@
       case "shutdown":
         shutdown();
         break;
+      case "background":
+        if (msg.kind === "shader") bg.setShader(msg);
+        else bg.clear();
+        break;
     }
   }
 
@@ -100,6 +104,7 @@
   function shutdown() {
     if (shuttingDown) return;
     shuttingDown = true;
+    bg.clear();
     try {
       window.close();
     } catch (e) {
@@ -547,6 +552,126 @@
         send({ type: "key", key: e.key, mods: mods(e) });
       }
     });
+  })();
+
+  // --- WebGL shader background -------------------------------------------
+  //
+  // A GPU fragment shader painted on its own canvas *behind* the (transparent)
+  // UI canvas. Python sends the GLSL program + uniforms; this runs the clock and
+  // renders. Where the UI dissolves its surface fills (set_surface_opacity) or
+  // drops them (reveal_mode), this scene shows through.
+
+  const bgCanvas = document.createElement("canvas");
+  Object.assign(bgCanvas.style, {
+    position: "fixed", left: "0", top: "0", zIndex: "-1", display: "none",
+  });
+  document.body.appendChild(bgCanvas);
+
+  const bg = (function () {
+    let gl = null, prog = null, buf = null, loc = {};
+    let current = null, startTime = 0, rafId = 0;
+    const VERT = "attribute vec2 p; void main(){ gl_Position = vec4(p,0.0,1.0); }";
+
+    function ensureGl() {
+      if (gl) return gl;
+      gl = bgCanvas.getContext("webgl", { premultipliedAlpha: false, antialias: false })
+        || bgCanvas.getContext("experimental-webgl");
+      if (gl) {
+        buf = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+        // One fullscreen triangle (covers the viewport, no index buffer).
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+      }
+      return gl;
+    }
+
+    function compile(type, src) {
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+        console.warn("PuiKit background shader failed to compile:", gl.getShaderInfoLog(s));
+        gl.deleteShader(s);
+        return null;
+      }
+      return s;
+    }
+
+    function build(fragSrc) {
+      const vs = compile(gl.VERTEX_SHADER, VERT);
+      const fs = compile(gl.FRAGMENT_SHADER, fragSrc);
+      if (!vs || !fs) return null;
+      const p = gl.createProgram();
+      gl.attachShader(p, vs);
+      gl.attachShader(p, fs);
+      gl.linkProgram(p);
+      if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+        console.warn("PuiKit background link failed:", gl.getProgramInfoLog(p));
+        return null;
+      }
+      return p;
+    }
+
+    function setShader(msg) {
+      if (!ensureGl()) return; // no WebGL — leave the plain page background
+      const np = build(msg.source);
+      if (!np) return; // a broken shader degrades to no background, never throws
+      if (prog) gl.deleteProgram(prog);
+      prog = np;
+      loc = {
+        p: gl.getAttribLocation(prog, "p"),
+        res: gl.getUniformLocation(prog, "resolution"),
+        time: gl.getUniformLocation(prog, "time"),
+        opacity: gl.getUniformLocation(prog, "opacity"),
+        ink: gl.getUniformLocation(prog, "ink"),
+        backdrop: gl.getUniformLocation(prog, "backdrop"),
+      };
+      current = {
+        ink: new Float32Array(msg.ink),
+        backdrop: new Float32Array(msg.backdrop),
+        opacity: msg.opacity,
+        speed: msg.speed,
+        scale: Math.max(0.1, Math.min(1, msg.resolution_scale || 1)),
+        reducedMotion: !!msg.reduced_motion,
+      };
+      startTime = performance.now();
+      bgCanvas.style.display = "block";
+      if (!rafId) rafId = requestAnimationFrame(frame);
+    }
+
+    function clear() {
+      current = null;
+      bgCanvas.style.display = "none";
+      if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+    }
+
+    function frame(now) {
+      rafId = 0;
+      if (!current || !gl || !prog) return;
+      const w = Math.max(1, Math.round(window.innerWidth * dpr * current.scale));
+      const h = Math.max(1, Math.round(window.innerHeight * dpr * current.scale));
+      if (bgCanvas.width !== w || bgCanvas.height !== h) {
+        bgCanvas.width = w;
+        bgCanvas.height = h;
+      }
+      bgCanvas.style.width = window.innerWidth + "px";
+      bgCanvas.style.height = window.innerHeight + "px";
+      gl.viewport(0, 0, w, h);
+      gl.useProgram(prog);
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.enableVertexAttribArray(loc.p);
+      gl.vertexAttribPointer(loc.p, 2, gl.FLOAT, false, 0, 0);
+      const t = current.reducedMotion ? 0.0 : ((now - startTime) / 1000) * current.speed;
+      if (loc.res) gl.uniform2f(loc.res, w, h);
+      if (loc.time) gl.uniform1f(loc.time, t);
+      if (loc.opacity) gl.uniform1f(loc.opacity, current.opacity);
+      if (loc.ink) gl.uniform4fv(loc.ink, current.ink);
+      if (loc.backdrop) gl.uniform4fv(loc.backdrop, current.backdrop);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      rafId = requestAnimationFrame(frame);
+    }
+
+    return { setShader, clear };
   })();
 
   // --- go ----------------------------------------------------------------

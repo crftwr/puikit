@@ -212,6 +212,7 @@ its documented fallback and never calls a primitive this backend does not serve:
 | `pixel_layout`, `hairline`, `vector_shapes`, `fonts`, `proportional_text` | on | full pixel/vector/text fidelity |
 | `layering`, `transparency`, `shadow`, `images`, `hover`, `pointer_shape`, `os_open` | on | |
 | `ime` | on | composition via a hidden, caret-positioned page `<input>` |
+| `background_shader` | on | a WebGL fragment shader behind the UI canvas (§6) |
 | `animation` | **off** | composited fade/scale apply immediately; geometry/blink still animate via `animation_ticks` |
 | `animation_ticks` | on | timer-driven re-render, 30 fps, coalesced |
 | `drag_and_drop` | **off** | no OS file drop-*in* |
@@ -236,7 +237,44 @@ never branches on the backend, and each fallback is the Panel's existing one.
 
 ---
 
-## 6. Relationship to other systems
+## 6. Shader background (WebGL)
+
+The animated `Shader` background (`puikit.background`) renders on the web backend
+in **WebGL**, the browser's native fragment-shader path — the same feature the
+macOS backend runs in Metal and the Windows one in Direct3D.
+
+A scene is genuinely per-backend (MSL, HLSL, and GLSL are different languages),
+so a cross-platform `Shader` ships each dialect and every backend compiles the
+one it speaks — exactly the pattern `source_hlsl` established for Windows. The
+web backend reads the new **`source_glsl`** field: `GLSL_PRELUDE` (the uniforms
++ a `main` that flips `gl_FragCoord` to the top-left origin the other dialects
+use) is prepended, so a scene is just the one `puikit_bg_fragment(vec2 pos)`
+function. A scene with no `source_glsl` draws nothing on web (the plain page
+background), just as a missing `source_hlsl` does on Windows.
+
+- **Client** — a second `<canvas>` sits behind the UI canvas (`z-index: -1`) with
+  a WebGL context. `set_background` sends the compiled GLSL program plus uniforms
+  (`ink` / `backdrop` / `opacity` / `speed` / `resolution_scale`); the client
+  compiles it (a broken shader degrades to no background, never throws), runs its
+  own `requestAnimationFrame` clock, and draws a fullscreen triangle each frame.
+  The clock is client-side, so the scene animates with no server round-trip;
+  `reduced_motion` freezes it.
+- **Showing through** — the UI canvas clears transparent, so the scene shows
+  wherever the UI doesn't paint. `set_surface_opacity(<1)` dissolves the flat
+  **surface fills** (`fill_rect`) to that alpha so the scene shows through the
+  panes, mirroring the macOS `_ui_fill_alpha` rule: fills inside a reveal-exempt
+  (`begin_group(opaque=True)`) group — a modal, a full-window overlay — stay
+  solid so they occlude the scene, and `has_wallpaper` is true while a scene
+  renders so a `reveal_mode="transparent"` pane drops its fill entirely. Text,
+  strokes, and framed dialogs never dissolve, so the UI stays legible.
+
+`examples/background_shader/main.py --backend web` is the end-to-end demo (it
+ships all three dialects). TFM's themed scenes need a `source_glsl` added per
+scene to appear on web; until then those themes fall back to a solid background.
+
+---
+
+## 7. Relationship to other systems
 
 - **Rendering** (`docs/rendering_system.md`) — the web backend implements the
   core primitive floor plus the `vector_shapes` / `images` / `shadow` extended

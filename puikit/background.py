@@ -104,6 +104,32 @@ vertex float4 puikit_bg_vertex(uint vid [[vertex_id]]) {
 SHADER_ENTRY = "puikit_bg_fragment"
 
 
+#: Fragment-shader prelude prepended to a :class:`Shader`'s ``source_glsl`` for the
+#: **web (WebGL) backend**. The counterpart of :data:`SHADER_PRELUDE` (Metal) and
+#: ``_d3d_shader.HLSL_PRELUDE`` (Direct3D): it fixes the uniform layout and a ``main``
+#: that a scene must not restate, so ``source_glsl`` is just the one fragment
+#: function. WebGL 1.0 / GLSL ES 1.00, so uniforms are declared individually (no
+#: uniform block), the entry is a prototype the app defines below, and the fullscreen
+#: triangle lives in the client's own vertex shader. ``gl_FragCoord`` is bottom-left
+#: origin in GL while Metal/D3D ``position`` is top-left, so ``main`` flips Y — a scene
+#: written for the other dialects then maps unchanged (``pos`` is top-left everywhere).
+GLSL_PRELUDE = """\
+precision highp float;
+uniform vec2 resolution;   // drawable size in pixels
+uniform float time;        // seconds since the background was set, scaled by speed
+uniform float opacity;     // the descriptor's opacity, 0..1
+uniform vec4 ink;          // theme foreground, rgba 0..1
+uniform vec4 backdrop;     // theme background, rgba 0..1
+
+vec4 puikit_bg_fragment(vec2 pos);
+
+void main() {
+    vec2 pos = vec2(gl_FragCoord.x, resolution.y - gl_FragCoord.y);
+    gl_FragColor = puikit_bg_fragment(pos);
+}
+"""
+
+
 @dataclass(frozen=True)
 class Shader:
     """The **animated** background kind: a fragment shader painted across the whole
@@ -173,6 +199,14 @@ class Shader:
     backdrop: Color | None = None
     resolution_scale: float = 1.0
     source_hlsl: str | None = None
+    #: The same scene translated to **GLSL ES** (WebGL 1.0) for the web backend,
+    #: defining a fragment function ``puikit_bg_fragment(vec2 pos)`` (:data:`GLSL_PRELUDE`
+    #: — uniforms + main — is prepended). ``None`` (the default) means the scene has no
+    #: web translation, so the web backend draws the plain backdrop and the other
+    #: backends are unaffected — exactly like ``source_hlsl`` for Windows. A
+    #: cross-platform scene ships all three dialects; each backend compiles the one it
+    #: speaks. ``speed``/``opacity``/``ink``/``backdrop`` are shared.
+    source_glsl: str | None = None
 
     def __post_init__(self) -> None:
         v = self.opacity
@@ -188,9 +222,19 @@ class Shader:
         """True when the shader would draw nothing: transparent, or no source for
         *any* backend (a scene with only one language's source still renders on the
         backend that speaks it)."""
-        return (not self.source and not self.source_hlsl) or self.opacity <= 0.0
+        return (
+            not self.source and not self.source_hlsl and not self.source_glsl
+        ) or self.opacity <= 0.0
 
     @property
     def program(self) -> str:
         """The full MSL translation unit: the prelude followed by the app's source."""
         return SHADER_PRELUDE + "\n" + self.source
+
+    @property
+    def program_glsl(self) -> str | None:
+        """The full GLSL ES fragment shader (:data:`GLSL_PRELUDE` + ``source_glsl``)
+        for the web backend, or ``None`` when the scene ships no web translation."""
+        if not self.source_glsl:
+            return None
+        return GLSL_PRELUDE + "\n" + self.source_glsl
