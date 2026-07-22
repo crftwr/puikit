@@ -18,6 +18,7 @@
   // it does, the window-level key handler stands down (see keydown below).
   let ime = null;
   let imeActive = false;
+  let shuttingDown = false;
 
   // --- websocket ---------------------------------------------------------
 
@@ -40,9 +41,10 @@
       dispatch(msg);
     };
     ws.onclose = () => {
-      // The Python process went away (window closed / app quit). Nothing more
-      // to do; leave the last frame on screen.
+      // The Python process went away (app quit or died). Try to close the tab,
+      // else show an "exited" notice instead of a frozen last frame.
       ws = null;
+      shutdown();
     };
   }
 
@@ -85,7 +87,39 @@
       case "ime":
         handleIme(msg);
         break;
+      case "shutdown":
+        shutdown();
+        break;
     }
+  }
+
+  // The app has exited. Try to close the tab — browsers only allow this for a
+  // tab a script opened, so a webbrowser-launched tab usually can't self-close —
+  // and if it's still here a moment later, replace the frozen last frame with a
+  // clear "exited" notice.
+  function shutdown() {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try {
+      window.close();
+    } catch (e) {
+      /* ignore */
+    }
+    setTimeout(showExitNotice, 200);
+  }
+
+  function showExitNotice() {
+    if (document.getElementById("exit-notice")) return;
+    const d = document.createElement("div");
+    d.id = "exit-notice";
+    d.textContent = "Application closed — you can close this tab.";
+    Object.assign(d.style, {
+      position: "fixed", inset: "0", display: "flex",
+      alignItems: "center", justifyContent: "center",
+      background: "#181818", color: "#9aa0a6",
+      font: '15px -apple-system, system-ui, sans-serif', zIndex: "10",
+    });
+    document.body.appendChild(d);
   }
 
   // --- rendering ---------------------------------------------------------

@@ -42,6 +42,11 @@ _web_server (HTTP + WebSocket)                    client.css (@font-face)
 - **Input** (`keydown` / mouse / `wheel`) is streamed back as small JSON
   messages; a reader thread turns each into a PuiKit `Event` on a queue that the
   event loop drains.
+- **`close()`** sends a `shutdown` message, then tears the socket down. The
+  client tries to `window.close()` the tab — browsers only honor that for a tab
+  a script opened, so a `webbrowser`-launched tab usually can't self-close — and
+  otherwise replaces the frozen last frame with an "app exited" notice, so the
+  tab never sits showing a dead UI.
 
 The client is deliberately dumb: **all** base-unit→pixel math and font
 resolution happen in Python, so each op is already in CSS pixels with a

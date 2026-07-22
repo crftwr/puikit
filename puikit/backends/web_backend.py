@@ -242,6 +242,12 @@ class WebBackend(Backend):
         self._quit = True
         self._stop_ticker()
         if self._server is not None:
+            # Ask the tab to close itself as the app exits. The browser only
+            # honors window.close() for a tab a script opened, so a
+            # webbrowser-launched tab usually can't self-close; the client falls
+            # back to an "app exited" notice (see client.js). Sent before the
+            # socket teardown so the message lands first.
+            self._server.send(json.dumps({"type": "shutdown"}))
             self._server.close()
             self._server = None
 
