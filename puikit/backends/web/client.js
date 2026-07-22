@@ -506,32 +506,30 @@
     document.body.appendChild(ime);
 
     let composing = false;
-    let recentlyComposed = false;
 
     ime.addEventListener("compositionstart", () => {
       composing = true;
     });
     ime.addEventListener("compositionupdate", (e) => {
+      // The in-progress composition (marked text); the widget draws it. Do NOT
+      // touch ime.value here — the IME owns the input's value during
+      // composition, and clearing it aborts the composition after one character.
       sendPreedit(e.data || "");
     });
     ime.addEventListener("compositionend", (e) => {
       composing = false;
-      recentlyComposed = true; // swallow the trailing input event that follows
       sendPreedit("");
-      sendCommit(e.data || "");
+      if (e.data) sendCommit(e.data);
+      // Safe to reset now that composition is over, so the next one starts empty.
       ime.value = "";
-      setTimeout(() => { recentlyComposed = false; }, 0);
     });
     ime.addEventListener("input", (e) => {
-      // Composition is handled by the composition events; direct (non-IME)
-      // typing arrives here as an insert with no composition around it.
-      if (composing || recentlyComposed) {
-        ime.value = "";
-        return;
-      }
-      if (e.data && (!e.inputType || e.inputType.indexOf("insert") === 0)) {
-        sendCommit(e.data);
-      }
+      // While composing, the IME owns the value — never disturb it here.
+      if (e.isComposing || composing) return;
+      // Direct (non-IME) typing commits here; a composition commit reports
+      // inputType "insertCompositionText" and is handled by compositionend
+      // above, so only a plain "insertText" is a direct keystroke to forward.
+      if (e.inputType === "insertText" && e.data) sendCommit(e.data);
       ime.value = "";
     });
 
