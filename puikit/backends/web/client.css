@@ -27,6 +27,25 @@
   src: url("/fonts/NotoSans-Bold.ttf") format("truetype");
 }
 
+/* CJK fallback faces (Noto Sans CJK JP), used for glyphs the Latin faces above
+ * lack (Japanese). Declared AFTER the primary faces and named AFTER them in the
+ * canvas font shorthand, so any glyph the primary covers keeps its advance — the
+ * chain matches WebBackend's [primary, cjk] table order exactly. Regular file
+ * only: bold (700) reuses it, and the browser synthesizes the bold look; Noto
+ * CJK advances are weight-invariant, so the synthesized weight measures the same.
+ * These may be absent (optional download) — then Python drops the CJK family from
+ * the shorthand too, so nothing references a missing face. */
+@font-face {
+  font-family: "PuiMonoCJK";
+  font-weight: 400 700;
+  src: url("/fonts/NotoSansMonoCJKjp-Regular.otf") format("opentype");
+}
+@font-face {
+  font-family: "PuiSansCJK";
+  font-weight: 400 700;
+  src: url("/fonts/NotoSansCJKjp-Regular.otf") format("opentype");
+}
+
 html,
 body {
   margin: 0;

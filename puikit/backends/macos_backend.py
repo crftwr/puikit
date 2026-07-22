@@ -297,10 +297,22 @@ _BUNDLED_FONT_FILES = (
     "NotoSansMono-Regular.ttf", "NotoSansMono-Bold.ttf",
 )
 
+# Optional Noto CJK JP faces (proportional + mono, Regular only). They give
+# Japanese a *bundled* face — prepended to each resolved font's fallback cascade
+# (see _with_cjk_cascade) so Japanese renders and measures in Noto CJK rather
+# than the OS font (Hiragino). Absent files just leave the OS fallback in place.
+_BUNDLED_CJK_UI = "Noto Sans CJK JP"
+_BUNDLED_CJK_MONO = "Noto Sans Mono CJK JP"
+_BUNDLED_CJK_FILES = (
+    "NotoSansCJKjp-Regular.otf",
+    "NotoSansMonoCJKjp-Regular.otf",
+)
+
 # Registration is a process-wide side effect, so it runs once and the result is
 # cached: None = not yet attempted, True/False = whether the bundled families
 # are usable.
 _bundled_fonts_registered: bool | None = None
+_cjk_fonts_registered: bool | None = None
 
 
 def _ensure_bundled_fonts() -> bool:
@@ -331,6 +343,57 @@ def _ensure_bundled_fonts() -> bool:
         return False
     _bundled_fonts_registered = True
     return True
+
+
+def _ensure_cjk_fonts() -> bool:
+    """Register the optional Noto CJK JP faces (process scope) on first use, so
+    ``_with_cjk_cascade`` can name them in a fallback cascade. Idempotent and
+    process-global; returns False (leaving the OS's own CJK fallback in place)
+    when Core Text is unavailable or the large CJK files were not downloaded."""
+    global _cjk_fonts_registered
+    if _cjk_fonts_registered is not None:
+        return _cjk_fonts_registered
+    _cjk_fonts_registered = False
+    if not _HAS_CORETEXT:
+        return False
+    paths = [os.path.join(_FONT_DIR, f) for f in _BUNDLED_CJK_FILES]
+    if not all(os.path.exists(p) for p in paths):
+        return False
+    try:
+        scope = CoreText.kCTFontManagerScopeProcess
+        for path in paths:
+            CoreText.CTFontManagerRegisterFontsForURL(NSURL.fileURLWithPath_(path), scope, None)
+    except Exception:  # any Core Text failure -> OS CJK fallback
+        return False
+    if (NSFont.fontWithName_size_(_BUNDLED_CJK_UI, 12.0) is None
+            or NSFont.fontWithName_size_(_BUNDLED_CJK_MONO, 12.0) is None):
+        return False
+    _cjk_fonts_registered = True
+    return True
+
+
+def _with_cjk_cascade(ns: Any, size: float, monospace: bool) -> Any:
+    """Return ``ns`` with the bundled Noto CJK JP face **prepended** to its
+    fallback cascade, so any glyph ``ns`` itself lacks (Japanese) both renders
+    and *measures* in the embedded CJK face instead of the OS font. Returns ``ns``
+    unchanged when the CJK faces are not bundled.
+
+    The system's own default cascade is preserved *after* the CJK entry, so
+    emoji and every other script keep their existing OS fallback. Bold/italic
+    Japanese resolves to the Regular CJK face (Noto CJK ships Regular only here);
+    that is metrically exact — its advances are weight-invariant — the weight is
+    simply not synthesized for the fallback run. Both ``NSAttributedString.size``
+    (measurement) and ``-drawAtPoint:`` (drawing) honor the cascade, so the two
+    stay in agreement."""
+    if ns is None or not _ensure_cjk_fonts():
+        return ns
+    family = _BUNDLED_CJK_MONO if monospace else _BUNDLED_CJK_UI
+    cjk_desc = CoreText.CTFontDescriptorCreateWithNameAndSize(family, size)
+    default = CoreText.CTFontCopyDefaultCascadeListForLanguages(ns, None) or []
+    cascade = [cjk_desc] + list(default)
+    desc = CoreText.CTFontDescriptorCreateCopyWithAttributes(
+        ns.fontDescriptor(), {CoreText.kCTFontCascadeListAttribute: cascade})
+    return CoreText.CTFontCreateWithFontDescriptor(desc, size, None) or ns
 
 
 # Slant used to synthesize an italic (oblique) for a face that ships no real
@@ -1361,6 +1424,11 @@ class MacOSBackend(Backend):
                 # only) — synthesize an oblique so italic prose is still slanted,
                 # keeping any bold already applied above.
                 ns = _oblique(ns)
+        # Prepend the bundled Noto CJK JP face to the fallback cascade (a no-op
+        # when the CJK files are absent), so Japanese in this font renders and
+        # measures in the embedded face instead of the OS's (Hiragino). Applied
+        # last, after all trait conversions, so nothing strips the cascade.
+        ns = _with_cjk_cascade(ns, size, font.monospace)
         return ns
 
     def _init_fonts(self) -> None:

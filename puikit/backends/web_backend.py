@@ -14,9 +14,11 @@ inside ``panel.render()``, before anything reaches the browser, so the backend
 cannot ask the canvas how wide a run is. Instead it predicts the browser's
 rendering: the page draws with the *same* bundled Noto faces and
 ``fontKerning: "none"``, so a run's width is the plain sum of its glyphs' advance
-widths — which ``_ttf`` reads straight from the font files. (Glyphs absent from
-the bundled fonts — CJK, astral emoji — fall to a browser font-fallback whose
-advances Python cannot predict, so their fit/wrap is approximate; see
+widths — which ``_ttf`` reads straight from the font files. Each face is a chain
+``[primary, cjk]``: the Latin/Greek/Cyrillic Noto face, then the bundled Noto CJK
+JP face for Japanese, so both sides of that measurement match what the browser
+draws. (Only a glyph *no* bundled face has — astral emoji, exotic scripts — falls
+to a browser font-fallback whose advance Python estimates by em width; see
 ``docs/web_backend.md``.)
 
 **Deferred for v1** (advertised off, so the Panel substitutes its fallbacks):
@@ -154,18 +156,38 @@ def _css_color(color: tuple[int, ...] | None, alpha: float = 1.0) -> str | None:
     return f"rgba({r},{g},{b},{alpha:.3f})"
 
 
+def _load_optional(path: str) -> _ttf.TrueTypeFont | None:
+    """Load a metrics table, or ``None`` when the file is absent/unreadable. Used
+    for the *optional* CJK faces: a dev setup that skipped the large CJK download
+    still runs, degrading to the em-width estimate for Japanese."""
+    try:
+        return _ttf.load(path)
+    except OSError:
+        return None
+
+
 class _Face:
-    """A resolved font: its metrics table (Python-side measurement) and the CSS
-    string the browser draws with (they name the same bundled face)."""
+    """A resolved font: an ordered chain of metrics tables (Python-side
+    measurement) and the CSS string the browser draws with — the two name the
+    same bundled faces *in the same order*, so the width the browser renders
+    equals the sum of advances this chain reports.
 
-    __slots__ = ("table", "css", "px", "ascent_px", "line_px")
+    The chain is ``[primary, cjk]`` (``cjk`` present only when the CJK face is
+    bundled). ``_measure_units`` walks it per glyph: the first table that has a
+    glyph supplies its advance; a glyph no table has falls to the em estimate.
+    Vertical metrics (``ascent_px`` / ``line_px``) come from the **primary**
+    table only — the base unit and line pitch are defined by the primary face,
+    never the taller CJK face."""
 
-    def __init__(self, table: _ttf.TrueTypeFont, css: str, px: float):
-        self.table = table
+    __slots__ = ("tables", "css", "px", "ascent_px", "line_px")
+
+    def __init__(self, tables: list[_ttf.TrueTypeFont], css: str, px: float):
+        self.tables = tables
         self.css = css
         self.px = px
-        self.ascent_px = table.ascent * px
-        self.line_px = table.line_height * px
+        primary = tables[0]
+        self.ascent_px = primary.ascent * px
+        self.line_px = primary.line_height * px
 
 
 class WebBackend(Backend):
@@ -204,12 +226,23 @@ class WebBackend(Backend):
         self._port = port
         self._open_browser = open_browser
 
-        # Loaded metrics tables for the four bundled Noto faces.
+        # Loaded metrics tables for the four bundled (Latin/Greek/Cyrillic) Noto
+        # faces. These are the *primary* faces: the base unit and every Latin
+        # advance come from here, so their behavior must never change.
         self._tables = {
             ("mono", False): _ttf.load(os.path.join(_FONT_DIR, "NotoSansMono-Regular.ttf")),
             ("mono", True): _ttf.load(os.path.join(_FONT_DIR, "NotoSansMono-Bold.ttf")),
             ("sans", False): _ttf.load(os.path.join(_FONT_DIR, "NotoSans-Regular.ttf")),
             ("sans", True): _ttf.load(os.path.join(_FONT_DIR, "NotoSans-Bold.ttf")),
+        }
+        # Optional CJK fallback faces (Noto Sans CJK JP, Regular only — advances
+        # are weight-invariant, so bold reuses the Regular table). A glyph the
+        # primary face lacks (Japanese) is measured from these instead of the em
+        # estimate. Absent files => None: the backend degrades to the em estimate
+        # with no error, and the CSS chain drops the CJK family to match.
+        self._cjk_tables = {
+            "mono": _load_optional(os.path.join(_FONT_DIR, "NotoSansMonoCJKjp-Regular.otf")),
+            "sans": _load_optional(os.path.join(_FONT_DIR, "NotoSansCJKjp-Regular.otf")),
         }
         mono = self._tables[("mono", False)]
         # One base unit in CSS pixels, kept as floats so the drawing path stays
@@ -336,31 +369,43 @@ class WebBackend(Backend):
         face = self._face_cache.get(key)
         if face is None:
             kind = "mono" if mono else "sans"
-            table = self._tables[(kind, bool(bold))]
+            # Measurement chain: the primary (Latin) face, then the CJK fallback
+            # face when it is bundled. Order here MUST equal the CSS @font-face
+            # order below — the browser walks the same chain to draw, so the
+            # rendered width equals our per-glyph sum of advances.
+            tables = [self._tables[(kind, bool(bold))]]
+            cjk = self._cjk_tables.get(kind)
+            if cjk is not None:
+                tables.append(cjk)
+            # The CJK @font-face family (present only when its table is), sits
+            # between the primary family and the generic keyword.
+            cjk_css = f'"{"PuiMonoCJK" if kind == "mono" else "PuiSansCJK"}", ' if cjk is not None else ""
             # CSS family: our bundled @font-face names, or a named installed
             # family the browser has (metrics then approximate the bundled sans).
             if family:
-                css_family = f'"{family}", "PuiSans", sans-serif'
+                css_family = f'"{family}", "PuiSans", {cjk_css}sans-serif'
             elif mono:
-                css_family = '"PuiMono", monospace'
+                css_family = f'"PuiMono", {cjk_css}monospace'
             else:
-                css_family = '"PuiSans", sans-serif'
+                css_family = f'"PuiSans", {cjk_css}sans-serif'
             weight = 700 if bold else 400
             slant = "italic " if italic else ""
             css = f"{slant}{weight} {px:.2f}px {css_family}"
-            face = _Face(table, css, px)
+            face = _Face(tables, css, px)
             self._face_cache[key] = face
         return face
 
     def _measure_units(self, text: str, face: _Face) -> float:
-        """Width of ``text`` in base units. A glyph the bundled font has is
-        measured exactly from its advance; one it lacks (CJK, emoji) the browser
-        draws from a fallback font whose advance is unknown here, so estimate it
-        as its **em width** — a full-width (wide) glyph is ~1 em, a half-width
-        one ~0.5 em (``display_width/2`` ems). This matches the browser far
-        better than the ``.notdef`` box (far too narrow — Japanese wrapped
-        without visibly wrapping) or the terminal column count (2 base units per
-        wide glyph is ~1.67 em, too wide — Japanese wrapped early)."""
+        """Width of ``text`` in base units, summed per glyph from the face's
+        table chain (``[primary, cjk]``). For each character the first table that
+        *has* the glyph supplies its advance — the primary (Latin) face for
+        Latin/Greek/Cyrillic, the bundled CJK face for Japanese — so the result
+        is the exact sum of advances the browser will render (both faces are 1000
+        upm and draw at the same px, so one ``em_units`` factor covers whichever
+        matched). Only a glyph *no* table has (astral emoji, exotic scripts, or —
+        when the CJK face is not bundled — CJK) falls to the **em-width estimate**:
+        a full-width glyph ~1 em, a half-width one ~0.5 em (``display_width/2``
+        ems), which the browser's own fallback font draws close to."""
         from ..text import display_width
 
         key = (face.css, text)
@@ -368,15 +413,19 @@ class WebBackend(Backend):
         if cached is not None:
             return cached
 
-        table = face.table
+        tables = face.tables
         em_units = face.px / self._base_w  # one em of this face, in base units
         total = 0.0
         for ch in text:
             cp = ord(ch)
-            if table.has_glyph(cp):
-                total += table.advance(cp) * em_units
-            else:
-                total += (display_width(ch) / 2.0) * em_units
+            advance = None
+            for table in tables:
+                if table.has_glyph(cp):
+                    advance = table.advance(cp) * em_units
+                    break
+            if advance is None:
+                advance = (display_width(ch) / 2.0) * em_units
+            total += advance
 
         if len(self._measure_cache) > 20000:
             self._measure_cache.clear()

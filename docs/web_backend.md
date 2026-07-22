@@ -103,23 +103,43 @@ size the native backends produce. Everything (base unit, text, measurement) is
 in that point-matched pixel space; only `measure_font_size` reports the nominal
 point size, so cross-backend relative font math stays consistent.
 
-### Glyphs the bundled fonts lack (CJK, emoji)
+### The measurement chain (primary → CJK → em estimate)
 
-The bundled Noto Sans/Mono do **not** contain CJK or astral emoji glyphs, and a
-missing glyph's `.notdef` box is far narrower than the full-width glyph the
-browser's fallback font actually draws. So `WebBackend._measure_units` estimates
-a glyph the font *lacks* (`_ttf.has_glyph` is False) by its **em width**: a
-full-width (wide) glyph is ~1 em, a half-width one ~0.5 em (`display_width/2`
-ems), which is what the browser draws a fallback ideograph at. Two earlier
-estimates were both wrong: the `.notdef` box (near-zero — Japanese "wrapped"
-without visibly wrapping) and the terminal column count (2 base units per wide
-glyph, but one base unit is only 0.6 em, so 2 columns ≈ 1.67 em — too wide,
-Japanese wrapped early). Latin/Greek/Cyrillic (the vast majority of any UI)
-still measure exactly from their advances.
+Each resolved face (`_Face`) is an **ordered chain of metrics tables**,
+`[primary, cjk]`, matched one-to-one by the CSS `@font-face` fallback list the
+browser draws with (`"PuiMono", "PuiMonoCJK", monospace`). `_measure_units` walks
+the chain per glyph: the first table that *has* the glyph supplies its advance —
+the primary Latin/Greek/Cyrillic Noto face for Latin, the bundled **Noto Sans CJK
+JP** face (`NotoSansCJKjp` / `NotoSansMonoCJKjp`, Regular only) for Japanese. CSS
+order equals Python table order, so the width the browser renders equals the sum
+of advances Python measured — pixel-exact for every glyph a bundled face covers,
+including Han/kana (full-width ≈ 1 em), halfwidth kana (≈ 0.5 em), and CJK
+punctuation `、。「」`.
 
-The em estimate is close, not pixel-exact (the fallback font's real advance is
-unknown to Python), so a wide-glyph run can still wrap a hair off. Bundling a
-CJK metrics face would make it exact; deferred for size.
+Only a glyph **no** bundled face has (astral emoji, exotic scripts — or CJK when
+the optional CJK face was not downloaded) falls to the **em-width estimate**: a
+full-width glyph ≈ 1 em, a half-width one ≈ 0.5 em (`display_width/2` ems), which
+the browser's own fallback font draws close to. Two earlier estimates were both
+wrong: the `.notdef` box (near-zero — Japanese "wrapped" without visibly
+wrapping) and the terminal column count (2 base units per wide glyph, ≈ 1.67 em —
+too wide, Japanese wrapped early). The estimate is close, not pixel-exact, so a
+run measured through it can still wrap a hair off.
+
+**Bold** CJK measures from the Regular CJK table (Noto CJK advances are
+weight-invariant), and the browser synthesizes the bold look. **Line metrics**
+(`measure_line_height`, `font_metrics`) come from the **primary** face only — the
+CJK face's line box is taller (1.448 em vs 1.362), and the base unit / line pitch
+must stay defined by the primary face.
+
+**East Asian Ambiguous width.** `text.char_width` treats Ambiguous characters as
+width 1, and the em-estimate path inherits that. Where the CJK face now covers an
+Ambiguous glyph, it measures at that face's true advance instead — more correct,
+but note it can differ from a `display_width`-based column count a grid widget
+assumes.
+
+The CJK files are **optional**: when absent the chain is just `[primary]` and the
+em estimate handles Japanese exactly as before, so a dev setup that skipped the
+~16 MB download still runs.
 
 ### Measurement is cached
 
@@ -234,8 +254,9 @@ never branches on the backend, and each fallback is the Panel's existing one.
 
 1. **Composited `animate()`** — real alpha/transform fade/scale/slide via CSS or
    per-group canvas compositing, to flip `animation` on.
-2. **CJK/emoji metrics** — bundle a CJK metrics face (or a server-side measure of
-   the browser's fallback) to make wide-glyph fit/wrap exact (§2).
+2. **Emoji metrics** — astral emoji stay on the em estimate (the CJK face covers
+   Japanese now — see "The measurement chain" — but not color emoji, whose
+   fallback advance Python still cannot see).
 3. **IME clause highlight** — the browser reports the whole preedit but not the
    converting clause, so `target_start/end` collapse (no thick target underline);
    deriving it would need a richer composition source.

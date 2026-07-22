@@ -26,8 +26,15 @@ stack. It follows the framework's existing rule: apps and widgets state
 ## 2. Non-goals (for this iteration)
 
 - Rich text / per-run inline markup inside a single string.
-- Font fallback chains for missing glyphs (the backend's native fallback is
-  used as-is).
+- Arbitrary font fallback chains for missing glyphs. **Exception:** the GUI
+  backends bundle a Japanese fallback face (Noto Sans CJK JP, proportional +
+  mono) and use it for the CJK glyphs the primary Latin faces lack, so Japanese
+  file names render in one embedded typeface everywhere — the web backend via a
+  `[primary, cjk]` measurement chain + CSS `@font-face` list, macOS via a
+  Core Text `kCTFontCascadeListAttribute` cascade, Windows by drawing the CJK
+  segments of a run with a CJK text format. Everything *else* still relies on the
+  backend's native fallback as-is. The faces are optional (fetched at build time);
+  absent, each backend degrades to its native CJK fallback.
 - *Implicit* re-flow of the layout to a font's metrics (see §7): a decorative
   font size never reshapes a pane. Note this is **not** a ban on
   content-driven sizing — a widget may *opt in* and size itself to its text

@@ -57,12 +57,18 @@
 
   async function preloadFonts() {
     if (!document.fonts) return;
+    // Preload every declared face before the first frame so nothing is drawn (and
+    // visually mismeasured) against an OS fallback while a face is still loading.
+    // The CJK faces are large (~16 MB each) and optional: we eagerly load them
+    // (no unicode-range lazy-load — the Python measurement assumes the real face
+    // is present), and a missing file just rejects its load() and is skipped.
     const specs = [
       '400 16px "PuiMono"', '700 16px "PuiMono"',
       '400 16px "PuiSans"', '700 16px "PuiSans"',
+      '400 16px "PuiMonoCJK"', '400 16px "PuiSansCJK"',
     ];
     try {
-      await Promise.all(specs.map((s) => document.fonts.load(s)));
+      await Promise.all(specs.map((s) => document.fonts.load(s).catch(() => {})));
     } catch (e) {
       /* fall back to whatever the browser has */
     }

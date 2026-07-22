@@ -19,4 +19,6 @@ build/
 # Bundled default fonts — fetched at build time (make fonts / scripts/fetch_fonts.py),
 # not committed. See puikit/fonts/README.md.
 puikit/fonts/*.ttf
+puikit/fonts/*.otf
 puikit/fonts/OFL.txt
+puikit/fonts/OFL-CJK.txt

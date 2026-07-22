@@ -45,7 +45,7 @@ from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..easing import resolve as _resolve_easing
 from ..event import Event, EventType, char_key_event
 from ..font import Font, FontMetrics
-from ..text import display_width, glyph_runs as _glyph_runs
+from ..text import display_width, glyph_runs as _glyph_runs, is_cjk, cjk_segments
 
 # Bundled default fonts (puikit/fonts): Noto Sans + Noto Sans Mono, a
 # designed-together superfamily whose proportional and monospace faces share
@@ -60,6 +60,23 @@ _BUNDLED_FAMILIES = frozenset({_BUNDLED_MONO, _BUNDLED_UI})
 _BUNDLED_FONT_FILES = (
     "NotoSans-Regular.ttf", "NotoSans-Bold.ttf",
     "NotoSansMono-Regular.ttf", "NotoSansMono-Bold.ttf",
+)
+
+# Optional Noto CJK JP faces (proportional + mono, Regular only), added to the
+# SAME custom collection when present. DirectWrite's own DrawText/DrawTextLayout
+# is format-based (one family per call) and cannot be handed a custom font
+# fallback, so instead the backend draws the CJK segments of a run (text.is_cjk)
+# with a text format naming one of these families — the embedded face — while
+# Latin keeps the primary format. Absent files leave the OS's CJK fallback (Yu
+# Gothic) in place; the required check on _BUNDLED_FONT_FILES stays independent
+# so a missing CJK download never disables the whole (Latin) collection. Regular
+# only: DirectWrite synthesizes bold from it (advances are weight-invariant).
+_BUNDLED_CJK_UI = "Noto Sans CJK JP"
+_BUNDLED_CJK_MONO = "Noto Sans Mono CJK JP"
+_BUNDLED_CJK_FAMILIES = frozenset({_BUNDLED_CJK_UI, _BUNDLED_CJK_MONO})
+_BUNDLED_CJK_FILES = (
+    "NotoSansCJKjp-Regular.otf",
+    "NotoSansMonoCJKjp-Regular.otf",
 )
 
 _DEFAULT_FG = (230, 230, 230)
@@ -592,6 +609,12 @@ class WindowsBackend(Backend):
         self._fonts: dict[TextAttribute, Any] = {}
         # Per-Style text formats cached by (Font, bold, italic).
         self._style_fonts: dict[tuple, Any] = {}
+        # Embedded CJK (Noto CJK JP) text formats, mirroring the two above but
+        # naming the CJK family — used for the CJK segments of a run. Populated
+        # only when the optional CJK files are bundled (_cjk_available).
+        self._cjk_available = False
+        self._cjk_fonts: dict[TextAttribute, Any] = {}   # grid (mono) CJK formats
+        self._style_cjk_fonts: dict[tuple, Any] = {}     # flow CJK formats
         self._line_height_cache: dict[int, float] = {}
         self._font_metrics_cache: dict[int, tuple[float, float]] = {}
         self._width_cache: dict[tuple, float] = {}
@@ -722,6 +745,7 @@ class WindowsBackend(Backend):
         for fmt in self._style_fonts.values():
             fmt.release()
         self._style_fonts.clear()
+        self._release_cjk_fonts()  # rebuilt by _init_fonts() below at the new DPI
         self._width_cache.clear()
         self._line_height_cache.clear()
         self._font_metrics_cache.clear()
@@ -799,6 +823,7 @@ class WindowsBackend(Backend):
         for fmt in self._style_fonts.values():
             fmt.release()
         self._style_fonts.clear()
+        self._release_cjk_fonts()
         if self._menu_bar_hmenu:
             from . import _win32_menu
 
@@ -844,8 +869,16 @@ class WindowsBackend(Backend):
                 self._dwrite_factory = native.create_dwrite_factory()
             paths = [os.path.join(_FONT_DIR, f) for f in _BUNDLED_FONT_FILES]
             if all(os.path.exists(p) for p in paths):
+                # Fold the optional CJK faces into the same collection when they
+                # were downloaded, so their family names resolve for the CJK
+                # segments. Their absence must NOT drop the (required) Latin
+                # faces, so they are appended only when all present.
+                cjk_paths = [os.path.join(_FONT_DIR, f) for f in _BUNDLED_CJK_FILES]
+                have_cjk = all(os.path.exists(p) for p in cjk_paths)
                 try:
-                    self._font_collection = native.create_font_collection_from_files(self._dwrite_factory, paths)
+                    self._font_collection = native.create_font_collection_from_files(
+                        self._dwrite_factory, paths + (cjk_paths if have_cjk else []))
+                    self._cjk_available = have_cjk and self._font_collection is not None
                 except OSError:
                     self._font_collection = None
         return self._font_collection
@@ -891,10 +924,28 @@ class WindowsBackend(Backend):
         if bold:
             weight = max(weight, 700)
         style = 2 if (italic or font_italic) else 0  # DWRITE_FONT_STYLE_ITALIC
-        # A bundled family resolves from our custom collection; anything else
-        # (an OS font, or an app-named family) uses the system collection.
-        collection = self._ensure_font_collection() if family in _BUNDLED_FAMILIES else None
+        # A bundled family (Latin or CJK) resolves from our custom collection;
+        # anything else (an OS font, or an app-named family) uses the system
+        # collection.
+        bundled = family in _BUNDLED_FAMILIES or family in _BUNDLED_CJK_FAMILIES
+        collection = self._ensure_font_collection() if bundled else None
         return native.dwrite_create_text_format(self._dwrite_factory, family, weight, style, size, collection=collection)
+
+    def _create_cjk_text_format(self, font: Font, bold: bool = False, italic: bool = False) -> Any:
+        """A text format like ``_create_text_format`` but naming the embedded
+        Noto CJK JP family (mono for a monospace font, proportional otherwise) at
+        the same size/weight/slant — used to draw a run's CJK segments. Weight is
+        honored; the Regular-only CJK face is faux-bolded by DirectWrite, whose
+        advances are weight-invariant, so measurement stays exact."""
+        if self._dwrite_factory is None:
+            self._dwrite_factory = native.create_dwrite_factory()
+        _, weight, font_italic, size = self._font_params(font)
+        if bold:
+            weight = max(weight, 700)
+        style = 2 if (italic or font_italic) else 0
+        family = _BUNDLED_CJK_MONO if font.monospace else _BUNDLED_CJK_UI
+        return native.dwrite_create_text_format(
+            self._dwrite_factory, family, weight, style, size, collection=self._ensure_font_collection())
 
     def _init_fonts(self) -> None:
         if self._d2d_factory is None:
@@ -903,6 +954,14 @@ class WindowsBackend(Backend):
             TextAttribute.NORMAL: self._create_text_format(self._base_font),
             TextAttribute.BOLD: self._create_text_format(self._base_font, bold=True),
         }
+        # Grid CJK formats (the base/mono font), built once _ensure_font_collection
+        # (called above via _create_text_format) has reported whether the CJK
+        # faces are bundled. Grid text draws a CJK cell with these.
+        if self._cjk_available:
+            self._cjk_fonts = {
+                TextAttribute.NORMAL: self._create_cjk_text_format(self._base_font),
+                TextAttribute.BOLD: self._create_cjk_text_format(self._base_font, bold=True),
+            }
         # Derived through DirectWrite (measure_text_dwrite), the same system
         # that measures every other Font request (measure_text/
         # measure_line_height) — using GDI here instead, as a first pass did,
@@ -931,6 +990,43 @@ class WindowsBackend(Backend):
             self._style_fonts[key] = fmt
         return fmt
 
+    def _resolve_style_cjk_font(self, style: Style) -> Any:
+        """The embedded-CJK format matching ``style`` (family swapped for the
+        Noto CJK JP face), cached like ``_resolve_style_font``. Used for a run's
+        CJK segments so they render/measure in the embedded face."""
+        font = style.font
+        bold = bool(style.attr & TextAttribute.BOLD)
+        italic = bool(style.attr & TextAttribute.ITALIC)
+        key = (font, bold, italic)
+        fmt = self._style_cjk_fonts.get(key)
+        if fmt is None:
+            fmt = self._create_cjk_text_format(font, bold=bold, italic=italic)
+            self._style_cjk_fonts[key] = fmt
+        return fmt
+
+    def _release_cjk_fonts(self) -> None:
+        """Release every cached CJK text format (grid + flow). ``_cjk_available``
+        is left as-is: whether the faces are bundled does not change; only the
+        format objects (DPI-sized) are torn down, to be rebuilt on demand."""
+        for fmt in self._cjk_fonts.values():
+            fmt.release()
+        self._cjk_fonts.clear()
+        for fmt in self._style_cjk_fonts.values():
+            fmt.release()
+        self._style_cjk_fonts.clear()
+
+    def _flow_segments(self, text: str, style: Style) -> list[tuple[str, Any]]:
+        """``text`` split into ``(segment, text_format)`` pairs: CJK runs paired
+        with the embedded-CJK format, the rest with the primary style format. A
+        single pair (the whole run, primary format) when the CJK faces are absent
+        or the run has no CJK, so the common path is unchanged. Draw and measure
+        both iterate this, so a glyph's drawn face and its measured advance agree."""
+        primary = self._resolve_style_font(style)
+        if not self._cjk_available or not any(is_cjk(c) for c in text):
+            return [(text, primary)]
+        cjk = self._resolve_style_cjk_font(style)
+        return [(seg, cjk if seg_cjk else primary) for seg, seg_cjk in cjk_segments(text)]
+
     def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
         if style.font is None:
             return float(display_width(text))
@@ -946,7 +1042,13 @@ class WindowsBackend(Backend):
         if width is None:
             if self._dwrite_factory is None:
                 self._dwrite_factory = native.create_dwrite_factory()
-            width, _ = native.measure_text_dwrite(self._dwrite_factory, text, text_format)
+            # Sum per-segment widths so a mixed Latin/CJK run measures each part
+            # in the face it will be drawn with; a pure-Latin (or CJK-less) run
+            # is one segment, i.e. the original single measurement unchanged.
+            width = sum(
+                native.measure_text_dwrite(self._dwrite_factory, seg, fmt)[0]
+                for seg, fmt in self._flow_segments(text, style)
+            )
             if len(self._width_cache) >= _WIDTH_CACHE_MAX:
                 self._width_cache.clear()
             self._width_cache[key] = width
@@ -1825,6 +1927,15 @@ class WindowsBackend(Backend):
         weight = TextAttribute.BOLD if style.attr & TextAttribute.BOLD else TextAttribute.NORMAL
         text_format = self._fonts[weight]
 
+        def _glyph_fmt(glyph: str) -> Any:
+            # A CJK cell draws with the embedded CJK format (same size/weight),
+            # so a Japanese file name shows the bundled face, not the OS's. Grid
+            # cells are column-positioned, so this changes only the face — never
+            # the layout — and needs no measurement change.
+            if self._cjk_available and self._cjk_fonts and is_cjk(glyph[0]):
+                return self._cjk_fonts[weight]
+            return text_format
+
         # Grid-locked text: each glyph gets its own DrawText call clipped to
         # its own (base-unit) cell, so neighboring glyphs cannot drift off the
         # grid from the font's natural (non-integer-pixel) advance — the same
@@ -1851,10 +1962,11 @@ class WindowsBackend(Backend):
             col = 0
             for glyph, width in zip(runs, widths):
                 r = self._unit_rect(x + col, y, width, 1)
+                gfmt = _glyph_fmt(glyph)
                 for kx, ky in _SHADOW_KERNEL:
                     ox, oy = bx + kx * br, by + ky * br
                     native.rt_draw_text(
-                        self._render_target, glyph, text_format,
+                        self._render_target, glyph, gfmt,
                         native.D2D1_RECT_F(r.left + ox, r.top + oy, r.right + ox, r.bottom + oy),
                         self._brush)
                 col += width
@@ -1870,7 +1982,7 @@ class WindowsBackend(Backend):
             # descenders (g/j/p/q/y). Matches the macOS grid path, which draws
             # each glyph via drawAtPoint_ with no clip.
             rect = self._unit_rect(x + col, y, width, 1)
-            native.rt_draw_text(self._render_target, glyph, text_format, rect, self._brush)
+            native.rt_draw_text(self._render_target, glyph, _glyph_fmt(glyph), rect, self._brush)
             col += width
         if underline or strike:
             full = self._unit_rect(x, y, total, 1)
@@ -1909,6 +2021,30 @@ class WindowsBackend(Backend):
             native.rt_fill_rectangle(
                 self._render_target, native.D2D1_RECT_F(origin_x, origin_y, origin_x + width, origin_y + self._base_h), self._brush
             )
+        # Split into (segment, format) pairs so a run's CJK parts draw in the
+        # embedded CJK face; a pure-Latin (or CJK-less, or CJK-absent) run is a
+        # single pair — the whole run in the primary format, exactly as before.
+        # Segments are placed at cumulative advances measured in their own face,
+        # which is the same per-segment sum measure_text reports, so positions
+        # agree with layout.
+        segments = self._flow_segments(text, style)
+
+        def _draw_run(base_x: float, base_y: float) -> None:
+            if len(segments) == 1:
+                seg, fmt = segments[0]
+                native.rt_draw_text(
+                    self._render_target, seg, fmt,
+                    native.D2D1_RECT_F(base_x, base_y, base_x + 100000.0, base_y + 100000.0),
+                    self._brush)
+                return
+            sx = 0.0
+            for seg, fmt in segments:
+                native.rt_draw_text(
+                    self._render_target, seg, fmt,
+                    native.D2D1_RECT_F(base_x + sx, base_y, base_x + sx + 100000.0, base_y + 100000.0),
+                    self._brush)
+                sx += native.measure_text_dwrite(self._dwrite_factory, seg, fmt)[0]
+
         # Drop-shadow ink pass under the real run (see _render_text): the run's
         # ink re-drawn as the same soft kernel of translucent-black copies.
         if self._drop_shadow is not None:
@@ -1918,16 +2054,12 @@ class WindowsBackend(Backend):
             self._set_brush((0, 0, 0), _shadow_tap_alpha(peak))
             for kx, ky in _SHADOW_KERNEL:
                 ox, oy = bx + kx * br, by + ky * br
-                native.rt_draw_text(
-                    self._render_target, text, text_format,
-                    native.D2D1_RECT_F(origin_x + ox, origin_y + oy,
-                                       origin_x + ox + 100000.0, origin_y + oy + 100000.0),
-                    self._brush)
+                _draw_run(origin_x + ox, origin_y + oy)
         self._set_brush(fg, alpha)
-        # A generously large layout rect: the outer pane clip (push_clip)
-        # already bounds what's visible, so this only needs to avoid wrapping.
-        rect = native.D2D1_RECT_F(origin_x, origin_y, origin_x + 100000.0, origin_y + 100000.0)
-        native.rt_draw_text(self._render_target, text, text_format, rect, self._brush)
+        # A generously large layout rect per segment: the outer pane clip
+        # (push_clip) already bounds what's visible, so this only needs to avoid
+        # wrapping.
+        _draw_run(origin_x, origin_y)
         for ly in (
             [origin_y + line_h - 2.0] if underline else []
         ) + ([origin_y + line_h / 2.0] if strike else []):

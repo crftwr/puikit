@@ -156,6 +156,43 @@ def glyph_runs(text: str) -> list[str]:
     return glyphs
 
 
+def is_cjk(ch: str) -> bool:
+    """True for a character in the CJK / Japanese Unicode blocks the bundled Noto
+    Sans CJK JP faces cover: ideographs, hiragana/katakana, CJK punctuation, and
+    the half/fullwidth forms. The primary (Latin) faces lack every one of these,
+    so the GUI backends route exactly these characters to the embedded CJK face.
+
+    Note halfwidth katakana (``U+FF61``–``FF9F``) is display-width **1** yet still
+    Japanese, so ``char_width`` alone cannot gate CJK routing — this block check
+    is the criterion instead."""
+    cp = ord(ch)
+    return (
+        0x3000 <= cp <= 0x30FF        # CJK Symbols/Punctuation, Hiragana, Katakana
+        or 0x31F0 <= cp <= 0x31FF     # Katakana Phonetic Extensions
+        or 0x3400 <= cp <= 0x4DBF     # CJK Unified Ideographs Extension A
+        or 0x4E00 <= cp <= 0x9FFF     # CJK Unified Ideographs
+        or 0xF900 <= cp <= 0xFAFF     # CJK Compatibility Ideographs
+        or 0xFF00 <= cp <= 0xFFEF     # Halfwidth and Fullwidth Forms
+        or 0x20000 <= cp <= 0x2FA1F   # CJK Unified Ideographs Ext B–F + Compat Suppl.
+    )
+
+
+def cjk_segments(text: str) -> list[tuple[str, bool]]:
+    """Split ``text`` into maximal runs of the same CJK-ness: a list of
+    ``(segment, is_cjk)`` in order. A backend that cannot font-fallback a whole
+    run at once (the Windows backend draws each run with its own text format)
+    renders each segment with the primary or the embedded CJK face accordingly.
+    ``"".join(seg for seg, _ in cjk_segments(t)) == t``; empty text ⇒ ``[]``."""
+    segments: list[tuple[str, bool]] = []
+    for ch in text:
+        cjk = is_cjk(ch)
+        if segments and segments[-1][1] == cjk:
+            segments[-1] = (segments[-1][0] + ch, cjk)
+        else:
+            segments.append((ch, cjk))
+    return segments
+
+
 def _fit_prefix(text: str, max_width: float, measure) -> str:
     """Longest run of leading glyphs whose measured length is <= ``max_width``.
     ``measure`` is applied to the *growing prefix string*, not summed per glyph,
