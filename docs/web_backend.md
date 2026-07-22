@@ -91,9 +91,17 @@ With kerning and ligatures disabled, a run's rendered width equals the plain sum
 of its glyphs' `hmtx` advances — exactly what `_ttf` returns. So Python's
 `measure_text` matches the canvas to the pixel, and a proportional label,
 button, or wrapped paragraph lands where the layout placed it. The base unit is
-grounded on the mono face's advance × the base point size, kept as a float so
+grounded on the mono face's advance × the base font size, kept as a float so
 `measure_line_height(font=None)` is exactly `1.0` and the drawing path stays
 crisp.
+
+A font size is a **point** size (the native backends hand it to NSFont /
+DirectWrite as points), and CSS renders in pixels where `1pt == 96/72 px`, so
+the backend multiplies by `_PX_PER_PT` (96/72) when it turns the point size into
+the CSS px it draws — otherwise a 12-point config would render at 12px, ~¾ the
+size the native backends produce. Everything (base unit, text, measurement) is
+in that point-matched pixel space; only `measure_font_size` reports the nominal
+point size, so cross-backend relative font math stays consistent.
 
 ### Glyphs the bundled fonts lack (CJK, emoji)
 

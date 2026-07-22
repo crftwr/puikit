@@ -168,6 +168,11 @@ class _Face:
 class WebBackend(Backend):
     PROFILE = PROFILE_WEB
 
+    #: CSS pixels per point (1pt = 1/72in, 1px = 1/96in). A font size is a point
+    #: size on the native backends; the web multiplies by this to draw it at the
+    #: same visual size rather than treating the number as CSS pixels.
+    _PX_PER_PT = 96.0 / 72.0
+
     def __init__(
         self,
         width: int = 100,
@@ -185,6 +190,14 @@ class WebBackend(Backend):
         self._base_font = base_font or Font(size=14.0, monospace=True)
         self._ui_font = ui_font
         self._base_pt = float(self._base_font.size or 14.0)
+        # A font "size" is a POINT size — the native backends hand it to
+        # NSFont / DirectWrite as points. CSS renders in pixels, where 1pt is
+        # 96/72 px, so convert: without this a 12pt config draws at 12px, ~3/4
+        # the size the native backends produce. base_pt stays the nominal point
+        # size (what measure_font_size reports); _base_px is what actually gets
+        # drawn, and the base unit + every measurement derive from it, so the
+        # whole UI stays in one consistent (point-matched) pixel space.
+        self._base_px = self._base_pt * self._PX_PER_PT
         self._port = port
         self._open_browser = open_browser
 
@@ -198,8 +211,8 @@ class WebBackend(Backend):
         mono = self._tables[("mono", False)]
         # One base unit in CSS pixels, kept as floats so the drawing path stays
         # crisp and measure_line_height(font=None) is exactly 1.0.
-        self._base_w = mono.advance(ord("M")) * self._base_pt
-        self._base_h = mono.line_height * self._base_pt
+        self._base_w = mono.advance(ord("M")) * self._base_px
+        self._base_h = mono.line_height * self._base_px
         self._face_cache: dict[tuple, _Face] = {}
         # Measured widths keyed by (face css, text). Text measurement is pure
         # per-character Python here (no native layout engine), and a widget that
@@ -310,7 +323,10 @@ class WebBackend(Backend):
         italic = (font.italic if font else False) or bool(attr & TextAttribute.ITALIC)
         mono = font.monospace if font else True  # font=None -> the mono base grid font
         family = font.family if font else None
-        px = float((font.size if font and font.size else None) or self._base_pt)
+        # The Style names a POINT size; convert to CSS px so it draws at the same
+        # visual size as the native backends (see _PX_PER_PT).
+        pt = float((font.size if font and font.size else None) or self._base_pt)
+        px = pt * self._PX_PER_PT
         key = (mono, bool(bold), bool(italic), family, px)
         face = self._face_cache.get(key)
         if face is None:
@@ -370,7 +386,13 @@ class WebBackend(Backend):
         return face.line_px / self._base_h
 
     def measure_font_size(self, style: Style = DEFAULT_STYLE) -> float:
-        return self._face(style).px
+        # The nominal POINT size (what a widget deriving one size from another
+        # keeps the ratio of), not the scaled render px — matches the native
+        # backends, which report points here.
+        font = style.font
+        if font is not None and font.size is not None:
+            return float(font.size)
+        return self._base_pt
 
     def font_metrics(self, style: Style = DEFAULT_STYLE) -> FontMetrics:
         face = self._face(style)

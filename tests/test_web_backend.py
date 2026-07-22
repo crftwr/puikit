@@ -98,7 +98,7 @@ def test_missing_glyphs_measured_by_em_width():
     # column count of 2 (too wide, ~1.67 em) both mis-wrapped Japanese; the em
     # width is the right estimate.
     b = _backend()
-    one_em = b._base_pt / b._base_w  # one em of the base grid face, in base units
+    one_em = b._base_px / b._base_w  # one em of the base grid face, in base units
     one_wide = b.measure_text("あ")
     assert 1.0 < one_wide < 2.0             # wider than a mono cell, narrower than 2
     assert one_wide == pytest.approx(one_em)
