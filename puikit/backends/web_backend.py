@@ -70,7 +70,9 @@ PROFILE_WEB = CapabilityProfile(
         # immediate until a real animate() lands.
         "animation_ticks": True,
         "animation": False,
-        "ime": False,
+        # IME is engaged through a hidden, caret-positioned <input> in the page
+        # that owns composition while a text widget is focused (see client.js).
+        "ime": True,
         "drag_and_drop": False,
         # draw_icon falls back to a text/emoji glyph — no icon set is bundled.
         "icons": False,
@@ -197,7 +199,6 @@ class WebBackend(Backend):
         self._quit = False
         self._connected = threading.Event()
         self._canvas_px: tuple[float, float] | None = None
-        self._last_units: tuple[int, int] | None = None
         self._pressed_button: str | None = None
         self._sent_images: set[str] = set()
         self._pointer_shape: str | None = None
@@ -228,9 +229,6 @@ class WebBackend(Backend):
         # the browser never opens (headless CI), proceed after a timeout — the
         # app still runs; it just has nowhere to draw.
         self._connected.wait(timeout=15.0)
-        # Seed the resize baseline so the connect-time size does not also fire a
-        # redundant RESIZE event into the loop below.
-        self._last_units = self.size
 
     def close(self) -> None:
         self._quit = True
@@ -301,9 +299,30 @@ class WebBackend(Backend):
             self._face_cache[key] = face
         return face
 
+    def _measure_units(self, text: str, face: _Face) -> float:
+        """Width of ``text`` in base units. A glyph the bundled font has is
+        measured exactly from its advance; one it lacks (CJK, emoji) the browser
+        draws from a fallback font whose advance is unknown here, so estimate it
+        as its **em width** — a full-width (wide) glyph is ~1 em, a half-width
+        one ~0.5 em (``display_width/2`` ems). This matches the browser far
+        better than the ``.notdef`` box (far too narrow — Japanese wrapped
+        without visibly wrapping) or the terminal column count (2 base units per
+        wide glyph is ~1.67 em, too wide — Japanese wrapped early)."""
+        from ..text import display_width
+
+        table = face.table
+        em_units = face.px / self._base_w  # one em of this face, in base units
+        total = 0.0
+        for ch in text:
+            cp = ord(ch)
+            if table.has_glyph(cp):
+                total += table.advance(cp) * em_units
+            else:
+                total += (display_width(ch) / 2.0) * em_units
+        return total
+
     def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
-        face = self._face(style)
-        return (face.table.advance_text(text) * face.px) / self._base_w
+        return self._measure_units(text, self._face(style))
 
     def measure_line_height(self, style: Style = DEFAULT_STYLE) -> float:
         face = self._face(style)
@@ -475,7 +494,7 @@ class WebBackend(Backend):
         alpha = 0.55 if style.attr & TextAttribute.DIM else 1.0
         x_px = x * self._base_w
         top_px = y * self._base_h
-        width_px = face.table.advance_text(text) * face.px
+        width_px = self._measure_units(text, face) * self._base_w
         # Background band behind the run (skip a transparent request, which asks
         # to paint glyphs only over whatever is beneath).
         if bg is not None and not is_transparent(bg):
@@ -562,6 +581,29 @@ class WebBackend(Backend):
             return True
         return super().open_url(url)
 
+    # --- text input / IME --------------------------------------------------
+
+    def begin_text_input(self) -> None:
+        # A text widget took focus: hand keyboard focus to the page's hidden
+        # <input> so the OS IME composes there (the browser equivalent of
+        # engaging NSTextInputClient).
+        if self._server is not None:
+            self._server.send(json.dumps({"type": "ime", "action": "begin"}))
+
+    def end_text_input(self) -> None:
+        if self._server is not None:
+            self._server.send(json.dumps({"type": "ime", "action": "end"}))
+
+    def request_text_input(self, x: float, y: float, hints: dict[str, Any] | None = None) -> None:
+        """Position the hidden IME input at the focused field's caret (screen
+        base units, possibly fractional), so the candidate window appears
+        there rather than at the page origin."""
+        if self._server is not None:
+            self._server.send(json.dumps({
+                "type": "ime", "action": "caret",
+                "x": x * self._base_w, "y": y * self._base_h, "h": self._base_h,
+            }))
+
     # --- animation ticks ---------------------------------------------------
 
     def request_animation_ticks(self, callback) -> None:
@@ -570,7 +612,11 @@ class WebBackend(Backend):
                 self._tick_callbacks.append(callback)
         self._ensure_ticker()
 
-    _TICK_INTERVAL = 1 / 60.0
+    # 30 fps: smooth enough for a spinner / caret blink / geometry transition,
+    # but half the full-frame re-render + WebSocket traffic of 60 fps — a
+    # perpetual animation (a busy indicator) must not saturate the socket and
+    # starve input (see the coalescing in _drain).
+    _TICK_INTERVAL = 1 / 30.0
 
     def _ensure_ticker(self) -> None:
         if self._ticker is not None and self._ticker.is_alive():
@@ -626,16 +672,43 @@ class WebBackend(Backend):
             event = self._mouse_event(msg)
             if event is not None:
                 self._queue.put(event)
+        elif kind == "ime_preedit":
+            # In-progress composition (marked text): the widget draws it, the
+            # browser owns the candidate window. The browser reports the whole
+            # preedit but not the highlighted clause, so target_start/end
+            # collapse (a plain thin underline, no thick target rule).
+            self._queue.put(Event(
+                type=EventType.IME_COMPOSITION,
+                hints={"preedit": msg.get("text", ""),
+                       "caret": int(msg.get("caret", 0)),
+                       "target_start": 0, "target_end": 0},
+            ))
+        elif kind == "ime_commit":
+            text = msg.get("text", "")
+            if text:
+                # End composition, then deliver each committed character as a
+                # KEY event through the shared contract helper — identical to
+                # the macOS backend's insertText: path, so a committed glyph
+                # inserts the same on every backend.
+                self._queue.put(Event(type=EventType.IME_COMPOSITION,
+                                      hints={"preedit": "", "caret": 0}))
+                for ch in text:
+                    self._queue.put(char_key_event(ch))
 
     def _handle_resize(self, msg: dict) -> None:
         w = float(msg.get("w", 0)) or 1.0
         h = float(msg.get("h", 0)) or 1.0
-        self._canvas_px = (w, h)
+        new_px = (w, h)
+        changed = new_px != self._canvas_px
+        self._canvas_px = new_px
         first = not self._connected.is_set()
         self._connected.set()
-        units = self.size
-        if not first and units != self._last_units:
-            self._last_units = units
+        # Fire on any *pixel* size change, not just a whole-base-unit one: the
+        # client resizes (and thereby clears) the canvas on every resize, so
+        # without a re-render even a sub-cell resize leaves it black until the
+        # next event. The first resize is the connect handshake (open()'s own
+        # first render() paints it), so it enqueues nothing.
+        if not first and changed:
             self._queue.put(Event(type=EventType.RESIZE))
 
     def _mouse_event(self, msg: dict) -> Event | None:
@@ -671,32 +744,46 @@ class WebBackend(Backend):
 
     # --- event loop --------------------------------------------------------
 
-    def _handle_item(self, item: Any, handler: EventHandler) -> None:
-        if item is _TICK:
+    def _drain(self, first: Any, handler: EventHandler) -> None:
+        """Handle ``first`` plus everything already queued behind it, in order,
+        collapsing any number of animation ticks into a single re-render at the
+        end. Under a perpetual animation the ticker keeps enqueuing ticks; if a
+        render falls behind, the backlog collapses to one frame (drop stale
+        frames) instead of rendering each and starving input."""
+        items = [first]
+        while True:
+            try:
+                items.append(self._queue.get_nowait())
+            except queue.Empty:
+                break
+        tick = False
+        for item in items:
+            if item is _TICK:
+                tick = True
+            elif item is _WAKE:
+                pass
+            elif isinstance(item, Event):
+                handler(item)
+        if tick and not self._quit:
             self._run_ticks()
-        elif isinstance(item, Event):
-            handler(item)
 
     def run_event_loop(self, handler: EventHandler) -> None:
         self._quit = False
         while not self._quit:
             try:
-                item = self._queue.get(timeout=0.25)
+                first = self._queue.get(timeout=0.25)
             except queue.Empty:
                 continue
-            if item is _WAKE:
-                continue
-            self._handle_item(item, handler)
+            self._drain(first, handler)
 
     def run_event_loop_iteration(self, handler: EventHandler, timeout_ms: int = 0) -> bool:
         if self._quit:
             return False
         try:
-            item = self._queue.get(timeout=max(0.0, timeout_ms / 1000.0))
+            first = self._queue.get(timeout=max(0.0, timeout_ms / 1000.0))
         except queue.Empty:
             return not self._quit
-        if item is not _WAKE:
-            self._handle_item(item, handler)
+        self._drain(first, handler)
         return not self._quit
 
     def quit(self) -> None:

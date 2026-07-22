@@ -425,8 +425,10 @@ class Panel:
    measured **in Python** — the layout seam runs before anything reaches the
    browser — via a from-scratch TrueType advance reader (`_ttf.py`) over the
    bundled Noto faces, which the page renders with `font-kerning: none` so the
-   widths agree. Composited `animate`, IME, and drop-in drag are deferred (off
-   in the profile). See `docs/web_backend.md`.
+   widths agree (glyphs the fonts lack — CJK — are estimated by display columns).
+   IME composition runs through a hidden caret-positioned page `<input>`;
+   composited `animate` and drop-in drag are deferred (off in the profile). See
+   `docs/web_backend.md`.
 
 ### Future
 5. `GTKBackend` — Linux GUI

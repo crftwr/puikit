@@ -14,6 +14,10 @@
   let dpr = window.devicePixelRatio || 1;
   const images = new Map(); // asset id -> HTMLImageElement
   let clipDepth = 0;
+  // A hidden <input> owns IME composition while a text field is focused; while
+  // it does, the window-level key handler stands down (see keydown below).
+  let ime = null;
+  let imeActive = false;
 
   // --- websocket ---------------------------------------------------------
 
@@ -77,6 +81,9 @@
         break;
       case "open_url":
         window.open(msg.url, "_blank", "noopener");
+        break;
+      case "ime":
+        handleIme(msg);
         break;
     }
   }
@@ -214,12 +221,21 @@
       case "shadow": {
         const [, x, y, w, h, radius, color] = op;
         ctx.save();
-        ctx.shadowColor = "rgba(0,0,0,0.45)";
-        ctx.shadowBlur = radius != null ? radius : 12;
-        ctx.shadowOffsetY = 3;
+        ctx.shadowColor = "rgba(0,0,0,0.35)";
+        // The blur radius is a fixed softness, independent of the corner radius.
+        ctx.shadowBlur = 16;
+        ctx.shadowOffsetY = 4;
         ctx.fillStyle = color || "rgba(0,0,0,1)";
-        roundRectPath(x, y, w, h, radius);
-        ctx.fill();
+        // draw_shadow's contract: radius null/0 is a SQUARE silhouette (matching
+        // a square draw_box panel); only a positive radius rounds the corners to
+        // match a rounded panel. (Unlike round_rect, where null means a pill —
+        // which is why this must not route through roundRectPath's null default.)
+        if (radius && radius > 0) {
+          roundRectPath(x, y, w, h, radius);
+          ctx.fill();
+        } else {
+          ctx.fillRect(x, y, w, h);
+        }
         ctx.restore();
         break;
       }
@@ -305,6 +321,9 @@
   }
 
   window.addEventListener("keydown", (e) => {
+    // While a text field is focused the hidden IME input owns the keyboard;
+    // its own handler forwards command keys, so stand down here.
+    if (imeActive) return;
     if (browserOwns(e)) return;
     // Bare modifier presses carry no PuiKit key; let them pass.
     if (["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(e.key)) return;
@@ -320,7 +339,9 @@
   const BUTTONS = { 0: "left", 1: "middle", 2: "right" };
 
   canvas.addEventListener("mousedown", (e) => {
-    canvas.focus();
+    // Don't steal focus from the IME input mid-composition; the app drives
+    // focus back to the canvas via an "ime end" message when a field blurs.
+    if (!imeActive) canvas.focus();
     const p = pos(e);
     send({ type: "mouse", kind: "down", x: p.x, y: p.y, button: BUTTONS[e.button] || "left", mods: mods(e) });
   });
@@ -360,6 +381,99 @@
   );
 
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+
+  // --- IME ---------------------------------------------------------------
+  //
+  // A hidden, caret-positioned <input> engages the OS IME (composition +
+  // candidate window) while a text widget is focused. The widget draws the
+  // preedit itself (fed by `ime_preedit`), so the input's own text is kept
+  // transparent; committed text comes back via `ime_commit`.
+
+  function sendPreedit(text) {
+    send({ type: "ime_preedit", text: text || "", caret: (text || "").length });
+  }
+  function sendCommit(text) {
+    if (text) send({ type: "ime_commit", text: text });
+  }
+
+  function handleIme(msg) {
+    if (!ime) return;
+    if (msg.action === "begin") {
+      imeActive = true;
+      ime.value = "";
+      ime.focus();
+    } else if (msg.action === "end") {
+      imeActive = false;
+      ime.value = "";
+      ime.blur();
+      canvas.focus();
+    } else if (msg.action === "caret") {
+      ime.style.left = Math.round(msg.x) + "px";
+      ime.style.top = Math.round(msg.y) + "px";
+      ime.style.height = Math.round(msg.h) + "px";
+    }
+  }
+
+  (function setupIme() {
+    ime = document.createElement("input");
+    ime.type = "text";
+    ime.autocapitalize = "off";
+    ime.autocomplete = "off";
+    ime.spellcheck = false;
+    ime.setAttribute("aria-hidden", "true");
+    Object.assign(ime.style, {
+      position: "fixed", left: "0px", top: "0px", width: "1px", height: "16px",
+      padding: "0", margin: "0", border: "none", outline: "none",
+      background: "transparent", color: "transparent", caretColor: "transparent",
+      zIndex: "0",
+    });
+    document.body.appendChild(ime);
+
+    let composing = false;
+    let recentlyComposed = false;
+
+    ime.addEventListener("compositionstart", () => {
+      composing = true;
+    });
+    ime.addEventListener("compositionupdate", (e) => {
+      sendPreedit(e.data || "");
+    });
+    ime.addEventListener("compositionend", (e) => {
+      composing = false;
+      recentlyComposed = true; // swallow the trailing input event that follows
+      sendPreedit("");
+      sendCommit(e.data || "");
+      ime.value = "";
+      setTimeout(() => { recentlyComposed = false; }, 0);
+    });
+    ime.addEventListener("input", (e) => {
+      // Composition is handled by the composition events; direct (non-IME)
+      // typing arrives here as an insert with no composition around it.
+      if (composing || recentlyComposed) {
+        ime.value = "";
+        return;
+      }
+      if (e.data && (!e.inputType || e.inputType.indexOf("insert") === 0)) {
+        sendCommit(e.data);
+      }
+      ime.value = "";
+    });
+
+    const IME_CMD = new Set([
+      "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter", "Tab",
+      "Escape", "Backspace", "Delete", "Home", "End", "PageUp", "PageDown",
+    ]);
+    ime.addEventListener("keydown", (e) => {
+      if (e.isComposing) return; // the IME owns keys during composition
+      if (browserOwns(e)) return;
+      // Command keys and modifier chords (copy/paste/select-all) go to the app;
+      // plain printable keys fall through to fire input / composition events.
+      if (IME_CMD.has(e.key) || ((e.ctrlKey || e.metaKey || e.altKey) && e.key.length === 1)) {
+        e.preventDefault();
+        send({ type: "key", key: e.key, mods: mods(e) });
+      }
+    });
+  })();
 
   // --- go ----------------------------------------------------------------
 

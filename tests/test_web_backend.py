@@ -92,6 +92,21 @@ def test_measure_scales_with_font_size():
     assert b.measure_font_size(big) == 20
 
 
+def test_missing_glyphs_measured_by_em_width():
+    # Noto Sans/Mono lack CJK glyphs; the browser draws them from a fallback at
+    # ~1 em. Measuring them as the .notdef box (too narrow) or the terminal
+    # column count of 2 (too wide, ~1.67 em) both mis-wrapped Japanese; the em
+    # width is the right estimate.
+    b = _backend()
+    one_em = b._base_pt / b._base_w  # one em of the base grid face, in base units
+    one_wide = b.measure_text("あ")
+    assert 1.0 < one_wide < 2.0             # wider than a mono cell, narrower than 2
+    assert one_wide == pytest.approx(one_em)
+    assert b.measure_text("ああああ") == pytest.approx(4 * one_wide)
+    assert b.measure_text("aあ") == pytest.approx(1.0 + one_wide)  # latin cell + em
+    assert b.measure_text("abc") == pytest.approx(3.0)             # latin unaffected
+
+
 def test_geometry_from_canvas_size():
     b = _backend()
     bw, bh = b.base_pixel_size
@@ -171,10 +186,10 @@ def test_profile_is_web_gui_with_v1_overrides():
     assert caps.supports("vector_shapes") and caps.supports("images")
     assert caps.supports("transparency") and caps.supports("shadow")
     assert caps.supports("hover") and caps.supports("pointer_shape")
+    assert caps.supports("ime")  # composition via a hidden page <input>
     # Deferred axes are advertised off so the Panel substitutes its fallbacks.
     assert not caps.supports("animation")
     assert caps.supports("animation_ticks")
-    assert not caps.supports("ime")
     assert not caps.supports("icons")
 
 
@@ -231,6 +246,16 @@ def test_serialize_vector_faces():
     assert rrect[0][0] == "rrect" and rrect[0][5] == 3.0
 
 
+def test_serialize_shadow_radius_passthrough():
+    # A bare modal (square draw_box panel) casts with radius=None -> the client
+    # must draw a SQUARE silhouette, not a pill (draw_shadow's contract), so the
+    # op carries None; a rounded panel passes a real radius through unchanged.
+    square = _ops_after(lambda b: b.draw_shadow(0, 0, 20, 8))
+    assert square[0][0] == "shadow" and square[0][5] is None
+    rounded = _ops_after(lambda b: b.draw_shadow(0, 0, 20, 8, radius=8.0))
+    assert rounded[0][5] == 8.0
+
+
 def test_serialize_clip_pair_and_scrollbar():
     ops = _ops_after(lambda b: (b.push_clip(0, 0, 4, 4), b.pop_clip()))
     assert ops[0][0] == "clip" and ops[1][0] == "unclip"
@@ -257,6 +282,59 @@ def test_panel_render_sends_a_frame():
     frame = json.loads(b._server.sent[-1])
     assert frame["type"] == "frame"
     assert isinstance(frame["ops"], list) and frame["ops"]
+
+
+def _drain_queue(b):
+    import queue as _q
+    out = []
+    while True:
+        try:
+            out.append(b._queue.get_nowait())
+        except _q.Empty:
+            return out
+
+
+def test_ime_preedit_and_commit_events():
+    from puikit.backends.web_backend import _TICK  # noqa: F401 (ensure import path)
+
+    b = _backend()
+    b._on_message('{"type":"ime_preedit","text":"にほん","caret":3}')
+    b._on_message('{"type":"ime_commit","text":"日本"}')
+    events = _drain_queue(b)
+    # preedit event, a clearing preedit, then one KEY per committed character.
+    assert events[0].type is EventType.IME_COMPOSITION
+    assert events[0].hints["preedit"] == "にほん"
+    assert events[1].type is EventType.IME_COMPOSITION and events[1].hints["preedit"] == ""
+    assert [e.char for e in events[2:]] == ["日", "本"]
+    assert all(e.type is EventType.KEY for e in events[2:])
+
+
+def test_resize_fires_on_any_pixel_change():
+    b = WebBackend(open_browser=False)
+    b._on_message('{"type":"resize","w":800,"h":600}')  # first = connect, no event
+    assert _drain_queue(b) == []
+    b._on_message('{"type":"resize","w":801,"h":600}')  # sub-cell change still repaints
+    events = _drain_queue(b)
+    assert len(events) == 1 and events[0].type is EventType.RESIZE
+
+
+def test_drain_coalesces_ticks():
+    from puikit.backends.web_backend import _TICK
+    from puikit.event import Event
+
+    b = WebBackend(open_browser=False)
+    ran = {"ticks": 0, "events": 0}
+    b.request_animation_ticks(lambda: (ran.__setitem__("ticks", ran["ticks"] + 1) or True))
+    for _ in range(5):
+        b._queue.put(_TICK)
+    b._queue.put(Event(EventType.KEY, key="a"))
+    for _ in range(5):
+        b._queue.put(_TICK)
+    first = b._queue.get_nowait()
+    b._drain(first, lambda e: ran.__setitem__("events", ran["events"] + 1))
+    b._stop_ticker()
+    # Ten queued ticks collapse to a single re-render; the event is still handled.
+    assert ran["ticks"] == 1 and ran["events"] == 1
 
 
 def test_css_color_rgb_and_rgba():

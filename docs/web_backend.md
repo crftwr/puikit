@@ -90,15 +90,23 @@ grounded on the mono face's advance × the base point size, kept as a float so
 `measure_line_height(font=None)` is exactly `1.0` and the drawing path stays
 crisp.
 
-### Known limitation: glyphs the bundled fonts lack
+### Glyphs the bundled fonts lack (CJK, emoji)
 
-The bundled Noto Sans/Mono do **not** contain CJK or astral emoji glyphs. Those
-codepoints resolve to `.notdef` in `_ttf` (so Python measures them at the
-`.notdef` advance) while the browser renders them through its own font-fallback
-(whose advances Python cannot predict). The result: **CJK / emoji text fits and
-wraps approximately**, not exactly — visible on the demo's Wrap and Truncate
-pages' Japanese samples. Latin/Greek/Cyrillic — the vast majority of any UI — is
-exact. Bundling a CJK metrics face would close the gap; it is deferred for size.
+The bundled Noto Sans/Mono do **not** contain CJK or astral emoji glyphs, and a
+missing glyph's `.notdef` box is far narrower than the full-width glyph the
+browser's fallback font actually draws. So `WebBackend._measure_units` estimates
+a glyph the font *lacks* (`_ttf.has_glyph` is False) by its **em width**: a
+full-width (wide) glyph is ~1 em, a half-width one ~0.5 em (`display_width/2`
+ems), which is what the browser draws a fallback ideograph at. Two earlier
+estimates were both wrong: the `.notdef` box (near-zero — Japanese "wrapped"
+without visibly wrapping) and the terminal column count (2 base units per wide
+glyph, but one base unit is only 0.6 em, so 2 columns ≈ 1.67 em — too wide,
+Japanese wrapped early). Latin/Greek/Cyrillic (the vast majority of any UI)
+still measure exactly from their advances.
+
+The em estimate is close, not pixel-exact (the fallback font's real advance is
+unknown to Python), so a wide-glyph run can still wrap a hair off. Bundling a
+CJK metrics face would make it exact; deferred for size.
 
 ---
 
@@ -143,6 +151,16 @@ path) before the first frame that references them; the client caches the decoded
   backend (`docs/keyboard_contract.md`). Browser `Meta` maps to the `cmd`
   command modifier. A small allowlist (reload / close / new-tab / devtools) is
   left to the browser; everything else is `preventDefault`ed and delivered.
+- **IME / composition** — a hidden, caret-positioned `<input>` engages the OS
+  IME while a text widget is focused. `begin_text_input` / `end_text_input`
+  focus / blur it (the browser equivalent of `NSTextInputClient`), and
+  `request_text_input` moves it to the field's caret so the candidate window
+  appears there. `compositionupdate` streams the preedit as `IME_COMPOSITION`
+  (the widget draws it; the input's own text is transparent); `compositionend`
+  and direct typing commit as one `char_key_event` per character — the same
+  event shapes the macOS backend produces. While the input holds focus the
+  window-level key handler stands down and the input's own handler forwards
+  command keys and chords (arrows, copy/paste), so navigation still works.
 - **Mouse** — down / up, hover `move` vs. `drag` (decided by the tracked press),
   and `wheel` → `MOUSE_SCROLL` with a notch plus precise `scroll_units` (base
   units) for smooth trackpad scrolling. Moves are coalesced to one per animation
@@ -150,10 +168,14 @@ path) before the first frame that references them; the client caches the decoded
 - **Resize** — the client reports canvas CSS size on load and on window resize;
   the backend recomputes `size` and enqueues a `RESIZE` event so layouts reflow.
 - **Animation ticks** — `request_animation_ticks` is driven by a timer thread
-  that enqueues a tick sentinel at ~60 fps while callbacks remain; the event-loop
-  thread runs them (they re-render), so caret blink, the busy spinner, and
-  geometry/color transitions animate. The ticker stops when the last callback
-  unregisters.
+  that enqueues a tick sentinel at **30 fps** while callbacks remain; the
+  event-loop thread runs them (they re-render), so caret blink, the busy
+  spinner, and geometry/color transitions animate. The ticker stops when the
+  last callback unregisters. Because a tick re-renders and sends a whole frame,
+  the loop **coalesces**: each drain of the queue collapses any number of queued
+  ticks into a single re-render (dropping stale frames), so a perpetual
+  animation — the Progress page's busy indicators — can't saturate the socket
+  and starve input.
 
 ---
 
@@ -166,9 +188,9 @@ its documented fallback and never calls a primitive this backend does not serve:
 |------|----|------|
 | `pixel_layout`, `hairline`, `vector_shapes`, `fonts`, `proportional_text` | on | full pixel/vector/text fidelity |
 | `layering`, `transparency`, `shadow`, `images`, `hover`, `pointer_shape`, `os_open` | on | |
+| `ime` | on | composition via a hidden, caret-positioned page `<input>` |
 | `animation` | **off** | composited fade/scale apply immediately; geometry/blink still animate via `animation_ticks` |
-| `animation_ticks` | on | timer-driven re-render |
-| `ime` | **off** | plain command keys only (no composition) |
+| `animation_ticks` | on | timer-driven re-render, 30 fps, coalesced |
 | `drag_and_drop` | **off** | no OS file drop-*in* |
 | `icons` | **off** | `draw_icon` falls back to a text/emoji glyph (no icon set bundled) |
 
@@ -179,10 +201,11 @@ never branches on the backend, and each fallback is the Panel's existing one.
 
 1. **Composited `animate()`** — real alpha/transform fade/scale/slide via CSS or
    per-group canvas compositing, to flip `animation` on.
-2. **IME composition** — bridge `beforeinput` / a hidden contenteditable to
-   `IME_COMPOSITION` events, to flip `ime` on.
-3. **CJK/emoji metrics** — bundle a CJK metrics face (or a server-side measure of
+2. **CJK/emoji metrics** — bundle a CJK metrics face (or a server-side measure of
    the browser's fallback) to make wide-glyph fit/wrap exact (§2).
+3. **IME clause highlight** — the browser reports the whole preedit but not the
+   converting clause, so `target_start/end` collapse (no thick target underline);
+   deriving it would need a richer composition source.
 4. **Clipboard / drop-in** — the browser clipboard and DataTransfer APIs behind
    `clipboard_rich` / `drag_and_drop`.
 5. **Frame diffing** — v1 sends the whole display list each frame; a dirty-rect

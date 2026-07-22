@@ -80,6 +80,18 @@ class TrueTypeFont:
                 return start_gid + (codepoint - start)
         return _NOTDEF
 
+    def has_glyph(self, codepoint: int) -> bool:
+        """Whether the font actually maps ``codepoint`` to a real glyph. False
+        means the browser will render it from a *fallback* font whose advance
+        this reader cannot predict — the caller then estimates the width another
+        way (see ``WebBackend._measure_units``)."""
+        if codepoint in self._cmap:
+            return True
+        for start, end, _ in self._cmap12:
+            if start <= codepoint <= end:
+                return True
+        return False
+
     def advance(self, codepoint: int) -> float:
         """Advance width of the glyph for ``codepoint``, as an em fraction."""
         gid = self.glyph_for(codepoint)
