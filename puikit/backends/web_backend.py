@@ -48,7 +48,7 @@ from ..backend import (
 )
 from ..capability import PROFILE_GUI_WEB, CapabilityProfile
 from ..event import Event, EventType, char_key_event
-from ..font import Font, FontMetrics
+from ..font import Font, FontMetrics, grid_aligned
 from . import _ttf
 from ._web_server import WebServer
 
@@ -433,6 +433,15 @@ class WebBackend(Backend):
         return total
 
     def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
+        # A grid-aligned font (font=None, or an unsized/unnamed monospace
+        # request) tiles one glyph per base-unit column, so it measures in
+        # COLUMNS (display_width) — a wide (CJK) glyph is 2 columns, not its
+        # ~1.67-column natural advance. This matches the native backends and the
+        # grid draw path in _ser_text, so a mixed CJK/Latin monospace layout
+        # stays column-aligned. Proportional/sized text measures by advance.
+        if grid_aligned(style.font):
+            from ..text import display_width
+            return float(display_width(text))
         return self._measure_units(text, self._face(style))
 
     def measure_line_height(self, style: Style = DEFAULT_STYLE) -> float:
@@ -629,15 +638,61 @@ class WebBackend(Backend):
         alpha = 0.55 if style.attr & TextAttribute.DIM else 1.0
         x_px = x * self._base_w
         top_px = y * self._base_h
+        baseline = top_px + face.ascent_px
+        fg_css = _css_color(fg, alpha)
+        underline = bool(style.attr & TextAttribute.UNDERLINE)
+        strike = bool(style.attr & TextAttribute.STRIKETHROUGH)
+
+        if grid_aligned(style.font):
+            self._ser_grid_text(ops, face, x, top_px, baseline, text, bg, fg_css, underline, strike)
+            return
+
         width_px = self._measure_units(text, face) * self._base_w
         # Background band behind the run (skip a transparent request, which asks
         # to paint glyphs only over whatever is beneath).
         if bg is not None and not is_transparent(bg):
             ops.append(["fill", x_px, top_px, width_px, face.line_px, _css_color(bg)])
-        underline = bool(style.attr & TextAttribute.UNDERLINE)
-        strike = bool(style.attr & TextAttribute.STRIKETHROUGH)
-        ops.append(["text", x_px, top_px + face.ascent_px, text, face.css,
-                    _css_color(fg, alpha), underline, strike])
+        ops.append(["text", x_px, baseline, text, face.css, fg_css, underline, strike])
+
+    def _ser_grid_text(self, ops, face, x, top_px, baseline, text, bg, fg_css, underline, strike):
+        """Serialize a grid-aligned run as a ``gtext`` op that places each cell at
+        its own base-unit column, so a wide (CJK) glyph fills its full
+        display_width and rows stay column-aligned — the pixel-backend equivalent
+        of the native backends' per-glyph grid path. A single ``fillText`` at the
+        run's natural advance instead packs a wide glyph into ~1.67 columns and
+        drifts every following column.
+
+        Cells batch: a maximal run of glyphs the **primary** (monospace) face
+        covers advances exactly one column each, so it is emitted as ONE cell
+        (one ``fillText``) — pure-ASCII text stays a single draw, as before. Only
+        a glyph the primary lacks (CJK, from the fallback face, whose advance is
+        not a whole column) is broken out and placed at its own column."""
+        from ..text import display_width, glyph_runs
+
+        primary = face.tables[0]
+        cells: list = []            # [text, x_px] — a batched column run or one wide glyph
+        seg: list[str] = []         # accumulating primary-covered glyphs
+        seg_col = 0
+        col = 0
+        for glyph in glyph_runs(text):
+            if primary.has_glyph(ord(glyph[0])):
+                if not seg:
+                    seg_col = col
+                seg.append(glyph)
+            else:
+                if seg:
+                    cells.append(["".join(seg), (x + seg_col) * self._base_w])
+                    seg = []
+                cells.append([glyph, (x + col) * self._base_w])
+            col += max(1, display_width(glyph))
+        if seg:
+            cells.append(["".join(seg), (x + seg_col) * self._base_w])
+
+        x_px = x * self._base_w
+        total_px = col * self._base_w
+        if bg is not None and not is_transparent(bg):
+            ops.append(["fill", x_px, top_px, total_px, face.line_px, _css_color(bg)])
+        ops.append(["gtext", face.css, fg_css, baseline, underline, strike, x_px, total_px, cells])
 
     def _ser_image(self, cmd, ops):
         from ..image import CONTAIN, COVER, contain_box, cover_source

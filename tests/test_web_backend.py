@@ -93,31 +93,34 @@ def test_measure_scales_with_font_size():
 
 
 def test_missing_glyphs_measured_by_em_width():
-    # Noto Sans/Mono lack CJK glyphs; the browser draws them from a fallback at
-    # ~1 em. Measuring them as the .notdef box (too narrow) or the terminal
-    # column count of 2 (too wide, ~1.67 em) both mis-wrapped Japanese; the em
-    # width is the right estimate.
+    # A glyph NO bundled face has (an astral emoji) is measured by its em width —
+    # the browser draws it from an OS fallback whose advance Python can't see, so
+    # ~1 em for a wide glyph is the estimate. (CJK is no longer "missing": it is
+    # measured exactly from the bundled Noto CJK face — see test_cjk_fonts.)
+    # Proportional style, since a grid-aligned font measures in whole columns.
     b = _backend()
-    one_em = b._base_px / b._base_w  # one em of the base grid face, in base units
-    one_wide = b.measure_text("あ")
-    assert 1.0 < one_wide < 2.0             # wider than a mono cell, narrower than 2
-    assert one_wide == pytest.approx(one_em)
-    assert b.measure_text("ああああ") == pytest.approx(4 * one_wide)
-    assert b.measure_text("aあ") == pytest.approx(1.0 + one_wide)  # latin cell + em
-    assert b.measure_text("abc") == pytest.approx(3.0)             # latin unaffected
+    prop = Style(font=Font(size=14.0, monospace=False))
+    face = b._face(prop)
+    one_em = face.px / b._base_w
+    emoji = "\U0001F600"  # 😀 — in neither the Latin nor the CJK faces
+    assert not any(t.has_glyph(ord(emoji)) for t in face.tables)
+    assert b.measure_text(emoji, prop) == pytest.approx(one_em)  # em-width estimate
 
 
 def test_measurement_is_cached():
-    # Per-character measurement is pure Python here, and a wrapping widget
-    # re-measures every render; the cache keeps repeated frames cheap.
+    # Proportional per-character measurement is pure Python here, and a wrapping
+    # widget re-measures every render; the cache keeps repeated frames cheap.
+    # (Grid text measures by column and skips this cache.)
     b = _backend()
+    prop = Style(font=Font(size=14.0, monospace=False))
     b._measure_cache.clear()
-    first = b.measure_text("日本語のテキスト")
+    first = b.measure_text("日本語のテキスト", prop)
     assert b._measure_cache  # populated
-    again = b.measure_text("日本語のテキスト")
+    again = b.measure_text("日本語のテキスト", prop)
     assert again == first  # served from cache, identical
     # A different face (bold) is a distinct cache key, not a collision.
-    bold = b.measure_text("日本語のテキスト", Style(attr=TextAttribute.BOLD))
+    bold = b.measure_text("日本語のテキスト",
+                          Style(font=Font(size=14.0, monospace=False), attr=TextAttribute.BOLD))
     assert isinstance(bold, float)
 
 
@@ -307,10 +310,14 @@ def test_serialize_fill_and_text_to_pixels():
     b.draw_text(1, 1, "Hi", Style(fg=(255, 0, 0)))
     ops = b._serialize(b._back)
     assert ops[0] == ["fill", 0.0, 0.0, 10 * bw, 2 * bh, "rgba(10,20,30,1.000)"]
+    # Default style is grid-aligned -> a gtext op; "Hi" is one primary-font cell.
     text = ops[-1]
-    assert text[0] == "text"
-    assert text[1] == pytest.approx(1 * bw)          # x in px
-    assert text[3] == "Hi" and text[5] == "rgba(255,0,0,1.000)"
+    assert text[0] == "gtext"
+    assert text[2] == "rgba(255,0,0,1.000)"          # fg color
+    assert text[6] == pytest.approx(1 * bw)          # run x in px
+    cells = text[-1]
+    assert len(cells) == 1 and cells[0][0] == "Hi"
+    assert cells[0][1] == pytest.approx(1 * bw)      # cell x at column 1
 
 
 def test_serialize_reverse_swaps_and_dim_alpha():
@@ -323,7 +330,8 @@ def test_serialize_reverse_swaps_and_dim_alpha():
     assert fill[-1] == "rgba(255,255,255,1.000)"
     dim = _ops_after(lambda b: b.draw_text(0, 0, "x", Style(fg=(200, 200, 200),
                                                             attr=TextAttribute.DIM)))
-    assert dim[-1][5].endswith("0.550)")  # dimmed foreground alpha
+    # Grid gtext op: [., font, color, baseline, ...]; color at index 2.
+    assert dim[-1][2].endswith("0.550)")  # dimmed foreground alpha
 
 
 def test_serialize_vector_faces():

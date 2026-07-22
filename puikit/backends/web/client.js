@@ -281,6 +281,32 @@
         }
         break;
       }
+      case "gtext": {
+        // Grid-aligned text: each cell (a batched column-run of primary-font
+        // glyphs, or a single wide/CJK glyph) is drawn at its own precomputed x,
+        // so a wide glyph fills its full column span instead of its narrower
+        // natural advance. Underline/strike is one continuous line across the
+        // run's total column width (xStart..xStart+totalW), not per cell.
+        const [, font, color, baseline, underline, strike, xStart, totalW, cells] = op;
+        ctx.font = font;
+        ctx.fontKerning = "none";
+        ctx.textBaseline = "alphabetic";
+        ctx.textAlign = "left";
+        ctx.fillStyle = color;
+        for (let i = 0; i < cells.length; i++) {
+          ctx.fillText(cells[i][0], cells[i][1], baseline);
+        }
+        if (underline || strike) {
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          const ly = underline ? baseline + 1.5 : baseline - 4;
+          ctx.moveTo(xStart, ly);
+          ctx.lineTo(xStart + totalW, ly);
+          ctx.stroke();
+        }
+        break;
+      }
       case "dim": {
         const [, x, y, w, h] = op;
         ctx.fillStyle = "rgba(0,0,0,0.5)";

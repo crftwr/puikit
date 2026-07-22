@@ -20,6 +20,7 @@ import sys
 import pytest
 
 from puikit import Font, FontWeight, Style, TextAttribute
+from puikit.font import grid_aligned
 from puikit.backend import DEFAULT_STYLE
 from puikit.backends import _ttf
 from puikit.backends.web_backend import WebBackend
@@ -71,10 +72,11 @@ def test_cjk_segments_empty_and_pure():
 
 @requires_cjk
 def test_web_measures_japanese_from_cjk_advances_exactly():
-    """A Japanese run measures the exact sum of the CJK table's advances — no
-    em-estimate term — for both the mono grid face and the proportional face."""
+    """A *proportional* Japanese run (a sized mono or the UI face — both flow,
+    not grid) measures the exact sum of the CJK table's advances, no em-estimate
+    term. (Grid-aligned text measures in columns instead — see the grid test.)"""
     b = WebBackend(open_browser=False)
-    for style, kind in ((DEFAULT_STYLE, "mono"),
+    for style, kind in ((Style(font=Font(size=14.0, monospace=True)), "mono"),
                         (Style(font=Font(size=14.0, monospace=False)), "sans")):
         face = b._face(style)
         primary, cjk = face.tables[0], b._cjk_tables[kind]
@@ -89,6 +91,34 @@ def test_web_measures_japanese_from_cjk_advances_exactly():
         assert b.measure_text(_JP, style) == pytest.approx(expected, abs=1e-9)
 
 
+def test_web_grid_measures_columns_not_advance():
+    """A grid-aligned font (font=None, or an unsized/unnamed monospace request)
+    measures in COLUMNS — a wide CJK glyph is 2 columns — so a monospace mixed
+    CJK/Latin layout stays column-aligned (matches the native backends)."""
+    b = WebBackend(open_browser=False)
+    for style in (DEFAULT_STYLE, Style(font=Font(monospace=True))):
+        assert grid_aligned(style.font)
+        assert b.measure_text("あいう", style) == pytest.approx(6.0)   # 3 × 2 cols
+        assert b.measure_text("漢字ｱ", style) == pytest.approx(5.0)     # 2+2+1
+        assert b.measure_text("abcdef", style) == pytest.approx(6.0)   # unchanged
+
+
+def test_web_grid_text_serializes_column_aligned_cells():
+    """The grid draw path emits a ``gtext`` op whose cells sit on base-unit
+    column boundaries: a batched primary-font run per contiguous stretch, and
+    each wide/CJK glyph on its own column."""
+    b = WebBackend(open_browser=False)
+    bw = b._base_w
+    ops = b._serialize([("text", 0, 0, "a漢b", DEFAULT_STYLE)])
+    gtext = [o for o in ops if o[0] == "gtext"]
+    assert len(gtext) == 1
+    *_, x_px, total_px, cells = gtext[0]
+    # "a" at col 0, "漢" at col 1 (its own cell), "b" at col 3 (after 2-wide 漢).
+    assert cells == [["a", 0.0], ["漢", 1 * bw], ["b", 3 * bw]]
+    assert total_px == pytest.approx(4 * bw)  # 1 + 2 + 1 columns
+    assert x_px == 0.0
+
+
 @requires_cjk
 def test_web_css_chain_names_cjk_family_in_order():
     b = WebBackend(open_browser=False)
@@ -100,27 +130,31 @@ def test_web_css_chain_names_cjk_family_in_order():
 def test_web_latin_identical_with_and_without_cjk():
     """Latin measures byte-for-byte the same whether or not the CJK tables load —
     the CJK face sits after the primary, so any glyph it already covers is
-    untouched."""
+    untouched. (Proportional style, to exercise the advance chain — a grid font
+    would measure by column and never consult the tables.)"""
     latin = "The quick brown fox — Hello, World! 12345 (){}[]"
+    prop = Style(font=Font(size=14.0, monospace=False))
     with_cjk = WebBackend(open_browser=False)
     without = WebBackend(open_browser=False)
     without._cjk_tables = {"mono": None, "sans": None}
     without._face_cache.clear()
     without._measure_cache.clear()
-    assert with_cjk.measure_text(latin) == without.measure_text(latin)
+    assert with_cjk.measure_text(latin, prop) == without.measure_text(latin, prop)
 
 
 def test_web_graceful_absence_uses_em_estimate():
-    """With the CJK tables forced absent, Japanese still measures (via the
-    em-width estimate) exactly as before the CJK face existed."""
+    """With the CJK tables forced absent, a *proportional* Japanese run still
+    measures (via the em-width estimate) exactly as before the CJK face existed.
+    (Grid text measures by column and does not use the estimate.)"""
+    prop = Style(font=Font(size=14.0, monospace=False))
     b = WebBackend(open_browser=False)
     b._cjk_tables = {"mono": None, "sans": None}
     b._face_cache.clear()
     b._measure_cache.clear()
-    face = b._face(DEFAULT_STYLE)
+    face = b._face(prop)
     em = face.px / b._base_w
     expected = sum((display_width(ch) / 2.0) * em for ch in _JP)
-    assert b.measure_text(_JP) == pytest.approx(expected, abs=1e-9)
+    assert b.measure_text(_JP, prop) == pytest.approx(expected, abs=1e-9)
 
 
 @requires_cjk
