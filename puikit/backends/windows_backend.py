@@ -615,6 +615,9 @@ class WindowsBackend(Backend):
         self._cjk_available = False
         self._cjk_fonts: dict[TextAttribute, Any] = {}   # grid (mono) CJK formats
         self._style_cjk_fonts: dict[tuple, Any] = {}     # flow CJK formats
+        # Baseline shift (px) per (primary_fmt, cjk_fmt) pair, so a CJK segment
+        # sits on the primary font's baseline (see _cjk_baseline_dy).
+        self._cjk_dy_cache: dict[tuple, float] = {}
         self._line_height_cache: dict[int, float] = {}
         self._font_metrics_cache: dict[int, tuple[float, float]] = {}
         self._width_cache: dict[tuple, float] = {}
@@ -1014,6 +1017,28 @@ class WindowsBackend(Backend):
         for fmt in self._style_cjk_fonts.values():
             fmt.release()
         self._style_cjk_fonts.clear()
+        # Keyed by format ids that just went stale (and the primary formats are
+        # torn down alongside every caller of this), so drop the shifts too.
+        self._cjk_dy_cache.clear()
+
+    def _cjk_baseline_dy(self, primary_fmt: Any, cjk_fmt: Any) -> float:
+        """Vertical pixels to add to a CJK segment's draw-rect top so its
+        baseline sits on the primary font's baseline. DirectWrite places each
+        format's baseline at ``rect_top + ascent``; Noto CJK's ascent exceeds the
+        Latin face's, so at a shared top the CJK baseline falls lower (the mixed
+        run then looks like the Japanese is dropped below the line). Shift up by
+        ``primary_ascent - cjk_ascent`` to re-align. DrawText does not clip to the
+        rect, so the taller CJK glyph is not trimmed by the shift."""
+        key = (id(primary_fmt), id(cjk_fmt))
+        dy = self._cjk_dy_cache.get(key)
+        if dy is None:
+            if self._dwrite_factory is None:
+                self._dwrite_factory = native.create_dwrite_factory()
+            primary_ascent, _ = native.font_line_metrics_dwrite(self._dwrite_factory, primary_fmt)
+            cjk_ascent, _ = native.font_line_metrics_dwrite(self._dwrite_factory, cjk_fmt)
+            dy = primary_ascent - cjk_ascent
+            self._cjk_dy_cache[key] = dy
+        return dy
 
     def _flow_segments(self, text: str, style: Style) -> list[tuple[str, Any]]:
         """``text`` split into ``(segment, text_format)`` pairs: CJK runs paired
@@ -1949,15 +1974,19 @@ class WindowsBackend(Backend):
         else:
             text_format = self._resolve_style_font(style)
             cjk_format = self._resolve_style_cjk_font(style) if self._cjk_available else None
+        # Baseline shift for CJK cells so they sit on the primary font's baseline
+        # (Noto CJK's ascent is taller); 0 for Latin cells and when CJK is absent.
+        cjk_dy = self._cjk_baseline_dy(text_format, cjk_format) if cjk_format is not None else 0.0
 
-        def _glyph_fmt(glyph: str) -> Any:
+        def _glyph_fmt(glyph: str) -> tuple[Any, float]:
             # A CJK cell draws with the embedded CJK format (same size/weight),
-            # so a Japanese file name shows the bundled face, not the OS's. Grid
-            # cells are column-positioned, so this changes only the face — never
-            # the layout — and needs no measurement change.
+            # so a Japanese file name shows the bundled face, not the OS's, and
+            # is nudged up by cjk_dy to share the Latin baseline. Grid cells are
+            # column-positioned, so this changes only face + baseline, never the
+            # horizontal layout, and needs no measurement change.
             if cjk_format is not None and is_cjk(glyph[0]):
-                return cjk_format
-            return text_format
+                return cjk_format, cjk_dy
+            return text_format, 0.0
 
         # Grid-locked text: each glyph gets its own DrawText call clipped to
         # its own (base-unit) cell, so neighboring glyphs cannot drift off the
@@ -1985,9 +2014,9 @@ class WindowsBackend(Backend):
             col = 0
             for glyph, width in zip(runs, widths):
                 r = self._unit_rect(x + col, y, width, 1)
-                gfmt = _glyph_fmt(glyph)
+                gfmt, gdy = _glyph_fmt(glyph)
                 for kx, ky in _SHADOW_KERNEL:
-                    ox, oy = bx + kx * br, by + ky * br
+                    ox, oy = bx + kx * br, by + ky * br + gdy
                     native.rt_draw_text(
                         self._render_target, glyph, gfmt,
                         native.D2D1_RECT_F(r.left + ox, r.top + oy, r.right + ox, r.bottom + oy),
@@ -2005,7 +2034,10 @@ class WindowsBackend(Backend):
             # descenders (g/j/p/q/y). Matches the macOS grid path, which draws
             # each glyph via drawAtPoint_ with no clip.
             rect = self._unit_rect(x + col, y, width, 1)
-            native.rt_draw_text(self._render_target, glyph, _glyph_fmt(glyph), rect, self._brush)
+            gfmt, gdy = _glyph_fmt(glyph)
+            if gdy:
+                rect = native.D2D1_RECT_F(rect.left, rect.top + gdy, rect.right, rect.bottom + gdy)
+            native.rt_draw_text(self._render_target, glyph, gfmt, rect, self._brush)
             col += width
         if underline or strike:
             full = self._unit_rect(x, y, total, 1)
@@ -2062,9 +2094,13 @@ class WindowsBackend(Backend):
                 return
             sx = 0.0
             for seg, fmt in segments:
+                # A CJK segment (fmt is not the primary format) is nudged up onto
+                # the primary baseline; the taller Noto CJK ascent would otherwise
+                # drop it below the Latin run it is interleaved with.
+                dy = self._cjk_baseline_dy(text_format, fmt) if fmt is not text_format else 0.0
                 native.rt_draw_text(
                     self._render_target, seg, fmt,
-                    native.D2D1_RECT_F(base_x + sx, base_y, base_x + sx + 100000.0, base_y + 100000.0),
+                    native.D2D1_RECT_F(base_x + sx, base_y + dy, base_x + sx + 100000.0, base_y + dy + 100000.0),
                     self._brush)
                 sx += native.measure_text_dwrite(self._dwrite_factory, seg, fmt)[0]
 
