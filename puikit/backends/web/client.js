@@ -370,12 +370,37 @@
     }
   });
 
+  // Coalesce wheel events like moves: a trackpad fires far more often than a
+  // frame, and each scroll re-renders the page. Accumulate the deltas and send
+  // one summed scroll per animation frame so a heavy page (a wrapping text
+  // block) can't fall behind an input flood.
+  let pendingScroll = null;
+  let scrollScheduled = false;
+  function flushScroll() {
+    scrollScheduled = false;
+    if (pendingScroll) {
+      send(pendingScroll);
+      pendingScroll = null;
+    }
+  }
   canvas.addEventListener(
     "wheel",
     (e) => {
       e.preventDefault();
       const p = pos(e);
-      send({ type: "mouse", kind: "scroll", x: p.x, y: p.y, dx: e.deltaX, dy: e.deltaY, mods: mods(e) });
+      if (pendingScroll) {
+        pendingScroll.dx += e.deltaX;
+        pendingScroll.dy += e.deltaY;
+        pendingScroll.x = p.x;
+        pendingScroll.y = p.y;
+        pendingScroll.mods = mods(e);
+      } else {
+        pendingScroll = { type: "mouse", kind: "scroll", x: p.x, y: p.y, dx: e.deltaX, dy: e.deltaY, mods: mods(e) };
+      }
+      if (!scrollScheduled) {
+        scrollScheduled = true;
+        requestAnimationFrame(flushScroll);
+      }
     },
     { passive: false }
   );

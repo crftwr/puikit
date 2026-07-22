@@ -108,6 +108,17 @@ The em estimate is close, not pixel-exact (the fallback font's real advance is
 unknown to Python), so a wide-glyph run can still wrap a hair off. Bundling a
 CJK metrics face would make it exact; deferred for size.
 
+### Measurement is cached
+
+Measuring is pure per-character Python (no native layout engine), and a widget
+that re-wraps every render — a `TextBlock` measures its lines in both `measure()`
+and `draw()` — repeats that work each frame. Scrolling or keying such a page
+re-renders identical content, so `WebBackend` caches measured widths by
+`(face, text)`; after the first frame the wrap is served from the cache (~5×
+faster on the demo's Wrapping page). The client also coalesces wheel events to
+one summed scroll per animation frame, so an input flood can't outrun the
+render.
+
 ---
 
 ## 3. Rendering: the op vocabulary

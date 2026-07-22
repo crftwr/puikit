@@ -189,6 +189,14 @@ class WebBackend(Backend):
         self._base_w = mono.advance(ord("M")) * self._base_pt
         self._base_h = mono.line_height * self._base_pt
         self._face_cache: dict[tuple, _Face] = {}
+        # Measured widths keyed by (face css, text). Text measurement is pure
+        # per-character Python here (no native layout engine), and a widget that
+        # re-wraps every render — a wrapping TextBlock measures its lines in both
+        # measure() and draw() — would repeat that work each frame. Scrolling /
+        # keying such a page re-renders identical content, so the cache makes
+        # every frame after the first cheap. Bounded so unbounded unique text
+        # (a busy log) can't grow it without limit.
+        self._measure_cache: dict[tuple[str, str], float] = {}
 
         # Display list (base-unit coords + Style/Font), rebuilt each frame.
         self._back: list[tuple] = []
@@ -310,6 +318,11 @@ class WebBackend(Backend):
         wide glyph is ~1.67 em, too wide — Japanese wrapped early)."""
         from ..text import display_width
 
+        key = (face.css, text)
+        cached = self._measure_cache.get(key)
+        if cached is not None:
+            return cached
+
         table = face.table
         em_units = face.px / self._base_w  # one em of this face, in base units
         total = 0.0
@@ -319,6 +332,10 @@ class WebBackend(Backend):
                 total += table.advance(cp) * em_units
             else:
                 total += (display_width(ch) / 2.0) * em_units
+
+        if len(self._measure_cache) > 20000:
+            self._measure_cache.clear()
+        self._measure_cache[key] = total
         return total
 
     def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:

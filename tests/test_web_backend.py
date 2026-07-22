@@ -107,6 +107,20 @@ def test_missing_glyphs_measured_by_em_width():
     assert b.measure_text("abc") == pytest.approx(3.0)             # latin unaffected
 
 
+def test_measurement_is_cached():
+    # Per-character measurement is pure Python here, and a wrapping widget
+    # re-measures every render; the cache keeps repeated frames cheap.
+    b = _backend()
+    b._measure_cache.clear()
+    first = b.measure_text("日本語のテキスト")
+    assert b._measure_cache  # populated
+    again = b.measure_text("日本語のテキスト")
+    assert again == first  # served from cache, identical
+    # A different face (bold) is a distinct cache key, not a collision.
+    bold = b.measure_text("日本語のテキスト", Style(attr=TextAttribute.BOLD))
+    assert isinstance(bold, float)
+
+
 def test_geometry_from_canvas_size():
     b = _backend()
     bw, bh = b.base_pixel_size
