@@ -68,7 +68,7 @@
   function dispatch(msg) {
     switch (msg.type) {
       case "frame":
-        render(msg.ops);
+        render(msg);
         break;
       case "asset": {
         const img = new Image();
@@ -97,10 +97,25 @@
     }
   }
 
-  function render(ops) {
+  function render(msg) {
+    const ops = msg.ops || [];
+    // The CSS size this frame was laid out for (from the server). Size the
+    // backing store to match it and clear+paint in one synchronous call, so the
+    // canvas is never composited blank. Between frames the backing store keeps
+    // the last bitmap, which the browser CSS-scales to the live window size —
+    // that is what avoids a black flash while a resize's reflowed frame is in
+    // flight (setting canvas.width/height at resize time would clear it).
+    const fw = msg.w || window.innerWidth;
+    const fh = msg.h || window.innerHeight;
+    const bw = Math.max(1, Math.round(fw * dpr));
+    const bh = Math.max(1, Math.round(fh * dpr));
+    if (canvas.width !== bw || canvas.height !== bh) {
+      canvas.width = bw;
+      canvas.height = bh;
+    }
     resetClips();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
+    ctx.clearRect(0, 0, fw, fh);
     for (let i = 0; i < ops.length; i++) {
       paint(ops[i]);
     }
@@ -296,8 +311,10 @@
     dpr = window.devicePixelRatio || 1;
     const w = window.innerWidth;
     const h = window.innerHeight;
-    canvas.width = Math.max(1, Math.round(w * dpr));
-    canvas.height = Math.max(1, Math.round(h * dpr));
+    // Only update the CSS (display) size — NOT the backing store. Resizing the
+    // backing store here would clear the canvas to black until the reflowed
+    // frame arrives; instead the browser scales the last bitmap to the new CSS
+    // size, and render() resizes the backing store when it paints the new frame.
     canvas.style.width = w + "px";
     canvas.style.height = h + "px";
     send({ type: "resize", w: w, h: h, dpr: dpr });

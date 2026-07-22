@@ -562,7 +562,15 @@ class WebBackend(Backend):
             if cmd[0] == "image":
                 self._ensure_image(cmd[3])
         ops = self._serialize(frame)
-        server.send(json.dumps({"type": "frame", "ops": ops}))
+        # The CSS-pixel size this frame was laid out for. The client sizes its
+        # canvas backing store to match *this*, not the live window — so mid-
+        # resize it CSS-scales the last frame instead of clearing to black while
+        # the reflowed frame is in flight (see client.js render()).
+        w, h = self._canvas_px or (
+            self._initial_size[0] * self._base_w,
+            self._initial_size[1] * self._base_h,
+        )
+        server.send(json.dumps({"type": "frame", "w": w, "h": h, "ops": ops}))
 
     def _ensure_image(self, path: str) -> None:
         if path in self._sent_images or self._server is None:

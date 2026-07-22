@@ -178,6 +178,13 @@ path) before the first frame that references them; the client caches the decoded
   frame. The Panel synthesizes `MOUSE_CLICK` from down/up itself.
 - **Resize** — the client reports canvas CSS size on load and on window resize;
   the backend recomputes `size` and enqueues a `RESIZE` event so layouts reflow.
+  To avoid a black flash while the reflowed frame is in flight (a round-trip
+  away, unlike an in-process GUI backend), the client does **not** resize its
+  canvas backing store on the resize event — that would clear it. It only
+  updates the CSS display size, letting the browser scale the last bitmap to the
+  new window; each `frame` message carries the CSS size it was laid out for, and
+  `render()` resizes the backing store to that and clears+paints in one call, so
+  the canvas is never composited blank.
 - **Animation ticks** — `request_animation_ticks` is driven by a timer thread
   that enqueues a tick sentinel at **30 fps** while callbacks remain; the
   event-loop thread runs them (they re-render), so caret blink, the busy

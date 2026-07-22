@@ -296,6 +296,10 @@ def test_panel_render_sends_a_frame():
     frame = json.loads(b._server.sent[-1])
     assert frame["type"] == "frame"
     assert isinstance(frame["ops"], list) and frame["ops"]
+    # The frame carries the CSS size it was laid out for, so the client can size
+    # its backing store to the frame (not the live window) and avoid a resize
+    # black flash.
+    assert frame["w"] == pytest.approx(800) and frame["h"] == pytest.approx(600)
 
 
 def _drain_queue(b):
