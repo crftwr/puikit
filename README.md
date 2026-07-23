@@ -40,23 +40,13 @@ Stable release (1.0). Implemented:
 ## Quick start
 
 ```bash
-python3.14 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
-
-# Run the examples (in a terminal)
-.venv/bin/python examples/hello_world/main.py
-.venv/bin/python examples/demo_catalog/main.py
-
-# On macOS, the same examples in a native window
-.venv/bin/python examples/hello_world/main.py --backend gui
-.venv/bin/python examples/demo_catalog/main.py --backend gui
-
-# Or in a web browser (opens a tab; works on any platform)
-.venv/bin/python examples/demo_catalog/main.py --backend web
-
-# Run the tests
-.venv/bin/python -m pytest
+pip install puikit
 ```
+
+That's all you need — the base install ships a working TUI on every platform,
+and a native window on macOS (PyObjC installs automatically; on Windows the
+curses backport installs automatically). The minimal app below then runs as-is,
+with no repository checkout required.
 
 ## Minimal app
 
@@ -79,6 +69,33 @@ with backend:
         panel.render()
 
     backend.run_event_loop(on_event)
+```
+
+Run it in a terminal for the TUI backend, or pass `--backend gui` (macOS) /
+`--backend web` (any platform) if you wire up argument handling like the
+bundled examples.
+
+## Development (from source)
+
+Clone the repository, then install editable with the dev extras:
+
+```bash
+python3.14 -m venv .venv
+.venv/bin/pip install -e ".[dev]"
+
+# Run the examples (in a terminal)
+.venv/bin/python examples/hello_world/main.py
+.venv/bin/python examples/demo_catalog/main.py
+
+# On macOS, the same examples in a native window
+.venv/bin/python examples/hello_world/main.py --backend gui
+.venv/bin/python examples/demo_catalog/main.py --backend gui
+
+# Or in a web browser (opens a tab; works on any platform)
+.venv/bin/python examples/demo_catalog/main.py --backend web
+
+# Run the tests
+.venv/bin/python -m pytest
 ```
 
 ## License
