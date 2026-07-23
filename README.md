@@ -48,6 +48,17 @@ and a native window on macOS (PyObjC installs automatically; on Windows the
 curses backport installs automatically). The minimal app below then runs as-is,
 with no repository checkout required.
 
+Want to see it move right away? The hello-world example is a single
+self-contained file — download and run it without cloning the repo:
+
+```bash
+curl -O https://raw.githubusercontent.com/crftwr/puikit/main/examples/hello_world/main.py
+
+python3 main.py                  # TUI — in a terminal, any platform
+python3 main.py --backend gui    # native window — macOS
+python3 main.py --backend web    # opens a browser tab — any platform
+```
+
 ## Minimal app
 
 ```python
