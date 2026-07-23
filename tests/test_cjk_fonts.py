@@ -226,6 +226,39 @@ def test_macos_cascade_routes_japanese_to_bundled_cjk():
     assert width(composed, "Latin only 123") == width(base, "Latin only 123")
 
 
+@pytest.mark.skipif(not (_IS_DARWIN and _HAS_CJK), reason="macOS + Noto CJK JP required")
+def test_macos_cascade_preserves_oblique_size():
+    """A synthetic-italic (oblique) font carries its point size in its text
+    matrix, not a size attribute. The CJK cascade must not re-apply the point
+    size on top of that matrix (which scaled a 14pt italic to 196pt = 14², the
+    giant slanted-text bug on the only faces that ever take the oblique path —
+    the bundled Noto UI/Mono, which ship no real italic member)."""
+    Cocoa = pytest.importorskip("Cocoa")
+    CoreText = pytest.importorskip("CoreText")
+    from puikit.backends import macos_backend as mb
+
+    assert mb._ensure_bundled_fonts()
+    if not mb._ensure_cjk_fonts():
+        pytest.skip("Core Text could not register the CJK faces")
+
+    size = 14.0
+    base = Cocoa.NSFont.fontWithName_size_(mb._BUNDLED_UI, size)
+    oblique = mb._oblique(base)
+    # Sanity: the oblique bakes the size into its matrix diagonal, not pointSize.
+    assert oblique.pointSize() == pytest.approx(size)
+    assert CoreText.CTFontGetMatrix(oblique).c > 0.1  # a real horizontal shear
+
+    composed = mb._with_cjk_cascade(oblique, size, monospace=False)
+    assert composed.pointSize() == pytest.approx(size)  # not size**2
+    m = CoreText.CTFontGetMatrix(composed)
+    assert m.a == pytest.approx(size) and m.d == pytest.approx(size)  # shear kept
+    assert m.c == pytest.approx(CoreText.CTFontGetMatrix(oblique).c)
+
+    # A normally sized (non-oblique) face still round-trips through the cascade.
+    plain = mb._with_cjk_cascade(base, size, monospace=False)
+    assert plain.pointSize() == pytest.approx(size)
+
+
 @pytest.mark.skipif(not _IS_DARWIN, reason="macOS only")
 def test_macos_cascade_noop_without_cjk_files(monkeypatch):
     from puikit.backends import macos_backend as mb

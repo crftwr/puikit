@@ -393,7 +393,14 @@ def _with_cjk_cascade(ns: Any, size: float, monospace: bool) -> Any:
     cascade = [cjk_desc] + list(default)
     desc = CoreText.CTFontDescriptorCreateCopyWithAttributes(
         ns.fontDescriptor(), {CoreText.kCTFontCascadeListAttribute: cascade})
-    return CoreText.CTFontCreateWithFontDescriptor(desc, size, None) or ns
+    # Size 0.0 (not ``size``) so Core Text takes the size from the descriptor's
+    # own matrix/size attribute unchanged. ``ns`` already carries its point size:
+    # a normally sized face in a size attribute, and a *synthetic oblique* (see
+    # _oblique) in its text-transform matrix — whose diagonal IS the point size.
+    # Passing ``size`` here would RE-scale that oblique matrix, blowing an italic
+    # up to size² (a 14pt italic rendered at 196pt) since the bundled Noto UI
+    # face has no real italic member and always takes the oblique path.
+    return CoreText.CTFontCreateWithFontDescriptor(desc, 0.0, None) or ns
 
 
 # Slant used to synthesize an italic (oblique) for a face that ships no real
