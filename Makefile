@@ -31,18 +31,16 @@ ifeq ($(IS_WINDOWS),1)
     endif
     VENV_PYTHON := $(VENV)/Scripts/python.exe
     VENV_PIP := $(VENV)/Scripts/pip.exe
-    # pyobjc (the macos extra) only installs on macOS.
-    EXTRAS := dev
 else
     PYTHON := python3.14
     VENV_PYTHON := $(VENV)/bin/python
     VENV_PIP := $(VENV)/bin/pip
-    ifeq ($(UNAME_S),Darwin)
-        EXTRAS := dev,macos
-    else
-        EXTRAS := dev
-    endif
 endif
+
+# `dev` (test tooling) is the only optional-dependency group. Each backend's own
+# requirements — PyObjC (macOS), numpy + windows-curses (Windows) — install
+# automatically via platform-marked base deps, so EXTRAS is the same on every OS.
+EXTRAS := dev
 
 # Optional base font size for GUI targets, e.g. `make demo-gui FONT_SIZE=18`.
 FONT_SIZE :=
@@ -68,7 +66,7 @@ FONTS := puikit/fonts/NotoSans-Regular.ttf
 help:
 	@echo "PuiKit utility commands:"
 	@echo "  make venv      - create the virtualenv and install puikit ($(VENV)/, $(PYTHON))"
-	@echo "  make install   - (re)install puikit into the venv (editable, with dev deps; +macos on macOS)"
+	@echo "  make install   - (re)install puikit into the venv (editable, with dev deps)"
 	@echo "  make fonts     - download the bundled default fonts into puikit/fonts/"
 	@echo "  make test      - run the test suite"
 	@echo "  make hello     - run the hello_world example (TUI)"

@@ -30,7 +30,7 @@ Stable release (1.0). Implemented:
   animatable
 - Backends:
   - `CursesBackend` — TUI, all platforms
-  - `MacOSBackend` — macOS native GUI (PyObjC; install with `pip install -e ".[macos]"`)
+  - `MacOSBackend` — macOS native GUI (PyObjC, installed automatically on macOS)
   - `WindowsBackend` — Windows native GUI (raw ctypes; Direct2D/DirectWrite)
   - `WebBackend` — runs in a web browser, launched with `webbrowser` over a
     local WebSocket (`--backend web`; see `docs/web_backend.md`)

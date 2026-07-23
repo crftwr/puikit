@@ -23,23 +23,37 @@ classifiers = [
     "Topic :: Terminals",
 ]
 dependencies = [
+    # Pillow decodes/crops/scales images for the terminal inline-image protocols
+    # (kitty / iTerm2 / sixel), so the curses (TUI) backend's ImageView draws
+    # real pictures instead of the alt-glyph fallback. Terminal image support is
+    # a cross-platform TUI feature (every platform's terminals), so it is an
+    # unconditional base dep — not a backend/platform-gated one. The renderer
+    # still soft-imports it (see _terminal_graphics.have_pillow) and degrades to
+    # the alt glyph if it is somehow absent; the native GUI backends render
+    # images themselves and do not use it.
+    "pillow>=9",
     # numpy vectorizes WindowsBackend's WIC->D2D alpha premultiply (~12-14x
-    # faster on large images; see _win32_native._premultiply_bgra).
-    "numpy>=1.21",
+    # faster on large images; see _win32_native._premultiply_bgra). Only the
+    # Windows native backend imports it, and _win32_native (raw WinDLL) loads
+    # only on Windows, so the win32 marker keeps numpy off macOS/Linux base
+    # installs, which would never touch it.
+    "numpy>=1.21; sys_platform == 'win32'",
     # windows-curses backports the _curses C extension CPython omits on Windows,
     # so the curses (TUI) backend runs there out of the box. The marker keeps it
     # off macOS/Linux, which already ship _curses.
     "windows-curses>=2.4; sys_platform == 'win32'",
+    # PyObjC powers the macOS native GUI backend (AppKit/Foundation/Quartz). The
+    # darwin marker installs it automatically on macOS, so `pip install puikit`
+    # yields a working native window out of the box, and keeps it off other
+    # platforms (where it cannot build and the macOS backend never loads).
+    # Symmetric with numpy above: a native GUI backend's hard requirement, gated
+    # to the one platform that uses it.
+    "pyobjc-framework-Cocoa>=10; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-timeout>=2", "pillow>=9"]
-macos = ["pyobjc-framework-Cocoa>=10", "pyobjc-framework-Quartz>=10"]
-# Pillow decodes/crops/scales images for the terminal inline-image protocols
-# (kitty / iTerm2 / sixel), so ImageView draws real pictures in a graphics-
-# capable terminal instead of the alt-glyph fallback. Optional: without it a
-# terminal shows the alt glyph and GUI backends are unaffected.
-images = ["pillow>=9"]
+dev = ["pytest>=8", "pytest-timeout>=2"]
 
 [project.urls]
 Homepage = "https://github.com/crftwr/puikit"
