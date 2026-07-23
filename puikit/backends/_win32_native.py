@@ -280,6 +280,7 @@ _IDX_RT_FILL_RECTANGLE = 17
 _IDX_RT_DRAW_ROUNDED_RECTANGLE = 18
 _IDX_RT_FILL_ROUNDED_RECTANGLE = 19
 _IDX_RT_DRAW_TEXT = 27
+_IDX_RT_DRAW_TEXT_LAYOUT = 28
 _IDX_RT_SET_TRANSFORM = 30
 _IDX_RT_SET_ANTIALIAS_MODE = 32
 _IDX_RT_SET_TEXT_ANTIALIAS_MODE = 34
@@ -332,8 +333,19 @@ _IDX_TEXT_FORMAT_SET_WORD_WRAPPING = 5
 #     GetLineMetrics[59], GetMetrics[60], ...) — verified live against a real
 #     IDWriteTextLayout (see windows_backend measure_text/measure_line_height).
 
+_IDX_TEXT_LAYOUT_SET_FONT_COLLECTION = 30
+_IDX_TEXT_LAYOUT_SET_FONT_FAMILY_NAME = 31
 _IDX_TEXT_LAYOUT_GET_LINE_METRICS = 59
 _IDX_TEXT_LAYOUT_GET_METRICS = 60
+
+
+class DWRITE_TEXT_RANGE(ctypes.Structure):
+    # A [startPosition, startPosition+length) span in UTF-16 code units, passed
+    # BY VALUE to the SetFont*(…, DWRITE_TEXT_RANGE) range setters. 8 bytes (two
+    # uint32); on the Windows x64 ABI a <=8-byte struct is passed in a single
+    # integer register regardless of member type, the same as a CJK glyph range
+    # would be handed to any C caller.
+    _fields_ = [("startPosition", ctypes.c_uint32), ("length", ctypes.c_uint32)]
 
 
 class DWRITE_TEXT_METRICS(ctypes.Structure):
@@ -772,6 +784,51 @@ def dwrite_create_text_layout(
     if not hresult_ok(hr):
         raise OSError(f"CreateTextLayout failed: 0x{hr & 0xFFFFFFFF:08x}")
     return ComPtr(out.value or 0)
+
+
+def text_layout_set_font_family(layout: ComPtr, family: str, start: int, length: int) -> None:
+    """IDWriteTextLayout::SetFontFamilyName[31] over ``[start, start+length)``
+    (UTF-16 code units). Overriding the family on a range makes DirectWrite shape
+    that range in the named face during Draw/GetMetrics — the single-pass font
+    fallback that DrawText (one family per call) cannot do. ``DWRITE_TEXT_RANGE``
+    is passed BY VALUE (see the struct)."""
+    hr = layout.call(
+        _IDX_TEXT_LAYOUT_SET_FONT_FAMILY_NAME, ctypes.c_int32,
+        [ctypes.c_wchar_p, DWRITE_TEXT_RANGE],
+        family, DWRITE_TEXT_RANGE(start, length),
+    )
+    if not hresult_ok(hr):
+        raise OSError(f"SetFontFamilyName({family!r}) failed: 0x{hr & 0xFFFFFFFF:08x}")
+
+
+def text_layout_set_font_collection(layout: ComPtr, collection: ComPtr, start: int, length: int) -> None:
+    """IDWriteTextLayout::SetFontCollection[30] over ``[start, start+length)``
+    (UTF-16 code units), so the range's overridden family name (see
+    text_layout_set_font_family) resolves from the bundled custom collection
+    rather than the system one. ``DWRITE_TEXT_RANGE`` passed BY VALUE."""
+    hr = layout.call(
+        _IDX_TEXT_LAYOUT_SET_FONT_COLLECTION, ctypes.c_int32,
+        [ctypes.c_void_p, DWRITE_TEXT_RANGE],
+        collection.addr, DWRITE_TEXT_RANGE(start, length),
+    )
+    if not hresult_ok(hr):
+        raise OSError(f"SetFontCollection failed: 0x{hr & 0xFFFFFFFF:08x}")
+
+
+def rt_draw_text_layout(rt: ComPtr, x: float, y: float, layout: ComPtr, brush: ComPtr, options: int = D2D1_DRAW_TEXT_OPTIONS_NONE) -> None:
+    """ID2D1RenderTarget::DrawTextLayout[28]: draw a pre-shaped IDWriteTextLayout
+    at ``(x, y)``. ``D2D1_POINT_2F`` is passed BY VALUE (2 floats / 8 bytes). On
+    Windows x64 an <=8-byte aggregate is passed in one integer register by size,
+    not by member type, so this marshals exactly like the ``D2D1_SIZE_U`` (two
+    uint32, 8 bytes) that ``rt_create_bitmap_from_pixels`` already passes by value
+    here — verified live. Unlike a per-range DrawText, the whole run — including
+    CJK ranges overridden onto the bundled face — is shaped and baseline-aligned
+    by DirectWrite in this single call."""
+    rt.call(
+        _IDX_RT_DRAW_TEXT_LAYOUT, None,
+        [D2D1_POINT_2F, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32],
+        D2D1_POINT_2F(x, y), layout.addr, brush.addr, options,
+    )
 
 
 def text_layout_get_metrics(layout: ComPtr) -> DWRITE_TEXT_METRICS:

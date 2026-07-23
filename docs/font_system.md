@@ -31,10 +31,11 @@ stack. It follows the framework's existing rule: apps and widgets state
   mono) and use it for the CJK glyphs the primary Latin faces lack, so Japanese
   file names render in one embedded typeface everywhere — the web backend via a
   `[primary, cjk]` measurement chain + CSS `@font-face` list, macOS via a
-  Core Text `kCTFontCascadeListAttribute` cascade, Windows by drawing the CJK
-  segments of a run with a CJK text format. Everything *else* still relies on the
-  backend's native fallback as-is. The faces are optional (fetched at build time);
-  absent, each backend degrades to its native CJK fallback.
+  Core Text `kCTFontCascadeListAttribute` cascade, Windows by shaping the whole
+  run in one `IDWriteTextLayout` with a per-range CJK font override (see §9.1).
+  Everything *else* still relies on the backend's native fallback as-is. The
+  faces are optional (fetched at build time); absent, each backend degrades to
+  its native CJK fallback.
 - *Implicit* re-flow of the layout to a font's metrics (see §7): a decorative
   font size never reshapes a pane. Note this is **not** a ban on
   content-driven sizing — a widget may *opt in* and size itself to its text
@@ -326,6 +327,44 @@ font into `attr`, so the backend keeps drawing as it does today. `fonts` and
 A helper distinguishes the two render paths: a run is grid-aligned only when
 it carries no distinguishing font request (the base monospaced font); anything
 else flows.
+
+### 9.1 CJK fallback and the shared baseline
+
+The bundled Noto CJK JP face is a **fallback layer**, never the primary/base
+face, so the Latin base unit and line pitch stay bit-identical (§8). One rule
+governs where mixed-script text sits vertically, and every GUI backend must
+honor it:
+
+> **A run's baseline is `y + (primary font's ascent)`, independent of the run's
+> content.** Fallback (CJK) glyphs align to that baseline; being taller, they
+> extend *above* the primary font's line-box top and slightly below its
+> baseline — exactly the CSS "strut" model, where the line box comes from the
+> element's own font and taller inline glyphs overflow it.
+
+This invariant is what lets two runs on the same row (a file name and its
+adjacent `<DIR> … date` column) share one visual baseline, and what keeps a
+label from jumping when its text changes from Latin to Japanese. It is
+content-independent **by requirement**, not incidentally.
+
+The backends realize it differently:
+
+- **Web** / **macOS** get it for free: the browser's `@font-face` fallback and
+  Core Text's cascade both align fallback glyphs to the *primary* font's
+  baseline. No extra work.
+- **Windows** must correct for a DirectWrite quirk. `DrawTextLayout` sizes a
+  line to the **tallest run actually present**, so a run with a CJK range would
+  get `baseline = y + cjk_ascent` — dropping the *whole* run (Latin included)
+  below a pure-Latin run by `cjk_ascent − primary_ascent`. The backend cancels
+  exactly that by shifting the draw origin up by that difference (a no-op for a
+  run with no CJK). The result is the same content-independent baseline the
+  other backends produce; the shift is *removing* DirectWrite's content
+  dependence, not adding one. (`SetLineSpacing(UNIFORM)` would be the direct
+  "strut" knob, but it only partially overrides the tallest-run baseline, so the
+  metric-based origin shift is used instead.)
+
+The **grid** path anchors CJK the same way per cell: each wide glyph is drawn
+in its embedded-CJK format nudged up by the same `primary_ascent − cjk_ascent`,
+so grid and flow agree and columns stay aligned.
 
 ---
 

@@ -1040,17 +1040,48 @@ class WindowsBackend(Backend):
             self._cjk_dy_cache[key] = dy
         return dy
 
-    def _flow_segments(self, text: str, style: Style) -> list[tuple[str, Any]]:
-        """``text`` split into ``(segment, text_format)`` pairs: CJK runs paired
-        with the embedded-CJK format, the rest with the primary style format. A
-        single pair (the whole run, primary format) when the CJK faces are absent
-        or the run has no CJK, so the common path is unchanged. Draw and measure
-        both iterate this, so a glyph's drawn face and its measured advance agree."""
+    def _build_flow_layout(self, text: str, style: Style) -> Any:
+        """An ``IDWriteTextLayout`` for a **flow** (proportional/sized) run in
+        ``style``'s primary format, with every CJK range overridden onto the
+        bundled Noto CJK JP family from the custom collection. DirectWrite then
+        shapes the whole run in one pass — font fallback AND baseline alignment —
+        so ``GetMetrics`` (measure) and ``DrawTextLayout`` (draw) agree by
+        construction, with no per-segment reconciliation and no baseline nudge.
+
+        A Latin-only run (or one with no CJK, or when the CJK faces are absent)
+        gets no overrides: it is already a single-format single-pass layout. The
+        caller owns the returned layout and must ``release()`` it."""
+        if self._dwrite_factory is None:
+            self._dwrite_factory = native.create_dwrite_factory()
         primary = self._resolve_style_font(style)
-        if not self._cjk_available or not any(is_cjk(c) for c in text):
-            return [(text, primary)]
-        cjk = self._resolve_style_cjk_font(style)
-        return [(seg, cjk if seg_cjk else primary) for seg, seg_cjk in cjk_segments(text)]
+        layout = native.dwrite_create_text_layout(self._dwrite_factory, text, primary)
+        if self._cjk_available and any(is_cjk(c) for c in text):
+            # The flow path never sees a grid-aligned font (those go to
+            # _render_text's grid branch), so style.font is a real font here;
+            # mono for a monospace request, else the proportional CJK face —
+            # the same choice _create_cjk_text_format makes.
+            family = _BUNDLED_CJK_MONO if (style.font is not None and style.font.monospace) else _BUNDLED_CJK_UI
+            collection = self._ensure_font_collection()
+            # DWRITE_TEXT_RANGE positions are UTF-16 code units, so advance the
+            # offset by each segment's UTF-16 length (astral CJK is 2 units).
+            u16 = 0
+            for seg, seg_cjk in cjk_segments(text):
+                seg_len = len(seg.encode("utf-16-le")) // 2
+                if seg_cjk:
+                    native.text_layout_set_font_collection(layout, collection, u16, seg_len)
+                    native.text_layout_set_font_family(layout, family, u16, seg_len)
+                u16 += seg_len
+        return layout
+
+    def _flow_baseline_fix(self, style: Style) -> float:
+        """Pixels to shift a CJK-containing flow run UP so its Latin baseline
+        lands where a pure-Latin run's would. DirectWrite gives a line its
+        baseline from the *tallest* run on it, so a run with a CJK range (Noto
+        CJK's ascent exceeds the Latin face's) has its baseline — and therefore
+        every glyph, Latin included — pushed down by exactly (cjk ascent −
+        primary ascent). That is ``-_cjk_baseline_dy`` (which is primary − cjk),
+        so the flow re-anchor and the grid per-cell nudge share one metric."""
+        return -self._cjk_baseline_dy(self._resolve_style_font(style), self._resolve_style_cjk_font(style))
 
     def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
         # A grid-aligned font (font=None, or an unsized/unnamed monospace
@@ -1072,15 +1103,14 @@ class WindowsBackend(Backend):
         key = (text, id(text_format))
         width = self._width_cache.get(key)
         if width is None:
-            if self._dwrite_factory is None:
-                self._dwrite_factory = native.create_dwrite_factory()
-            # Sum per-segment widths so a mixed Latin/CJK run measures each part
-            # in the face it will be drawn with; a pure-Latin (or CJK-less) run
-            # is one segment, i.e. the original single measurement unchanged.
-            width = sum(
-                native.measure_text_dwrite(self._dwrite_factory, seg, fmt)[0]
-                for seg, fmt in self._flow_segments(text, style)
-            )
+            # Measure the same single-pass layout the run is DRAWN with (primary
+            # format + per-range CJK overrides), so a mixed Latin/CJK run's width
+            # is DirectWrite's own shaped width — measure == draw by construction,
+            # no per-segment summation. widthIncludingTrailingWhitespace matches
+            # the old measure_text_dwrite (trailing spaces keep their advance).
+            layout = self._build_flow_layout(text, style)
+            width = native.text_layout_get_metrics(layout).widthIncludingTrailingWhitespace if text else 0.0
+            layout.release()
             if len(self._width_cache) >= _WIDTH_CACHE_MAX:
                 self._width_cache.clear()
             self._width_cache[key] = width
@@ -2051,11 +2081,13 @@ class WindowsBackend(Backend):
     def _render_flow_text(
         self, x: int, y: int, text: str, style: Style, fg: tuple, bg: tuple | None, alpha: float, underline: bool, strike: bool = False
     ) -> None:
-        """Render with a real per-Style font: one DrawText call at the run's
-        natural advances (no per-glyph grid placement) — proportional and
+        """Render with a real per-Style font: one DrawTextLayout call at the
+        run's natural advances (no per-glyph grid placement) — proportional and
         sized text flow continuously; the pane clip trims the overflow. The
-        GUI "no text grid" path (docs/font_system.md §9)."""
-        text_format = self._resolve_style_font(style)
+        GUI "no text grid" path (docs/font_system.md §9). CJK ranges are
+        overridden onto the bundled face inside the one layout, so DirectWrite
+        shapes fallback + baseline in a single pass (like the browser / Core
+        Text) — no per-segment loop, no manual baseline nudge."""
         origin_x = x * self._base_w
         origin_y = y * self._base_h
         line_h = self._base_h * self.measure_line_height(style)
@@ -2076,49 +2108,30 @@ class WindowsBackend(Backend):
             native.rt_fill_rectangle(
                 self._render_target, native.D2D1_RECT_F(origin_x, origin_y, origin_x + width, origin_y + self._base_h), self._brush
             )
-        # Split into (segment, format) pairs so a run's CJK parts draw in the
-        # embedded CJK face; a pure-Latin (or CJK-less, or CJK-absent) run is a
-        # single pair — the whole run in the primary format, exactly as before.
-        # Segments are placed at cumulative advances measured in their own face,
-        # which is the same per-segment sum measure_text reports, so positions
-        # agree with layout.
-        segments = self._flow_segments(text, style)
-
-        def _draw_run(base_x: float, base_y: float) -> None:
-            if len(segments) == 1:
-                seg, fmt = segments[0]
-                native.rt_draw_text(
-                    self._render_target, seg, fmt,
-                    native.D2D1_RECT_F(base_x, base_y, base_x + 100000.0, base_y + 100000.0),
-                    self._brush)
-                return
-            sx = 0.0
-            for seg, fmt in segments:
-                # A CJK segment (fmt is not the primary format) is nudged up onto
-                # the primary baseline; the taller Noto CJK ascent would otherwise
-                # drop it below the Latin run it is interleaved with.
-                dy = self._cjk_baseline_dy(text_format, fmt) if fmt is not text_format else 0.0
-                native.rt_draw_text(
-                    self._render_target, seg, fmt,
-                    native.D2D1_RECT_F(base_x + sx, base_y + dy, base_x + sx + 100000.0, base_y + dy + 100000.0),
-                    self._brush)
-                sx += native.measure_text_dwrite(self._dwrite_factory, seg, fmt)[0]
-
-        # Drop-shadow ink pass under the real run (see _render_text): the run's
-        # ink re-drawn as the same soft kernel of translucent-black copies.
-        if self._drop_shadow is not None:
-            dx, dy, peak, blur = self._drop_shadow
-            s = self._dpi_scale
-            bx, by, br = dx * s, dy * s, blur * s
-            self._set_brush((0, 0, 0), _shadow_tap_alpha(peak))
-            for kx, ky in _SHADOW_KERNEL:
-                ox, oy = bx + kx * br, by + ky * br
-                _draw_run(origin_x + ox, origin_y + oy)
-        self._set_brush(fg, alpha)
-        # A generously large layout rect per segment: the outer pane clip
-        # (push_clip) already bounds what's visible, so this only needs to avoid
-        # wrapping.
-        _draw_run(origin_x, origin_y)
+        # One shaped layout for the whole run (primary format + per-range CJK
+        # overrides); its own NO_WRAP single line is bounded by the outer pane
+        # clip, so it only needs to avoid wrapping.
+        layout = self._build_flow_layout(text, style)
+        # Re-anchor to the Latin baseline: a CJK range would otherwise raise the
+        # line's baseline (DirectWrite uses the tallest run's), dropping the whole
+        # run — Latin included — below a pure-Latin run like an adjacent column.
+        if self._cjk_available and any(is_cjk(c) for c in text):
+            origin_y -= self._flow_baseline_fix(style)
+        try:
+            # Drop-shadow ink pass under the real run (see _render_text): the run's
+            # ink re-drawn as the same soft kernel of translucent-black copies.
+            if self._drop_shadow is not None:
+                dx, dy, peak, blur = self._drop_shadow
+                s = self._dpi_scale
+                bx, by, br = dx * s, dy * s, blur * s
+                self._set_brush((0, 0, 0), _shadow_tap_alpha(peak))
+                for kx, ky in _SHADOW_KERNEL:
+                    ox, oy = bx + kx * br, by + ky * br
+                    native.rt_draw_text_layout(self._render_target, origin_x + ox, origin_y + oy, layout, self._brush)
+            self._set_brush(fg, alpha)
+            native.rt_draw_text_layout(self._render_target, origin_x, origin_y, layout, self._brush)
+        finally:
+            layout.release()
         for ly in (
             [origin_y + line_h - 2.0] if underline else []
         ) + ([origin_y + line_h / 2.0] if strike else []):
