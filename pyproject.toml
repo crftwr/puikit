@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "puikit"
-version = "0.1.0"
+version = "1.0.0"
 description = "Capability-based Python UI framework with TUI and GUI backends"
 readme = "README.md"
 license = "MIT"
-authors = [{ name = "crftwr" }]
+authors = [{ name = "craftware" }]
 requires-python = ">=3.10"
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
@@ -55,7 +55,7 @@ include = ["puikit*"]
 # fits both and text does not clip). Shipped so the GUI backends render the same
 # on any machine without the fonts installed; OFL.txt is their SIL OFL license.
 # The web backend also serves the client page assets (backends/web/*) from disk.
-puikit = ["fonts/*.ttf", "fonts/*.txt", "backends/web/*.html", "backends/web/*.js", "backends/web/*.css"]
+puikit = ["fonts/*.ttf", "fonts/*.otf", "fonts/*.txt", "backends/web/*.html", "backends/web/*.js", "backends/web/*.css"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

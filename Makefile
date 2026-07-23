@@ -63,7 +63,7 @@ VENV_STAMP := $(VENV)/.installed
 # stamp depends on this so `make venv` / any run target populates the fonts.
 FONTS := puikit/fonts/NotoSans-Regular.ttf
 
-.PHONY: help venv install test fonts hello demo layout bg3d hello-gui demo-gui layout-gui bg3d-gui hello-web demo-web clean
+.PHONY: help venv install test fonts hello demo layout bg3d hello-gui demo-gui layout-gui bg3d-gui hello-web demo-web build publish-test publish clean
 
 help:
 	@echo "PuiKit utility commands:"
@@ -81,6 +81,9 @@ help:
 	@echo "  make demo-web  - run the demo_catalog example (web backend, in a browser)"
 	@echo "  make layout-gui - run the layout demo (native GUI, pixel layout)"
 	@echo "  make bg3d-gui  - run the background_3d example (native GUI: macOS or Windows)"
+	@echo "  make build     - build the sdist + wheel into dist/ (installs build/twine as needed)"
+	@echo "  make publish-test - upload dist/* to TestPyPI (needs a [testpypi] token in ~/.pypirc)"
+	@echo "  make publish   - upload dist/* to PyPI (needs a [pypi] token in ~/.pypirc)"
 	@echo "  make clean     - remove build artifacts and caches"
 	@echo ""
 	@echo "  Run/test targets create the venv and install puikit automatically"
@@ -132,6 +135,23 @@ bg3d: $(VENV_STAMP)
 
 bg3d-gui: $(VENV_STAMP)
 	$(VENV_PYTHON) examples/background_3d/main.py --backend gui $(FONT_SIZE_ARG)
+
+# --- Packaging / release ----------------------------------------------------
+# `build` and `twine` are release-time tooling, not needed to run or develop
+# PuiKit, so they are installed on demand here rather than bloating the base
+# venv. Invoked as `python -m ...` (not the venv's console scripts) so the same
+# recipe works on Windows, where those scripts live in Scripts/ and end in .exe.
+build: $(VENV_STAMP)
+	$(VENV_PIP) install --quiet build twine
+	rm -rf dist build puikit.egg-info
+	$(VENV_PYTHON) -m build
+	$(VENV_PYTHON) -m twine check dist/*
+
+publish-test: build
+	$(VENV_PYTHON) -m twine upload -r testpypi dist/*
+
+publish: build
+	$(VENV_PYTHON) -m twine upload dist/*
 
 clean:
 	rm -rf build dist *.egg-info

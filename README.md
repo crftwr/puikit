@@ -13,7 +13,7 @@ See [CLAUDE.md](CLAUDE.md) for the full design document.
 
 ## Status
 
-Early development. Currently implemented:
+Stable release (1.0). Implemented:
 
 - Core framework: `Panel`, `Backend` interface, capability profiles, event model
 - Layout system: `HSplit` / `VSplit` / `Item` with weights and `min_px` / `min`
