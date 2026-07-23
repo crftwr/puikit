@@ -9,7 +9,9 @@ them on multiple backends without splitting implementations.
 - Backends declare their capabilities; the Panel layer resolves fallbacks
 - Widget code never branches on TUI/GUI
 
-See [CLAUDE.md](CLAUDE.md) for the full design document.
+See the [documentation](https://github.com/crftwr/puikit/tree/main/docs) for
+design notes and per-system guides (layout, rendering, color, animation, fonts,
+widgets, and more).
 
 ## Status
 
@@ -81,4 +83,4 @@ with backend:
 
 ## License
 
-See [LICENSE](LICENSE).
+See [LICENSE](https://github.com/crftwr/puikit/blob/main/LICENSE).
