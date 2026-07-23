@@ -468,8 +468,7 @@ puikit/
 ├── tests/
 ├── CLAUDE.md             # this file
 ├── README.md
-├── pyproject.toml
-└── requirements.txt
+└── pyproject.toml
 ```
 
 ---

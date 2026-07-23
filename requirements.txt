@@ -1,4 +1,0 @@
-# Runtime dependencies:
-numpy
-# Development dependencies:
-pytest>=8
