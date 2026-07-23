@@ -6,6 +6,28 @@ import sys
 
 from ..backend import Backend
 
+# PyObjC ships each macOS framework as its own top-level module, and the macOS
+# backend imports several at load time. PyObjC is an optional dependency (the
+# ``macos`` extra), so a bare ``pip install puikit`` omits it; without this,
+# requesting the backend fails with a bare ``No module named 'AppKit'`` that
+# gives no hint about the fix.
+_PYOBJC_MODULES = frozenset(
+    {"AppKit", "Foundation", "objc", "PyObjCTools", "Quartz",
+     "Cocoa", "CoreText", "CoreFoundation", "CoreGraphics"}
+)
+
+
+def _optional_dep_hint(err: ImportError, *, extra: str, dep: str) -> str | None:
+    """If ``err`` is a missing optional backend dependency, return an install
+    hint naming the extra; otherwise ``None`` (a genuine import error to
+    re-raise so real bugs are not masked)."""
+    if getattr(err, "name", None) in _PYOBJC_MODULES:
+        return (
+            f'the {dep} package is required for the "{extra}" backend but is '
+            f'not installed. Install it with:  pip install "puikit[{extra}]"'
+        )
+    return None
+
 
 def create_backend(name: str, **kwargs) -> Backend:
     """Create a backend by name: "curses" (alias "tui"), "macos",
@@ -29,7 +51,13 @@ def create_backend(name: str, **kwargs) -> Backend:
 
         return WebBackend(**kwargs)
     if name == "macos":
-        from .macos_backend import MacOSBackend
+        try:
+            from .macos_backend import MacOSBackend
+        except ImportError as e:
+            hint = _optional_dep_hint(e, extra="macos", dep="PyObjC")
+            if hint is not None:
+                raise ImportError(hint) from e
+            raise
 
         return MacOSBackend(**kwargs)
     if name in ("windows", "win32"):

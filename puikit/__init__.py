@@ -25,7 +25,7 @@ from .panel import DrawContext, Panel, Rect
 from .posteffect import CRT, PRESETS, PostEffect
 from .theme import THEME_GUI, THEME_TUI, Theme, derive_theme, lift, mix, theme_for
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 __all__ = [
     "Backend",
