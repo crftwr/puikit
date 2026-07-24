@@ -61,7 +61,7 @@ VENV_STAMP := $(VENV)/.installed
 # stamp depends on this so `make venv` / any run target populates the fonts.
 FONTS := puikit/fonts/NotoSans-Regular.ttf
 
-.PHONY: help venv install test fonts hello demo layout bg3d hello-gui demo-gui layout-gui bg3d-gui hello-web demo-web build publish-test publish clean
+.PHONY: help venv install test fonts hello demo layout bg3d hello-gui demo-gui layout-gui bg3d-gui hello-web demo-web build publish-testpypi publish-pypi release clean
 
 help:
 	@echo "PuiKit utility commands:"
@@ -80,8 +80,9 @@ help:
 	@echo "  make layout-gui - run the layout demo (native GUI, pixel layout)"
 	@echo "  make bg3d-gui  - run the background_3d example (native GUI: macOS or Windows)"
 	@echo "  make build     - build the sdist + wheel into dist/ (installs build/twine as needed)"
-	@echo "  make publish-test - upload dist/* to TestPyPI (needs a [testpypi] token in ~/.pypirc)"
-	@echo "  make publish   - upload dist/* to PyPI (needs a [pypi] token in ~/.pypirc)"
+	@echo "  make publish-testpypi - upload dist/* to TestPyPI (needs a [testpypi] token in ~/.pypirc)"
+	@echo "  make publish-pypi     - upload dist/* to PyPI (needs a [pypi] token in ~/.pypirc)"
+	@echo "  make release VERSION=x.y.z - one-command release: bump, tag, build, PyPI, GitHub Release"
 	@echo "  make clean     - remove build artifacts and caches"
 	@echo ""
 	@echo "  Run/test targets create the venv and install puikit automatically"
@@ -145,11 +146,37 @@ build: $(VENV_STAMP)
 	$(VENV_PYTHON) -m build
 	$(VENV_PYTHON) -m twine check dist/*
 
-publish-test: build
+publish-testpypi: build
 	$(VENV_PYTHON) -m twine upload -r testpypi dist/*
 
-publish: build
+publish-pypi: build
 	$(VENV_PYTHON) -m twine upload dist/*
+
+# One-command release. Usage: make release VERSION=1.0.2
+#
+# Runs entirely on your machine and ties the three release artifacts together so
+# they can't drift: the git tag, the PyPI upload, and the GitHub Release all
+# name the same version. release_preflight.py runs FIRST and aborts before any
+# mutation if the tree is dirty, the version is stale, the tag exists, or `gh`
+# is missing/unauthenticated — so a failed precondition never leaves a
+# half-published release. The test suite must pass before anything is built.
+# `make build` cleans dist/ and re-checks the artifacts each run.
+#
+# Prereqs: a [pypi] token in ~/.pypirc and an authenticated `gh` (gh auth login).
+release: $(VENV_STAMP)
+	@test -n "$(VERSION)" || { echo "ERROR: set VERSION, e.g. make release VERSION=1.0.2"; exit 1; }
+	$(VENV_PYTHON) scripts/release_preflight.py "$(VERSION)"
+	$(MAKE) test
+	$(VENV_PYTHON) scripts/bump_version.py "$(VERSION)"
+	git add pyproject.toml
+	git commit -m "Releasing $(VERSION)"
+	git tag -a v$(VERSION) -m "$(VERSION)"
+	$(MAKE) build
+	git push
+	git push origin v$(VERSION)
+	$(VENV_PYTHON) -m twine upload dist/*
+	gh release create v$(VERSION) dist/* --title "v$(VERSION)" --generate-notes --verify-tag
+	@echo "Released $(VERSION): git tag + PyPI + GitHub Release ✓"
 
 clean:
 	rm -rf build dist *.egg-info
