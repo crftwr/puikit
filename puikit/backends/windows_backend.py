@@ -4,9 +4,11 @@ Uses plain user32/kernel32 stdcall exports for the window and message loop,
 and Direct2D + DirectWrite (also via ctypes — see ``_win32_native.py``) for
 rendering: antialiased vector shapes and real proportional/sized fonts, the
 same capability tier as the macOS backend's CoreGraphics/CoreText. Text
-*metrics* are measured through GDI instead of DirectWrite's own (larger)
-font-enumeration surface; actual glyph rendering still goes through
-Direct2D/DirectWrite.
+*metrics* are measured through DirectWrite's own layout engine — the same
+system that renders the run — since GDI's metrics for the same font/text can
+disagree with DirectWrite's actual layout by a wide margin; GDI is used only
+for the monospace base/grid font's cell size (see ``measure_text`` and
+``docs/windows_backend.md`` §3).
 
 Like the macOS backend, this one keeps a display list of drawing intents
 (text runs, boxes, scrollbars, icons) in base-unit coordinates between

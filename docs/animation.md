@@ -18,6 +18,59 @@ fade parity from this document alone.
 
 ---
 
+## 0. Two playback models
+
+The app states one intent — `panel.animate(widget, hints)` — and the Panel
+resolves *how* to play it from the backend's capability. There are two playback
+models, and **every transition kind works in both**: no kind is TUI-only or
+GUI-only. Sections 1–8 below detail the compositing model; this section covers
+the choice between them and the stepped model in full.
+
+**Compositing backends** (`animation`: GUI) play transitions frame-by-frame over
+the requested `duration_ms`: `fade` / `scale` / `highlight` as real alpha and
+sub-unit transforms, `slide` as a sub-pixel transform, `size` as a Panel
+re-measure, `color` as a continuous tween. Geometry motion is **linear**
+(constant velocity).
+
+**Stepped backends** (`animation_ticks` but not `animation` — a terminal) cannot
+draw smooth motion: multi-frame interpolation snapped to the character grid only
+reads as flicker. So the Panel plays **every** kind as exactly **two frames** —
+one intermediate state, then the target — using whole-cell stand-ins:
+
+| kind        | intermediate frame (whole-cell)              |
+|-------------|----------------------------------------------|
+| `slide`     | rect moved halfway in (snapped to cells)     |
+| `size`      | rect grown halfway (snapped)                 |
+| `scale`     | rect inset toward its center, then full      |
+| `color`     | the midpoint color (palette-snapped)         |
+| `fade`      | one **dim** pass over the group              |
+| `highlight` | one **color flash** over the group           |
+
+The user sees a single clear "something changed" beat, never a janky crawl.
+
+A **still backend** (neither capability) applies the change immediately.
+
+Geometry interpolation in both models is linear and, on a character grid,
+snapped to whole base units, so a region steps by an integer number of cells.
+
+`fade` and `highlight` are **group effects**: on a stepped backend the Panel
+paints them over the whole widget group (`dim_rect` / `flash_rect`); a
+compositing backend renders them as real overlays (§2–§3). Either way the app
+never branches.
+
+The `color` value is read by the widget via `ctx.animated_color(...)`. `to` is
+normally the widget's resting color (the `default`), so completion is seamless:
+
+```python
+panel.animate(row, hints={"transition": "color",
+                          "from": theme.accent, "to": theme.text})
+
+# in the widget's draw():
+ctx.draw_text(0, 0, label, Style(fg=ctx.animated_color(default=theme.text)))
+```
+
+---
+
 ## 1. Where animations sit in the pipeline (shared by all backends)
 
 All GUI backends share the same structure. The pieces relevant here:

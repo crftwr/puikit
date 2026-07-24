@@ -58,6 +58,34 @@ and have no notion of line weight, so meaning must not depend on it.
 
 ---
 
+## Lines need the *default* background
+
+Box-drawing glyphs are drawn with `bg=None` — `ink=False`, on the terminal's
+**default** background — and that is a correctness requirement, not a style
+choice.
+
+Terminals such as macOS Terminal.app render box-drawing glyphs (`│ ─ ┌ ┐ └ ┘`)
+as *seamless connected lines* only when the cell uses the default background.
+Set a custom cell `bg` and the terminal falls back to the per-cell **font
+glyph**, which leaves **inter-line gaps** where the line spacing shows through.
+Same character, same attributes — only the background differs, and the line
+visibly breaks into dashes.
+
+So `draw_divider` and `draw_box` draw on the default background. A line that
+*must* sit on a colored surface has two honest options:
+
+- **Paint it as background instead of glyph** — a column or row of spaces whose
+  `bg` carries the line color. This is exactly the `draw_scrollbar` technique
+  (below): it fills the whole cell including the inter-line spacing, so it is
+  seamless at any color.
+- **Drop the line entirely** and separate by surface contrast. The `Drawer`
+  draws no TUI edge line at all — its surface-role background against the
+  page's is enough. This is also why `divider="subtle"` costs nothing on a
+  whole-unit backend: the theme guarantees adjacent surface roles contrasting
+  backgrounds, and no glyph is spent.
+
+---
+
 ## Character families
 
 All families below are width-1 in PuiKit. Pick per role (e.g. heavy = focused
@@ -237,8 +265,23 @@ Two things make it read as a shadow rather than a flat gray smear:
    Cells the page never painted fall back to the `base_bg` the Panel passes.
 2. **Every shadow cell is overwritten.** A glyph left showing through the shadow
    would read as stray characters, not a shadow — so covered cells are repainted
-   (with wide-glyph and deferred-emoji edge cases handled). Terminals without
-   color fall back to dimmed blanks (`A_DIM`).
+   with a darkened space rather than dimmed in place. Terminals without color
+   fall back to dimmed blanks (`A_DIM`).
+
+### Wide glyphs at a layer or shadow edge
+
+A full-width (CJK) glyph spans **two cells in one write**, so an opaque upper
+layer — or the drop shadow — covering only *one* of those cells would leave the
+other as a broken half-glyph spilling past the edge.
+
+The curses backend tracks each wide glyph's lead cell (`_wide_lead`). When a
+later draw or shadow lands on one half, the orphaned half is replaced with a
+background space that preserves its color (`_blank_cell_bg`), so only a clean
+left or right half survives the cut.
+
+This is layer-system geometry, not a per-widget concern: the same fixup serves
+every layer and the shadow, and no widget has to know whether its text happens
+to be Japanese.
 
 The drop shadow and the horizontal scrollbar share the **same** `▄` lower-half
 block — the workhorse glyph for "half a cell" on this backend.
