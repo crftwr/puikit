@@ -2146,7 +2146,7 @@ class MacOSBackend(Backend):
             # A scale may opt into fading in as it grows ("fade": True) — the
             # "materialize" look a modal wants, where scaling alone reads as a
             # fully-opaque box lurching to size. It needs the SAME offscreen
-            # transparency layer a plain fade does (see animation_compositing.md):
+            # transparency layer a plain fade does (see animation.md):
             # compositing the group once at the group alpha, rather than
             # multiplying each primitive's alpha, which double-blends where the
             # dialog's own fills overlap. Opened before the CTM so the layer

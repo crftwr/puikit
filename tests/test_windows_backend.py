@@ -376,7 +376,7 @@ def test_fade_group_renders_through_pushlayer():
     (ID2D1RenderTarget::PushLayer[40] / PopLayer[41] with
     D2D1_LAYER_PARAMETERS.opacity) instead of folding the group opacity into
     every brush — the Direct2D analog of macOS's transparency layer (see
-    docs/animation_compositing.md). This drives the real vtable calls against a
+    docs/animation.md). This drives the real vtable calls against a
     live device context: a wrong slot index or struct layout would fault or
     fail EndDraw here."""
     backend = WindowsBackend(width=40, height=20, title="puikit-fade-test")

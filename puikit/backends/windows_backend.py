@@ -2494,7 +2494,7 @@ class WindowsBackend(Backend):
             # shadow) before opacity is applied, so nothing double-attenuates —
             # unlike folding `eased` into every brush. Images inside the group
             # fade for free too, since they draw into the layer. See
-            # docs/animation_compositing.md.
+            # docs/animation.md.
             params = native.D2D1_LAYER_PARAMETERS(
                 # Bound the layer to the widget rect (in the current, untransformed
                 # space — fade sets no transform) rather than InfiniteRect, which

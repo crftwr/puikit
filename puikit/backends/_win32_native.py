@@ -166,7 +166,7 @@ D2D1_LAYER_OPTIONS_NONE = 0
 
 class D2D1_LAYER_PARAMETERS(ctypes.Structure):
     """Parameters for ID2D1RenderTarget::PushLayer (the offscreen-compositing
-    layer used for fade transitions — see animation_compositing.md). Field
+    layer used for fade transitions — see animation.md). Field
     order/types mirror d2d1.h's v1.0 struct exactly; ctypes default alignment
     (largest member is an 8-byte pointer, no #pragma pack in the header) matches
     the native layout, so no _pack_."""
@@ -287,7 +287,7 @@ _IDX_RT_SET_TEXT_ANTIALIAS_MODE = 34
 # Inherited ID2D1RenderTarget::PushLayer/PopLayer. NOTE: _render_target is an
 # ID2D1DeviceContext, which appends its own PushLayer(D2D1_LAYER_PARAMETERS1*)
 # overload at a higher slot; index 40 is the v1.0 PushLayer taking the plain
-# D2D1_LAYER_PARAMETERS struct below (see rt_push_layer / animation_compositing.md).
+# D2D1_LAYER_PARAMETERS struct below (see rt_push_layer / animation.md).
 _IDX_RT_PUSH_LAYER = 40
 _IDX_RT_POP_LAYER = 41
 _IDX_RT_PUSH_AXIS_ALIGNED_CLIP = 45
