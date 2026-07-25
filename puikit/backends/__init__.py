@@ -14,7 +14,16 @@ from ..backend import Backend
 # fix. Map those misses to a clear message instead.
 _PYOBJC_MODULES = frozenset(
     {"AppKit", "Foundation", "objc", "PyObjCTools", "Quartz",
-     "Cocoa", "CoreText", "CoreFoundation", "CoreGraphics"}
+     "Cocoa", "CoreText", "CoreFoundation", "CoreGraphics", "Metal"}
+)
+
+#: The PyObjC distributions the macOS backend needs — one wheel per system
+#: framework, none of them implied by the others. Kept in sync with the
+#: `sys_platform == 'darwin'` dependencies in pyproject.toml, and named in the
+#: hint below so a --no-deps install can be repaired in one command.
+_PYOBJC_PACKAGES = (
+    "pyobjc-framework-Cocoa pyobjc-framework-Quartz "
+    "pyobjc-framework-Metal pyobjc-framework-CoreText"
 )
 
 
@@ -27,7 +36,7 @@ def _pyobjc_hint(err: ImportError) -> str | None:
             "the macOS backend requires PyObjC, which installs automatically "
             "with `pip install puikit` on macOS. If it is missing (e.g. a "
             "--no-deps install), run:  "
-            "pip install pyobjc-framework-Cocoa pyobjc-framework-Quartz"
+            f"pip install {_PYOBJC_PACKAGES}"
         )
     return None
 

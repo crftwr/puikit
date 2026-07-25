@@ -42,14 +42,35 @@ dependencies = [
     # so the curses (TUI) backend runs there out of the box. The marker keeps it
     # off macOS/Linux, which already ship _curses.
     "windows-curses>=2.4; sys_platform == 'win32'",
-    # PyObjC powers the macOS native GUI backend (AppKit/Foundation/Quartz). The
-    # darwin marker installs it automatically on macOS, so `pip install puikit`
-    # yields a working native window out of the box, and keeps it off other
-    # platforms (where it cannot build and the macOS backend never loads).
-    # Symmetric with numpy above: a native GUI backend's hard requirement, gated
-    # to the one platform that uses it.
+    # PyObjC powers the macOS native GUI backend. The darwin marker installs it
+    # automatically on macOS, so `pip install puikit` yields a working native
+    # window out of the box, and keeps it off other platforms (where it cannot
+    # build and the macOS backend never loads). Symmetric with numpy above: a
+    # native GUI backend's hard requirement, gated to the one platform that
+    # uses it.
+    #
+    # PyObjC ships ONE DISTRIBUTION PER SYSTEM FRAMEWORK, and they do not imply
+    # each other, so every framework the backend imports needs its own entry
+    # here. Cocoa covers AppKit/Foundation/objc/PyObjCTools; Quartz covers
+    # CoreGraphics/CoreImage/QuartzCore (CAMetalLayer). Neither pulls in Metal
+    # or CoreText — those are separate wheels and were missing, which is why
+    # the two below are listed explicitly.
     "pyobjc-framework-Cocoa>=10; sys_platform == 'darwin'",
     "pyobjc-framework-Quartz>=10; sys_platform == 'darwin'",
+    # Metal renders the Shader background kind (backends/_metal.py). Its import
+    # is soft (HAVE_METAL) so a machine without it reports the capability
+    # unsupported rather than crashing — but that is a fallback for broken
+    # installs, not the intended shape: shader backgrounds are an advertised
+    # macOS feature, so the binding is a declared dependency. Same
+    # soft-import-but-still-required reasoning as pillow above.
+    "pyobjc-framework-Metal>=10; sys_platform == 'darwin'",
+    # CoreText registers the bundled Noto fonts into the process font scope and
+    # builds the CJK fallback cascade (macos_backend._ensure_bundled_fonts /
+    # _with_cjk_cascade). Also soft-imported (_HAS_CORETEXT): without it the
+    # backend silently falls back to whatever fonts the OS happens to have,
+    # losing the render-the-same-on-any-machine guarantee the bundled fonts
+    # exist to provide.
+    "pyobjc-framework-CoreText>=10; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
