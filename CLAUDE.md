@@ -317,6 +317,98 @@ puikit/
 
 ---
 
+## API Compatibility Policy
+
+PuiKit is **released** — 1.0, on PyPI, with apps pinning it and expecting an
+upgrade to be uneventful. The public API is a contract now, not a draft. The
+default answer to "can I change this shape?" is **no; add beside it.**
+
+### What counts as public
+
+Everything reachable without a leading underscore: the names in
+`puikit.__all__`, the `Backend` method surface, the `Panel` / widget APIs, and
+the descriptor dataclasses (`Shader`, `Wallpaper`, `PostEffect`, `Theme`,
+`Font`, `Menu`, …) — including their field **names, order, defaults and
+accepted values**.
+
+Underscore names (`_bg_rate`, `MacOSBackend._render_shader`, `_BG_RAMP_DOWN`)
+are internal and may change. But **say so in the commit message**: xefm already
+imports `puikit.backends._metal`, `._d3d_shader` and `._terminal_graphics` from
+its tools and tests, so "private" here means *unannounced*, not *unused*.
+
+### The additive recipe
+
+Almost every feature fits through it, and when it does the change is invisible
+to existing callers:
+
+- **New dataclass field** → append it **last**, with a default that reproduces
+  the old behavior. Appending keeps positional construction binding correctly;
+  inserting mid-list silently mis-assigns every caller's arguments.
+- **New function parameter** → append it last with a default. Never reorder,
+  rename, or repurpose an existing one.
+- **New accepted value** for a string-ish field → fine. And make an
+  *unrecognized* value degrade to the previous behavior rather than raise, so a
+  forward-looking config costs the feature, not the app.
+- **New capability** → declare it in `capability.py`; backends lacking it
+  inherit the base no-op. That is why `set_background`, `set_post_effect` and
+  friends are always safe to call.
+- **Never** remove or rename a public name, tighten an accepted range, or change
+  a return type.
+
+Verify it rather than assume it. The checklist that has actually caught things:
+
+```python
+Shader(src, 0.6, 0.7, ink, backdrop, 0.5, hlsl, glsl)  # old positional arity still binds
+Shader(**dataclasses.asdict(old)) == old               # round-trips
+dataclasses.replace(old, speed=1.0)                    # replace() unaffected
+
+# A new parameter's default must reproduce the old output *exactly*:
+px = MetalBackground.texture_pixels
+assert bytes(px(r.render_to_texture(64, 40, 2.0))) == \
+       bytes(px(r.render_to_texture(64, 40, 2.0, 1.0)))
+```
+
+The last one is what actually proves it. "Looks the same" is not the bar —
+byte-identical is, because the old call site must be untouched, not merely
+close.
+
+### When it cannot be additive
+
+An incompatible change needs a **migration period**, never a flag day:
+
+1. **Keep the old spelling working.** Accept both; translate the old to the new
+   internally.
+2. **Warn**, naming the replacement and the version that drops it. (Illustrative
+   — `freeze_when_idle` never shipped; the field went in as `idle` precisely so
+   this would not be needed.)
+
+   ```python
+   warnings.warn(
+       "Shader(freeze_when_idle=...) is deprecated and will be removed in "
+       "PuiKit 2.0; use idle='freeze' / idle='fade' instead.",
+       DeprecationWarning, stacklevel=2,
+   )
+   ```
+
+   `stacklevel=2` so the warning points at the app's line, not ours. A warning
+   that does not name both the replacement and the removal version is not a
+   migration path — it is a nuisance the app will silence.
+3. **Overlap for at least one minor release**, and document the swap in
+   `docs/` beside the feature it belongs to.
+4. **Remove only in a major version.**
+
+There is no deprecation helper in the tree yet — nothing has needed one. The
+first change that does should add one rather than hand-roll a second style.
+
+### Versioning
+
+`__version__` in `puikit/__init__.py` is the single source of truth
+(`pyproject.toml` derives it), and it is semver: **patch** for fixes, **minor**
+for additive features — the recipe above — and **major** for anything a pinned
+app could notice. Release tooling lives in `scripts/` (`make release`).
+
+---
+
 ## Multi-Language Policy
 
 PuiKit is primarily Python, but backends may include compiled components in other languages.
@@ -335,7 +427,8 @@ PuiKit is primarily Python, but backends may include compiled components in othe
 
 - Use xefm as the first real user; validate the design by migrating it to PuiKit incrementally
 - Widget tests should be written in a way that runs identically on TUI and GUI
-- Package structure should be ready for PyPI publication from the start
+- PuiKit is published on PyPI; every change is measured against the
+  [API Compatibility Policy](#api-compatibility-policy) above before it lands
 - New subsystem depth goes in `docs/`, not this file; keep the axes above at
   principle level with a pointer
 
