@@ -193,6 +193,32 @@ class Shader:
                shader does a quarter of the work. ``1`` (default) is right for
                crisp geometry; a soft, diffuse scene — glow, particles, gradients —
                is usually indistinguishable at ``0.5`` and four times cheaper.
+      idle     What the scene resolves to when the app goes idle and the backend
+               parks the animation to stop burning battery: ``"freeze"`` (the
+               default) holds the last frame as a still backdrop, ``"fade"``
+               dissolves the scene into its ``backdrop`` first and parks on an
+               empty frame.
+
+               **This is a property of the scene, not a preference.** A scene whose
+               every frame is a composed image — a lit interior, a landscape —
+               reads as a deliberate still when it stops. A scene that *is* motion
+               — falling rain, streaming stars, a fly-through — has no meaningful
+               frame to stop on: frozen, it is an arbitrary smear of half-drawn
+               objects sitting where the animation happened to run out, and looks
+               broken rather than restful. Those scenes ask for ``"fade"``.
+
+               The two rest states want opposite things from the *speed*, and the
+               backends give them that. A freezing scene coasts down over
+               ``_BG_RAMP_DOWN``, because the ramp is how it arrives at the frame
+               it will hold. A dissolving scene **keeps full speed and simply
+               goes**: slowing it as well would put a visible deceleration on
+               screen for the whole fade, which is the "it has stopped" reading
+               the fade exists to avoid. Only its presence ramps, over those same
+               spans; input brings it back.
+
+               Reduced motion is *not* idleness and never fades, whatever the
+               scene says: its rest state is the still frame by definition, since
+               a fade is itself motion.
 
     Only a backend with the ``background_shader`` capability renders this; the
     others inherit the base no-op, so setting one is always safe.
@@ -213,6 +239,7 @@ class Shader:
     #: cross-platform scene ships all three dialects; each backend compiles the one it
     #: speaks. ``speed``/``opacity``/``ink``/``backdrop`` are shared.
     source_glsl: str | None = None
+    idle: str = "freeze"
 
     def __post_init__(self) -> None:
         v = self.opacity
@@ -222,6 +249,16 @@ class Shader:
         s = self.resolution_scale
         object.__setattr__(self, "resolution_scale",
                            0.1 if s < 0.1 else 1.0 if s > 1.0 else float(s))
+        # An unrecognized mode falls back to holding the frame, which is what every
+        # backend did before this field existed — a typo costs the fade, not the
+        # background.
+        object.__setattr__(self, "idle", "fade" if self.idle == "fade" else "freeze")
+
+    @property
+    def fades_when_idle(self) -> bool:
+        """True when parking this scene should dissolve it away rather than freeze
+        it (``idle="fade"``). Read by the backends that park an idle animation."""
+        return self.idle == "fade"
 
     @property
     def is_noop(self) -> bool:

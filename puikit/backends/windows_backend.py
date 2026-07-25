@@ -90,10 +90,12 @@ _DEFAULT_BG = (24, 24, 24)
 #: Seconds of no input before the animation begins slowing.
 _BG_IDLE_TIMEOUT = 15.0
 #: Seconds the coast-down and spin-up ramps take (see _approach / _smoothstep).
+#: A scene that declares ``idle="fade"`` dissolves over these same spans on its own
+#: ramp (_bg_fade) but does **not** ride the rate ramp: it keeps full speed until it
+#: is gone, since a visible deceleration during the fade is the "it has stopped"
+#: reading the fade exists to avoid — see MacOSBackend.
 _BG_RAMP_DOWN = 40.0
 _BG_RAMP_UP = 15.0
-#: Below this rate the scene is close enough to still to be parked outright.
-_BG_RATE_FLOOR = 0.02
 
 
 def _smoothstep(t: float) -> float:
@@ -657,6 +659,10 @@ class WindowsBackend(Backend):
         # Current rate, 0..1, eased by _background_tick; and whether the tick is
         # registered (False once parked, until _dispatch re-arms it).
         self._bg_rate: float = 1.0
+        # How present the scene is, 0..1, on its own ramp — eased to 0 when the app
+        # goes idle and the scene declares idle="fade", so it dissolves into its
+        # backdrop instead of freezing (see MacOSBackend._bg_fade).
+        self._bg_fade: float = 1.0
         self._bg_running: bool = False
         self._bg_last_tick: float = 0.0
         # Opacity of UI surface fills (1 = opaque UI); lower composites them
@@ -1405,10 +1411,11 @@ class WindowsBackend(Backend):
         self._background = None if (background is None or background.is_noop) else background
         if isinstance(self._background, Shader):
             # A new background starts from the beginning of its own clock at full
-            # rate — a theme switch is itself user activity, so it should not arrive
-            # mid-coast.
+            # rate and fully present — a theme switch is itself user activity, so it
+            # should not arrive mid-coast or half faded out.
             self._bg_clock = 0.0
             self._bg_rate = 1.0
+            self._bg_fade = 1.0
             self._bg_running = False
             self._ensure_background_ticker()
         self._sync_shader_layer()
@@ -1432,17 +1439,46 @@ class WindowsBackend(Backend):
         surface opacity (see ``Backend.has_wallpaper``)."""
         return self._background is not None
 
-    def _bg_target(self, now: float) -> float:
-        """The rate the animated background heads toward: full while the app is in
-        use (our window active AND recent input), zero once it is not — an animation
-        the user cannot see is pure drain. Mirrors _roll_user_active.
+    def _bg_user_active(self, now: float) -> bool:
+        """Whether the app is being *used*: our window is active AND input was
+        recent. An animation the user cannot see is pure drain. Mirrors
+        _roll_user_active."""
+        return bool(self._window_active) and (now - self._last_input_time) < _BG_IDLE_TIMEOUT
 
-        Reduced motion targets zero through the same ramp, so the scene
-        decelerates to a stop and holds its last frame as a still backdrop (see
-        the macOS backend's ``_bg_target`` — the two must agree)."""
-        if self.reduced_motion or not self._window_active:
+    @property
+    def _bg_dissolves(self) -> bool:
+        """True when the active scene dissolves away on an idle park rather than
+        freezing, and reduced motion is not overriding that. Picks which rate rule
+        _background_tick follows (see MacOSBackend._bg_dissolves)."""
+        background = self._background
+        return (isinstance(background, Shader) and background.fades_when_idle
+                and not self.reduced_motion)
+
+    def _bg_target(self, now: float) -> float:
+        """The rate a *freezing* scene heads toward: full while the app is in use,
+        zero once it is not. Only consulted when the scene is not dissolving — the
+        coast-down ramp is how a freeze arrives at the frame it will hold, and a
+        dissolving scene has no such frame (see MacOSBackend._bg_target).
+
+        Reduced motion targets zero through this same ramp whatever the scene says,
+        so it decelerates to a stop and holds its last frame as a still backdrop
+        (the two backends must agree)."""
+        if self.reduced_motion:
             return 0.0
-        return 1.0 if (now - self._last_input_time) < _BG_IDLE_TIMEOUT else 0.0
+        return 1.0 if self._bg_user_active(now) else 0.0
+
+    def _bg_fade_target(self, now: float) -> float:
+        """How present the scene heads toward: full unless it declares
+        ``idle="fade"`` and the app has gone idle, in which case zero — the scene
+        then dissolves into its backdrop rather than freezing mid-motion. Reduced
+        motion never fades (a dissolve is itself motion, and the user is still
+        there); see the macOS backend's ``_bg_fade_target`` — the two must agree."""
+        background = self._background
+        if not isinstance(background, Shader) or not background.fades_when_idle:
+            return 1.0
+        if self.reduced_motion:
+            return 1.0
+        return 1.0 if self._bg_user_active(now) else 0.0
 
     def _on_reduced_motion_changed(self) -> None:
         """Re-arm the ticker so the ramp (down or back up) runs now, and re-sync
@@ -1470,25 +1506,40 @@ class WindowsBackend(Backend):
         self.request_animation_ticks(self._background_tick)
 
     def _background_tick(self) -> bool:
-        """Frame callback for an animated background: ease the rate toward its
-        target, advance the scene's own clock by what was actually animated, and
-        park (return False) once fully coasted so the timer can stop — re-armed from
-        _dispatch on the next input. Mirrors MacOSBackend._background_tick; the
-        _on_animation_tick repaint covers both the segment scene (drawn in the
-        render pass) and the shader (whose texture is produced there too)."""
+        """Frame callback for an animated background: ease the rate and the fade
+        toward their targets, advance the scene's own clock by what was actually
+        animated, and park (return False) once both have settled so the timer can
+        stop — re-armed from _dispatch on the next input. Mirrors
+        MacOSBackend._background_tick; the _on_animation_tick repaint is what
+        actually redraws the shader, whose texture is produced in the render pass."""
         if not isinstance(self._background, Shader):
             self._bg_running = False
             return False
         now = time.monotonic()
         dt = min(max(0.0, now - self._bg_last_tick), 0.25)
         self._bg_last_tick = now
-        self._bg_rate = _approach(self._bg_rate, self._bg_target(now), dt,
+        fade_target = self._bg_fade_target(now)
+        self._bg_fade = _approach(self._bg_fade, fade_target, dt,
                                   _BG_RAMP_UP, _BG_RAMP_DOWN)
+        if self._bg_dissolves:
+            # A dissolving scene keeps full speed until it is gone, then drops
+            # outright — see MacOSBackend._background_tick for why it must not also
+            # decelerate, and why the snap costs nothing at zero opacity.
+            self._bg_rate = 1.0 if self._bg_fade > 0.0 else 0.0
+        else:
+            self._bg_rate = _approach(self._bg_rate, self._bg_target(now), dt,
+                                      _BG_RAMP_UP, _BG_RAMP_DOWN)
         eased = _smoothstep(self._bg_rate)
         self._bg_clock += dt * eased
-        if eased <= _BG_RATE_FLOOR and self._bg_rate <= 0.0:
-            # Fully coasted: drop the callback. The last frame drawn stays on screen.
+        if self._bg_rate <= 0.0 and self._bg_fade == fade_target:
+            # Fully coasted and fully resolved: drop the callback. The frame left on
+            # screen is the settled one — the frozen scene, or the bare backdrop for
+            # a scene that fades. _on_animation_tick skips its repaint on the tick a
+            # callback retires, so ask for that last frame here or a faded-out scene
+            # would park one frame short of gone.
             self._bg_running = False
+            if self._hwnd:
+                native.user32.InvalidateRect(self._hwnd, None, False)
             return False
         return True
 
@@ -1865,7 +1916,8 @@ class WindowsBackend(Backend):
             cw, ch = self._client_size_px()
             scale = getattr(self._background, "resolution_scale", 1.0)
             shader_tex = self._d3d_shader.render_to_texture(
-                max(1, int(cw * scale)), max(1, int(ch * scale)), self._bg_clock)
+                max(1, int(cw * scale)), max(1, int(ch * scale)), self._bg_clock,
+                _smoothstep(self._bg_fade))
         # Both passes below (the recording and the frame itself) may draw shadows,
         # and neither may retarget the device context once its batch is open.
         self._prepare_shadows()

@@ -116,8 +116,9 @@ class TestBackgroundApi:
         b = WindowsBackend()
         b.set_background(_SHADER)
         b._bg_clock = 5.0
+        b._bg_fade = 0.0
         b.set_background(Shader(source=_SHADER.source, speed=2.0))
-        assert b._bg_clock == 0.0 and b._bg_rate == 1.0
+        assert b._bg_clock == 0.0 and b._bg_rate == 1.0 and b._bg_fade == 1.0
 
 
 class TestSurfaceOpacity:
@@ -164,3 +165,32 @@ class TestBackgroundRate:
         b._window_active = True
         b._last_input_time = 0.0
         assert b._bg_target(10_000.0) == 0.0
+
+
+class TestBackgroundFade:
+    """``Shader.idle`` decides what the scene comes to rest *as* — a held frame or
+    nothing at all. Must agree with MacOSBackend._bg_fade_target."""
+
+    def _backend(self, shader, *, active=True, idle=False):
+        b = WindowsBackend()
+        b.set_background(shader)
+        b._window_active = active
+        b._last_input_time = 0.0 if idle else 10_000.0
+        return b
+
+    def test_a_freezing_scene_never_fades(self):
+        b = self._backend(_SHADER, idle=True)
+        assert b._bg_fade_target(10_000.0) == 1.0
+
+    def test_a_fading_scene_fades_once_idle(self):
+        b = self._backend(Shader(source=_SHADER.source, idle="fade"), idle=True)
+        assert b._bg_fade_target(10_000.0) == 0.0
+
+    def test_a_fading_scene_stays_while_in_use(self):
+        b = self._backend(Shader(source=_SHADER.source, idle="fade"))
+        assert b._bg_fade_target(10_000.0) == 1.0
+
+    def test_reduced_motion_holds_the_frame_instead(self):
+        b = self._backend(Shader(source=_SHADER.source, idle="fade"), idle=True)
+        b._reduced_motion = True
+        assert b._bg_fade_target(10_000.0) == 1.0

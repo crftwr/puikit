@@ -77,6 +77,7 @@ Uniforms, shared by all three dialects: `resolution` (drawable pixels), `time`
 | `ink` | Line/particle color. `None` lets the backend fill in the theme foreground, so a shader stays on-palette by default; a shader may ignore it. |
 | `backdrop` | Clear color under the shader, also a uniform. |
 | `resolution_scale` | Fraction of native drawable size to render at, `0.1`..`1`, upscaled by the compositor. |
+| `idle` | What the scene comes to rest as when the backend parks it: `"freeze"` (default) holds the last frame, `"fade"` dissolves it to `backdrop` first. See §4.1. An unrecognized value falls back to `"freeze"`. |
 
 > **`resolution_scale` is the knob that matters on a Retina display.** Cost is
 > per pixel, so `0.5` is a quarter of the work. Crisp geometry wants `1`; a
@@ -88,7 +89,7 @@ Uniforms, shared by all three dialects: `resolution` (drawable pixels), `time`
 
 MSL, HLSL, and GLSL are different languages, so a cross-platform scene ships all
 three and each backend compiles the dialect it speaks. Everything else —
-`speed`, `opacity`, `ink`, `backdrop`, `resolution_scale` — is shared.
+`speed`, `opacity`, `ink`, `backdrop`, `resolution_scale`, `idle` — is shared.
 `is_noop` is true only when *no* dialect has source (a scene with one language's
 source still renders on the backend that speaks it).
 
@@ -119,6 +120,55 @@ Two prelude details worth knowing before editing one:
 Both GPU paths gate the capability at runtime on whether the shader-compile path
 is actually usable (`HAVE_D3D_SHADER` on Windows, the Metal gate on macOS), so
 the app falls back to a plain backdrop rather than failing.
+
+### 4.1 Idle parking, and `idle`
+
+An animated background is the one thing that keeps an otherwise-idle app
+redrawing forever, so the desktop backends stop it when nobody is watching. No
+app opt-in: the ramp lives in `MacOSBackend` / `WindowsBackend`.
+
+After `_BG_IDLE_TIMEOUT` (15s) without input, or as soon as the window loses
+focus, the rate eases to zero over `_BG_RAMP_DOWN` (40s) — smoothed at both ends
+so the *change in speed* stays under ~0.2% per frame, well below where the eye
+reads the ramp itself as motion. At zero the tick unregisters, letting the frame
+timer fall back to its idle rate; input re-arms it and it eases back up over
+`_BG_RAMP_UP` (15s). The scene's clock counts **animated** time, so a background
+parked for ten minutes resumes where it stopped rather than teleporting — which
+is why a scene must take all its motion from the `time` uniform and nothing else.
+
+`idle` decides what is left on screen, and it is a property of the **scene**:
+
+- `"freeze"` (default) — the last frame stays. Right when every frame is a
+  composed image: a lit interior, a landscape, anything worth looking at still.
+- `"fade"` — the scene dissolves into its `backdrop` and parks on an empty frame.
+  Right when the scene *is* motion — falling rain, streaming stars, a
+  fly-through. Frozen, such a scene is an arbitrary smear of half-drawn objects
+  sitting where the animation ran out; it reads as a hang, not a rest state.
+
+**The two want opposite things from the rate, so only one of them ramps it.** A
+freezing scene coasts down over `_BG_RAMP_DOWN` — the ramp is how it *arrives* at
+the frame it will hold. A dissolving scene keeps full speed and simply goes:
+slowing it as well puts a visible deceleration on screen for the entire fade,
+which is the "it has stopped" reading the fade exists to avoid. Only presence
+ramps for a fade. Once presence hits zero the rate drops outright rather than
+coasting — there is nothing left on screen to witness the change, and a 40s coast
+on an invisible scene is pure battery. The same asymmetry makes resume cheap: the
+rate snaps back to full while the scene is still at zero opacity, so only the
+fade-in is ever seen.
+
+The fade is applied by scaling the `opacity` uniform on its way into the buffer,
+so **a scene needs no shader change to support it** — provided it ends on the
+usual `mix(backdrop, rgb, coverage * opacity)`. A scene that instead *adds* its
+color would park on a visible ghost; test for it.
+
+**Reduced motion is not idleness** and never fades, however a scene is marked:
+the user is still there, and a slow dissolve is exactly the motion the setting
+asks to be rid of, so its rest state is the still frame. That is the one case
+where the two ramps diverge, and the reason the fade is tracked separately from
+the rate.
+
+The web backend runs its scene from `requestAnimationFrame` with no idle logic,
+so nothing there parks and `idle` is inert on web.
 
 ---
 

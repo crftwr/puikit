@@ -117,21 +117,27 @@ class MetalBackground:
         self._pipeline = pipeline
         return True
 
-    def _uniforms(self, width: float, height: float, elapsed: float) -> Any:
-        """Pack ``BackgroundUniforms`` for this frame — see UNIFORM_BYTES."""
+    def _uniforms(self, width: float, height: float, elapsed: float,
+                  fade: float = 1.0) -> Any:
+        """Pack ``BackgroundUniforms`` for this frame — see UNIFORM_BYTES.
+
+        ``fade`` scales the descriptor's own opacity, which is how an idle scene
+        that declares ``idle="fade"`` dissolves away: every scene mixes its colour
+        over the ``backdrop`` by this uniform, so 0 renders the bare backdrop.
+        """
         shader = self._shader
         buf = ctypes.create_string_buffer(UNIFORM_BYTES)
         f = (ctypes.c_float * (UNIFORM_BYTES // 4)).from_buffer(buf)
         f[0], f[1] = float(width), float(height)
         f[2] = float(elapsed) * float(getattr(shader, "speed", 1.0))
-        f[3] = float(getattr(shader, "opacity", 1.0))
+        f[3] = float(getattr(shader, "opacity", 1.0)) * float(fade)
         f[4:8] = _rgba(getattr(shader, "ink", None), 0.85)
         f[8:12] = _rgba(getattr(shader, "backdrop", None), 0.08)
         return self._device.newBufferWithBytes_length_options_(
             bytes(buf), UNIFORM_BYTES, 0)
 
     def _encode(self, texture: Any, width: float, height: float,
-                elapsed: float) -> Any:
+                elapsed: float, fade: float = 1.0) -> Any:
         """Encode the single fullscreen draw into a command buffer (not committed)."""
         clear = _rgba(getattr(self._shader, "backdrop", None), 0.08)
         descriptor = Metal.MTLRenderPassDescriptor.renderPassDescriptor()
@@ -145,13 +151,13 @@ class MetalBackground:
         encoder = command.renderCommandEncoderWithDescriptor_(descriptor)
         encoder.setRenderPipelineState_(self._pipeline)
         encoder.setFragmentBuffer_offset_atIndex_(
-            self._uniforms(width, height, elapsed), 0, 0)
+            self._uniforms(width, height, elapsed, fade), 0, 0)
         encoder.drawPrimitives_vertexStart_vertexCount_(
             Metal.MTLPrimitiveTypeTriangle, 0, 3)
         encoder.endEncoding()
         return command
 
-    def render_to_layer(self, layer: Any, elapsed: float) -> bool:
+    def render_to_layer(self, layer: Any, elapsed: float, fade: float = 1.0) -> bool:
         """Draw one frame into ``layer``'s next drawable and present it.
 
         Returns False when there is nothing to draw or the layer has no drawable
@@ -164,12 +170,14 @@ class MetalBackground:
         if drawable is None:
             return False
         size = layer.drawableSize()
-        command = self._encode(drawable.texture(), size.width, size.height, elapsed)
+        command = self._encode(drawable.texture(), size.width, size.height,
+                               elapsed, fade)
         command.presentDrawable_(drawable)
         command.commit()
         return True
 
-    def render_to_texture(self, width: int, height: int, elapsed: float) -> Any:
+    def render_to_texture(self, width: int, height: int, elapsed: float,
+                          fade: float = 1.0) -> Any:
         """Draw one frame into a fresh offscreen texture and return it, or ``None``.
 
         The window-free path: same pipeline, same uniforms, a texture instead of a
@@ -184,7 +192,7 @@ class MetalBackground:
         descriptor.setUsage_(Metal.MTLTextureUsageRenderTarget
                              | Metal.MTLTextureUsageShaderRead)
         texture = self._device.newTextureWithDescriptor_(descriptor)
-        command = self._encode(texture, width, height, elapsed)
+        command = self._encode(texture, width, height, elapsed, fade)
         command.commit()
         command.waitUntilCompleted()
         return texture

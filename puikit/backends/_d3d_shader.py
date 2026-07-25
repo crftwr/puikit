@@ -369,18 +369,23 @@ class D3DShaderBackground:
 
     # --- rendering ---------------------------------------------------------
 
-    def render_to_texture(self, width: int, height: int, elapsed: float) -> Any:
+    def render_to_texture(self, width: int, height: int, elapsed: float,
+                          fade: float = 1.0) -> Any:
         """Draw one frame into the (recreated-on-resize) offscreen texture and
         return its ``ComPtr``, or ``None`` when there is nothing to draw. The
         texture is owned by this object and reused across frames — the caller must
-        not release it."""
+        not release it.
+
+        ``fade`` scales the descriptor's opacity (see ``_write_uniforms``), which
+        is how a scene declaring ``idle="fade"`` dissolves away when the app parks
+        it."""
         if self._ps is None or not self.available:
             return None
         width, height = max(1, int(width)), max(1, int(height))
         if not self._ensure_texture(width, height):
             return None
         ctx = self._ctx
-        self._write_uniforms(width, height, elapsed)
+        self._write_uniforms(width, height, elapsed, fade)
 
         clear = _rgba(getattr(self._shader, "backdrop", None), 0.08)
         clear_arr = (ctypes.c_float * 4)(*clear)
@@ -409,12 +414,13 @@ class D3DShaderBackground:
         ctx.call(_IDX_CTX_DRAW, None, [ctypes.c_uint32, ctypes.c_uint32], 3, 0)
         return self._tex
 
-    def render_pixels(self, width: int, height: int, elapsed: float) -> "bytearray | None":
+    def render_pixels(self, width: int, height: int, elapsed: float,
+                      fade: float = 1.0) -> "bytearray | None":
         """Render one frame and read it back as BGRA bytes (top row first). The
         window-free path used by the tests; copies the render texture into a
         staging texture, maps it, and returns a tightly-packed ``width*height*4``
         buffer."""
-        tex = self.render_to_texture(width, height, elapsed)
+        tex = self.render_to_texture(width, height, elapsed, fade)
         if tex is None:
             return None
         width, height = max(1, int(width)), max(1, int(height))
@@ -524,12 +530,15 @@ class D3DShaderBackground:
         self._tex_size = (width, height)
         return True
 
-    def _write_uniforms(self, width: float, height: float, elapsed: float) -> None:
+    def _write_uniforms(self, width: float, height: float, elapsed: float,
+                        fade: float = 1.0) -> None:
         shader = self._shader
         buf = (ctypes.c_float * (UNIFORM_BYTES // 4))()
         buf[0], buf[1] = float(width), float(height)
         buf[2] = float(elapsed) * float(getattr(shader, "speed", 1.0))
-        buf[3] = float(getattr(shader, "opacity", 1.0))
+        # Every scene mixes its colour over the backdrop by the opacity uniform, so
+        # scaling it here is all an idle fade-out needs from the shader side.
+        buf[3] = float(getattr(shader, "opacity", 1.0)) * float(fade)
         buf[4:8] = _rgba(getattr(shader, "ink", None), 0.85)
         buf[8:12] = _rgba(getattr(shader, "backdrop", None), 0.08)
         # UpdateSubresource writes the whole buffer (no box), the simplest of the

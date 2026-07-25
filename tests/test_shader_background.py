@@ -63,6 +63,17 @@ class TestDescriptor:
         assert s.speed == 1.0 and s.opacity == 1.0
         assert s.ink is None and s.backdrop is None
         assert not s.is_noop
+        # Holding the last frame is the default rest state: it is what every
+        # backend did before the field existed, and it is right for any scene whose
+        # frames are composed images rather than pure motion.
+        assert s.idle == "freeze" and not s.fades_when_idle
+
+    def test_idle_fade_is_opt_in_per_scene(self):
+        assert Shader(source="x", idle="fade").fades_when_idle
+
+    def test_an_unknown_idle_mode_holds_the_frame(self):
+        # A typo costs the fade, not the background.
+        assert Shader(source="x", idle="dissolve").idle == "freeze"
 
     def test_opacity_is_clamped(self):
         assert Shader(source="x", opacity=5.0).opacity == 1.0
@@ -95,7 +106,7 @@ class TestDescriptor:
         assert not isinstance(Shader(source="x"), Wallpaper)
         assert {f.name for f in dataclasses.fields(Shader)} == {
             "source", "speed", "opacity", "ink", "backdrop", "resolution_scale",
-            "source_hlsl", "source_glsl"}
+            "source_hlsl", "source_glsl", "idle"}
 
     def test_resolution_scale_is_clamped_above_zero(self):
         # Zero would ask for a zero-sized drawable, which is an error rather than

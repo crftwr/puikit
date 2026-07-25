@@ -226,6 +226,19 @@ _DEFAULT_BG = (24, 24, 24)
 #: spans rather than switching: the scene visibly coasts to a halt and glides back
 #: up. Resuming is quicker than stopping so input feels answered, and both ends of
 #: each ramp are smoothed (see ``_smoothstep``) so the speed never changes abruptly.
+#:
+#: What the scene comes to rest *as* is the scene's own call (``Shader.idle``): it
+#: either holds its last frame or dissolves away to the backdrop. A scene that is
+#: nothing but motion has no frame worth freezing on, so it asks to fade.
+#:
+#: The two rest states want opposite things from the rate, which is why they are
+#: separate rules rather than one shared ramp. A *freezing* scene rides the
+#: coast-down ramp below, because the ramp is how it arrives at the frame it will
+#: hold. A *dissolving* scene keeps full speed and simply goes: slowing it as well
+#: would put a visible deceleration on screen for the whole fade, which is the
+#: "it stopped" reading the fade exists to avoid. Its presence ramp (``_bg_fade``)
+#: uses these same spans; its rate does not ramp at all.
+#:
 #: Seconds of no input before the animation starts slowing.
 _BG_IDLE_TIMEOUT = 15.0
 #: Seconds the coast-down and the spin-up take. Long on purpose: at these spans the
@@ -235,9 +248,11 @@ _BG_IDLE_TIMEOUT = 15.0
 #: — parking is deferred, not skipped.
 _BG_RAMP_DOWN = 40.0
 _BG_RAMP_UP = 15.0
-#: Below this rate the scene is close enough to still to be parked outright — the
-#: remaining motion is imperceptible and not worth a 60Hz timer.
-_BG_RATE_FLOOR = 0.02
+#: How many frames the tick will retry a final frame the compositor withheld a
+#: drawable for before parking anyway. Half a second: long enough to outlast a
+#: resize or a moment of occlusion, short enough that a window which can never
+#: present does not hold the frame timer open on the strength of one lost frame.
+_BG_PARK_RETRIES = 30
 
 #: NSView autoresizing masks (AppKit constants, spelled out so the import block
 #: does not have to carry two more names): the UI view tracks its container's size.
@@ -1220,6 +1235,16 @@ class MacOSBackend(Backend):
         # Current speed, 0..1, eased between by _background_tick; and whether the
         # tick is registered (False once parked, until _dispatch re-arms it).
         self._bg_rate: float = 1.0
+        # How present the scene is, 0..1, on its own ramp — 1 unless the scene
+        # declares idle="fade" and the app has gone idle, in which case it eases to
+        # 0 and the scene dissolves into its backdrop instead of freezing. Separate
+        # from _bg_rate because the two diverge under reduced motion, whose rest
+        # state is a still frame at full presence.
+        self._bg_fade: float = 1.0
+        # Consecutive settled frames the compositor withheld a drawable for, so the
+        # tick does not park on a frame that never reached the layer (see
+        # _BG_PARK_RETRIES).
+        self._bg_park_retries: int = 0
         self._bg_running: bool = False
         self._bg_last_tick: float = 0.0
         # Loaded NSImage per wallpaper path, so the file is decoded once (not every
@@ -1985,21 +2010,36 @@ class MacOSBackend(Backend):
                       "segs": 0, "paths": 0, "ui": 0,
                       "t0": time.perf_counter()})
 
-    def _render_shader(self, bg: Any, now: float) -> None:
-        """Draw one frame of the shader background onto its GPU layer.
+    def _render_shader(self, bg: Any, now: float) -> bool:
+        """Draw one frame of the shader background onto its GPU layer. Returns
+        whether the frame actually reached the layer.
 
         Called from the render pass so the GPU frame is produced in step with the
         UI frame that composites over it, rather than on a timer of its own (which
         would let the two drift and tear). The whole cost here is packing 64 bytes
         of uniforms and encoding a three-vertex draw — it does not scale with what
         the shader actually paints, which is the entire reason this kind exists.
+
+        The eased fade scales the scene's opacity uniform, so a scene that
+        dissolves when idle needs nothing of the shader itself: every scene already
+        mixes its colour over the backdrop by that uniform, and 0 leaves the bare
+        backdrop.
+
+        The return value matters only on the last frame before parking (see
+        ``_background_tick``): the compositor can withhold a drawable while the
+        window is occluded or mid-resize, and parking on a *skipped* final frame
+        would leave the layer holding the frame before it — for a fading scene,
+        the one still showing the scene. No layer at all counts as drawn: there is
+        nothing on screen to be left stale.
         """
         if self._metal is None or self._metal_layer is None:
-            return
+            return True
         mark = time.perf_counter() if _BG_PROFILE else 0.0
-        self._metal.render_to_layer(self._metal_layer, self._bg_clock)
+        drawn = self._metal.render_to_layer(self._metal_layer, self._bg_clock,
+                                            _smoothstep(self._bg_fade))
         if _BG_PROFILE:
             self._bg_profile_tick(time.perf_counter() - mark)
+        return drawn
 
     def _render_wallpaper(self, bg: Any) -> None:
         """Draw the wallpaper image under the display list, scaled into the live
@@ -2787,10 +2827,12 @@ class MacOSBackend(Backend):
         self._background = None if (background is None or background.is_noop) else background
         if isinstance(self._background, Shader):
             # A new background starts from the beginning of its own clock, at full
-            # rate — switching theme is itself user activity, so it should not
-            # arrive mid-coast.
+            # rate and fully present — switching theme is itself user activity, so
+            # it should not arrive mid-coast or half faded out.
             self._bg_clock = 0.0
             self._bg_rate = 1.0
+            self._bg_fade = 1.0
+            self._bg_park_retries = 0
             self._bg_running = False
             self._ensure_background_ticker()
         # A shader draws on the GPU into its own layer beneath the UI, so it needs
@@ -2901,56 +2943,115 @@ class MacOSBackend(Backend):
         dt = min(max(0.0, now - self._bg_last_tick), 0.25)
         self._bg_last_tick = now
 
-        self._bg_rate = _approach(self._bg_rate, self._bg_target(now), dt,
+        fade_target = self._bg_fade_target(now)
+        self._bg_fade = _approach(self._bg_fade, fade_target, dt,
                                   _BG_RAMP_UP, _BG_RAMP_DOWN)
+
+        if self._bg_dissolves:
+            # A dissolving scene does **not** also decelerate. Fading and slowing
+            # are two gestures at once, and the deceleration is on screen for the
+            # whole 40s of the fade — which is precisely the "it has stopped"
+            # reading the fade exists to avoid. So the scene keeps its speed and
+            # simply goes.
+            #
+            # And once the fade reaches zero there is nothing left on screen to
+            # witness a rate change, so the rate drops outright instead of coasting:
+            # a 40s coast on an invisible scene would be pure battery, and the
+            # snap back to full on resume is equally unobservable at zero opacity.
+            self._bg_rate = 1.0 if self._bg_fade > 0.0 else 0.0
+        else:
+            self._bg_rate = _approach(self._bg_rate, self._bg_target(now), dt,
+                                      _BG_RAMP_UP, _BG_RAMP_DOWN)
         eased = _smoothstep(self._bg_rate)
         # The scene's clock advances only by what was actually animated, so it
         # never jumps: park for ten minutes and it resumes exactly where it
         # stopped, rather than teleporting ten minutes into the scene.
         self._bg_clock += dt * eased
 
-        if eased <= _BG_RATE_FLOOR and self._bg_rate <= 0.0:
-            # Fully coasted: drop the callback so the frame timer can fall back to
-            # the idle rate (or stop). The last frame drawn stays on screen — a
-            # shader's layer keeps its last drawable, a segment scene its last
-            # paint — so parking freezes the scene rather than clearing it.
-            # _dispatch re-arms on the next input.
-            self._bg_running = False
-            return False
+        # A shader owns its own layer *behind* the UI, so advancing it does not
+        # touch a single UI pixel — draw straight into that layer and leave the
+        # view alone. Marking the view dirty instead would repaint the entire file
+        # manager 60 times a second purely to move a background, which measured
+        # ~8ms/frame of pure waste.
+        #
+        # Drawn *before* the park check below, unlike the rate-only version this
+        # replaces: the frame that stays on screen has to be the settled one, and
+        # for a fading scene that is the empty frame, not the last one with the
+        # scene still in it.
+        drawn = self._render_shader(background, now)
 
-        if isinstance(background, Shader):
-            # A shader owns its own layer *behind* the UI, so advancing it does not
-            # touch a single UI pixel — draw straight into that layer and leave the
-            # view alone. Marking the view dirty instead (as the segment kinds must)
-            # would repaint the entire file manager 60 times a second purely to move
-            # a background, which measured ~8ms/frame of pure waste.
-            self._render_shader(background, now)
-        elif self._view is not None:
-            # A segment scene is drawn *in* the UI's render pass, so it can only
-            # advance by repainting the view.
-            self._view.setNeedsDisplay_(True)
+        if self._bg_rate <= 0.0 and self._bg_fade == fade_target:
+            # Fully coasted and fully resolved: drop the callback so the frame
+            # timer can fall back to the idle rate (or stop). The frame just drawn
+            # stays on screen — the shader's layer keeps its last drawable — so
+            # parking leaves either the frozen scene or the bare backdrop,
+            # whichever the scene asked for. _dispatch re-arms on the next input.
+            #
+            # A frame the compositor refused a drawable for is retried rather than
+            # parked on, since the layer would keep the frame before it. Bounded,
+            # because a window that can never get a drawable must not hold the
+            # timer open forever — the point of parking is the battery.
+            if drawn or self._bg_park_retries >= _BG_PARK_RETRIES:
+                self._bg_running = False
+                return False
+            self._bg_park_retries += 1
+            return True
+        self._bg_park_retries = 0
         return True
 
+    def _bg_user_active(self, now: float) -> bool:
+        """Whether the app is being *used*: the window holds focus and input was
+        recent. An animation the user cannot see (another app is front) or has
+        walked away from is pure battery drain. Mirrors ``_roll_user_active``."""
+        window = self._window
+        if window is not None and not window.isKeyWindow():
+            return False
+        return (now - self._last_input_time) < _BG_IDLE_TIMEOUT
+
+    @property
+    def _bg_dissolves(self) -> bool:
+        """True when the active scene answers an idle park by dissolving away
+        rather than freezing (``Shader.idle == "fade"``), and reduced motion is not
+        overriding that. Decides which of the two rate rules ``_background_tick``
+        follows — the coast-down ramp, or full speed until gone."""
+        background = self._background
+        return (isinstance(background, Shader) and background.fades_when_idle
+                and not self.reduced_motion)
+
     def _bg_target(self, now: float) -> float:
-        """The rate the background should be heading toward: full while the app is
-        being used, zero once it is not.
+        """The rate a *freezing* scene should be heading toward: full while the app
+        is being used, zero once it is not.
 
-        "Being used" is the window holding focus *and* recent input — an animation
-        the user cannot see (another app is front) or has walked away from is pure
-        battery drain. Mirrors ``_roll_user_active``.
+        Only consulted when the scene is not dissolving (see ``_bg_dissolves``),
+        because coasting to a halt is what a freeze resolves *to* — the ramp is
+        there so the last frame is arrived at rather than cut to. A dissolving
+        scene has no such frame to arrive at and keeps full speed instead.
 
-        Reduced motion targets zero for the same reason idleness does, and reuses
-        the same ramp: the scene *decelerates* to a stop and holds its last frame
-        as a still backdrop, rather than cutting out mid-motion. An endlessly
-        looping ambient scene has no "final frame" to resolve to, so its rest
-        state is a still one.
+        Reduced motion targets zero through this same ramp whatever the scene says:
+        it decelerates to a stop and holds its last frame as a still backdrop.
         """
         if self.reduced_motion:
             return 0.0
-        window = self._window
-        if window is not None and not window.isKeyWindow():
-            return 0.0
-        return 1.0 if (now - self._last_input_time) < _BG_IDLE_TIMEOUT else 0.0
+        return 1.0 if self._bg_user_active(now) else 0.0
+
+    def _bg_fade_target(self, now: float) -> float:
+        """How present the scene should be heading toward: full unless it declares
+        ``idle="fade"`` and the app has gone idle, in which case zero.
+
+        Two things deliberately do *not* fade. A scene with the default
+        ``idle="freeze"`` never does — its last frame is a composed image worth
+        keeping. And reduced motion never does, however the scene is marked: it is
+        not idleness, the user is still there, and a slow dissolve is exactly the
+        motion the setting asks to be rid of. Its rest state is the still frame,
+        which is why this rides a separate ramp from ``_bg_target`` rather than
+        reusing the rate.
+        """
+        background = self._background
+        if not isinstance(background, Shader) or not background.fades_when_idle:
+            return 1.0
+        if self.reduced_motion:
+            return 1.0
+        return 1.0 if self._bg_user_active(now) else 0.0
 
     def _on_reduced_motion_changed(self) -> None:
         """Re-arm the ticker so the change is acted on now: turning reduced motion
