@@ -9,8 +9,12 @@ import sys
 
 import pytest
 
-pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows-only backend")
-pytest.importorskip("ctypes.wintypes", reason="Windows-only backend")
+# Skip at COLLECTION time: the imports below reach _win32_native, whose module
+# body calls ctypes.WinDLL, which does not exist off Windows. importorskip on
+# "ctypes.wintypes" does NOT work as a guard here -- that module imports fine on
+# macOS/Linux -- and a pytestmark gates execution, not import.
+if sys.platform != "win32":
+    pytest.skip("Windows-only backend", allow_module_level=True)
 
 import ctypes  # noqa: E402
 

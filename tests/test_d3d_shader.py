@@ -15,8 +15,17 @@ import sys
 
 import pytest
 
-from puikit.background import Shader
-from puikit.backends._d3d_shader import (
+# Skip at COLLECTION time, before the imports below. _d3d_shader pulls in
+# _win32_native, whose module body calls ctypes.WinDLL -- which does not exist
+# off Windows, so merely importing this module raises there. A pytestmark or a
+# skipif decorator would be too late (they gate execution, not import), and the
+# HAVE_D3D_SHADER mark below cannot help either: it is imported by the very line
+# that would crash.
+if sys.platform != "win32":
+    pytest.skip("Windows-only backend", allow_module_level=True)
+
+from puikit.background import Shader  # noqa: E402
+from puikit.backends._d3d_shader import (  # noqa: E402
     HAVE_D3D_SHADER,
     HLSL_PRELUDE,
     SHADER_ENTRY,
