@@ -20,6 +20,12 @@ _SCROLLBAR_THUMB = (150, 150, 150)
 _SCROLLBAR_TRACK = (60, 60, 60)
 #: Lower half block — a horizontal scrollbar's thin bar on a character grid.
 _HBAR_GLYPH = "▄"
+#: Sub-cell resolution of a vertical scrollbar's thumb, and the LOWER {0..8}/8
+#: BLOCK ladder its end caps are drawn with (index k fills the bottom k
+#: eighths). Mirrors CursesBackend, kept local so this headless backend never
+#: imports curses; tests/test_scrollbar_subcell.py pins the two together.
+_SUBCELL = 8
+_LOWER_BLOCKS = " ▁▂▃▄▅▆▇█"
 
 # Per-cell dim opacity, mirroring CursesBackend._DIM_BLEND (kept local so this
 # headless backend never imports curses, which is absent on Windows).
@@ -43,6 +49,27 @@ def _to_gray(c):
 # whole-cell darken right edge (matched thickness; no vertical ▌).
 _SHADOW_STRENGTH = 0.8
 _SHADOW_BOTTOM = "▄"   # U+2584 lower half block (page on bottom, shadow on top via bg)
+
+
+def _vbar_cells(h: int, pos: float, ratio: float, subcell: bool = True):
+    """Per-row cell kinds of a vertical scrollbar — see CursesBackend._vbar_cells,
+    which this mirrors exactly."""
+    unit = _SUBCELL if subcell else 1
+    total = h * unit
+    length = max(unit, round(total * ratio))
+    start = round((total - length) * pos)
+    end = start + length
+    for row in range(h):
+        top = row * unit
+        covered = min(end, top + unit) - max(start, top)
+        if covered <= 0:
+            yield row, "track", 0
+        elif covered >= unit:
+            yield row, "thumb", unit
+        elif start <= top:
+            yield row, "bottom", covered
+        else:
+            yield row, "top", covered
 
 
 class MemoryBackend(Backend):
@@ -355,24 +382,36 @@ class MemoryBackend(Backend):
         surface: tuple[int, int, int] | None = None,
     ) -> None:
         x, y, h = round(x), round(y), round(h)
-        thumb_len = max(1, round(h * ratio))
-        thumb_off = round((h - thumb_len) * pos)
         # Mirror the curses backend. Horizontal: a lower-half-block glyph (bar color
         # on the fg, client surface on the bg so the upper half blends) is a thin
         # bar in a single row. Vertical: base unit background colors fill the full
-        # cell so a stacked thumb has no inter-line gaps.
+        # cell so a stacked thumb body has no inter-line gaps, with the thumb's two
+        # end caps on the lower-block ladder for 1/8-cell precision (the "bottom"
+        # cap inverting fg/bg, there being no upper-block ladder).
         if orientation == "horizontal":
+            thumb_len = max(1, round(h * ratio))
+            thumb_off = round((h - thumb_len) * pos)
             thumb_style = Style(fg=style.fg or _SCROLLBAR_THUMB, bg=surface)
             track_style = Style(fg=style.bg or _SCROLLBAR_TRACK, bg=surface)
             for i in range(h):
                 st = thumb_style if thumb_off <= i < thumb_off + thumb_len else track_style
                 self.draw_text(x + i, y, _HBAR_GLYPH, st)
             return
-        thumb_style = Style(bg=style.fg or _SCROLLBAR_THUMB)
-        track_style = Style(bg=style.bg or _SCROLLBAR_TRACK)
-        for i in range(h):
-            cell = thumb_style if thumb_off <= i < thumb_off + thumb_len else track_style
-            self.draw_text(x, y + i, " ", cell)
+        thumb = style.fg or _SCROLLBAR_THUMB
+        track = style.bg or _SCROLLBAR_TRACK
+        thumb_style = Style(bg=thumb)
+        track_style = Style(bg=track)
+        for row, kind, eighths in _vbar_cells(h, pos, ratio):
+            if kind == "thumb":
+                self.draw_text(x, y + row, " ", thumb_style)
+            elif kind == "track":
+                self.draw_text(x, y + row, " ", track_style)
+            elif kind == "top":
+                self.draw_text(x, y + row, _LOWER_BLOCKS[eighths],
+                               Style(fg=thumb, bg=track))
+            else:
+                self.draw_text(x, y + row, _LOWER_BLOCKS[_SUBCELL - eighths],
+                               Style(fg=track, bg=thumb))
 
     def draw_icon(self, x: int, y: int, icon_name: str, style: Style = DEFAULT_STYLE) -> None:
         self.icon_calls.append((x, y, icon_name))

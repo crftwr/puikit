@@ -187,10 +187,13 @@ how a character grid fakes sub-cell shapes — and the details differ from what 
 
 ### Scrollbars (`draw_scrollbar`)
 
-- **Vertical** bars draw **no glyph at all**. Each cell is a plain space whose
-  *background* carries the thumb or track color (`Style(bg=…)`), so the fill
-  covers the whole cell including the terminal's inter-line spacing. A stacked
-  `█` glyph would leave thin gaps between rows; a background fill is seamless.
+- **Vertical** bars draw no glyph *in the thumb's body*. Each whole cell is a
+  plain space whose *background* carries the thumb or track color (`Style(bg=…)`),
+  so the fill covers the whole cell including the terminal's inter-line spacing.
+  A stacked `█` glyph would leave thin gaps between rows; a background fill is
+  seamless. The thumb's two **end caps** are the exception — they carry a
+  lower-block glyph so the thumb can start and stop mid-cell (see
+  [sub-cell thumb precision](#sub-cell-thumb-precision) below).
 - **Horizontal** bars are a single row, so they *can* use a glyph: the lower-half
   block `▄` (`_HBAR_GLYPH`). The bar color rides the glyph **foreground** (its
   lower half), while the cell **background** is the client surface, so the glyph's
@@ -201,45 +204,53 @@ how a character grid fakes sub-cell shapes — and the details differ from what 
 Colors default to `_SCROLLBAR_THUMB = (150,150,150)` / `_SCROLLBAR_TRACK =
 (60,60,60)`, overridable via the passed `Style`.
 
-#### Idea: sub-cell thumb precision (not yet implemented — revisit later)
+#### Sub-cell thumb precision
 
-Today the vertical thumb snaps to whole cells (`thumb_off` / `thumb_len` are
-`round()`ed), so on a tall list it jumps a full row at a time even though `pos` /
-`ratio` come in as floats. The lower-eighth block glyphs could land the thumb's
-two **end caps** on 1/8-cell boundaries — ~8× finer — while the thumb *body*
-stays the seamless background fill:
+The vertical thumb is positioned and sized in **eighths of a cell**, not whole
+rows, so on a tall list it slides smoothly instead of jumping a full row at a
+time (`pos` / `ratio` arrive as floats; the GUI backends have always rendered
+them at device-pixel precision). The thumb's *body* stays the seamless
+background fill; only its two **end caps** carry a glyph, from the lower-block
+ladder:
 
 ```
 ▁ ▂ ▃ ▄ ▅ ▆ ▇ █   ← LOWER {1..8}/8 BLOCK, filling from the bottom up
 ```
 
-The snag: Unicode has a full *lower*-eighth set but only two *upper* blocks (`▀`
-half, `▔` one-eighth), so a thumb whose **bottom** edge lands mid-cell has no
-matching upper-fill glyph. The fix is foreground/background inversion — the same
-trick `shadow_rect` already uses for its `"top"` cell (a `▄` with the halves
-swapped by color):
+Unicode has a full *lower*-eighth set but only two *upper* blocks (`▀` half, `▔`
+one-eighth), so a thumb whose **bottom** edge lands mid-cell has no matching
+upper-fill glyph. The fix is foreground/background inversion — the same trick
+`shadow_rect` uses for its `"top"` cell (a `▄` with the halves swapped by color):
 
 | Thumb boundary | Glyph | fg | bg | Result |
 |---|---|---|---|---|
-| **Top** cap (thumb covers the lower part of the cell) | lower-eighth of the *thumb* fraction | thumb | track | thumb fills the lower portion |
-| **Bottom** cap (thumb covers the upper part of the cell) | lower-eighth of the *track* remainder | track | thumb | thumb fills the upper portion |
+| **Top** cap (thumb covers the lower part of the cell) | lower block of the *thumb* fraction | thumb | track | thumb fills the lower portion |
+| **Bottom** cap (thumb covers the upper part of the cell) | lower block of the *track* remainder | track | thumb | thumb fills the upper portion |
 
-The horizontal bar has the same option with the **left**-eighth set
-(`▉▊▋▌▍▎▏`) for sub-cell position/length, orthogonal to the `▄` it uses for
-thickness.
+`_vbar_cells(h, pos, ratio, subcell)` does the decomposition — one
+`("track" | "thumb" | "top" | "bottom", eighths)` per row — and
+`draw_scrollbar` only paints what it is told. `MemoryBackend` carries an
+identical copy (it must never import curses); `tests/test_scrollbar_subcell.py`
+asserts the two agree, since every widget test only ever sees the memory one.
 
-Caveats to weigh when we pick this up:
+Where the caveats landed:
 
 - **Ambiguous width.** Block glyphs are East-Asian *Ambiguous*, so a terminal
   that renders them at 2 cells would make a 1-column bar's cap **overflow into
-  the client area**. The current space-fill is immune (a space is unambiguous);
-  this trades that immunity for smoothness (see
-  [the ambiguous-width hazard](#the-ambiguous-width-hazard)).
-- **No color → no inversion.** The bottom-cap trick needs color; fall back to
-  whole-cell rounding on a mono terminal.
-- **Very short thumbs.** If both edges fall in the same cell you'd need a
-  mid-cell-only fill (no such glyph); the existing `max(1, …)` minimum thumb
-  length already avoids that case.
+  the client area** (see [the ambiguous-width
+  hazard](#the-ambiguous-width-hazard)). A pure space fill was immune; this
+  trades that immunity for smoothness — the same bet the horizontal bar and the
+  drop shadow already make with `▄`, and only on the two cap cells.
+- **No color → no inversion.** The bottom cap needs two colors in one cell, so
+  `curses.has_colors() == False` falls back to whole-cell rounding
+  (`subcell=False`), which yields no caps at all.
+- **Very short thumbs.** If both edges fell in the same cell it would need a
+  mid-cell-only fill (no such glyph); the one-cell minimum thumb length
+  (`max(unit, …)`) is what rules that out, so it is load-bearing, not cosmetic.
+
+Still open: the **horizontal** bar remains whole-cell. Sub-cell position there
+would want the **left**-eighth set (`▉▊▋▌▍▎▏`), which is not composable with the
+`▄` it uses for thickness — one glyph cannot carry both.
 
 ### Drop shadow (`shadow_rect`)
 
@@ -283,8 +294,10 @@ This is layer-system geometry, not a per-widget concern: the same fixup serves
 every layer and the shadow, and no widget has to know whether its text happens
 to be Japanese.
 
-The drop shadow and the horizontal scrollbar share the **same** `▄` lower-half
-block — the workhorse glyph for "half a cell" on this backend.
+The drop shadow, the horizontal scrollbar and a vertical thumb's half-cell cap
+all land on the **same** `▄` lower-half block — the workhorse glyph for "half a
+cell" on this backend, and the middle rung of the ladder the caps generalize it
+to.
 
 ---
 

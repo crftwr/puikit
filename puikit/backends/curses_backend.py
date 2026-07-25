@@ -355,6 +355,47 @@ _HBAR_GLYPH = "▄"
 #: shadow_rect): the glyph's fg keeps the page color in the lower half, its bg
 #: shades the upper half (hugging the layer edge).
 _SHADOW_BOTTOM_GLYPH = "▄"
+#: Sub-cell resolution of a vertical scrollbar's thumb, in fractions of a cell.
+#: Eight, because that is how far the lower-block ladder goes.
+_SUBCELL = 8
+#: LOWER {0..8}/8 BLOCK: index k fills the bottom k eighths of the cell (0 = a
+#: plain space, 8 = the full block). The vertical scrollbar's end caps.
+_LOWER_BLOCKS = " ▁▂▃▄▅▆▇█"
+
+
+def _vbar_cells(h: int, pos: float, ratio: float, subcell: bool = True):
+    """Decompose a vertical scrollbar of ``h`` rows into per-row cell kinds.
+
+    Yields ``(row, kind, eighths)`` top to bottom. ``kind`` is "track" or
+    "thumb" for a whole cell of either, or "top"/"bottom" for a partially
+    covered *end cap*, where ``eighths`` is the thumb's share of that cell —
+    "top" means the thumb starts inside the cell and covers its lower part,
+    "bottom" that the thumb ends inside it and covers its upper part.
+
+    Thumb length and offset are computed in eighth-cell units, so the thumb
+    slides in 1/8-row steps instead of snapping a whole row at a time. A cap
+    needs two colors in one cell, so ``subcell=False`` (a terminal without
+    color) falls back to the old whole-cell rounding and yields no caps.
+
+    The one-cell minimum length is what keeps both caps out of the *same* cell:
+    a cell covered only in its middle has no glyph to draw it with.
+    """
+    unit = _SUBCELL if subcell else 1
+    total = h * unit
+    length = max(unit, round(total * ratio))
+    start = round((total - length) * pos)
+    end = start + length
+    for row in range(h):
+        top = row * unit
+        covered = min(end, top + unit) - max(start, top)
+        if covered <= 0:
+            yield row, "track", 0
+        elif covered >= unit:
+            yield row, "thumb", unit
+        elif start <= top:
+            yield row, "bottom", covered
+        else:
+            yield row, "top", covered
 
 
 class CursesBackend(Backend):
@@ -1167,9 +1208,9 @@ class CursesBackend(Backend):
         surface: tuple[int, int, int] | None = None,
     ) -> None:
         x, y, h = round(x), round(y), round(h)
-        thumb_len = max(1, round(h * ratio))
-        thumb_off = round((h - thumb_len) * pos)
         if orientation == "horizontal":
+            thumb_len = max(1, round(h * ratio))
+            thumb_off = round((h - thumb_len) * pos)
             # A horizontal bar is a single row, so a lower-half-block glyph reads
             # as a thin bar (half the cell height) rather than a full cell — and
             # the inter-line gap that rules out block glyphs for a *stacked*
@@ -1182,15 +1223,37 @@ class CursesBackend(Backend):
                 st = thumb_style if thumb_off <= i < thumb_off + thumb_len else track_style
                 self.draw_text(x + i, y, _HBAR_GLYPH, st)
             return
-        # Vertical: paint base unit *background* colors rather than block glyphs:
-        # the background fills the full cell (including the terminal's line
-        # spacing), so a stacked thumb reads as one continuous bar with no gaps,
-        # whereas a stacked `█` glyph would leave inter-line gaps.
-        thumb_style = Style(bg=style.fg or _SCROLLBAR_THUMB)
-        track_style = Style(bg=style.bg or _SCROLLBAR_TRACK)
-        for i in range(h):
-            cell = thumb_style if thumb_off <= i < thumb_off + thumb_len else track_style
-            self.draw_text(x, y + i, " ", cell)
+        # Vertical: the thumb's *body* is painted as base unit background colors
+        # rather than block glyphs — a background fills the full cell (including
+        # the terminal's line spacing), so a stacked body reads as one continuous
+        # bar with no gaps, whereas a stacked `█` glyph would leave inter-line
+        # gaps. Only the two *end caps* carry a glyph, from the lower-block
+        # ladder, so the thumb starts and stops on 1/8-cell boundaries instead of
+        # jumping a whole row at a time (the same "half a cell" trick the drop
+        # shadow's bottom band uses, at eighth resolution — see _vbar_cells).
+        thumb = style.fg or _SCROLLBAR_THUMB
+        track = style.bg or _SCROLLBAR_TRACK
+        thumb_style = Style(bg=thumb)
+        track_style = Style(bg=track)
+        # A cap paints two colors into one cell, so it needs color at all; a mono
+        # terminal falls back to whole-cell rounding rather than draw a block
+        # glyph that could not say which half is the thumb.
+        for row, kind, eighths in _vbar_cells(h, pos, ratio, curses.has_colors()):
+            if kind == "thumb":
+                self.draw_text(x, y + row, " ", thumb_style)
+            elif kind == "track":
+                self.draw_text(x, y + row, " ", track_style)
+            elif kind == "top":
+                # Thumb in the cell's lower part: a lower block of exactly that
+                # many eighths, thumb-colored, over the track.
+                self.draw_text(x, y + row, _LOWER_BLOCKS[eighths],
+                               Style(fg=thumb, bg=track))
+            else:
+                # Thumb in the cell's *upper* part — and Unicode has no matching
+                # upper-block ladder, so the colors invert: a lower block of the
+                # track's remainder, track-colored, over a thumb-colored cell.
+                self.draw_text(x, y + row, _LOWER_BLOCKS[_SUBCELL - eighths],
+                               Style(fg=track, bg=thumb))
 
     def draw_image(
         self, x: int, y: int, path: str, hints: dict[str, Any] | None = None
