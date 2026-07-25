@@ -32,8 +32,8 @@ inner program initiate a system file drag. So `os_drag_drop` sits under *System
 Integration* alongside the native file dialog and system tray — all need a
 native window the terminal denies you — and is `False` for TUI.
 
-This is exactly why the reference predecessor, tfm/ttk, can export files by drag
-only from its native CoreGraphics backend, never from curses.
+This is exactly why XeFM can export files by drag only from its native
+backends, never from curses.
 
 ## Capability mapping
 
@@ -86,7 +86,7 @@ the **source** must then delete the originals. **PuiKit never deletes files.**
 Instead the chosen operation is reported back through `on_complete(op)` once the
 session ends (`op` is `"copy"` / `"move"` / `"link"`, or `"none"` if cancelled),
 and the *app* performs the move and any undo bookkeeping. This keeps the
-consequential deletion in the app layer — where tfm's file-manager logic and
+consequential deletion in the app layer — where xefm's file-manager logic and
 undo already live — rather than buried in the framework.
 
 On macOS this rides the view's `draggingSession:sourceOperationMaskForDraggingContext:`

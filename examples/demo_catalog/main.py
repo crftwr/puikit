@@ -411,7 +411,7 @@ class TruncateView(Widget):
     (keep the end). A dotted guide marks the budget edge; the fitted lines stop
     at it while the dim full text overflows past it.
 
-    The point over TTK: the samples render in a **proportional** font on GUI and
+    The point: the samples render in a **proportional** font on GUI and
     are fitted by their real measured width (`elide(..., measure=ctx.measure_text)`),
     not a column count — so the fit follows the actual glyph advances, kerning and
     all. On TUI the proportional font folds to the grid and `measure_text` returns
@@ -776,7 +776,7 @@ common GitHub-flavored cases.
 ## Inline runs
 
 Mix **bold**, *italic*, ***both***, ~~struck out~~, inline `code`, and a real
-[PuiKit link](https://github.com/crftwr/tfm) in one sentence. Prose uses a
+[PuiKit link](https://github.com/crftwr/puikit) in one sentence. Prose uses a
 proportional font and `code` a monospace one on GUI; both fold to the one grid
 font (bold / italic kept) on a terminal.
 
@@ -840,7 +840,7 @@ def greet(name):
 [Back to top](#markdownview) · scroll with the arrow / page keys, Home / End,
 or the mouse wheel.
 
-[repo]: https://github.com/crftwr/tfm
+[repo]: https://github.com/crftwr/puikit
 """
 
 

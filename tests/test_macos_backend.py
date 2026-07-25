@@ -311,7 +311,7 @@ def _patch_nstimer(monkeypatch):
 
 
 def test_frame_timer_runs_slow_for_idle_pump_only(monkeypatch):
-    # A permanent tick callback (e.g. TFM's filesystem pump) with no animation
+    # A permanent tick callback (e.g. XeFM's filesystem pump) with no animation
     # keeps the timer alive but at the slow idle rate, not 60fps.
     _patch_nstimer(monkeypatch)
     backend = MacOSBackend()

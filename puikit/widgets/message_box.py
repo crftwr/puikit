@@ -138,7 +138,7 @@ class MessageBox:
         # base-unit rows read as an airy, over-tall header, so the header is sized
         # to the measured title line — an equal pad above/below its line box, thin
         # and balanced — with the message a uniform gap below the rule. (Kept in
-        # step with tfm_dialog_geometry.draw_title_bar and the size calc below.)
+        # step with xefm.dialog_geometry.draw_title_bar and the size calc below.)
         tight = ctx.vector_shapes
         if tight:
             head_y = _GUI_TITLE_PAD

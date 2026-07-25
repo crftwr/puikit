@@ -119,7 +119,7 @@ _CODE_PAD = 1.0
 
 # Syntax palette (VS Code Dark+ hues, tuned to read on the code block's fill) and
 # the neutral default when a token has no category. Categories mirror the seven
-# TFM uses in its Pygments text viewer (``get_syntax_color`` in ``tfm_colors``):
+# XeFM uses in its Pygments text viewer (``get_syntax_color`` in ``xefm.colors``):
 # keyword / string / comment / number / operator / builtin / name.
 _SYNTAX_DEFAULT_FG: Color = (212, 212, 212)
 _SYNTAX: dict[str, Color] = {
@@ -135,7 +135,7 @@ _SYNTAX: dict[str, Color] = {
 
 def _syntax_color(token_type) -> Color | None:
     """Map a Pygments token type to a palette color, by the same substring test
-    TFM's viewer uses so the two stay visually in step. None → the block default."""
+    XeFM's viewer uses so the two stay visually in step. None → the block default."""
     s = str(token_type)
     if "Keyword" in s:
         return _SYNTAX["keyword"]
@@ -843,7 +843,7 @@ def _wrap_spans(spans: list[Span], width: float, measure, *, word: bool) -> list
 # Search-match background = the surface blended toward amber, firmer for the
 # current match — derived from the surface (not a fixed dark constant) so the
 # highlight tracks the theme (a dark wash on a dark surface, a pale one on a
-# light one), matching TFM's text-viewer isearch.
+# light one), matching XeFM's text-viewer isearch.
 _SEARCH_HUE: Color = (200, 175, 55)
 _SEARCH_TINT = 0.24
 _SEARCH_CURRENT_TINT = 0.46
@@ -977,7 +977,7 @@ class MarkdownView(Widget):
         # Incremental search (driven by a host viewer's search bar; see the
         # ``search_*`` methods). The pattern highlights every occurrence in the
         # visible rows; the navigable match set is the display rows that contain
-        # it (the row is the unit, mirroring TFM's text-viewer isearch, which
+        # it (the row is the unit, mirroring XeFM's text-viewer isearch, which
         # walks matching lines). ``_search_token`` records the (pattern, wrap
         # width) the set was built at so a resize that re-wraps the document
         # rebuilds it; ``_search_origin`` is the pre-search scroll, restored on
@@ -2031,7 +2031,7 @@ class MarkdownView(Widget):
 
     # --- incremental search ---------------------------------------------------
     #
-    # A host viewer (TFM's modal file viewer) drives these from its shared search
+    # A host viewer (XeFM's modal file viewer) drives these from its shared search
     # bar so the rendered Markdown view gets the same incremental-search UX as the
     # raw text view. Match finding, scroll-to-match and highlighting all need the
     # widget's own (proportional, wrapped) layout, so they live here rather than

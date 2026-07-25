@@ -379,8 +379,8 @@ _WNDPROC_TRAMPOLINE = native.WNDPROC(_global_wndproc)
 
 
 #: Resource id of the application icon embedded in the host .exe. Resource
-#: compilers assign id 1 to the first ICON in a script (as TFM's does:
-#: ``1 ICON "TFM.ico"``), and it is the de-facto convention for the app icon.
+#: compilers assign id 1 to the first ICON in a script (as XeFM's does:
+#: ``1 ICON "XeFM.ico"``), and it is the de-facto convention for the app icon.
 _APP_ICON_RESOURCE_ID = 1
 
 
@@ -678,7 +678,7 @@ class WindowsBackend(Backend):
         # Per-monitor DPI awareness must be set before the first window is
         # created; otherwise Windows bitmap-stretches a 96-DPI surface and text
         # blurs on any display scaled above 100%. Setting it here (rather than
-        # in a manifest) covers both the bundled app and plain `python tfm.py`.
+        # in a manifest) covers both the bundled app and plain `python -m xefm`.
         native.set_process_dpi_awareness()
         _register_window_class()
 

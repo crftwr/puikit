@@ -6,7 +6,7 @@ PuiKit is a capability-based Python UI framework that supports both TUI (termina
 
 The goal is to build apps and widgets once, and run them on multiple backends without splitting implementations.
 
-First user: [tfm](https://github.com/shimomut/tfm) — a dual-pane TUI/GUI file manager.
+First user: [xefm](https://github.com/shimomut/xefm) — a dual-pane TUI/GUI file manager.
 
 **This document holds the principles and policies.** The detail lives in
 [`docs/`](docs/README.md) — one guide per system — and in
@@ -333,7 +333,7 @@ PuiKit is primarily Python, but backends may include compiled components in othe
 
 ## Development Policy
 
-- Use tfm as the first real user; validate the design by migrating it to PuiKit incrementally
+- Use xefm as the first real user; validate the design by migrating it to PuiKit incrementally
 - Widget tests should be written in a way that runs identically on TUI and GUI
 - Package structure should be ready for PyPI publication from the start
 - New subsystem depth goes in `docs/`, not this file; keep the axes above at

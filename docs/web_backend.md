@@ -299,7 +299,7 @@ background), just as a missing `source_hlsl` does on Windows.
   strokes, and framed dialogs never dissolve, so the UI stays legible.
 
 `examples/background_shader/main.py --backend web` is the end-to-end demo (it
-ships all three dialects). TFM's themed scenes ship GLSL too — generated from
+ships all three dialects). XeFM's themed scenes ship GLSL too — generated from
 their MSL by `tools/generate_shader_glsl.py` and validated with
 `glslangValidator` — so its animated backgrounds render on web.
 
@@ -316,7 +316,7 @@ move. `reduced_motion` drops `roll`/`flicker` (the backend sends
 `PostEffect.without_motion()`), matching macOS/Windows. `bloom` is an
 approximation (a ring-sampled bright-pass halo, not the native Core Image /
 Direct2D blur) and `curvature` (barrel distortion) and the text-only
-`drop_shadow` are not yet applied. TFM's **Phosphor** theme pairs its
+`drop_shadow` are not yet applied. XeFM's **Phosphor** theme pairs its
 `post_effect: 'crt'` with the rain shader background, so both render together on
 web (`make run-web`, switch to Phosphor).
 

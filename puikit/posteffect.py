@@ -115,7 +115,7 @@ class PostEffect:
 
 #: The default CRT screen effect — a soft phosphor glow: a tight bloom halo on
 #: bright text, subtle scanlines, a light vignette, and an occasional rolling
-#: band. No ``tint`` — pair it with a monochrome theme (e.g. TFM's phosphor-green
+#: band. No ``tint`` — pair it with a monochrome theme (e.g. XeFM's phosphor-green
 #: "Phosphor") and it reinforces that hue, or call ``.with_tint(color)`` to force
 #: one. Values are the tuned defaults; override any of them per-theme in config.
 CRT = PostEffect(

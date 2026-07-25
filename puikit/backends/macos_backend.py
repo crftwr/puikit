@@ -724,8 +724,7 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
     characters arrive via insertText: (delivered as KEY events with a char),
     in-progress composition arrives via setMarkedText: (delivered as
     IME_COMPOSITION events), and non-text commands (arrows, enter, ...) arrive
-    via doCommandBySelector: (re-translated from the current key event). This
-    mirrors the ttk CoreGraphics backend's input pipeline."""
+    via doCommandBySelector: (re-translated from the current key event)."""
 
     backend = None  # set right after alloc/init
 
@@ -1714,7 +1713,7 @@ class MacOSBackend(Backend):
         AppHelper.callAfter(callback)
 
     #: Frame-timer rates. A live animation wants smooth 60fps; a permanent tick
-    #: callback with no animation (e.g. TFM's idle filesystem-monitoring pump)
+    #: callback with no animation (e.g. XeFM's idle filesystem-monitoring pump)
     #: only polls queues, so it runs far slower — 10Hz keeps reload/loading
     #: latency imperceptible while cutting idle CPU wakeups 6x, letting macOS
     #: coalesce timers and nap.

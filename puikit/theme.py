@@ -100,7 +100,7 @@ class Theme:
     # App-specific themed values that are not part of the general control palette.
     # A host app stashes its own semantic colors here — keyed by name — so a widget
     # can read them off ``ctx.theme`` and they travel and re-derive with the theme
-    # like every other field (e.g. TFM keeps its file-pane ``directory`` foreground,
+    # like every other field (e.g. XeFM keeps its file-pane ``directory`` foreground,
     # its i-search ``isearch_match`` base hue, and its text-viewer ``syntax`` token
     # palette here). Empty for a theme that names none; ``derive_theme`` passes an
     # ``extras=`` keyword straight through.

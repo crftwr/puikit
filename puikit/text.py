@@ -234,7 +234,7 @@ def elide(
     it defaults to ``display_width`` (grid columns, for monospace / TUI), but a
     pixel backend passes ``DrawContext.measure_text`` so **proportional fonts fit
     by real rendered width**, not column count — the same seam ``wrap_text`` uses,
-    and the reason this is more than TTK's monospace-only truncation. The ellipsis
+    and the reason this is more than a monospace-only truncation. The ellipsis
     is measured in the same unit, so the result never exceeds ``max_width``.
 
     Text already within ``max_width`` is returned unchanged; glyph boundaries are

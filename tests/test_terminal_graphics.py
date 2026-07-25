@@ -416,7 +416,7 @@ def test_curses_without_a_protocol_keeps_images_off(monkeypatch):
 
 
 def test_images_go_to_the_real_terminal_not_a_redirected_stdout(monkeypatch, quadrants):
-    # THE reason images never appeared in iTerm2: a host app (TFM) replaces
+    # THE reason images never appeared in iTerm2: a host app (XeFM) replaces
     # sys.stdout with a log-capture shim that never forwards to the tty — and an
     # image escape has no newline, so a line-buffering shim holds it forever. The
     # backend must write to the real terminal (captured as _raw_out from
@@ -436,7 +436,7 @@ def test_images_go_to_the_real_terminal_not_a_redirected_stdout(monkeypatch, qua
     backend._cell_px = (8, 16)
 
     # A host redirects sys.stdout AFTER the backend was built, to a sink that
-    # never reaches the terminal (like TFM's LogCapture).
+    # never reaches the terminal (like XeFM's LogCapture).
     swallowed: list[str] = []
 
     class _Shim:

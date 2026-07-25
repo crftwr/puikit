@@ -10,7 +10,7 @@ events (the macOS backend routes ``insertText:`` through them); in-progress
 string, which is drawn underlined at the cursor without touching the buffer
 until it commits. While focused the field calls ``panel.request_text_input``
 with the on-screen caret position so the backend can place the candidate
-window next to it (the ttk pattern: ``firstRectForCharacterRange``).
+window next to it (AppKit asks for it via ``firstRectForCharacterRange``).
 """
 
 from __future__ import annotations

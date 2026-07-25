@@ -390,7 +390,7 @@ class CursesBackend(Backend):
         )
         # Where out-of-band terminal control (mouse tracking, pointer shape,
         # inline images) is written. It must reach the real terminal even when
-        # the host app has replaced ``sys.stdout`` — TFM routes stdout to its log
+        # the host app has replaced ``sys.stdout`` — XeFM routes stdout to its log
         # pane through a capture shim that never forwards to the tty, so an escape
         # sequence written via ``sys.stdout`` would be swallowed (worse, an image
         # escape has no newline, so the line-buffering shim holds it forever and
@@ -500,7 +500,7 @@ class CursesBackend(Backend):
         # unresponsive. Shrink the window to 100ms before initscr() reads it, so
         # ESC reports promptly while real sequences still assemble (100ms stays
         # safe over slower links, e.g. SSH, where a sequence can arrive split;
-        # matches the tfm reference implementation).
+        # matches the xefm reference implementation).
         os.environ.setdefault("ESCDELAY", "100")
         self._stdscr = curses.initscr()
         # Belt-and-suspenders for ncurses builds that ignore the env var: apply

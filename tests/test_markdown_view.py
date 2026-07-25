@@ -775,7 +775,7 @@ def test_anchor_link_scrolls_to_heading():
 
 # --- incremental search -------------------------------------------------------
 #
-# A host viewer (TFM's file viewer) drives these; the widget owns match finding,
+# A host viewer (XeFM's file viewer) drives these; the widget owns match finding,
 # scroll-to-match and highlighting over its own wrapped layout. On the plain grid
 # backend every row is one unit tall, so a match at display row i sits at
 # offset i, which the offset assertions below rely on.

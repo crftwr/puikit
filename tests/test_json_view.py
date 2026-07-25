@@ -29,7 +29,7 @@ def _key(name, mods=frozenset()):
 
 def _data():
     return {
-        "name": "tfm",
+        "name": "xefm",
         "tags": ["tui", "files"],
         "nested": {"ok": True, "count": 42, "z": None},
     }
@@ -40,7 +40,7 @@ def test_top_level_keys_render_with_markers(backend):
     panel.add(JsonView(_data()), x=0, y=0, w=40, h=14)
     panel.render()
     snap = backend.snapshot()
-    assert snap[0].startswith('  name: "tfm"')      # scalar leaf, no expander
+    assert snap[0].startswith('  name: "xefm"')     # scalar leaf, no expander
     assert any(r.startswith("▸ tags: [2]") for r in snap)     # collapsed array
     assert any(r.startswith("▸ nested: {3}") for r in snap)   # collapsed object
 
@@ -73,7 +73,7 @@ def test_branches_draw_vector_chevrons_not_glyphs():
     assert sorted(call[4] for call in be.chevron_calls) == [False, True]
     text = "\n".join(be.snapshot())
     assert "▸" not in text and "▾" not in text   # the glyph is a vector stroke now
-    assert 'name: "tfm"' in text                  # labels still render
+    assert 'name: "xefm"' in text                 # labels still render
 
 
 def test_scalar_document_draws_no_chevron():
@@ -165,7 +165,7 @@ def test_ctrl_c_copies_selected_value(backend):
     panel.add(view, x=0, y=0, w=40, h=14)
     panel.render()
     panel.dispatch_event(_key("c", frozenset({"ctrl"})))   # selected = "name"
-    assert backend.get_clipboard() == '"tfm"'
+    assert backend.get_clipboard() == '"xefm"'
     panel.dispatch_event(_key("down"))                     # select "tags"
     panel.dispatch_event(_key("c", frozenset({"cmd"})))
     assert backend.get_clipboard() == '["tui", "files"]'

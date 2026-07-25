@@ -22,7 +22,7 @@ Which curve to reach for:
 * :func:`ease_out_expo` — a *hard* deceleration: most of the distance is covered
   in the first fifth of the duration, then it glides in. This is the curve that
   reads as "the UI snapped to attention and settled", and it is what a
-  holographic/tactical-HUD look (TFM's Sci-Fi theme) is built on.
+  holographic/tactical-HUD look (XeFM's Sci-Fi theme) is built on.
 * :func:`ease_in_out_quad` — symmetric; for a motion that both starts and ends at
   rest, e.g. something moving between two resting positions.
 * :func:`ease_out_back` — overshoots past the target and settles back. Use

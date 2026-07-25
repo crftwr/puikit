@@ -65,7 +65,7 @@ new widget.
    building teach the framework something — a new capability-fallback path, a
    new intrinsic-sizing case, a drag interaction. If it exercises an axis we
    haven't, that's a point in favor.
-4. **Does the first real user (tfm) need it?** A dual-pane file manager's needs
+4. **Does the first real user (xefm) need it?** A dual-pane file manager's needs
    (a splitter, a multi-column table) outrank speculative widgets.
 5. **Is the new surface area worth the perpetual cost?** Every widget must be
    correct on TUI *and* every GUI backend, forever.
@@ -144,7 +144,7 @@ A draggable divider between two panes.
   the **drag** axis cleanly (`MOUSE_DRAG` → fraction, clamped to per-pane
   minimums). A layout-weight-mutating divider is still worth building later for
   splits declared in `set_layout`; the two can coexist.
-- **Abstraction value:** High and directly tfm-relevant (dual-pane resize); the
+- **Abstraction value:** High and directly xefm-relevant (dual-pane resize); the
   first widget to exercise drag.
 - **Verdict:** Built as a leaf composite. Revisit a layout-level interactive
   divider separately.
@@ -156,8 +156,8 @@ Multi-column rows with headers and per-column widths/alignment.
   open question is whether column intrinsic-sizing/alignment is common enough to
   standardize rather than re-derive per app.
 - **Abstraction value:** High; column intrinsic sizing is a meaty layout case.
-  Directly relevant to tfm's name/size/date file list.
-- **Verdict:** Likely build (tfm needs it), but explore "`ListView` + column
+  Directly relevant to xefm's name/size/date file list.
+- **Verdict:** Likely build (xefm needs it), but explore "`ListView` + column
   layout helper" before a monolithic widget.
 
 #### Tooltip
@@ -234,7 +234,7 @@ carry no spans, so they are not part of a selection.
    a mid-paragraph image *run* (a row as tall as its tallest run) is rare and
    layout-heavy, so it stays deferred.
 2. **Themeable syntax palette.** The seven syntax colors are fixed module
-   constants (VS Code Dark+ hues, mirroring TFM's `tfm_colors` categories); lift
+   constants (VS Code Dark+ hues, mirroring XeFM's `xefm.colors` categories); lift
    them onto `Theme` if a light-surface code block ever needs different hues.
 
 *Shipped since the initial cut* (all GitHub-rendered, so in scope): GFM tables,
@@ -268,7 +268,7 @@ resolved entries in §3); `MarkdownView` carries open future work in §3.3.
   together (the determinate `ProgressBar` could then fold into a
   `Slider(readonly=True)` mode). `BusyIndicator` already covers the `animation`
   fallback story.
-- **To unblock tfm:** the dual-pane resize is covered by the new **Splitter**;
+- **To unblock xefm:** the dual-pane resize is covered by the new **Splitter**;
   prioritize the **Table** (or a `ListView` column helper) next, and revisit a
   *layout-level* interactive divider for splits declared in `set_layout`.
 - **Resist adding:** SpinBox, Tooltip, Accordion — each is reachable by
