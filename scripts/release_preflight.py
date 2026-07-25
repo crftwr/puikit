@@ -17,6 +17,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+from _version_source import INIT, read_version
+
 PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 
 # X.Y.Z core, with an optional PEP 440-ish pre/post/dev suffix (e.g. 1.2.0rc1).
@@ -46,11 +48,25 @@ def main() -> int:
         problems.append(f"VERSION '{new}' is not X.Y.Z (optionally +rc1/.post1/…)")
 
     # 2. New version is strictly ahead of the current one (no re-release / rollback).
-    current = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]["version"]
+    #    Read from the single source of truth, puikit/__init__.py's __version__.
+    current = read_version()
     if new == current:
-        problems.append(f"VERSION {new} equals the current version in pyproject.toml")
+        problems.append(f"VERSION {new} equals the current version in {INIT.name}")
     elif core(new) < core(current):
         problems.append(f"VERSION {new} is older than the current {current}")
+
+    # 2b. pyproject.toml still DERIVES the version rather than hardcoding it.
+    #     A static [project].version would silently win over __version__ at build
+    #     time, so the wheel could ship a different number than the package
+    #     reports at runtime — exactly the drift that shipped 1.0.2 as 1.0.1.
+    pyproject = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    if "version" in pyproject.get("project", {}):
+        problems.append(
+            "pyproject.toml has a static [project].version — it must stay in "
+            'dynamic = ["version"] so the build derives puikit.__version__'
+        )
+    elif "version" not in pyproject.get("project", {}).get("dynamic", []):
+        problems.append('pyproject.toml no longer declares dynamic = ["version"]')
 
     # 3. On the main branch.
     branch = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()

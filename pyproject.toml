@@ -4,7 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "puikit"
-version = "1.0.2"
+# version -> single-sourced from puikit/__init__.py's __version__ (see
+# [tool.setuptools.dynamic] at the bottom of this file). Bump it there, not here.
+dynamic = ["version"]
 description = "Capability-based Python UI framework with TUI and GUI backends"
 readme = "README.md"
 license = "MIT"
@@ -80,6 +82,12 @@ dev = ["pytest>=8", "pytest-timeout>=2"]
 Homepage = "https://github.com/crftwr/puikit"
 Repository = "https://github.com/crftwr/puikit"
 Issues = "https://github.com/crftwr/puikit/issues"
+
+[tool.setuptools.dynamic]
+# setuptools reads the literal straight out of puikit/__init__.py's AST -- it
+# does NOT import the package, so this resolves at build time without pillow,
+# pyobjc or the other runtime deps being installed.
+version = { attr = "puikit.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["puikit*"]

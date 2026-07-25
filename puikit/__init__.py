@@ -25,7 +25,13 @@ from .panel import DrawContext, Panel, Rect
 from .posteffect import CRT, PRESETS, PostEffect
 from .theme import THEME_GUI, THEME_TUI, Theme, derive_theme, lift, mix, theme_for
 
-__version__ = "1.0.1"
+#: Single source of truth for the version string -- the ONLY place the literal
+#: appears in this repo. Bumping the version means editing this line and nothing
+#: else: pyproject.toml derives it via its dynamic ``version``
+#: (``attr = "puikit.__version__"``), so packaging metadata and ``puikit
+#: .__version__`` can no longer disagree. (They did once: 1.0.2 was released
+#: with this line left at 1.0.1.)
+__version__ = "1.0.2"
 
 __all__ = [
     "Backend",

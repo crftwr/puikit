@@ -154,6 +154,11 @@ publish-pypi: build
 
 # One-command release. Usage: make release VERSION=1.0.2
 #
+# The version's single source of truth is puikit/__init__.py's __version__;
+# pyproject.toml derives it (dynamic version = attr). bump_version.py rewrites
+# that one literal, which is why the commit below stages __init__.py rather
+# than pyproject.toml.
+#
 # Runs entirely on your machine and ties the three release artifacts together so
 # they can't drift: the git tag, the PyPI upload, and the GitHub Release all
 # name the same version. release_preflight.py runs FIRST and aborts before any
@@ -168,7 +173,7 @@ release: $(VENV_STAMP)
 	$(VENV_PYTHON) scripts/release_preflight.py "$(VERSION)"
 	$(MAKE) test
 	$(VENV_PYTHON) scripts/bump_version.py "$(VERSION)"
-	git add pyproject.toml
+	git add puikit/__init__.py
 	git commit -m "Releasing $(VERSION)"
 	git tag -a v$(VERSION) -m "$(VERSION)"
 	$(MAKE) build
