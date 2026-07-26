@@ -11,7 +11,7 @@ from collections import deque
 from dataclasses import replace
 from typing import Any
 
-from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, is_transparent
+from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, WindowStyle, is_transparent
 from ..capability import PROFILE_TUI, CapabilityProfile
 from ..event import Event
 
@@ -80,10 +80,16 @@ class MemoryBackend(Backend):
         width: int = 80,
         height: int = 24,
         capabilities: CapabilityProfile | None = None,
+        style: WindowStyle | None = None,
+        activation_policy: str = "regular",
     ):
         self._width = width
         self._height = height
         self._capabilities = capabilities if capabilities is not None else self.PROFILE
+        # Recorded for tests (signature parity with the GUI backends; a
+        # headless grid has no real window to style).
+        self.window_style = style if style is not None else WindowStyle()
+        self.activation_policy = activation_policy
         self._grid: list[list[str]] = []
         self._styles: list[list[Style]] = []
         self._events: deque[Event] = deque()
@@ -107,7 +113,34 @@ class MemoryBackend(Backend):
         # Text-input gating, recorded for tests: current state + transition log.
         self.text_input_active = False
         self.text_input_calls: list[str] = []  # "begin" / "end", in order
+        # call_later one-shots, recorded (delay, callback, live-flag dict);
+        # tests fire them deterministically with fire_timers().
+        self.later_timers: list[tuple[float, Any, dict]] = []
         self.clear()
+
+    def call_later(self, delay_seconds: float, callback) -> Any:
+        """Record the one-shot instead of scheduling it; tests fire pending
+        timers deterministically with fire_timers()."""
+        state = {"live": True}
+        self.later_timers.append((delay_seconds, callback, state))
+
+        def cancel() -> None:
+            state["live"] = False
+
+        return cancel
+
+    def fire_timers(self) -> int:
+        """Fire (and clear) every pending, uncancelled call_later one-shot in
+        scheduling order. Returns how many fired."""
+        pending = self.later_timers
+        self.later_timers = []
+        fired = 0
+        for _delay, callback, state in pending:
+            if state["live"]:
+                state["live"] = False
+                callback()
+                fired += 1
+        return fired
 
     def begin_text_input(self) -> None:
         self.text_input_active = True

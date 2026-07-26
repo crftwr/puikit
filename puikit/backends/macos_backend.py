@@ -29,6 +29,7 @@ from typing import Any
 from AppKit import (
     NSApp,
     NSApplication,
+    NSApplicationActivationPolicyAccessory,
     NSApplicationActivationPolicyRegular,
     NSAttributedString,
     NSBackingStoreBuffered,
@@ -90,7 +91,9 @@ from AppKit import (
     NSUnderlineStyleThick,
     NSView,
     NSWorkspace,
+    NSFloatingWindowLevel,
     NSWindow,
+    NSWindowStyleMaskBorderless,
     NSWindowStyleMaskClosable,
     NSWindowStyleMaskMiniaturizable,
     NSWindowStyleMaskResizable,
@@ -117,7 +120,7 @@ try:
     from Quartz import CAMetalLayer
 except ImportError:  # pragma: no cover - older/partial PyObjC
     CAMetalLayer = None
-from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, is_transparent
+from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, WindowStyle, is_transparent
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..easing import resolve as _resolve_easing
 from ..event import Event, EventType, char_key_event
@@ -1248,9 +1251,19 @@ class MacOSBackend(Backend):
 
     def __init__(self, width: int = 100, height: int = 30, title: str = "PuiKit",
                  base_font: Font | None = None, ui_font: Font | None = None,
-                 frame_autosave_name: str | None = None):
+                 frame_autosave_name: str | None = None,
+                 style: "WindowStyle | None" = None,
+                 activation_policy: str = "regular"):
         self._initial_size = (width, height)
         self._title = title
+        # How the window is framed/layered (capability "window_styles"); None
+        # is equivalent to WindowStyle() and reproduces the classic app window.
+        self._window_style = style if style is not None else WindowStyle()
+        # "regular" (Dock icon, may steal focus on open) or "accessory" (an
+        # agent app: no Dock icon, never force-activates on open — for
+        # menu-bar-extra style apps). Unrecognized values degrade to "regular"
+        # per the additive-API recipe.
+        self._activation_policy = activation_policy
         # When set, AppKit persists this window's frame (position + size) to the
         # user defaults under this name and restores it on the next launch — the
         # standard NSWindow frame-autosave feature. None keeps the default of
@@ -1388,21 +1401,31 @@ class MacOSBackend(Backend):
 
     def open(self) -> None:
         app = NSApplication.sharedApplication()
-        app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+        if self._activation_policy == "accessory":
+            app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+        else:  # "regular" and anything unrecognized degrade to the old behavior
+            app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
 
         self._init_fonts()
         w_px = self._initial_size[0] * self._base_w
         h_px = self._initial_size[1] * self._base_h
-        style = (
-            NSWindowStyleMaskTitled
-            | NSWindowStyleMaskClosable
-            | NSWindowStyleMaskMiniaturizable
-            | NSWindowStyleMaskResizable
-        )
+        ws = self._window_style
+        if ws.frameless:
+            style = NSWindowStyleMaskBorderless
+        else:
+            style = (
+                NSWindowStyleMaskTitled
+                | NSWindowStyleMaskClosable
+                | NSWindowStyleMaskMiniaturizable
+            )
+            if ws.resizable:
+                style |= NSWindowStyleMaskResizable
         self._window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(120, 120, w_px, h_px), style, NSBackingStoreBuffered, False
         )
         self._window.setTitle_(self._title)
+        if ws.topmost:
+            self._window.setLevel_(NSFloatingWindowLevel)
 
         self._view = _PuiKitView.alloc().initWithFrame_(NSMakeRect(0, 0, w_px, h_px))
         self._view.backend = self
@@ -1445,8 +1468,15 @@ class MacOSBackend(Backend):
         self._delegate.backend = self
         self._window.setDelegate_(self._delegate)
 
-        self._window.makeKeyAndOrderFront_(None)
-        app.activateIgnoringOtherApps_(True)
+        if self._window_style.activates:
+            self._window.makeKeyAndOrderFront_(None)
+            # An accessory (agent) app must not yank focus from the frontmost
+            # app at launch; its window still becomes key when clicked.
+            if self._activation_policy != "accessory":
+                app.activateIgnoringOtherApps_(True)
+        else:
+            # Display-only overlay: show without taking key status or focus.
+            self._window.orderFrontRegardless()
 
     def close(self) -> None:
         if self._anim_timer is not None:
@@ -2001,6 +2031,18 @@ class MacOSBackend(Backend):
             # back to the slow rate so we stop waking at 60fps to poll empty
             # queues. No-op (same rate) in steady state.
             self._ensure_animation_timer()
+
+    def call_later(self, delay_seconds: float, callback: Callable[[], None]) -> Callable[[], None]:
+        """One-shot NSTimer on the main run loop — a real OS timer instead of
+        the base class's animation-tick fallback, so a pending timer never
+        drags the 60fps tick alive."""
+        def _fire(timer) -> None:
+            callback()
+
+        nstimer = NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
+            delay_seconds, False, _fire
+        )
+        return nstimer.invalidate
 
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float,

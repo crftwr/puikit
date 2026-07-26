@@ -111,6 +111,10 @@ PROFILE_GUI_DESKTOP = CapabilityProfile(
         "os_drag_drop": True,  # native NSDraggingSource: drag files to other apps
         "gpu_acceleration": True,
         "media_keys": True,
+        # WindowStyle requests (frameless / topmost / no-activate / tool) are
+        # honored at window creation. Backends without this accept the
+        # parameter and ignore it.
+        "window_styles": True,
         # A native run loop on a dedicated UI thread can accept work scheduled
         # from worker threads, so apps can be fully event-driven (no idle poll).
         "main_thread_dispatch": True,

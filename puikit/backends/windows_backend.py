@@ -42,7 +42,7 @@ from . import _win32_dragdrop, _win32_ime
 from . import _win32_native as native
 from ._d3d_shader import HAVE_D3D_SHADER, D3DShaderBackground
 from ..background import Shader, Wallpaper
-from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, is_transparent
+from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, WindowStyle, is_transparent
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..easing import resolve as _resolve_easing
 from ..event import Event, EventType, char_key_event
@@ -514,9 +514,17 @@ class WindowsBackend(Backend):
         base_font: Font | None = None,
         ui_font: Font | None = None,
         frame_autosave_name: str | None = None,
+        style: WindowStyle | None = None,
+        activation_policy: str = "regular",
     ):
         self._initial_size = (width, height)
         self._title = title
+        # How the window is framed/layered (capability "window_styles"); None
+        # is equivalent to WindowStyle() and reproduces the classic app window.
+        self._window_style = style if style is not None else WindowStyle()
+        # Accepted for signature parity with MacOSBackend; Dock activation
+        # policy is a macOS concept, so it is a no-op here.
+        self._activation_policy = activation_policy
         # Windows has no built-in analogue of AppKit's NSWindow frame-autosave,
         # so this is emulated with a registry value under this name: the frame
         # is restored from it on open() and written back to it in close().
@@ -607,6 +615,10 @@ class WindowsBackend(Backend):
         self._quit_requested = False
         self._main_thread_lock = threading.Lock()
         self._main_thread_callbacks: list[Callable[[], None]] = []
+        # call_later one-shots: WM_TIMER id -> callback. Ids start above
+        # _TIMER_ID so the animation timer's id can never collide.
+        self._later_timers: dict[int, Callable[[], None]] = {}
+        self._later_timer_next_id = 1000
         # Display list double buffer: widgets fill `_back`, WM_PAINT reads `_front`.
         self._back: list[tuple] = []
         self._front: list[tuple] = []
@@ -692,11 +704,25 @@ class WindowsBackend(Backend):
         # be read (per-monitor aware), then derive the base unit and correct the
         # frame to the requested base-unit size. Layouts re-resolve from the
         # live size each render, so the provisional size is never shown.
+        ws = self._window_style
+        if ws.frameless:
+            win_style = native.WS_POPUP
+        else:
+            win_style = native.WS_OVERLAPPEDWINDOW
+            if not ws.resizable:
+                win_style &= ~(native.WS_THICKFRAME | native.WS_MAXIMIZEBOX)
+        ex_style = 0
+        if ws.topmost:
+            ex_style |= native.WS_EX_TOPMOST
+        if not ws.activates:
+            ex_style |= native.WS_EX_NOACTIVATE
+        if ws.tool:
+            ex_style |= native.WS_EX_TOOLWINDOW
         self._hwnd = native.user32.CreateWindowExW(
-            0,
+            ex_style,
             _CLASS_NAME,
             self._title,
-            native.WS_OVERLAPPEDWINDOW,
+            win_style,
             100,
             100,
             800,
@@ -724,7 +750,8 @@ class WindowsBackend(Backend):
         _win32_dragdrop.ensure_ole_initialized()
         self._drop_target = _win32_dragdrop.register_drop_target(self._hwnd, self._dispatch_file_drop)
 
-        native.user32.ShowWindow(self._hwnd, native.SW_SHOW)
+        show_cmd = native.SW_SHOW if self._window_style.activates else native.SW_SHOWNA
+        native.user32.ShowWindow(self._hwnd, show_cmd)
         native.user32.UpdateWindow(self._hwnd)
 
     def _apply_initial_frame(self) -> None:
@@ -1329,6 +1356,26 @@ class WindowsBackend(Backend):
             return
         native.user32.SetTimer(self._hwnd, _TIMER_ID, 16, None)  # ~60fps
         self._anim_timer_running = True
+
+    def call_later(self, delay_seconds: float, callback: Callable[[], None]) -> Callable[[], None]:
+        """One-shot WM_TIMER on this window — a real OS timer instead of the
+        base class's animation-tick fallback (which would keep the 60fps tick
+        alive for the whole wait)."""
+        if not self._hwnd:
+            # Before open() there is no window to attach a timer to; the
+            # animation-tick fallback still honors the contract.
+            return super().call_later(delay_seconds, callback)
+        timer_id = self._later_timer_next_id
+        self._later_timer_next_id += 1
+        self._later_timers[timer_id] = callback
+        # USER_TIMER_MINIMUM is 10 ms; SetTimer clamps shorter delays itself.
+        native.user32.SetTimer(self._hwnd, timer_id, max(1, int(delay_seconds * 1000)), None)
+
+        def cancel() -> None:
+            if self._later_timers.pop(timer_id, None) is not None and self._hwnd:
+                native.user32.KillTimer(self._hwnd, timer_id)
+
+        return cancel
 
     def _on_animation_tick(self) -> None:
         now = time.monotonic()
@@ -2936,7 +2983,14 @@ class WindowsBackend(Backend):
             self.quit()
             return 0
         if msg == native.WM_TIMER:
-            self._on_animation_tick()
+            if wparam == _TIMER_ID:
+                self._on_animation_tick()
+            else:
+                # A call_later one-shot: fire exactly once, then kill.
+                callback = self._later_timers.pop(wparam, None)
+                if callback is not None:
+                    native.user32.KillTimer(self._hwnd, wparam)
+                    callback()
             return 0
         if msg == _WM_ACTIVATE:
             # Track focus so the CRT roll only fires while our window is active;

@@ -8,6 +8,7 @@ based on the backend's CapabilityProfile.
 
 from __future__ import annotations
 
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -79,6 +80,41 @@ class Style:
 
 
 DEFAULT_STYLE = Style()
+
+
+@dataclass(frozen=True)
+class WindowStyle:
+    """How a GUI backend's window is framed and layered (capability
+    ``window_styles``). Passed to a GUI backend's constructor; every default
+    reproduces the pre-WindowStyle behavior (a normal resizable app window),
+    so ``None`` and ``WindowStyle()`` are equivalent.
+
+    Fields (append-only, per the API compatibility policy):
+
+    - ``frameless``: no title bar or border (macOS borderless NSWindow /
+      Win32 WS_POPUP). A frameless window does not take keyboard focus on
+      macOS (borderless windows cannot become key) — intended for tooltip /
+      balloon style overlays.
+    - ``topmost``: float above normal windows (NSFloatingWindowLevel /
+      WS_EX_TOPMOST).
+    - ``activates``: when False, showing the window does not steal focus
+      from the active application (ordered front without activation /
+      WS_EX_NOACTIVATE + SW_SHOWNA). Keyboard-taking non-activating panels
+      are a separate future feature; ``activates=False`` is for display-only
+      overlays.
+    - ``resizable``: user-resizable frame (ignored when ``frameless``).
+    - ``tool``: keep the window out of the taskbar / Alt-Tab list
+      (WS_EX_TOOLWINDOW). Windows-only today; no-op on macOS.
+
+    Backends without the ``window_styles`` capability accept the parameter
+    and ignore it (the base recipe: unknown requests degrade, not raise)."""
+
+    frameless: bool = False
+    topmost: bool = False
+    activates: bool = True
+    resizable: bool = True
+    tool: bool = False
+
 
 EventHandler = Callable[[Event], None]
 
@@ -691,6 +727,35 @@ class Backend(ABC):
     @abstractmethod
     def quit(self) -> None:
         """Request the event loop to stop after the current iteration."""
+
+    def call_later(self, delay_seconds: float, callback: Callable[[], None]) -> Callable[[], None]:
+        """Schedule ``callback`` to run once on the UI thread after
+        ``delay_seconds``. Returns a zero-argument cancel function; calling it
+        after the timer fired is a harmless no-op.
+
+        Not thread-safe (schedule from the UI thread; a worker thread pairs
+        this with ``call_on_main_thread``). The base implementation rides the
+        animation tick (so any backend with ``animation_ticks`` gets a working
+        timer at tick granularity); native backends override it with a real
+        OS timer (NSTimer / WM_TIMER)."""
+        deadline = time.monotonic() + delay_seconds
+        state = {"cancelled": False}
+
+        def _tick() -> bool:
+            if state["cancelled"]:
+                return False
+            if time.monotonic() >= deadline:
+                state["cancelled"] = True
+                callback()
+                return False
+            return True
+
+        self.request_animation_ticks(_tick)
+
+        def cancel() -> None:
+            state["cancelled"] = True
+
+        return cancel
 
     # --- shell-out ----------------------------------------------------------
 

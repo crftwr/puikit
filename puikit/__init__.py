@@ -6,6 +6,7 @@ from .backend import (
     DEFAULT_STYLE,
     Style,
     TextAttribute,
+    WindowStyle,
 )
 from .capability import (
     CapabilityProfile,
@@ -64,6 +65,7 @@ __all__ = [
     "Rect",
     "SEPARATOR",
     "Style",
+    "WindowStyle",
     "TextAttribute",
     "THEME_GUI",
     "THEME_TUI",
