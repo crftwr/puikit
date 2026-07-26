@@ -23,6 +23,8 @@ import argparse
 import colorsys
 import math
 import os
+import subprocess
+import sys
 from dataclasses import replace
 
 from puikit import (
@@ -2394,6 +2396,161 @@ def build_drag_page(panel: Panel) -> VSplit:
     )
 
 
+def build_window_page(panel: Panel) -> VSplit:
+    # WindowStyle / activation_policy are *constructor-time* declarations
+    # (docs/window_management.md) — a page cannot restyle the already-open
+    # window, and one process owns one window. So this page demonstrates them
+    # the honest way: each button launches window_overlay.py as a separate
+    # process with the style under test; the overlay announces its style and
+    # closes itself via call_later. No capability branching here — on a
+    # desktop the overlay opens even when this catalog runs in a terminal,
+    # and where no GUI exists the launch fails into the status line.
+    status = Label("", DIM)
+    overlay_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "window_overlay.py")
+
+    def launch(label: str, *flags: str):
+        def on_click():
+            try:
+                subprocess.Popen([sys.executable, overlay_py, "--backend", "gui", *flags])
+                status.text = f"Launched {label} — a separate process; it closes itself in 3s"
+            except Exception as e:
+                status.text = f"Launch failed: {e}"
+            panel.render()
+        return on_click
+
+    buttons = VSplit(
+        Item(Button(
+            "Balloon overlay — frameless + topmost + no-activate",
+            on_click=launch("the balloon overlay", "--frameless", "--topmost",
+                            "--no-activate", "--not-resizable"),
+        ), size="content"),
+        Item(Button(
+            "Floating tool window — topmost + tool",
+            on_click=launch("the tool window", "--topmost", "--tool"),
+        ), size="content"),
+        Item(Button(
+            "Agent-app window — activation_policy=\"accessory\"",
+            on_click=launch("the accessory window", "--accessory"),
+        ), size="content"),
+        Item(Label(""), weight=1),
+        gap=1,
+    )
+    explainer = TextBlock(
+        "WindowStyle(frameless, topmost, activates, resizable, tool) is "
+        "passed to a GUI backend's constructor; every default reproduces the "
+        "classic app window (capability \"window_styles\").\n"
+        "\n"
+        "  · frameless — no title bar (borderless NSWindow / WS_POPUP)\n"
+        "  · topmost — floats above normal windows\n"
+        "  · activates=False — shown without stealing focus from the active "
+        "app (watch the balloon: your keyboard focus never moves)\n"
+        "  · tool — out of the taskbar / Alt-Tab (Windows)\n"
+        "\n"
+        "activation_policy=\"accessory\" (macOS) makes the whole process an "
+        "agent app: no Dock icon, no forced activation on open.\n"
+        "\n"
+        "Backends without the capability accept the parameter and ignore it. "
+        "Inside ONE window — any backend, including TUI — overlays are "
+        "layers, not OS windows: see the Layering page. That is also how the "
+        "planned multi-window feature will degrade on TUI (a \"window\" "
+        "becomes a framed, z-ordered layer on the one terminal surface).",
+        wrap=True,
+    )
+    return VSplit(
+        Item(Label("Window styles — constructor declarations, shown by launching them", DIM), size=1),
+        Item(
+            HSplit(
+                Item(buttons, size=56),
+                Item(explainer, weight=1, hints={"surface": "content"}),
+                gap=2,
+            ),
+            weight=1,
+        ),
+        Item(status, size=1),
+        gap=1,
+    )
+
+
+def build_timers_page(panel: Panel) -> VSplit:
+    # panel.call_later works on EVERY backend with no capability check: a
+    # native one-shot (NSTimer / WM_TIMER) on GUI, the animation tick on TUI.
+    log = LogView(auto_scroll=True, max_lines=200)
+    status = Label("No timer pending", DIM)
+    state = {"pending": 0, "n": 0}
+
+    def note(text: str):
+        log.append(text)
+        panel.render()
+
+    def show_pending():
+        status.text = (f"{state['pending']} timer(s) pending"
+                       if state["pending"] else "No timer pending")
+
+    def schedule(seconds: float):
+        def on_click():
+            state["n"] += 1
+            n = state["n"]
+            state["pending"] += 1
+            show_pending()
+
+            def fired():
+                state["pending"] -= 1
+                show_pending()
+                note(f"#{n}: fired after {seconds:g}s")
+
+            panel.call_later(seconds, fired)
+            note(f"#{n}: scheduled in {seconds:g}s")
+        return on_click
+
+    def schedule_and_cancel():
+        state["n"] += 1
+        n = state["n"]
+        cancel = panel.call_later(
+            2.0, lambda: note(f"#{n}: fired (BUG — this timer was cancelled)"))
+        cancel()
+        note(f"#{n}: scheduled in 2s and cancelled immediately — it must never fire")
+
+    buttons = HSplit(
+        Item(Button("Fire in 1s", on_click=schedule(1.0)), size="content"),
+        Item(Button("Fire in 3s", on_click=schedule(3.0)), size="content"),
+        Item(Button("Schedule + cancel", on_click=schedule_and_cancel,
+                    variant="secondary"), size="content"),
+        Item(Label(""), weight=1),
+        gap=2,
+    )
+    explainer = TextBlock(
+        "panel.call_later(delay_seconds, callback) -> cancel — a one-shot "
+        "timer on the UI thread.\n"
+        "\n"
+        "  · GUI-Desktop -> a real OS timer (one-shot NSTimer / WM_TIMER), "
+        "so a pending timer never holds the 60fps animation tick alive.\n"
+        "  · TUI / others -> the same call rides the animation tick, firing "
+        "at tick granularity.\n"
+        "\n"
+        "No capability flag: every backend honors the contract, so the page "
+        "(and your app) never branches. The returned cancel function is a "
+        "no-op after the timer fired.\n"
+        "\n"
+        "Not thread-safe by design — a worker thread hands the schedule to "
+        "the UI thread with panel.call_on_main_thread.",
+        wrap=True,
+    )
+    return VSplit(
+        Item(Label("One-shot timers — the same intent on every backend", DIM), size=1),
+        Item(buttons, size="content"),
+        Item(
+            HSplit(
+                Item(log, weight=1, hints={"surface": "content"}),
+                Item(explainer, weight=1, hints={"surface": "content"}),
+                gap=2,
+            ),
+            weight=1,
+        ),
+        Item(status, size=1),
+        gap=1,
+    )
+
+
 # Each nav entry carries an emoji prefix: the same intent renders as a
 # full-color glyph on GUI and as a (wide) text glyph on TUI — the shared
 # wide-character accounting (puikit.text) keeps the labels column-aligned on
@@ -2416,6 +2573,8 @@ PAGES = [
     ("💬 MessageBox", build_messagebox_page),
     ("🚪 Drawer", build_drawer_page),
     ("🫳 Drag", build_drag_page),
+    ("🪟 Window", build_window_page),
+    ("⏱️ Timers", build_timers_page),
     ("🎬 Animation", build_animation_page),
     ("🗂️ Layering", build_layer_page),
     ("📐 Layout", build_layout_page),

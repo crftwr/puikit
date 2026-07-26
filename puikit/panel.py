@@ -2290,6 +2290,14 @@ class Panel:
         self.backend.call_on_main_thread(callback)
         return True
 
+    def call_later(self, delay_seconds: float, callback: Any) -> Any:
+        """Schedule ``callback`` once on the UI thread after ``delay_seconds``;
+        returns a zero-argument cancel function. Available on every backend (a
+        native one-shot timer where the backend has one, the animation tick
+        otherwise), so apps need no capability check. Not thread-safe — from a
+        worker thread, pair with ``call_on_main_thread``."""
+        return self.backend.call_later(delay_seconds, callback)
+
     def _start_geometry_animation(
         self, widget: Any, hints: dict[str, Any], stepped: bool
     ) -> None:

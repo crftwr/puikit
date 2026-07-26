@@ -168,6 +168,23 @@ since the emulator owns the window — so the Panel falls back to copying the
 paths to the clipboard. One intent (`panel.begin_file_drag`), resolved per
 backend. See [`docs/drag_drop.md`](../../docs/drag_drop.md).
 
+### 🪟 Window
+`WindowStyle` (frameless / topmost / no-activate / tool) and
+`activation_policy="accessory"` are **constructor-time** declarations, and one
+process owns one window — so each button launches `window_overlay.py` as a
+separate process with the style under test. The overlay announces its style
+and closes itself in 3 s via `call_later`. Watch the balloon variant: it
+floats above everything without ever taking your keyboard focus. See
+[`docs/window_management.md`](../../docs/window_management.md).
+
+### ⏱️ Timers
+`panel.call_later(delay, callback) -> cancel` — one-shot timers on the UI
+thread, on **every** backend with no capability check: a real OS timer
+(one-shot `NSTimer` / `WM_TIMER`) on GUI-Desktop, the animation tick on TUI.
+The third button schedules and immediately cancels — proving a cancelled
+timer never fires. See
+[`docs/window_management.md`](../../docs/window_management.md).
+
 ---
 
 ## Motion & layers

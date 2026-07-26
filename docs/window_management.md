@@ -53,6 +53,46 @@ MacOSBackend(..., activation_policy="accessory")
   parameter for signature parity and ignores it (no Dock on Windows; taskbar
   presence is `WindowStyle.tool`).
 
+## Multi-window (planned) — and what it means on TUI
+
+Today one backend owns one window, and `WindowStyle` styles *that* window at
+construction. The planned multi-window extension (`backend.create_window(...)
+-> WindowHandle`, a `Panel` per window) is the next step for apps like
+Keyhac 2 that show a console, a chooser popup, and a balloon at once.
+
+**On TUI there are no OS windows to create — and there don't need to be.**
+PuiKit already has the right degradation primitive: **layers**
+(`Panel.push_layer`, the mechanism behind `MessageBox`, `Drawer`, and the
+`ComboBox`/`DropDown` popups — see the Layering page of the demo catalog).
+The terminal surface plays the role of the *screen*, and each "window"
+renders as a framed, z-ordered region on it:
+
+| Intent | GUI-Desktop | TUI |
+|---|---|---|
+| `create_window(...)` | a real OS window | a layer on the one terminal surface, framed unless `frameless` |
+| `topmost` | window level / `WS_EX_TOPMOST` | a higher layer `z` |
+| `frameless` | borderless window | no frame box around the layer |
+| `activates=False` | no focus stealing | the layer is non-interactive (`interactive=False`); key events keep flowing to the layer below |
+| window position/size | screen coordinates | a rect on the terminal surface (`hints={"x","y","w","h"}`) |
+| z-order between windows | OS compositor | layer `z`; the topmost *interactive* layer is modal, exactly as today |
+| screen geometry | `screen_frames()` | the terminal size — one "screen" |
+
+So the app keeps issuing one intent — "give me a small topmost surface next
+to X" — and the backend decides whether that is an `NSWindow` or a boxed
+region drawn over the log view. This is the same fallback philosophy as
+menus (native `NSMenu`/`HMENU` vs. the widget-rendered menu): widget and app
+code never branches; the Panel/backend seam resolves the fidelity.
+
+Two consequences fall out of the mapping:
+
+- A TUI "window" cannot escape the terminal: a balloon that would float over
+  *another app's* window on GUI can only float over PuiKit's own surface.
+  That is an honest, documented fidelity limit (like `os_drag_drop` falling
+  back to the clipboard), not something to emulate around.
+- Modality stays consistent: on both fidelities the topmost interactive
+  surface owns input, so a chooser popup behaves identically — list below,
+  keys go to the popup — whether it is an OS window or a layer.
+
 ## `Backend.call_later(delay_seconds, callback) -> cancel`
 
 One-shot timer on the UI thread; returns a zero-argument cancel function
