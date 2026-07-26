@@ -213,8 +213,8 @@ def test_profile_declares_gui_capabilities():
     assert profile.supports("images")
     assert profile.supports("animation")
     assert profile.supports("vector_shapes")
-    # Not implemented yet in the MVP:
-    assert not profile.supports("system_tray")
+    # set_tray shipped (NSStatusItem menu bar extra):
+    assert profile.supports("system_tray")
 
 
 def test_vector_primitives_record_display_list_commands():

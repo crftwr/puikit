@@ -148,6 +148,11 @@ class WindowHandle:
     def close(self) -> None: ...
     def set_title(self, title: str) -> None: ...
 
+    def move_px(self, x: float, y: float) -> None:
+        """Position the window at native screen coordinates (macOS:
+        bottom-left origin points). Provisional until screen_frames() ships
+        a portable coordinate story."""
+
     @property
     def closed(self) -> bool:
         return False
@@ -765,6 +770,18 @@ class Backend(ABC):
         """Request the event loop to stop after the current iteration."""
 
     # --- multi-window (capability "multi_window") -----------------------------
+
+    def set_tray(self, title: str | None = None, menu: Any = None,
+                 tooltip: str | None = None) -> None:
+        """System tray icon / macOS menu bar extra (capability "system_tray").
+        ``title`` is short text/emoji shown in the bar (image support is a
+        future additive field); ``menu`` is a puikit Menu opened on click;
+        ``title=None`` removes the item."""
+        raise CapabilityNotSupported("system_tray")
+
+    def show_main_window(self) -> None:
+        """Re-show the main window (used with main_window_close="hide").
+        Base is a no-op."""
 
     def create_window(self, width: int, height: int, title: str = "",
                       style: "WindowStyle | None" = None) -> WindowHandle:

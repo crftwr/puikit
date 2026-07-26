@@ -1217,6 +1217,13 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
 class _PuiKitWindowDelegate(NSObject):
     backend = None
 
+    def windowShouldClose_(self, sender):
+        backend = self.backend
+        if backend is not None and getattr(backend, "_main_window_close", "quit") == "hide":
+            sender.orderOut_(None)
+            return False
+        return True
+
     def windowWillClose_(self, notification):
         if self.backend is not None:
             self.backend.quit()
@@ -1279,6 +1286,9 @@ class MacWindowHandle(WindowHandle):
     def set_title(self, title: str) -> None:
         self.nswindow.setTitle_(title)
 
+    def move_px(self, x: float, y: float) -> None:
+        self.nswindow.setFrameOrigin_((x, y))
+
     @property
     def closed(self) -> bool:
         return self._closed
@@ -1320,7 +1330,7 @@ class MacOSBackend(Backend):
             "ime": True,
             "clipboard_rich": True,   # NSPasteboard multi-type write (HTML + plain)
             "native_file_dialog": False,
-            "system_tray": False,
+            "system_tray": True,   # set_tray: NSStatusItem menu bar extra
             "media_keys": False,
             "gpu_acceleration": False,
             "post_effects": True,    # Core Image content-filter composite; gated
@@ -1353,7 +1363,8 @@ class MacOSBackend(Backend):
                  base_font: Font | None = None, ui_font: Font | None = None,
                  frame_autosave_name: str | None = None,
                  style: "WindowStyle | None" = None,
-                 activation_policy: str = "regular"):
+                 activation_policy: str = "regular",
+                 main_window_close: str = "quit"):
         self._initial_size = (width, height)
         self._title = title
         # Multi-window: secondary windows created via create_window(); while
@@ -1370,6 +1381,12 @@ class MacOSBackend(Backend):
         # menu-bar-extra style apps). Unrecognized values degrade to "regular"
         # per the additive-API recipe.
         self._activation_policy = activation_policy
+        # "hide": the close button hides the main window instead of quitting
+        # (re-shown via show_main_window(), e.g. from a tray menu). Unknown
+        # values degrade to "quit", the classic behavior.
+        self._main_window_close = main_window_close
+        self._status_item = None      # NSStatusItem (set_tray)
+        self._tray_responder = None   # retained menu responder
         # When set, AppKit persists this window's frame (position + size) to the
         # user defaults under this name and restores it on the next launch — the
         # standard NSWindow frame-autosave feature. None keeps the default of
@@ -1587,6 +1604,44 @@ class MacOSBackend(Backend):
         else:
             # Display-only overlay: show without taking key status or focus.
             self._window.orderFrontRegardless()
+
+    def set_tray(self, title: str | None = None, menu: Any = None,
+                 tooltip: str | None = None) -> None:
+        from AppKit import NSStatusBar, NSVariableStatusItemLength
+        if title is None:
+            if self._status_item is not None:
+                NSStatusBar.systemStatusBar().removeStatusItem_(self._status_item)
+                self._status_item = None
+                self._tray_responder = None
+            return
+        if self._status_item is None:
+            self._status_item = NSStatusBar.systemStatusBar().statusItemWithLength_(
+                NSVariableStatusItemLength)
+        button = self._status_item.button()
+        button.setTitle_(title)
+        if tooltip is not None:
+            button.setToolTip_(tooltip)
+        if menu is not None:
+            from ._macos_menu import build_popup_menu
+            ns_menu, responder = build_popup_menu(menu)
+            self._tray_responder = responder  # NSMenuItem does not retain targets
+            self._status_item.setMenu_(ns_menu)
+
+    def show_main_window(self) -> None:
+        if self._window is not None:
+            self._window.makeKeyAndOrderFront_(None)
+            NSApp.activateIgnoringOtherApps_(True)
+
+    def screen_frames(self) -> list:
+        """Provisional E5-lite: [(frame, visible_frame)] per screen, each an
+        (x, y, w, h) tuple in bottom-left-origin points; main screen first."""
+        from AppKit import NSScreen
+        frames = []
+        for screen in NSScreen.screens():
+            f, v = screen.frame(), screen.visibleFrame()
+            frames.append(((f.origin.x, f.origin.y, f.size.width, f.size.height),
+                           (v.origin.x, v.origin.y, v.size.width, v.size.height)))
+        return frames
 
     def create_window(self, width: int, height: int, title: str = "",
                       style: WindowStyle | None = None) -> MacWindowHandle:
