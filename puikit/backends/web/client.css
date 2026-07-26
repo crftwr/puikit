@@ -31,18 +31,28 @@
  * lack (Japanese). Declared AFTER the primary faces and named AFTER them in the
  * canvas font shorthand, so any glyph the primary covers keeps its advance — the
  * chain matches WebBackend's [primary, cjk] table order exactly. Regular file
- * only: bold (700) reuses it, and the browser synthesizes the bold look; Noto
- * CJK advances are weight-invariant, so the synthesized weight measures the same.
+ * only: bold (700) reuses it and the browser synthesizes the bold look; Noto CJK
+ * advances are weight-invariant, and synthesis does not change them either
+ * (measured in Chrome: 240.00px at both weights), so measurement stays exact.
  * These may be absent (optional download) — then Python drops the CJK family from
- * the shorthand too, so nothing references a missing face. */
+ * the shorthand too, so nothing references a missing face.
+ *
+ * The weight descriptor MUST stay a single 400, not a `400 700` range. A range
+ * claims the face already covers 700, which is an exact match — so the browser
+ * has nothing to synthesize and renders the Regular outlines for bold. That is
+ * what it did here, and it made bold Japanese identical to regular on the web
+ * backend (ink 1.000x, issue #238) exactly as the Core Text cascade did on
+ * macOS. With a plain 400 the 700 request finds no matching face in the family
+ * and synthesis kicks in (1.124x). Family selection is by glyph coverage, not
+ * weight, so the missing 700 never pushes Japanese out to a system font. */
 @font-face {
   font-family: "PuiMonoCJK";
-  font-weight: 400 700;
+  font-weight: 400;
   src: url("/fonts/NotoSansMonoCJKjp-Regular.otf") format("opentype");
 }
 @font-face {
   font-family: "PuiSansCJK";
-  font-weight: 400 700;
+  font-weight: 400;
   src: url("/fonts/NotoSansCJKjp-Regular.otf") format("opentype");
 }
 

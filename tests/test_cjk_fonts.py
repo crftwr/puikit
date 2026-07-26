@@ -270,3 +270,126 @@ def test_macos_cascade_noop_without_cjk_files(monkeypatch):
     monkeypatch.setattr(mb, "_cjk_fonts_registered", None)
     assert mb._ensure_cjk_fonts() is False
     assert mb._with_cjk_cascade(base, 14.0, True) is base
+
+
+# --- macOS synthetic bold for the CJK fallback (issue #238) -------------------
+
+
+@pytest.mark.skipif(not _IS_DARWIN, reason="macOS only")
+def test_cjk_bold_ranges_are_utf16_offsets():
+    """The ranges handed to NSAttributedString are UTF-16, not code points: an
+    astral kanji (Ext B, a surrogate pair) is 2 units, and getting that wrong
+    slides every later range left by one pair."""
+    from puikit.backends.macos_backend import _cjk_bold_ranges
+
+    assert _cjk_bold_ranges("Latin 日本語 tail") == [(6, 3)]
+    assert _cjk_bold_ranges("a𠀋b語c") == [(1, 2), (4, 1)]   # 𠀋 is 2 UTF-16 units
+    assert _cjk_bold_ranges("ｱ mixed 語") == [(0, 1), (8, 1)]  # halfwidth katakana
+    # Nothing to embolden: pure Latin, and emoji (the OS cascade supplies those,
+    # so stroking them would be wrong).
+    assert _cjk_bold_ranges("Latin only") == []
+    assert _cjk_bold_ranges("🙂🎉") == []
+    assert _cjk_bold_ranges("") == []
+
+
+@pytest.mark.skipif(not (_IS_DARWIN and _HAS_CJK), reason="macOS + Noto CJK JP required")
+@pytest.mark.parametrize(
+    "text,regular,bold",
+    [
+        # The grid path: font=None (the base faces) and a grid-aligned monospace.
+        ("日本語の太字", Style(), Style(attr=TextAttribute.BOLD)),
+        # Halfwidth katakana is display width 1, so it rides the multi-glyph
+        # segment branch rather than the per-wide-glyph one.
+        ("ｱｲｳｴｵ", Style(), Style(attr=TextAttribute.BOLD)),
+        ("日本語の太字", Style(font=Font(monospace=True)),
+         Style(font=Font(monospace=True, weight=FontWeight.BOLD))),
+        # The flow path: proportional, sized, and the attribute source of bold.
+        ("日本語の太字", Style(font=Font()), Style(font=Font(weight=FontWeight.BOLD))),
+        ("日本語の太字", Style(font=Font(size=28)),
+         Style(font=Font(size=28, weight=FontWeight.BOLD))),
+        ("日本語の太字", Style(font=Font()),
+         Style(font=Font(), attr=TextAttribute.BOLD)),
+    ],
+)
+def test_macos_bold_japanese_renders_heavier_than_regular(text, regular, bold):
+    """Issue #238: bold Japanese rendered at regular weight. The bundled Noto CJK
+    face ships Regular only and the cascade names it by family, which bypasses
+    Core Text's trait matching — so the weight has to be synthesized. Rendered
+    offscreen (no window); the assertion is on inked coverage, which was
+    *byte-identical* between regular and bold before the fix."""
+    import macos_ink as ink
+
+    be = ink.font_only_backend()
+    r, b = ink.coverage(be, text, regular), ink.coverage(be, text, bold)
+    assert r > 0
+    assert b > r * 1.05, f"bold Japanese is not heavier than regular ({b / r:.3f}x)"
+
+
+@pytest.mark.skipif(not (_IS_DARWIN and _HAS_CJK), reason="macOS + Noto CJK JP required")
+def test_macos_faux_bold_leaves_emoji_and_latin_alone():
+    """Only the characters routed to the Regular-only CJK face are stroked. Latin
+    already has a real bold face (stroking it too would double-embolden it), and
+    emoji come from the OS cascade."""
+    import macos_ink as ink
+
+    be = ink.font_only_backend()
+    emoji_r = ink.coverage(be, "🙂🎉", Style())
+    emoji_b = ink.coverage(be, "🙂🎉", Style(attr=TextAttribute.BOLD))
+    assert emoji_b == pytest.approx(emoji_r, rel=0.01)
+    # Latin still gets its real bold, undisturbed.
+    latin_r = ink.coverage(be, "Latin bold", Style())
+    latin_b = ink.coverage(be, "Latin bold", Style(attr=TextAttribute.BOLD))
+    assert latin_b > latin_r * 1.05
+
+
+@pytest.mark.skipif(not (_IS_DARWIN and _HAS_CJK), reason="macOS + Noto CJK JP required")
+@pytest.mark.parametrize("text", ["日本語の太字", "Latin 日本語", "ｱｲｳ", "Latin only"])
+def test_macos_faux_bold_does_not_move_advances(text):
+    """The stroke is painted on the glyph outline in place, so advances — and
+    therefore the column grid, wrapping, and every measure_text caller — are
+    unchanged. Noto CJK advances are weight-invariant, so the *flow* measure of
+    pure Japanese matches too; a run with Latin in it legitimately differs,
+    because its Latin half swaps to a real bold face."""
+    import macos_ink as ink
+
+    be = ink.font_only_backend()
+    assert be.measure_text(text, Style()) == be.measure_text(
+        text, Style(attr=TextAttribute.BOLD))
+    if all(is_cjk(c) for c in text):
+        assert be.measure_text(text, Style(font=Font())) == pytest.approx(
+            be.measure_text(text, Style(font=Font(weight=FontWeight.BOLD))))
+
+
+@pytest.mark.skipif(not _IS_DARWIN, reason="macOS only")
+def test_macos_faux_bold_declines_without_the_bundled_cascade(monkeypatch):
+    """Without the bundled CJK files ``_with_cjk_cascade`` is a no-op and Core
+    Text's own default cascade resolves Japanese against the requested font's
+    *traits*, picking a real bold system face. Synthesizing on top of that would
+    double-embolden it, so the synthesis is gated on the bundled cascade."""
+    from puikit.backends import macos_backend as mb
+
+    be = mb.MacOSBackend.__new__(mb.MacOSBackend)
+    monkeypatch.setattr(mb, "_cjk_fonts_registered", True)
+    assert be._wants_cjk_faux_bold(True) is True
+    assert be._wants_cjk_faux_bold(False) is False
+    monkeypatch.setattr(mb, "_cjk_fonts_registered", False)
+    assert be._wants_cjk_faux_bold(True) is False
+
+
+@requires_cjk
+def test_web_cjk_font_face_declares_a_single_weight():
+    """Issue #238 on the web backend. A ``font-weight: 400 700`` range on the
+    CJK @font-face claims the Regular-only file already covers bold, so the
+    browser finds an exact match, synthesizes nothing, and draws bold Japanese
+    with regular outlines (measured in Chrome: ink 1.000x vs regular; 1.124x
+    once the range is a plain 400). Family selection is by glyph coverage, so
+    the missing 700 does not push Japanese out to a system font."""
+    css_path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "puikit", "backends", "web", "client.css")
+    with open(css_path, encoding="utf-8") as fh:
+        css = fh.read()
+    for family in ("PuiMonoCJK", "PuiSansCJK"):
+        start = css.index(f'font-family: "{family}"')
+        block = css[start:css.index("}", start)]
+        assert "font-weight: 400;" in block, f"{family} must declare a single weight"
+        assert "400 700" not in block, f"{family} must not claim a weight range"

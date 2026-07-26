@@ -1130,33 +1130,79 @@ def build_fonts_page(panel: Panel) -> VSplit:
     # font is one base unit, a taller proportional/sized font more, so the rows
     # never overlap regardless of face or point size — the height comes from the
     # widget's own measure, not a number the page guesses.
-    def row(label: str, style: Style = Style()) -> Item:
-        return Item(Label(label, style), size="content")
+    # Every specimen row carries a Latin tag and a Japanese sample in the SAME
+    # run, so one row demonstrates both scripts at once — no second column, and
+    # no reading a weight down one list to compare it against another.
+    #
+    # That pairing is also what makes a fallback bug legible. The bundled Noto
+    # CJK JP faces ship Regular only, so a bold or italic run reaches its
+    # kana/kanji through a face that has no such member and the platform has to
+    # synthesize it (docs/font_system.md §9.1) — where the Latin tag beside it is
+    # drawn by the primary face, which has real bold and needs no synthesis. A
+    # row whose tag thickens or slants while its kanji stays upright and thin is
+    # the failure, and it shows up *within the row*, needing nothing to compare
+    # against. Issue #238 was exactly that, on macOS and the web backend both.
+    JA = "日本語の見本"
 
+    def row(tag: str, style: Style = Style()) -> tuple:
+        return (Label(f"{tag}  {JA}", style), "content")
+
+    def heading(text: str) -> tuple:
+        return (Label(text, DIM), "content")
+
+    # A ScrollView rather than a fixed VSplit: the list is longer than a short
+    # terminal, and truncating the variations to whatever fits 24 rows would
+    # quietly drop the very cases worth looking at.
+    scroller = ScrollView(
+        [
+            heading("Faces — the default, and the grid font the base unit comes from"),
+            # The app-wide GUI default for text that names no font is the
+            # proportional UI font; on TUI it folds to the one terminal font.
+            row("Default (font=None), proportional on GUI"),
+            # Pin the monospace face explicitly to still demonstrate the column-
+            # aligned base grid font the layout's base unit is derived from.
+            row("Base grid font — column-aligned", Style(font=Font(monospace=True))),
+            # A named installed family (GUI only; ignored on TUI). Georgia has no
+            # kana, so its Japanese comes from the CJK fallback like everything
+            # else — a named primary does not opt out of the cascade.
+            row("Named family: Georgia, 16pt", Style(font=Font(family="Georgia", size=16))),
+
+            heading("Weights — only >= SEMI_BOLD survives on TUI, as bold"),
+            row("Light (300) — folds to plain on TUI", Style(font=Font(weight=FontWeight.LIGHT))),
+            row("Regular (400)", Style(font=Font(weight=FontWeight.REGULAR))),
+            row("Semibold (600) — folds to bold on TUI",
+                Style(font=Font(weight=FontWeight.SEMI_BOLD))),
+            row("Bold (700)", Style(font=Font(weight=FontWeight.BOLD))),
+            row("Bold, grid font", Style(font=Font(monospace=True, weight=FontWeight.BOLD))),
+
+            heading("Slants — italic survives on TUI as the italic attribute"),
+            row("Italic", Style(font=Font(slant=FontSlant.ITALIC))),
+            row("Italic, grid font", Style(font=Font(monospace=True, slant=FontSlant.ITALIC))),
+            # Neither bundled face ships a real italic member, so this asks for
+            # two syntheses at once on GUI: the oblique shear and, for the kanji,
+            # the fallback's missing weight.
+            row("Bold + Italic", Style(font=Font(weight=FontWeight.BOLD, slant=FontSlant.ITALIC))),
+
+            heading("Attributes (font=None) — the path most widgets actually take"),
+            row("attr BOLD", BOLD),
+            row("attr ITALIC", Style(attr=TextAttribute.ITALIC)),
+            row("attr BOLD | ITALIC", Style(attr=TextAttribute.BOLD | TextAttribute.ITALIC)),
+            row("attr UNDERLINE", Style(attr=TextAttribute.UNDERLINE)),
+
+            heading("Display size — a hairline difference at body size, obvious at 28pt"),
+            row("28pt Regular", Style(font=Font(size=28))),
+            row("28pt Bold", Style(font=Font(size=28, weight=FontWeight.BOLD))),
+            row("28pt Italic", Style(font=Font(size=28, slant=FontSlant.ITALIC))),
+        ],
+        gap=0,
+    )
     return VSplit(
         Item(
             Label("GUI renders faces, sizes, weights, slants; TUI folds them", DIM),
             size=1,
         ),
-        # The app-wide GUI default for text that names no font is the
-        # proportional UI font; on TUI it folds to the one terminal font.
-        row("Default (font=None) — proportional UI font on GUI"),
-        # Pin the monospace face explicitly to still demonstrate the column-
-        # aligned base grid font the layout's base unit is derived from.
-        row("Base grid font — monospaced, column-aligned", Style(font=Font(monospace=True))),
-        # Weights: only >= SEMI_BOLD survives on TUI (as bold).
-        row("Light (300) — folds to plain on TUI", Style(font=Font(weight=FontWeight.LIGHT))),
-        row("Semibold (600) — folds to bold on TUI", Style(font=Font(weight=FontWeight.SEMI_BOLD))),
-        row("Bold (700)", Style(font=Font(weight=FontWeight.BOLD))),
-        # Slant: italic survives on TUI as the italic attribute.
-        row("Italic — folds to italic on TUI", Style(font=Font(slant=FontSlant.ITALIC))),
-        # A named installed family (GUI only; ignored on TUI).
-        row("Named family: Georgia, 16pt", Style(font=Font(family="Georgia", size=16))),
-        # Decorative size: content sizing reserves the 28pt line height for it,
-        # so it sits in its own tall row instead of overlapping its neighbours.
-        row("Big Title — sized text", Style(font=Font(size=28, weight=FontWeight.SEMI_BOLD))),
-        Item(Label(""), weight=1),
-        gap=0,
+        Item(scroller, weight=1, hints={"surface": "content"}),
+        gap=1,
     )
 
 

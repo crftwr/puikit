@@ -366,6 +366,50 @@ The **grid** path anchors CJK the same way per cell: each wide glyph is drawn
 in its embedded-CJK format nudged up by the same `primary_ascent − cjk_ascent`,
 so grid and flow agree and columns stay aligned.
 
+#### Bold on a Regular-only fallback
+
+The bundled CJK faces ship **Regular only**, so a bold run's Japanese has no
+real bold face to reach and the weight must be synthesized. Every platform can
+do this; the trap is that **naming a face precisely enough also tells the
+platform not to bother**. Issue #238 was that trap, hit twice, by two different
+mechanisms — the symptom identical in both: bold Japanese rendering at exactly
+regular weight (ink 1.000x) while the Latin beside it in the same run thickened.
+
+- **macOS** — `_with_cjk_cascade` names the fallback by *family*, which bypasses
+  the trait matching Core Text's own default cascade would have done, so the
+  face comes back Regular and Core Text synthesizes nothing. The backend
+  emboldens the run itself with a stroke (`NSStrokeWidthAttributeName`) applied
+  **per range** — only to `text.is_cjk` characters, since the Latin in the same
+  run already carries a real bold (stroking it too would double-embolden it) and
+  emoji come from the OS cascade.
+- **Web** — the CJK `@font-face` declared `font-weight: 400 700`. A range claims
+  the face already *covers* 700, so the browser finds an exact match and has
+  nothing to synthesize; it drew the Regular outlines. Declaring a single `400`
+  restores the synthesis (measured in Chrome: 1.000x → 1.124x). Family selection
+  is by glyph coverage, not weight, so the missing 700 never pushes Japanese out
+  to a system font.
+- **Windows** — `_create_cjk_text_format` asks the custom collection for weight
+  700 and relies on DirectWrite's algorithmic bold simulation for a family with
+  no bold member. Not reproduced on a Windows machine, so unlike the two above
+  this one is reasoned from the API contract rather than measured.
+
+Whatever does the emboldening, **advances must not move**: a stroke is painted on
+the glyph outline in place, and the browser's synthesis likewise measured
+240.00px at both weights. That is what keeps the column grid, wrapping, and every
+`measure_text` caller exact — measurement never sees the synthesis at all.
+
+The macOS stroke is sized to **match a real Japanese bold, not a Latin one**: it
+thickens a stem by 2.40% of the em, against +2.39% for Hiragino Kaku Gothic ProN
+W3→W6 and +2.48% for YuGothic Medium→Bold. Matching the *Latin* face's own
+regular→bold delta (+6.21%) would be wrong — a kanji packs many more strokes into
+the em, and thickening one that far closes the counters of dense glyphs (鬱, 議)
+into a blot at UI sizes.
+
+It is gated on the bundled cascade actually being installed. Without it the
+cascade call is a no-op and Core Text's default cascade resolves Japanese against
+the requested font's traits — picking a real bold system face on its own, which
+synthesizing on top of would double-embolden.
+
 ---
 
 ## 10. Public API surface (additions only)

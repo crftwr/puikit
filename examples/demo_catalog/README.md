@@ -216,6 +216,24 @@ on the backend. `size="content"` lets each `Label` reserve its *own* line
 height, so rows never overlap regardless of face or point size.
 See [`docs/font_system.md`](../../docs/font_system.md) §6.
 
+Every row carries a **Latin tag and a Japanese sample in the same run**, so one
+row demonstrates both scripts at once. That pairing is also what makes a
+fallback bug legible: the bundled Noto CJK JP faces ship Regular only, so a bold
+or italic run reaches its kana/kanji through a face with no such member and the
+platform has to synthesize it
+([`docs/font_system.md`](../../docs/font_system.md) §9.1) — while the Latin tag
+beside it is drawn by the primary face, which has a real bold and needs no
+synthesis. A row whose tag thickens or slants while its kanji stays upright and
+thin is the failure, and it shows up *within the row*, with nothing to compare
+against. Issue #238 was exactly that, on macOS and the web backend both.
+
+The rows are grouped into faces, weights, slants, the `attr` path most widgets
+actually take (no `Style.font` at all), and a 28pt display size where a
+difference that is a hairline at body size becomes obvious. They live in a
+`ScrollView` because the full set of variations is longer than a short terminal,
+and truncating it to what fits 24 rows would quietly drop the cases worth
+looking at.
+
 ### 📜 Wrapping
 Text wrapping is content-driven on *both* axes: a long logical line is folded to
 the pane width and the block reserves the rows it needs (`size="content"`). The

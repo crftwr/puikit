@@ -65,7 +65,9 @@ from AppKit import (
     NSItalicFontMask,
     NSImage,
     NSKernAttributeName,
+    NSMutableAttributedString,
     NSShadowAttributeName,
+    NSStrokeWidthAttributeName,
     NSMutableParagraphStyle,
     NSParagraphStyleAttributeName,
     NSCompositingOperationCopy,
@@ -120,7 +122,7 @@ from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..easing import resolve as _resolve_easing
 from ..event import Event, EventType, char_key_event
 from ..font import Font, FontMetrics, FontWeight
-from ..text import display_width, glyph_runs as _glyph_runs
+from ..text import cjk_segments, display_width, glyph_runs as _glyph_runs
 
 try:
     from Quartz import (
@@ -396,10 +398,13 @@ def _with_cjk_cascade(ns: Any, size: float, monospace: bool) -> Any:
     The system's own default cascade is preserved *after* the CJK entry, so
     emoji and every other script keep their existing OS fallback. Bold/italic
     Japanese resolves to the Regular CJK face (Noto CJK ships Regular only here);
-    that is metrically exact — its advances are weight-invariant — the weight is
-    simply not synthesized for the fallback run. Both ``NSAttributedString.size``
-    (measurement) and ``-drawAtPoint:`` (drawing) honor the cascade, so the two
-    stay in agreement."""
+    that is metrically exact — its advances are weight-invariant. Naming the face
+    by *family* here does mean Core Text applies no trait matching to it, so the
+    weight does not come back bold on its own: the draw path synthesizes it with
+    a per-range stroke (see _with_cjk_faux_bold, issue #238), and the oblique
+    above covers the slant. Both ``NSAttributedString.size`` (measurement) and
+    ``-drawAtPoint:`` (drawing) honor the cascade, so the two stay in
+    agreement."""
     if ns is None or not _ensure_cjk_fonts():
         return ns
     family = _BUNDLED_CJK_MONO if monospace else _BUNDLED_CJK_UI
@@ -434,6 +439,67 @@ def _oblique(ns: Any) -> Any:
     transform = NSAffineTransform.transform()
     transform.setTransformStruct_((size, 0.0, _OBLIQUE_SHEAR * size, size, 0.0, 0.0))
     return NSFont.fontWithDescriptor_textTransform_(ns.fontDescriptor(), transform) or ns
+
+# Stroke width used to synthesize a bold for the CJK fallback run, as the
+# percentage of the point size that NSStrokeWidthAttributeName expects. Negative
+# = stroke *and* fill (a plain embolden); the stroke takes the foreground color,
+# so a DIM run's alpha carries through unchanged.
+#
+# -5.0 thickens a stem by 2.40% of the em, which is what a real Japanese bold
+# does: measured against the OS faces that ship one, Hiragino Kaku Gothic ProN
+# W3->W6 is +2.39% and YuGothic Medium->Bold +2.48% (Hiragino Sans W3->W7, a
+# heavier W7, is +3.08%). Deliberately NOT matched to the Latin face's own
+# regular->bold delta, which is +6.21% — CJK bolds are proportionally far
+# lighter than Latin ones because a kanji packs many more strokes into the em,
+# and thickening one by 6% closes the counters of dense glyphs (鬱, 議) into a
+# blot at UI sizes. Advances are untouched at any stroke width (the outline is
+# stroked in place), so the column grid and every measurement stay exact.
+_CJK_FAUX_BOLD_STROKE = -5.0
+
+
+def _cjk_bold_ranges(text: str) -> list[tuple[int, int]]:
+    """``(location, length)`` of each maximal CJK run in ``text``, as UTF-16
+    offsets — the unit NSAttributedString ranges are in, so astral-plane kanji
+    (Ext B, surrogate pairs in UTF-16) land on the right characters instead of
+    sliding the range left by one per preceding pair."""
+    ranges: list[tuple[int, int]] = []
+    loc = 0
+    for segment, cjk in cjk_segments(text):
+        length = len(segment.encode("utf-16-le")) // 2
+        if cjk:
+            if ranges and ranges[-1][0] + ranges[-1][1] == loc:
+                ranges[-1] = (ranges[-1][0], ranges[-1][1] + length)
+            else:
+                ranges.append((loc, length))
+        loc += length
+    return ranges
+
+
+def _with_cjk_faux_bold(ns_text: Any, text: str) -> Any:
+    """``ns_text`` with a synthetic bold applied to its Japanese characters only.
+
+    The bundled Noto CJK JP faces ship Regular alone, and ``_with_cjk_cascade``
+    names one by *family* — which bypasses the trait matching Core Text's own
+    default cascade would do — so a bold run's kanji come back at regular weight
+    while its Latin, drawn by the primary face's real bold, thickens (issue #238;
+    verified offscreen as byte-identical ink for bold vs. regular Japanese).
+    Windows and the web backend never had this: DirectWrite and CSS both
+    synthesize a missing bold on their own. This is the macOS equivalent.
+
+    The stroke is applied per-range rather than to the whole string precisely
+    because a run mixes the two: the Latin already carries a real bold and
+    stroking it too would double-embolden it. Emoji and every other script the
+    OS cascade supplies are likewise left alone — only ``text.is_cjk``
+    characters, the ones routed to the Regular-only face, are emboldened."""
+    ranges = _cjk_bold_ranges(text)
+    if not ranges:
+        return ns_text
+    mutable = NSMutableAttributedString.alloc().initWithAttributedString_(ns_text)
+    for location, length in ranges:
+        mutable.addAttribute_value_range_(
+            NSStrokeWidthAttributeName, _CJK_FAUX_BOLD_STROKE, (location, length))
+    return mutable
+
 
 # Upper bound on the attributed-string / measured-width caches. Picked well
 # above the run count of any single frame so steady-state UIs never evict, yet
@@ -1530,17 +1596,33 @@ class MacOSBackend(Backend):
             self._style_fonts[key] = ns
         return ns
 
-    def _cached_attr_string(self, key: tuple, text: str, attrs) -> Any:
+    def _cached_attr_string(self, key: tuple, text: str, attrs, cjk_bold: bool = False) -> Any:
         """An NSAttributedString for (text, style ``key``), reused across frames.
         ``attrs`` is only built by the caller on a miss. See _attr_string for the
-        leak this prevents and _ATTR_CACHE_MAX for the bound."""
+        leak this prevents and _ATTR_CACHE_MAX for the bound.
+
+        ``cjk_bold`` emboldens the run's Japanese in place (see
+        _with_cjk_faux_bold). It is folded into the cached object rather than
+        applied per draw, so the synthesis costs one mutable copy per distinct
+        (text, style) instead of one per frame."""
         s = self._attr_cache.get(key)
         if s is None:
             s = _attr_string(text, attrs)
+            if cjk_bold:
+                s = _with_cjk_faux_bold(s, text)
             if len(self._attr_cache) >= _ATTR_CACHE_MAX:
                 self._attr_cache.clear()
             self._attr_cache[key] = s
         return s
+
+    def _wants_cjk_faux_bold(self, bold: bool) -> bool:
+        """Whether a bold run drawn in ``ns_font`` needs its Japanese emboldened
+        by hand. Only when the bundled Regular-only CJK cascade is the thing
+        supplying those glyphs: without it ``_with_cjk_cascade`` is a no-op and
+        Core Text's own default cascade resolves Japanese against the *traits*
+        of the requested font, picking a real bold system face (Hiragino W6) on
+        its own — synthesizing there would double-embolden it."""
+        return bool(bold) and _ensure_cjk_fonts()
 
     def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
         """Displayed width in base units. A grid font (font=None or an unsized,
@@ -2277,12 +2359,13 @@ class MacOSBackend(Backend):
         # weight/slant (a monospaced bold/italic keeps the base advance, so the
         # column grid and the kern below stay exact).
         if style.font is None:
-            weight = (
-                TextAttribute.BOLD if style.attr & TextAttribute.BOLD else TextAttribute.NORMAL
-            )
+            bold = bool(style.attr & TextAttribute.BOLD)
+            weight = TextAttribute.BOLD if bold else TextAttribute.NORMAL
             ns_font = self._fonts[weight]
         else:
+            bold = bool(style.attr & TextAttribute.BOLD) or style.font.bold
             ns_font = self._resolve_style_font(style)
+        cjk_bold = self._wants_cjk_faux_bold(bold)
         attrs = {
             NSFontAttributeName: ns_font,
             NSForegroundColorAttributeName: _ns_color(fg, alpha),
@@ -2319,7 +2402,11 @@ class MacOSBackend(Backend):
         kerned[NSParagraphStyleAttributeName] = self._grid_para
         # id(ns_font) keys the cache by the exact resolved face, covering both
         # the NORMAL/BOLD base faces and any grid-aligned per-Style monospace.
-        sig = (id(ns_font), fg, alpha, underline, thick, strike, shadow is not None)
+        # cjk_bold rides in the signature because it changes the cached object,
+        # not just how it is drawn. Both branches below pass it: halfwidth
+        # katakana is display width 1, so a g1 segment carries Japanese too — and
+        # a g2 wide glyph may be an emoji, which _with_cjk_faux_bold declines.
+        sig = (id(ns_font), fg, alpha, underline, thick, strike, shadow is not None, cjk_bold)
         col = 0
         i = 0
         n = len(runs)
@@ -2329,15 +2416,15 @@ class MacOSBackend(Backend):
                 while j < n and widths[j] == 1:
                     j += 1
                 seg = "".join(runs[i:j])
-                self._cached_attr_string(("g1", seg, *sig), seg, kerned).drawAtPoint_(
-                    self._unit_rect(x + col, y, 1, 1).origin
-                )
+                self._cached_attr_string(
+                    ("g1", seg, *sig), seg, kerned, cjk_bold
+                ).drawAtPoint_(self._unit_rect(x + col, y, 1, 1).origin)
                 col += j - i
                 i = j
             else:
-                self._cached_attr_string(("g2", runs[i], *sig), runs[i], attrs).drawAtPoint_(
-                    self._unit_rect(x + col, y, widths[i], 1).origin
-                )
+                self._cached_attr_string(
+                    ("g2", runs[i], *sig), runs[i], attrs, cjk_bold
+                ).drawAtPoint_(self._unit_rect(x + col, y, widths[i], 1).origin)
                 col += widths[i]
                 i += 1
 
@@ -2352,6 +2439,12 @@ class MacOSBackend(Backend):
         underline = bool(style.attr & TextAttribute.UNDERLINE)
         thick = bool(style.attr & TextAttribute.UNDERLINE_THICK)
         strike = bool(style.attr & TextAttribute.STRIKETHROUGH)
+        # Either source of bold counts: the attribute, or the Style's own font
+        # weight (>= SEMI_BOLD) — the same "stronger wins" composition
+        # _resolve_style_font applies when it picks the face.
+        bold = bool(style.attr & TextAttribute.BOLD) or (
+            style.font is not None and style.font.bold)
+        cjk_bold = self._wants_cjk_faux_bold(bold)
         attrs = {
             NSFontAttributeName: ns_font,
             NSForegroundColorAttributeName: _ns_color(fg, alpha),
@@ -2367,8 +2460,8 @@ class MacOSBackend(Backend):
         if shadow is not None:
             attrs[NSShadowAttributeName] = shadow
         key = ("f", text, id(ns_font), tuple(fg) if fg else None, alpha,
-               underline, thick, strike, shadow is not None)
-        ns_text = self._cached_attr_string(key, text, attrs)
+               underline, thick, strike, shadow is not None, cjk_bold)
+        ns_text = self._cached_attr_string(key, text, attrs, cjk_bold)
         origin = self._unit_rect(x, y, 1, 1).origin
         if bg is not None and not is_transparent(bg):
             width = ns_text.size().width

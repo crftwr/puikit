@@ -10,7 +10,11 @@ For Japanese (and CJK generally), two **Noto Sans CJK JP** faces are also bundle
 Regular weight only. The non-terminal backends use these as a *fallback layer*:
 the primary Latin faces still define the base unit and line pitch, and the CJK
 faces supply glyphs/advances only for codepoints the Latin faces lack. Bold is
-synthesized (Noto CJK advances are weight-invariant), so Regular alone suffices.
+synthesized (Noto CJK advances are weight-invariant, and synthesis does not
+change them either), so Regular alone suffices — but each backend has to be
+careful not to tell its platform the Regular file already *is* the bold, which
+suppresses the synthesis and was issue #238 on both macOS and the web backend.
+See [`docs/font_system.md`](../../docs/font_system.md) §9.1.
 
 These `.ttf` / `.otf` files and their `OFL.txt` / `OFL-CJK.txt` licenses are
 **not committed** — they are large binaries under the
