@@ -523,3 +523,47 @@ def test_transport_handshake_and_roundtrip():
         s.close()
     finally:
         server.close()
+
+
+def test_gtext_breaks_out_glyphs_that_do_not_advance_one_column():
+    # A gtext cell is one fillText, so the browser lays it out at the font's own
+    # advances: every glyph batched into a cell must advance exactly one base
+    # unit, or it slides the rest of the cell off the column grid. Two ways a
+    # single-column glyph fails that, and both must be broken out.
+    b = _backend()
+    bw = b.base_pixel_size[0]
+
+    def cells(text):
+        ops = _ops_after(lambda bk: bk.draw_text(0, 0, text, Style(fg=(1, 2, 3))))
+        gtext = [o for o in ops if o[0] == "gtext"][0]
+        return [(c[0], round(c[1] / bw)) for c in gtext[-1]]
+
+    # Not covered by the primary face -> browser fallback draws it at its own
+    # advance. Everything after it must still start on its own column.
+    assert cells("Deselected: ♡aaa") == [
+        ("Deselected: ", 0), ("♡", 12), ("aaa", 13),
+    ]
+    # Covered by the primary face but double-advance, and East-Asian-Ambiguous
+    # so display_width calls it one column: the case a coverage-only test misses.
+    assert b._face(Style()).tables[0].has_glyph(0x25B6)
+    assert cells("cols ▶ after") == [("cols ", 0), ("▶", 5), (" after", 6)]
+    # Wide CJK keeps its two columns; Latin either side stays batched.
+    assert cells("a漢b") == [("a", 0), ("漢", 1), ("b", 3)]
+    # Pure ASCII stays exactly one cell (one fillText), as before.
+    assert cells("Selected: test.txt") == [("Selected: test.txt", 0)]
+
+
+def test_gtext_marks_solo_cells_with_the_cell_to_seat_them_in():
+    # A solo glyph was drawn for whatever box its face gives it, which can be
+    # wider than the column the grid allows, so the client has to seat its ink
+    # inside the cell. It can only do that if the op says how wide the cell is —
+    # and only for solo cells: a batched run must never be touched.
+    b = _backend()
+    bw = b.base_pixel_size[0]
+    ops = _ops_after(lambda bk: bk.draw_text(0, 0, "ab♡c漢d", Style(fg=(1, 2, 3))))
+    cells = [o for o in ops if o[0] == "gtext"][0][-1]
+    assert [c[0] for c in cells] == ["ab", "♡", "c", "漢", "d"]
+    # Batched runs carry no cell width; solo glyphs carry their column span.
+    assert [len(c) for c in cells] == [2, 3, 2, 3, 2]
+    assert cells[1][2] == pytest.approx(bw)       # ♡ -> one column
+    assert cells[3][2] == pytest.approx(2 * bw)   # 漢 -> two columns

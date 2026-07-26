@@ -22,6 +22,7 @@ from puikit.backends.macos_backend import (  # noqa: E402
     translate_key,
 )
 from puikit.event import EventType  # noqa: E402
+from puikit.text import display_width, glyph_runs  # noqa: E402
 
 
 def _advance(font, ch):
@@ -584,3 +585,125 @@ def test_begin_end_text_input_toggle_the_context():
     backend.end_text_input()
     assert backend._text_input_active is False
     assert spy.calls == ["deactivate"]
+
+
+def _batch_segments(backend, text):
+    """The column segmentation _render_text performs, as (text, column) pairs:
+    one entry per batched run or solo glyph. Mirrors the draw loop without
+    needing a graphics context."""
+    ns_font = backend._fonts[TextAttribute.NORMAL]
+    runs = glyph_runs(text)
+    widths = [max(1, display_width(g)) for g in runs]
+    on_grid = backend._grid_batchable(ns_font, runs, widths)
+    out, col, i, n = [], 0, 0, len(runs)
+    while i < n:
+        if on_grid[i]:
+            j = i
+            while j < n and on_grid[j]:
+                j += 1
+            out.append(("".join(runs[i:j]), col))
+            col += j - i
+            i = j
+        else:
+            out.append((runs[i], col))
+            col += widths[i]
+            i += 1
+    return out
+
+
+def test_grid_batches_only_glyphs_that_advance_one_column():
+    # The grid path draws a run of glyphs as ONE kerned string, which is only
+    # sound while every glyph in it advances by the base face's advance. Ordinary
+    # text does; a glyph the face draws at another advance must be excluded, or
+    # it drags everything after it in the same string off the column grid.
+    backend = MacOSBackend(base_font=Font(size=12, monospace=True))
+    backend._init_fonts()
+    ns_font = backend._fonts[TextAttribute.NORMAL]
+
+    def batchable(glyph):
+        return backend._grid_batchable(ns_font, [glyph], [max(1, display_width(glyph))])[0]
+
+    # Latin from the base face itself: batchable, and that is the fast path.
+    for ch in "Ma0 .-_/":
+        assert batchable(ch), ch
+    # Off-grid by fallback: the base face lacks these, so the cascade draws them
+    # at its own advance (Noto CJK, 12.0 against a 7.2 grid).
+    for ch in "♡★":
+        assert not batchable(ch), ch
+        assert _advance(ns_font, ch) != _advance(ns_font, "M")
+    # Off-grid while *covered*: U+25B6 is in Noto Sans Mono at double advance,
+    # yet East-Asian-Ambiguous, so display_width calls it one column. A coverage
+    # test would wrongly batch this one.
+    assert ns_font.coveredCharacterSet().longCharacterIsMember_(0x25B6)
+    assert not batchable("▶")
+
+
+def test_grid_segmentation_keeps_columns_after_an_off_grid_glyph():
+    # The regression itself: text after ♡ / ▶ must still start on its own column.
+    backend = MacOSBackend(base_font=Font(size=12, monospace=True))
+    backend._init_fonts()
+
+    assert _batch_segments(backend, "Deselected: ♡aaa") == [
+        ("Deselected: ", 0), ("♡", 12), ("aaa", 13),
+    ]
+    assert _batch_segments(backend, "cols ▶ after") == [
+        ("cols ", 0), ("▶", 5), (" after", 6),
+    ]
+    # A wide glyph still takes two columns, and Latin either side stays batched.
+    assert _batch_segments(backend, "a漢b") == [("a", 0), ("漢", 1), ("b", 3)]
+    # Pure ASCII is untouched: one segment, one draw call.
+    assert _batch_segments(backend, "Selected: test.txt") == [("Selected: test.txt", 0)]
+
+
+def test_glyph_metrics_memoized_per_face():
+    backend = MacOSBackend(base_font=Font(size=12, monospace=True))
+    backend._init_fonts()
+    ns_font = backend._fonts[TextAttribute.NORMAL]
+    backend._grid_batchable(ns_font, ["M", "♡"], [1, 1])
+    cache = backend._glyph_metric_cache[id(ns_font)]
+    assert set(cache) == {"M", "♡"}
+    # (advance, ink_x, ink_width): the base face advances "M" by the grid
+    # advance; ♡ comes from the cascade at a wider one.
+    assert cache["M"][0] == pytest.approx(backend._grid_advance)
+    assert cache["♡"][0] > backend._grid_advance
+    assert cache["♡"][2] > 0.0  # real ink, so _solo_fit has something to seat
+
+
+def test_solo_fit_seats_an_oversized_glyph_without_touching_one_that_fits():
+    # A glyph excluded from a batched run is placed alone at its column, but it
+    # was drawn for a wider box than the grid gives it. _solo_fit is the
+    # horizontal (scale, translate) that keeps its ink inside that cell.
+    backend = MacOSBackend(base_font=Font(size=12, monospace=True))
+    backend._init_fonts()
+    ns_font = backend._fonts[TextAttribute.NORMAL]
+    cell = float(backend._base_w)
+
+    def seated(glyph, columns=1):
+        """Where the glyph's ink lands in its cell after _solo_fit, as
+        (left, right) offsets from the cell's left edge."""
+        slot = columns * cell
+        _, ink_x, ink_w = backend._glyph_metrics(ns_font, glyph)
+        fit = backend._solo_fit(ns_font, glyph, slot)
+        scale, shift = (1.0, 0.0) if fit is None else fit
+        left = scale * ink_x + shift
+        return left, left + scale * ink_w, slot
+
+    # ♡ is inked wider than a column: scaled down, and the result fills the cell
+    # exactly without crossing either edge.
+    left, right, slot = seated("♡")
+    assert backend._solo_fit(ns_font, "♡", cell)[0] < 1.0    # scaled
+    assert left == pytest.approx(0.0) and right == pytest.approx(slot)
+
+    # ▶ carries narrow ink in a double-wide advance: no scaling, just a nudge
+    # back inside the cell. Squeezing this one would needlessly distort it.
+    assert backend._solo_fit(ns_font, "▶", cell)[0] == 1.0
+    left, right, slot = seated("▶")
+    assert left >= -0.01 and right <= slot + 0.01
+
+    # A glyph whose ink already fits is left exactly as the face designed it —
+    # ideographic punctuation hugs one side of its em box on purpose, and a CJK
+    # ideograph's slack in a two-column slot is the face's own side bearing.
+    for glyph in "。「」漢あ":
+        assert backend._solo_fit(ns_font, glyph, 2 * cell) is None, glyph
+    for glyph in "ｱｲｳ":  # halfwidth katakana: one column, narrow ink
+        assert backend._solo_fit(ns_font, glyph, cell) is None, glyph

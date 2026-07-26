@@ -114,7 +114,9 @@ def test_web_grid_text_serializes_column_aligned_cells():
     assert len(gtext) == 1
     *_, x_px, total_px, cells = gtext[0]
     # "a" at col 0, "漢" at col 1 (its own cell), "b" at col 3 (after 2-wide 漢).
-    assert cells == [["a", 0.0], ["漢", 1 * bw], ["b", 3 * bw]]
+    # A solo cell carries a third field — the cell width the client seats its
+    # ink in; a batched run carries none and is drawn untouched.
+    assert cells == [["a", 0.0], ["漢", 1 * bw, 2 * bw], ["b", 3 * bw]]
     assert total_px == pytest.approx(4 * bw)  # 1 + 2 + 1 columns
     assert x_px == 0.0
 

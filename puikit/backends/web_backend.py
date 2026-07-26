@@ -179,7 +179,7 @@ class _Face:
     table only — the base unit and line pitch are defined by the primary face,
     never the taller CJK face."""
 
-    __slots__ = ("tables", "css", "px", "ascent_px", "line_px")
+    __slots__ = ("tables", "css", "px", "ascent_px", "line_px", "grid_tiles")
 
     def __init__(self, tables: list[_ttf.TrueTypeFont], css: str, px: float):
         self.tables = tables
@@ -188,6 +188,10 @@ class _Face:
         primary = tables[0]
         self.ascent_px = primary.ascent * px
         self.line_px = primary.line_height * px
+        # Memo of "does this glyph advance exactly one base-unit column in the
+        # primary face", the test _ser_grid_text batches on. Bounded per face by
+        # the glyphs actually drawn, and the face cache bounds the faces.
+        self.grid_tiles: dict[str, bool] = {}
 
 
 class WebBackend(Backend):
@@ -663,19 +667,43 @@ class WebBackend(Backend):
         drifts every following column.
 
         Cells batch: a maximal run of glyphs the **primary** (monospace) face
-        covers advances exactly one column each, so it is emitted as ONE cell
-        (one ``fillText``) — pure-ASCII text stays a single draw, as before. Only
-        a glyph the primary lacks (CJK, from the fallback face, whose advance is
-        not a whole column) is broken out and placed at its own column."""
+        advances by exactly one column is emitted as ONE cell (one ``fillText``)
+        — pure-ASCII text stays a single draw, as before. Anything else is broken
+        out and placed at its own column, because inside a batched cell the
+        browser advances by the font's metrics and one off-metric glyph slides
+        every glyph after it off the grid. Two ways a glyph earns that: the
+        primary **lacks** it, so the browser draws it from the fallback face at
+        *its* advance (CJK, and single-column symbols like U+2661 HEART); or the
+        primary *has* it but at a non-column advance (U+25B6 BLACK
+        RIGHT-POINTING TRIANGLE is double-advance yet East-Asian-Ambiguous, so
+        ``display_width`` calls it one column).
+
+        A solo cell carries a third field, the width of the cell it must sit in,
+        which asks the client to **seat** it: the glyph was drawn for whatever
+        box its face gives it, so its ink can still cross into the neighbour
+        (♡ is inked wider than a column). The seating itself has to happen in
+        the client, not here — the glyph may come from the browser's own
+        fallback stack, and the tables this side reads carry advances only, no
+        ink extents. A batched cell has no third field and is never touched."""
         from ..text import display_width, glyph_runs
 
         primary = face.tables[0]
-        cells: list = []            # [text, x_px] — a batched column run or one wide glyph
-        seg: list[str] = []         # accumulating primary-covered glyphs
+        tiles = face.grid_tiles
+        # [text, x_px] for a batched column run; [text, x_px, cell_px] for a
+        # solo glyph, whose third field is the cell the client must seat it in.
+        cells: list = []
+        seg: list[str] = []         # accumulating on-grid glyphs
         seg_col = 0
         col = 0
         for glyph in glyph_runs(text):
-            if primary.has_glyph(ord(glyph[0])):
+            on_grid = tiles.get(glyph)
+            if on_grid is None:
+                on_grid = all(primary.has_glyph(ord(ch)) for ch in glyph) and abs(
+                    primary.advance_text(glyph) * face.px - self._base_w
+                ) < 0.01
+                tiles[glyph] = on_grid
+            width = max(1, display_width(glyph))
+            if on_grid:
                 if not seg:
                     seg_col = col
                 seg.append(glyph)
@@ -683,8 +711,8 @@ class WebBackend(Backend):
                 if seg:
                     cells.append(["".join(seg), (x + seg_col) * self._base_w])
                     seg = []
-                cells.append([glyph, (x + col) * self._base_w])
-            col += max(1, display_width(glyph))
+                cells.append([glyph, (x + col) * self._base_w, width * self._base_w])
+            col += width
         if seg:
             cells.append(["".join(seg), (x + seg_col) * self._base_w])
 

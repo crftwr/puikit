@@ -1350,6 +1350,14 @@ class MacOSBackend(Backend):
         # stream of unique text (a busy log) can never grow them without bound.
         self._attr_cache: dict[tuple, Any] = {}
         self._width_cache: dict[tuple, float] = {}
+        # Per-face memo of (advance, ink_x, ink_width) per glyph — what the grid
+        # path needs to decide whether it may batch a glyph into a kerned run
+        # and, when it may not, how to seat it in its cell (see _grid_batchable
+        # / _solo_fit). Nested by id(NSFont) so the hot loop hashes a bare glyph
+        # string rather than allocating a key tuple per character; both levels
+        # are bounded (resolved faces by _style_fonts, glyphs by the scripts
+        # actually drawn).
+        self._glyph_metric_cache: dict[int, dict[str, tuple[float, float, float]]] = {}
         # Decoded images keyed by path. Without this, _render_image decoded a
         # fresh NSImage from disk on every frame for every visible image; the
         # AppKit/CoreGraphics backing-store caches behind those accumulate as
@@ -1595,6 +1603,111 @@ class MacOSBackend(Backend):
             ns = self.resolve_font(font, bold=bold, italic=italic)
             self._style_fonts[key] = ns
         return ns
+
+    def _grid_batchable(self, ns_font: Any, runs: list[str], widths: list[int]) -> list[bool]:
+        """Per glyph run, whether the grid path may fold it into a **batched**
+        kerned draw rather than placing it alone at its column.
+
+        The constant kern (`_grid_kern`) turns the base face's own advance into
+        exactly one base unit, so a whole run of base-face glyphs can be drawn
+        as one string and still land on the columns. It corrects one advance,
+        though — the base face's. A glyph the face draws at any *other* advance
+        slides every glyph after it in the same batched string off the grid, so
+        such a glyph is excluded here and drawn solo (see `_render_text`).
+
+        Two ways a single-column glyph earns exclusion, both ordinary in real
+        text:
+
+        - the base face **lacks** it, so Core Text's cascade supplies it at the
+          fallback's advance — U+2661 HEART and U+2605 STAR come from Noto CJK
+          at 12.0 against a 7.2 grid, halfwidth katakana at 6.0;
+        - the base face **has** it, at a non-column advance — U+25B6 BLACK
+          RIGHT-POINTING TRIANGLE is double-advance (14.4) in Noto Sans Mono.
+
+        Neither is East Asian Wide, so `display_width` calls both one column and
+        only the face knows better: hence measuring, where a coverage test would
+        catch the first kind and miss the second. Wide glyphs are excluded
+        outright — they already take their 2-cell slot alone.
+
+        Measured once per (face, glyph) and memoized. The emboldening
+        `_with_cjk_faux_bold` applies never moves an advance (docs/font_system.md
+        §9.1), so the plain face is the right thing to measure.
+        """
+        # This runs per glyph of every grid run drawn, so the memo is read
+        # inline here (one dict lookup, no key tuple) and _glyph_metrics is
+        # entered only to fill a miss.
+        cache = self._glyph_metric_cache.setdefault(id(ns_font), {})
+        grid_advance = self._grid_advance
+        out: list[bool] = []
+        for glyph, w in zip(runs, widths):
+            if w != 1:
+                out.append(False)  # a wide glyph takes its 2-cell slot alone
+                continue
+            m = cache.get(glyph) or self._glyph_metrics(ns_font, glyph)
+            out.append(abs(m[0] - grid_advance) < 0.01)
+        return out
+
+    def _glyph_metrics(self, ns_font: Any, glyph: str) -> tuple[float, float, float]:
+        """``(advance, ink_x, ink_width)`` of one glyph run in ``ns_font``, in
+        points, with ``ink_x`` measured from the run's draw origin.
+
+        The *advance* is the layout box the text engine reserves; the *ink* is
+        where the glyph's outline actually lands inside it. The grid path needs
+        both and they routinely disagree — U+25B6 ▶ has a double-wide advance
+        carrying narrow ink, U+2661 ♡ the reverse — so a cell's fit cannot be
+        judged from either one alone.
+
+        Memoized per (face, glyph): a cascade lookup plus a CoreText line build
+        is far too costly per frame, and the answer depends on nothing else.
+        """
+        cache = self._glyph_metric_cache.setdefault(id(ns_font), {})
+        m = cache.get(glyph)
+        if m is None:
+            attr = _attr_string(glyph, {NSFontAttributeName: ns_font})
+            advance = attr.size().width
+            ink_x, ink_w = 0.0, advance
+            if _HAS_CORETEXT:
+                box = CoreText.CTLineGetImageBounds(
+                    CoreText.CTLineCreateWithAttributedString(attr), None)
+                ink_x, ink_w = box.origin.x, box.size.width
+            m = (advance, ink_x, ink_w)
+            cache[glyph] = m
+        return m
+
+    def _solo_fit(self, ns_font: Any, glyph: str, slot: float) -> tuple[float, float] | None:
+        """Horizontal ``(scale, translate)`` seating a solo glyph's ink inside
+        the ``slot``-point-wide cell it is drawn in, or None when it already
+        sits inside and should be left exactly as the face designed it.
+
+        A glyph excluded from a batched run (`_grid_batchable`) is placed alone
+        at its column, which fixes the *columns* but not the glyph: it was drawn
+        for a wider box than the grid gives it, so its ink can cross into the
+        neighbouring cell. U+2661 ♡ is the visible case — Noto CJK draws it
+        10.2pt wide where the grid column is 8.
+
+        The correction is deliberately the smallest one that works, because a
+        glyph's position inside its box is usually **designed** and must not be
+        second-guessed: ideographic punctuation (U+3002 。) hugs the left of its
+        em on purpose, and a CJK ideograph's slack inside a two-column slot is
+        the face's own side bearing. So a glyph whose ink already fits is
+        returned untouched; one that overflows is nudged the minimum distance
+        back inside; and only ink genuinely *wider* than the cell is scaled
+        down, horizontally, leaving the baseline and every vertical metric
+        alone.
+        """
+        _, ink_x, ink_w = self._glyph_metrics(ns_font, glyph)
+        if ink_w <= 0.0:
+            return None  # a space or other blank: nothing to seat
+        scale = slot / ink_w if ink_w > slot else 1.0
+        left = scale * ink_x
+        shift = 0.0
+        if left + scale * ink_w > slot:
+            shift = slot - (left + scale * ink_w)   # overhangs right: pull it in
+        if left + shift < 0.0:
+            shift = -left                           # overhangs left: push it in
+        if scale == 1.0 and abs(shift) < 0.01:
+            return None
+        return (scale, shift)
 
     def _cached_attr_string(self, key: tuple, text: str, attrs, cjk_bold: bool = False) -> Any:
         """An NSAttributedString for (text, style ``key``), reused across frames.
@@ -2386,14 +2499,17 @@ class MacOSBackend(Backend):
         # glyph; a constant kern of (base_w - grid_advance) added after each
         # glyph cancels that drift exactly, so columns stay aligned and the clip
         # rect still trims the boundary glyph at the pane edge. Drawing each
-        # contiguous single-width segment in one call (rather than per glyph)
-        # also collapses the draw count; see _attr_string for why these go
-        # through NSAttributedString rather than -[NSString draw…WithAttributes:].
-        # Wide glyphs (East Asian, display width 2) break a segment: they get a
-        # 2-cell slot drawn on their own so the next glyph does not overlap.
+        # contiguous batchable segment in one call (rather than per glyph) also
+        # collapses the draw count; see _attr_string for why these go through
+        # NSAttributedString rather than -[NSString draw…WithAttributes:].
+        # What may share a batched segment is _grid_batchable's call: a wide
+        # (East Asian) glyph takes its 2-cell slot alone so the next glyph does
+        # not overlap it, and so does any single-column glyph the face advances
+        # by something other than the kern-corrected grid column.
         runs = _glyph_runs(text)
         widths = [max(1, display_width(glyph)) for glyph in runs]
         total = sum(widths)
+        on_grid = self._grid_batchable(ns_font, runs, widths)
         if bg is not None and not is_transparent(bg):
             _ns_color(bg).setFill()
             NSRectFill(self._unit_rect(x, y, total, 1))
@@ -2403,28 +2519,51 @@ class MacOSBackend(Backend):
         # id(ns_font) keys the cache by the exact resolved face, covering both
         # the NORMAL/BOLD base faces and any grid-aligned per-Style monospace.
         # cjk_bold rides in the signature because it changes the cached object,
-        # not just how it is drawn. Both branches below pass it: halfwidth
-        # katakana is display width 1, so a g1 segment carries Japanese too — and
-        # a g2 wide glyph may be an emoji, which _with_cjk_faux_bold declines.
+        # not just how it is drawn. Both branches below pass it: a solo glyph is
+        # routinely Japanese (every wide ideograph, and halfwidth katakana via
+        # its off-grid 6.0 advance), and it may equally be an emoji, which
+        # _with_cjk_faux_bold declines on its own.
         sig = (id(ns_font), fg, alpha, underline, thick, strike, shadow is not None, cjk_bold)
         col = 0
         i = 0
         n = len(runs)
         while i < n:
-            if widths[i] == 1:
+            if on_grid[i]:
                 j = i
-                while j < n and widths[j] == 1:
+                while j < n and on_grid[j]:
                     j += 1
                 seg = "".join(runs[i:j])
                 self._cached_attr_string(
-                    ("g1", seg, *sig), seg, kerned, cjk_bold
+                    ("gseg", seg, *sig), seg, kerned, cjk_bold
                 ).drawAtPoint_(self._unit_rect(x + col, y, 1, 1).origin)
                 col += j - i
                 i = j
             else:
-                self._cached_attr_string(
-                    ("g2", runs[i], *sig), runs[i], attrs, cjk_bold
-                ).drawAtPoint_(self._unit_rect(x + col, y, widths[i], 1).origin)
+                # Tagged apart from a batched segment: the two carry different
+                # attributes (no kern here), so one glyph can appear as both.
+                solo = self._cached_attr_string(
+                    ("gsolo", runs[i], *sig), runs[i], attrs, cjk_bold
+                )
+                origin = self._unit_rect(x + col, y, widths[i], 1).origin
+                # A glyph drawn for a wider box than its cell would spill its ink
+                # over the neighbour; _solo_fit returns the horizontal transform
+                # that seats it (None for the common case that it already fits).
+                fit = self._solo_fit(ns_font, runs[i], widths[i] * self._base_w)
+                if fit is None:
+                    solo.drawAtPoint_(origin)
+                else:
+                    scale, shift = fit
+                    gctx = NSGraphicsContext.currentContext()
+                    gctx.saveGraphicsState()
+                    seat = NSAffineTransform.transform()
+                    # x -> scale*x + tX, y untouched. tX is solved so the ink
+                    # lands where _solo_fit put it *relative to this cell*:
+                    # scale*(origin.x + ink_x) + tX == origin.x + scale*ink_x + shift.
+                    seat.setTransformStruct_(
+                        (scale, 0.0, 0.0, 1.0, origin.x * (1.0 - scale) + shift, 0.0))
+                    seat.concat()
+                    solo.drawAtPoint_(origin)
+                    gctx.restoreGraphicsState()
                 col += widths[i]
                 i += 1
 

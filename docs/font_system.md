@@ -328,6 +328,61 @@ A helper distinguishes the two render paths: a run is grid-aligned only when
 it carries no distinguishing font request (the base monospaced font); anything
 else flows.
 
+#### What may share one draw call
+
+Placing every glyph in its own call is always correct and always slowest, so
+the grid path batches: a contiguous run of glyphs goes out as **one** string,
+positioned by the text engine's own advances (macOS corrects the base face's
+advance to the rounded-up base unit with a constant kern; the web emits one
+`fillText` per cell). Windows does not batch at all — one `DrawText` per glyph.
+
+Batching is sound **only for glyphs the resolved face advances by exactly one
+base unit**, and that is narrower than "display width 1". Two ordinary kinds of
+text break it, and both must be split out and drawn alone at their column:
+
+- a glyph the base face **lacks**, supplied by the fallback at *its* advance —
+  U+2661 ♡ and U+2605 ★ come from Noto CJK at 12.0 against a 7.2 grid, and
+  halfwidth katakana at 6.0;
+- a glyph the base face **has**, at a non-column advance — U+25B6 ▶ is
+  double-advance in Noto Sans Mono.
+
+Neither is East Asian Wide, so `display_width` reports one column for both and
+only the *face* knows otherwise: the test is a measured advance, not glyph
+coverage (coverage catches the first kind and misses the second). Get it wrong
+and a single ♡ in a log line slides every character after it off the grid,
+which is exactly what the column-counted wrap, `measure_text`, and mouse
+hit-testing all assume cannot happen.
+
+Splitting a glyph out fixes the *columns*, not the glyph: it was still drawn
+for a wider box than the grid gives it, so its ink can cross into the
+neighbouring cell (♡ is inked 10.2pt against an 8pt column). So a solo glyph is
+also **seated** — a horizontal-only transform, baseline and every vertical
+metric untouched.
+
+The seating is deliberately the *smallest* correction that works, because where
+a glyph sits inside its box is usually designed and must not be second-guessed:
+
+- ink that already fits is left exactly as the face drew it — U+3002 。 hugs the
+  left of its em on purpose, U+300C 「 the right, and a CJK ideograph's slack
+  inside a two-column slot is the face's own side bearing;
+- ink that overhangs an edge is nudged the minimum distance back inside
+  (U+25B6 ▶ again: narrow ink parked to the right of a double-wide advance, so
+  it needs a shift and no scaling at all);
+- only ink genuinely *wider* than the cell is scaled down, by exactly the ratio
+  that makes it fit.
+
+Wide (2-column) glyphs are drawn alone for the same reason and already were;
+they go through the same seating, which for a well-fitted ideograph is a no-op.
+
+**Where the seating runs.** macOS does it in the backend, from Core Text ink
+bounds. The web *cannot*: a solo glyph may be drawn from the browser's own
+fallback stack, and the font tables the Python side reads carry advances only,
+no ink — so the backend marks each solo cell with the cell width to seat it in
+and the client does the measuring (`measureText`'s `actualBoundingBox*`) and the
+transform. That is the one piece of layout the "dumb pixel replayer" client owns,
+and only because the measurement is not available anywhere else. Windows draws
+one glyph per call and does not seat yet; its solo glyphs still spill.
+
 ### 9.1 CJK fallback and the shared baseline
 
 The bundled Noto CJK JP face is a **fallback layer**, never the primary/base
