@@ -11,7 +11,11 @@ from collections import deque
 from dataclasses import replace
 from typing import Any
 
-from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, WindowStyle, is_transparent
+from ..backend import (
+    Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, WindowHandle,
+    WindowStyle, is_transparent,
+)
+from contextlib import contextmanager
 from ..capability import PROFILE_TUI, CapabilityProfile
 from ..event import Event
 
@@ -72,6 +76,54 @@ def _vbar_cells(h: int, pos: float, ratio: float, subcell: bool = True):
             yield row, "top", covered
 
 
+class _MemoryWindowHandle(WindowHandle):
+    """A recorded secondary window: its own character grid, testable with
+    snapshot()/style_at() exactly like the backend's main grid."""
+
+    def __init__(self, backend: "MemoryBackend", width: int, height: int,
+                 title: str, style: WindowStyle | None):
+        self._backend = backend
+        self.width = width
+        self.height = height
+        self.title = title
+        self.window_style = style if style is not None else WindowStyle()
+        self.visible = True
+        self._closed = False
+        self.grid: list[list[str]] = [[" "] * width for _ in range(height)]
+        self.styles: list[list[Style]] = [[DEFAULT_STYLE] * width for _ in range(height)]
+
+    # -- WindowHandle ------------------------------------------------------
+
+    def show(self) -> None:
+        self.visible = True
+
+    def hide(self) -> None:
+        self.visible = False
+
+    def close(self) -> None:
+        self.visible = False
+        self._closed = True
+
+    def set_title(self, title: str) -> None:
+        self.title = title
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    @property
+    def size_units(self) -> tuple[float, float]:
+        return (float(self.width), float(self.height))
+
+    # -- test helpers (mirror MemoryBackend's) ------------------------------
+
+    def snapshot(self) -> list[list[str]]:
+        return [row[:] for row in self.grid]
+
+    def style_at(self, x: int, y: int) -> Style:
+        return self.styles[y][x]
+
+
 class MemoryBackend(Backend):
     PROFILE = PROFILE_TUI
 
@@ -83,8 +135,13 @@ class MemoryBackend(Backend):
         style: WindowStyle | None = None,
         activation_policy: str = "regular",
     ):
-        self._width = width
-        self._height = height
+        self._width_main = width
+        self._height_main = height
+        # Multi-window: secondary windows created via create_window(); while
+        # a Panel bound to one renders, _active_win routes the grid/size
+        # properties below to that window's surface.
+        self.windows: list[_MemoryWindowHandle] = []
+        self._active_win: _MemoryWindowHandle | None = None
         self._capabilities = capabilities if capabilities is not None else self.PROFILE
         # Recorded for tests (signature parity with the GUI backends; a
         # headless grid has no real window to style).
@@ -145,6 +202,71 @@ class MemoryBackend(Backend):
                 callback()
                 fired += 1
         return fired
+
+    # --- multi-window (capability "multi_window") ---------------------------
+    # The grid/size fields below are properties so that, while a Panel bound
+    # to a secondary window renders (inside _window_scope), every draw
+    # primitive and size query transparently targets that window's surface.
+
+    @property
+    def _width(self) -> int:
+        return self._active_win.width if self._active_win else self._width_main
+
+    @_width.setter
+    def _width(self, value: int) -> None:
+        if self._active_win:
+            self._active_win.width = value
+        else:
+            self._width_main = value
+
+    @property
+    def _height(self) -> int:
+        return self._active_win.height if self._active_win else self._height_main
+
+    @_height.setter
+    def _height(self, value: int) -> None:
+        if self._active_win:
+            self._active_win.height = value
+        else:
+            self._height_main = value
+
+    @property
+    def _grid(self):
+        return self._active_win.grid if self._active_win else self._grid_main
+
+    @_grid.setter
+    def _grid(self, value):
+        if self._active_win:
+            self._active_win.grid = value
+        else:
+            self._grid_main = value
+
+    @property
+    def _styles(self):
+        return self._active_win.styles if self._active_win else self._styles_main
+
+    @_styles.setter
+    def _styles(self, value):
+        if self._active_win:
+            self._active_win.styles = value
+        else:
+            self._styles_main = value
+
+    def create_window(self, width: int, height: int, title: str = "",
+                      style: WindowStyle | None = None) -> _MemoryWindowHandle:
+        self._assert_ui_thread("create_window")
+        handle = _MemoryWindowHandle(self, width, height, title, style)
+        self.windows.append(handle)
+        return handle
+
+    @contextmanager
+    def _window_scope(self, window):
+        previous = self._active_win
+        self._active_win = window
+        try:
+            yield
+        finally:
+            self._active_win = previous
 
     def begin_text_input(self) -> None:
         self.text_input_active = True

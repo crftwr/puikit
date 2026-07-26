@@ -488,6 +488,9 @@ class WindowsBackend(Backend):
             "clipboard_rich": False,
             "native_file_dialog": False,
             "system_tray": False,
+            # multi_window needs per-hwnd D2D render targets/swap chains on
+            # this backend; off until that lands (macOS shipped first).
+            "multi_window": False,
             "media_keys": False,
             "post_effects": True,  # Direct2D-effects CRT composite (set_post_effect)
             "background": True,  # a wallpaper image drawn under the UI in the

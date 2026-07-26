@@ -53,12 +53,31 @@ MacOSBackend(..., activation_policy="accessory")
   parameter for signature parity and ignores it (no Dock on Windows; taskbar
   presence is `WindowStyle.tool`).
 
-## Multi-window (planned)
+## Multi-window (capability `multi_window`)
 
-Today one backend owns one window, and `WindowStyle` styles *that* window at
-construction. The planned multi-window extension (`backend.create_window(...)
--> WindowHandle`, a `Panel` per window) is the next step for apps like
-Keyhac 2 that show a console, a chooser popup, and a balloon at once.
+**Status: shipped on macOS and MemoryBackend; Windows pending (needs
+per-hwnd D2D render targets); Web and TUI planned.**
+
+```python
+win = backend.create_window(34, 4, title="Balloon",
+                            style=WindowStyle(frameless=True, topmost=True,
+                                              activates=False))
+panel = Panel(backend, window=win)      # renders into win, receives its events
+panel.add(Label("hello"), 0, 0, 20, 1)
+panel.render()
+win.hide(); win.show(); win.close()     # closing a secondary never quits the app
+win.on_close = ...                       # user clicked close
+```
+
+- `create_window` is UI-thread-only and requires the backend to be open
+  (secondary windows share the main window's base unit and fonts).
+- A bound Panel installs itself as `win.on_event` (dispatch + render) unless
+  the app set its own handler first.
+- Per-window fidelity today: each secondary window has its own display list
+  and input routing; backgrounds/post effects/IME composition remain
+  main-window features for now.
+- `MemoryBackend` windows record everything (`win.snapshot()`,
+  `win.style_at()`), so multi-window UIs are testable headlessly.
 
 **Decided fidelity mapping** (2026-07): secondary windows are **real windows
 on every backend that has them** — native OS windows on GUI-Desktop, real

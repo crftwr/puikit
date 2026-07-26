@@ -214,3 +214,103 @@ class TestMacOSBackendSignature:
         assert backend._frame_autosave_name == "frame-name"
         assert backend._window_style == WindowStyle()
         assert backend._activation_policy == "regular"
+
+
+class TestMultiWindowMemory:
+    """create_window() + Panel(backend, window=...) on the recording backend."""
+
+    def _make(self):
+        from puikit import Panel
+        from puikit.widgets import Label
+        backend = MemoryBackend(80, 24)
+        backend.open()
+        main_panel = Panel(backend)
+        main_panel.add(Label("main window"), 0, 0, 20, 1)
+        main_panel.render()
+        return backend, main_panel
+
+    def test_secondary_window_renders_isolated(self):
+        from puikit import Panel, WindowStyle
+        from puikit.widgets import Label
+        backend, _main = self._make()
+
+        win = backend.create_window(30, 5, title="popup",
+                                    style=WindowStyle(frameless=True, topmost=True))
+        panel = Panel(backend, window=win)
+        panel.add(Label("hello popup"), 0, 0, 20, 1)
+        panel.render()
+
+        popup_rows = ["".join(r) for r in win.snapshot()]
+        main_rows = ["".join(r) for r in backend.snapshot()]
+        assert any("hello popup" in r for r in popup_rows)
+        assert not any("hello popup" in r for r in main_rows)
+        assert any("main window" in r for r in main_rows)
+        assert not any("main window" in r for r in popup_rows)
+        assert win.size_units == (30.0, 5.0)
+        assert win.window_style.frameless is True
+
+    def test_main_render_unaffected_after_secondary(self):
+        from puikit import Panel
+        from puikit.widgets import Label
+        backend, main_panel = self._make()
+        win = backend.create_window(30, 5)
+        panel = Panel(backend, window=win)
+        panel.add(Label("popup"), 0, 0, 10, 1)
+        panel.render()
+        main_panel.render()   # re-render main AFTER a secondary render
+        main_rows = ["".join(r) for r in backend.snapshot()]
+        assert any("main window" in r for r in main_rows)
+        assert not any("popup" in r for r in main_rows)
+
+    def test_panel_auto_binds_events(self):
+        from puikit import Panel
+        from puikit.widgets import Button
+        backend, _main = self._make()
+        win = backend.create_window(30, 5)
+        clicked = []
+        panel = Panel(backend, window=win)
+        panel.add(Button("Go", on_click=lambda: clicked.append(1)), 0, 0, 10, 1)
+        panel.render()
+        assert win.on_event is not None      # Panel installed itself
+        from puikit import Event, EventType
+        win.on_event(Event(type=EventType.MOUSE_DOWN, x=2.0, y=0.5, button="left"))
+        win.on_event(Event(type=EventType.MOUSE_UP, x=2.0, y=0.5, button="left"))
+        assert clicked == [1]
+
+    def test_app_event_handler_kept(self):
+        from puikit import Panel
+        backend, _main = self._make()
+        win = backend.create_window(30, 5)
+        seen = []
+        win.on_event = seen.append           # app handler set BEFORE binding
+        Panel(backend, window=win)
+        from puikit import Event, EventType
+        event = Event(type=EventType.KEY, key="a")
+        win.on_event(event)
+        assert seen == [event]               # Panel did not overwrite it
+
+    def test_lifecycle_flags(self):
+        backend, _main = self._make()
+        win = backend.create_window(30, 5, title="t")
+        assert win.visible and not win.closed
+        win.hide()
+        assert not win.visible
+        win.show()
+        assert win.visible
+        win.set_title("t2")
+        assert win.title == "t2"
+        win.close()
+        assert win.closed and not win.visible
+
+    def test_create_window_is_ui_thread_only(self):
+        backend, _main = self._make()
+        result = _run_in_thread(lambda: backend.create_window(10, 3))
+        assert isinstance(result.get("error"), RuntimeError)
+
+    def test_base_backend_raises_capability(self):
+        from puikit.backend import CapabilityNotSupported
+        backend = MemoryBackend()
+        # a backend WITHOUT an implementation: use the Backend base method
+        from puikit.backend import Backend
+        with pytest.raises(CapabilityNotSupported):
+            Backend.create_window(backend, 10, 3)

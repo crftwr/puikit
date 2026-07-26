@@ -124,6 +124,41 @@ class CapabilityNotSupported(Exception):
     """Raised when an extended primitive is called on a backend without it."""
 
 
+class WindowHandle:
+    """A secondary window created by Backend.create_window() (capability
+    ``multi_window``).
+
+    Fidelity per backend (docs/window_management.md): a real OS window on
+    GUI-Desktop, a real browser window on Web (planned), a framed layer on
+    TUI (planned). Apps hold the handle and bind a Panel to it with
+    ``Panel(backend, window=handle)`` — the Panel then renders into this
+    window and receives its events.
+
+    - ``on_event``: callable receiving this window's events. A bound Panel
+      installs itself here (dispatch + render) unless the app already set one.
+    - ``on_close``: called when the user closes the window. Closing a
+      secondary window never quits the app (only the main window does).
+    """
+
+    on_event: Callable[[Event], None] | None = None
+    on_close: Callable[[], None] | None = None
+
+    def show(self) -> None: ...
+    def hide(self) -> None: ...
+    def close(self) -> None: ...
+    def set_title(self, title: str) -> None: ...
+
+    @property
+    def closed(self) -> bool:
+        return False
+
+    @property
+    def size_units(self) -> tuple[float, float]:
+        """Drawable size in base units (the window's analogue of
+        Backend.size_units)."""
+        return (0.0, 0.0)
+
+
 class Backend(ABC):
     """Abstract base class for all PuiKit backends."""
 
@@ -728,6 +763,23 @@ class Backend(ABC):
     @abstractmethod
     def quit(self) -> None:
         """Request the event loop to stop after the current iteration."""
+
+    # --- multi-window (capability "multi_window") -----------------------------
+
+    def create_window(self, width: int, height: int, title: str = "",
+                      style: "WindowStyle | None" = None) -> WindowHandle:
+        """Create a secondary window (base units). UI-thread-only. The main
+        window (the backend itself) must be open first — secondary windows
+        share its base unit and fonts. Bind a Panel with
+        ``Panel(backend, window=handle)``."""
+        raise CapabilityNotSupported("multi_window")
+
+    @contextmanager
+    def _window_scope(self, window: WindowHandle | None):
+        """Route rendering (draw primitives, present, size queries) to
+        ``window`` for the duration. The Panel brackets render/dispatch with
+        this; the base is a no-op so single-window backends cost nothing."""
+        yield
 
     # --- UI-thread guard ------------------------------------------------------
 
