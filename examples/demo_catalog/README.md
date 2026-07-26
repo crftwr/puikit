@@ -169,13 +169,15 @@ paths to the clipboard. One intent (`panel.begin_file_drag`), resolved per
 backend. See [`docs/drag_drop.md`](../../docs/drag_drop.md).
 
 ### 🪟 Window
-`WindowStyle` (frameless / topmost / no-activate / tool) and
-`activation_policy="accessory"` are **constructor-time** declarations, and one
-process owns one window — so each button launches `window_overlay.py` as a
-separate process with the style under test. The overlay announces its style
-and closes itself in 3 s via `call_later`. Watch the balloon variant: it
-floats above everything without ever taking your keyboard focus. See
-[`docs/window_management.md`](../../docs/window_management.md).
+One intent — "a small topmost surface" — shown at both fidelities. The first
+button pushes a non-interactive **layer** inside this window (works on every
+backend; nav keys keep working below it; auto-dismissed via `call_later`) —
+the same degradation the planned multi-window feature uses on TUI. The lower
+buttons demonstrate the real OS-window declarations (`WindowStyle`,
+`activation_policy="accessory"`) by launching `window_overlay.py` as a
+**separate GUI process** — the native window belongs to that process and
+appears on this machine's desktop regardless of the backend the catalog runs
+on. See [`docs/window_management.md`](../../docs/window_management.md).
 
 ### ⏱️ Timers
 `panel.call_later(delay, callback) -> cancel` — one-shot timers on the UI

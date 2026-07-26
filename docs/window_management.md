@@ -83,6 +83,13 @@ region drawn over the log view. This is the same fallback philosophy as
 menus (native `NSMenu`/`HMENU` vs. the widget-rendered menu): widget and app
 code never branches; the Panel/backend seam resolves the fidelity.
 
+The demo catalog's Window page shows both fidelities today: its balloon
+*layer* button is the in-surface form (every backend), while its OS-window
+buttons launch `window_overlay.py` as a **separate GUI process** — so a
+native window appears on the desktop even when the catalog itself runs on
+the TUI or web backend. That is the subprocess demonstrating the GUI
+feature, not the TUI/web backend growing OS windows.
+
 Two consequences fall out of the mapping:
 
 - A TUI "window" cannot escape the terminal: a balloon that would float over

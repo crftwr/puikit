@@ -2397,67 +2397,102 @@ def build_drag_page(panel: Panel) -> VSplit:
 
 
 def build_window_page(panel: Panel) -> VSplit:
-    # WindowStyle / activation_policy are *constructor-time* declarations
-    # (docs/window_management.md) — a page cannot restyle the already-open
-    # window, and one process owns one window. So this page demonstrates them
-    # the honest way: each button launches window_overlay.py as a separate
-    # process with the style under test; the overlay announces its style and
-    # closes itself via call_later. No capability branching here — on a
-    # desktop the overlay opens even when this catalog runs in a terminal,
-    # and where no GUI exists the launch fails into the status line.
+    # Two fidelities of "a small topmost surface", shown side by side:
+    #
+    #  1. IN this window (every backend): a non-interactive layer — what the
+    #     planned multi-window API will do automatically on TUI/web, and the
+    #     GUI analogue of activates=False. Auto-dismissed via call_later.
+    #  2. AS separate OS windows: WindowStyle / activation_policy are
+    #     *constructor-time* declarations and one process owns one window, so
+    #     each button launches window_overlay.py as a NEW GUI PROCESS. That
+    #     opens a native window on this machine's desktop no matter which
+    #     backend this catalog runs on — it demonstrates the GUI feature, not
+    #     this backend's fidelity. Where no desktop exists, the launch fails
+    #     into the status line.
     status = Label("", DIM)
     overlay_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "window_overlay.py")
+
+    def show_balloon_layer():
+        balloon = TextBlock(
+            "A balloon — a non-interactive layer in THIS window.\n"
+            "Keys keep going to the page below it.\n"
+            "Dismisses itself in 3s (call_later).",
+            wrap=True,
+        )
+        panel.push_layer(balloon, z=90, interactive=False,
+                         hints={"w": 52, "h": 5, "shadow": True})
+        status.text = "Balloon layer shown — note the nav keys still work meanwhile"
+        panel.render()
+
+        def dismiss():
+            panel.remove(balloon)
+            status.text = "Balloon layer dismissed"
+            panel.render()
+
+        panel.call_later(3.0, dismiss)
 
     def launch(label: str, *flags: str):
         def on_click():
             try:
                 subprocess.Popen([sys.executable, overlay_py, "--backend", "gui", *flags])
-                status.text = f"Launched {label} — a separate process; it closes itself in 3s"
+                status.text = (f"Launched {label} — a separate GUI process on this "
+                               "machine's desktop; it closes itself in 3s")
             except Exception as e:
                 status.text = f"Launch failed: {e}"
             panel.render()
         return on_click
 
     buttons = VSplit(
+        Item(Label("In this window — every backend:", DIM), size="content"),
         Item(Button(
-            "Balloon overlay — frameless + topmost + no-activate",
-            on_click=launch("the balloon overlay", "--frameless", "--topmost",
+            "Balloon layer — topmost, non-interactive, auto-dismiss",
+            on_click=show_balloon_layer,
+        ), size="content"),
+        Item(Label(""), size=1),
+        Item(Label("As separate OS windows — launches a GUI process:", DIM), size="content"),
+        Item(Button(
+            "Balloon window — frameless + topmost + no-activate",
+            on_click=launch("the balloon window", "--frameless", "--topmost",
                             "--no-activate", "--not-resizable"),
+            variant="secondary",
         ), size="content"),
         Item(Button(
             "Floating tool window — topmost + tool",
             on_click=launch("the tool window", "--topmost", "--tool"),
+            variant="secondary",
         ), size="content"),
         Item(Button(
             "Agent-app window — activation_policy=\"accessory\"",
             on_click=launch("the accessory window", "--accessory"),
+            variant="secondary",
         ), size="content"),
         Item(Label(""), weight=1),
         gap=1,
     )
     explainer = TextBlock(
-        "WindowStyle(frameless, topmost, activates, resizable, tool) is "
-        "passed to a GUI backend's constructor; every default reproduces the "
-        "classic app window (capability \"window_styles\").\n"
+        "One intent — \"a small topmost surface\" — has two fidelities:\n"
         "\n"
-        "  · frameless — no title bar (borderless NSWindow / WS_POPUP)\n"
-        "  · topmost — floats above normal windows\n"
-        "  · activates=False — shown without stealing focus from the active "
-        "app (watch the balloon: your keyboard focus never moves)\n"
-        "  · tool — out of the taskbar / Alt-Tab (Windows)\n"
+        "Inside a PuiKit window (ANY backend, including TUI and web) it is a "
+        "LAYER: z-ordered, optionally non-interactive so input keeps flowing "
+        "below — try the first button, then keep pressing up/down. This is "
+        "exactly how the planned multi-window feature degrades on TUI "
+        "(docs/window_management.md).\n"
         "\n"
-        "activation_policy=\"accessory\" (macOS) makes the whole process an "
-        "agent app: no Dock icon, no forced activation on open.\n"
+        "As an OS WINDOW it is a constructor-time declaration: "
+        "WindowStyle(frameless, topmost, activates, resizable, tool) and, on "
+        "macOS, activation_policy=\"accessory\" (agent app: no Dock icon, no "
+        "focus stealing). The lower buttons launch window_overlay.py as a "
+        "separate GUI process with the style under test — the native window "
+        "you see belongs to that process and appears on this machine's "
+        "desktop regardless of the backend this catalog runs on. Watch the "
+        "balloon variant: your keyboard focus never moves.\n"
         "\n"
-        "Backends without the capability accept the parameter and ignore it. "
-        "Inside ONE window — any backend, including TUI — overlays are "
-        "layers, not OS windows: see the Layering page. That is also how the "
-        "planned multi-window feature will degrade on TUI (a \"window\" "
-        "becomes a framed, z-ordered layer on the one terminal surface).",
+        "Backends without the \"window_styles\" capability accept the "
+        "constructor parameter and ignore it.",
         wrap=True,
     )
     return VSplit(
-        Item(Label("Window styles — constructor declarations, shown by launching them", DIM), size=1),
+        Item(Label("Window styles — one intent, two fidelities: a layer here, an OS window out there", DIM), size=1),
         Item(
             HSplit(
                 Item(buttons, size=56),
