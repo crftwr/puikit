@@ -366,6 +366,8 @@ _hwnd_backends: dict[int, "WindowsBackend"] = {}
 # thread schedules a callback via call_on_main_thread; PostMessageW queues it
 # on the window-owning thread regardless of what that thread is blocked on.
 _WM_CALL_ON_MAIN_THREAD = native.WM_APP + 1
+_WM_TRAY_CALLBACK = native.WM_APP + 2
+_TRAY_ICON_ID = 1
 
 
 def _global_wndproc(hwnd: int, msg: int, wparam: int, lparam: int) -> int:
@@ -519,6 +521,7 @@ class WindowsBackend(Backend):
         frame_autosave_name: str | None = None,
         style: WindowStyle | None = None,
         activation_policy: str = "regular",
+        main_window_close: str = "quit",
     ):
         self._initial_size = (width, height)
         self._title = title
@@ -528,6 +531,11 @@ class WindowsBackend(Backend):
         # Accepted for signature parity with MacOSBackend; Dock activation
         # policy is a macOS concept, so it is a no-op here.
         self._activation_policy = activation_policy
+        # "hide": the close button hides the main window instead of quitting
+        # (re-shown via show_main_window(), e.g. from the tray menu).
+        self._main_window_close = main_window_close
+        self._tray_installed = False
+        self._tray_menu = None
         # Windows has no built-in analogue of AppKit's NSWindow frame-autosave,
         # so this is emulated with a registry value under this name: the frame
         # is restored from it on open() and written back to it in close().
@@ -852,7 +860,7 @@ class WindowsBackend(Backend):
                     rect.bottom - rect.top,
                 )
 
-    def close(self) -> None:
+    def _close_impl(self) -> None:
         self._save_autosave_frame()
         if self._anim_timer_running and self._hwnd:
             native.user32.KillTimer(self._hwnd, _TIMER_ID)
@@ -2782,6 +2790,63 @@ class WindowsBackend(Backend):
         self._menu_bar_hmenu = _win32_menu.build_menu_bar(menu, self._menu_responder)
         native.user32.SetMenu(self._hwnd, self._menu_bar_hmenu)
 
+    def set_tray(self, title: str | None = None, menu: Any = None,
+                 tooltip: str | None = None) -> None:
+        """System tray icon (Shell_NotifyIconW). The icon is the host exe's
+        embedded icon (same as the window class); ``title`` is used as the
+        tooltip fallback since a text glyph cannot be a tray icon on Windows.
+        Left or right click opens ``menu``. ``title=None`` removes."""
+        data = native.NOTIFYICONDATAW()
+        data.cbSize = ctypes.sizeof(native.NOTIFYICONDATAW)
+        data.hWnd = self._hwnd
+        data.uID = _TRAY_ICON_ID
+        if title is None:
+            if self._tray_installed:
+                native.shell32.Shell_NotifyIconW(native.NIM_DELETE, ctypes.byref(data))
+                self._tray_installed = False
+                self._tray_menu = None
+            return
+        h_icon, h_icon_sm = _load_app_icons()
+        data.uFlags = native.NIF_MESSAGE | native.NIF_ICON | native.NIF_TIP
+        data.uCallbackMessage = _WM_TRAY_CALLBACK
+        data.hIcon = h_icon_sm or h_icon
+        data.szTip = (tooltip or title)[:127]
+        native.shell32.Shell_NotifyIconW(
+            native.NIM_MODIFY if self._tray_installed else native.NIM_ADD,
+            ctypes.byref(data))
+        self._tray_installed = True
+        self._tray_menu = menu
+
+    def show_main_window(self) -> None:
+        if self._hwnd:
+            native.user32.ShowWindow(self._hwnd, native.SW_SHOW)
+            native.user32.SetForegroundWindow(self._hwnd)
+
+    def screen_frames(self) -> list:
+        """[(frame, work_area)] per monitor, primary first, in virtual-screen
+        pixel coordinates (top-left origin) - the Windows analogue of
+        MacOSBackend.screen_frames()."""
+        results = []
+
+        def _cb(hmon, hdc, rect, lparam):
+            info = native.MONITORINFO()
+            info.cbSize = ctypes.sizeof(native.MONITORINFO)
+            if native.user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
+                m, w = info.rcMonitor, info.rcWork
+                entry = (((m.left, m.top, m.right - m.left, m.bottom - m.top),
+                          (w.left, w.top, w.right - w.left, w.bottom - w.top)),
+                         bool(info.dwFlags & native.MONITORINFOF_PRIMARY))
+                results.append(entry)
+            return True
+
+        native.user32.EnumDisplayMonitors(None, None, native.MONITORENUMPROC(_cb), 0)
+        results.sort(key=lambda e: not e[1])  # primary first
+        return [frames for frames, _primary in results]
+
+    def close(self) -> None:
+        self.set_tray(None)
+        self._close_impl()
+
     def popup_menu(self, menu: Any, x: float, y: float, on_done: Callable[[], None] | None = None) -> None:
         from . import _win32_menu
 
@@ -2982,6 +3047,12 @@ class WindowsBackend(Backend):
             native.user32.InvalidateRect(hwnd, None, False)
             return 0
         if msg == native.WM_CLOSE:
+            if self._main_window_close == "hide":
+                # Tray-app lifecycle: the close button hides the window; the
+                # app stays alive and show_main_window() re-shows it.
+                self._save_autosave_frame()
+                native.user32.ShowWindow(hwnd, native.SW_HIDE)
+                return 0
             # DestroyWindow tears the window down synchronously (WM_DESTROY
             # fires before it returns), so the frame must be captured now —
             # by the time close() runs, GetWindowRect on this hwnd fails.
@@ -3013,6 +3084,22 @@ class WindowsBackend(Backend):
             return 0
         if msg == _WM_CALL_ON_MAIN_THREAD:
             self._drain_main_thread_callbacks()
+            return 0
+        if msg == _WM_TRAY_CALLBACK:
+            # Left or right click on the tray icon opens the tray menu.
+            if lparam in (native.WM_LBUTTONUP, native.WM_RBUTTONUP) \
+                    and self._tray_menu is not None:
+                pt = wintypes.POINT()
+                native.user32.GetCursorPos(ctypes.byref(pt))
+                from . import _win32_menu
+                if self._menu_responder is None:
+                    self._menu_responder = _win32_menu.MenuResponder()
+                hmenu = _win32_menu.build_popup_menu(self._tray_menu, self._menu_responder)
+                native.user32.SetForegroundWindow(self._hwnd)
+                native.user32.TrackPopupMenu(
+                    hmenu, native.TPM_RIGHTBUTTON, pt.x, pt.y, 0, self._hwnd, None)
+                native.user32.PostMessageW(self._hwnd, 0, 0, 0)
+                _win32_menu.destroy_menu_recursive(hmenu)
             return 0
         if msg == native.WM_COMMAND:
             if self._menu_responder is not None:
