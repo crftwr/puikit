@@ -407,6 +407,46 @@ first change that does should add one rather than hand-roll a second style.
 for additive features — the recipe above — and **major** for anything a pinned
 app could notice. Release tooling lives in `scripts/` (`make release`).
 
+### Release notes
+
+`make release` calls `gh release create --generate-notes`, which produces little
+more than a compare link here — this repo lands work as direct commits, and the
+generator has only merged PRs to list. So every release gets hand-written notes
+afterwards:
+
+```bash
+gh release edit vX.Y.Z --notes-file notes.md
+```
+
+They are for someone deciding whether to upgrade, not for someone reviewing the
+work. **At most three bullets**, one for each change a user would actually
+notice, one to three sentences each: the symptom or the capability, not the
+mechanism. Name the affected backends when a change is platform-specific. Then
+fold everything else — smaller fixes, packaging, docs — into one short "Also"
+paragraph, so nothing is dropped silently but nothing minor gets a headline
+either. Close with the `**Full Changelog**` compare link.
+
+```markdown
+## PuiKit 1.0.3
+
+- **Monospace text no longer drifts off the column grid** (macOS, web) — a glyph
+  the grid font doesn't draw at exactly one column (♡, ★, ▶, halfwidth katakana)
+  used to slide every character after it out of alignment. Those glyphs now get
+  their own cell, sized to fit it.
+- **`Shader.idle="fade"`** — an animated background can now dissolve into its
+  backdrop when the app goes idle, instead of freezing on whatever frame the
+  animation happened to stop at. Default stays `"freeze"`.
+
+Also: the curses vertical scrollbar thumb slides in eighths of a cell rather than
+snapping to whole rows, and the version string is single-sourced from
+`puikit/__init__.py` (1.0.2 shipped with metadata saying 1.0.1).
+
+**Full Changelog**: https://github.com/crftwr/puikit/compare/v1.0.2...v1.0.3
+```
+
+The reasoning behind a change belongs in the commit body, which is where it is
+already written at length — notes that restate it are the failure mode to avoid.
+
 ---
 
 ## Multi-Language Policy
