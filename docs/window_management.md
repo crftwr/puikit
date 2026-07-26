@@ -53,52 +53,47 @@ MacOSBackend(..., activation_policy="accessory")
   parameter for signature parity and ignores it (no Dock on Windows; taskbar
   presence is `WindowStyle.tool`).
 
-## Multi-window (planned) — and what it means on TUI
+## Multi-window (planned)
 
 Today one backend owns one window, and `WindowStyle` styles *that* window at
 construction. The planned multi-window extension (`backend.create_window(...)
 -> WindowHandle`, a `Panel` per window) is the next step for apps like
 Keyhac 2 that show a console, a chooser popup, and a balloon at once.
 
-**On TUI there are no OS windows to create — and there don't need to be.**
-PuiKit already has the right degradation primitive: **layers**
-(`Panel.push_layer`, the mechanism behind `MessageBox`, `Drawer`, and the
-`ComboBox`/`DropDown` popups — see the Layering page of the demo catalog).
-The terminal surface plays the role of the *screen*, and each "window"
-renders as a framed, z-ordered region on it:
+**Decided fidelity mapping** (2026-07): secondary windows are **real windows
+on every backend that has them** — native OS windows on GUI-Desktop, real
+browser windows on Web — and degrade to **layers only on TUI**, where the
+emulator owns the single terminal surface and no other kind of window can
+exist.
 
-| Intent | GUI-Desktop | TUI |
-|---|---|---|
-| `create_window(...)` | a real OS window | a layer on the one terminal surface, framed unless `frameless` |
-| `topmost` | window level / `WS_EX_TOPMOST` | a higher layer `z` |
-| `frameless` | borderless window | no frame box around the layer |
-| `activates=False` | no focus stealing | the layer is non-interactive (`interactive=False`); key events keep flowing to the layer below |
-| window position/size | screen coordinates | a rect on the terminal surface (`hints={"x","y","w","h"}`) |
-| z-order between windows | OS compositor | layer `z`; the topmost *interactive* layer is modal, exactly as today |
-| screen geometry | `screen_frames()` | the terminal size — one "screen" |
+| Intent | GUI-Desktop | Web | TUI |
+|---|---|---|---|
+| `create_window(...)` | a real OS window (`NSWindow` / `HWND`) | a real browser window (`window.open` companion page, same server session, own canvas + socket) | a framed, z-ordered layer on the one terminal surface |
+| `topmost` | window level / `WS_EX_TOPMOST` | best-effort (`window.focus` on show; browsers do not expose true always-on-top) | a higher layer `z` |
+| `frameless` | borderless window | browser-chrome-limited (popup features) | no frame box around the layer |
+| `activates=False` | no focus stealing | open without `focus()` | non-interactive layer; keys keep flowing below |
+| position/size | screen coordinates | `window.open` features (best-effort; browser-gated) | a rect on the terminal surface |
+| z-order between windows | OS compositor | browser window manager | layer `z`; topmost *interactive* layer is modal |
+| screen geometry | `screen_frames()` | `window.screen` (per browser window) | the terminal size — one "screen" |
 
-So the app keeps issuing one intent — "give me a small topmost surface next
-to X" — and the backend decides whether that is an `NSWindow` or a boxed
-region drawn over the log view. This is the same fallback philosophy as
-menus (native `NSMenu`/`HMENU` vs. the widget-rendered menu): widget and app
-code never branches; the Panel/backend seam resolves the fidelity.
+The app keeps issuing one intent — "give me a small topmost surface next to
+X" — and the backend realizes it at its own fidelity, the same fallback
+philosophy as menus (native `NSMenu`/`HMENU` vs. the widget-rendered menu):
+widget and app code never branches.
 
-The demo catalog's Window page shows both fidelities today: its balloon
-*layer* button is the in-surface form (every backend), while its OS-window
-buttons launch `window_overlay.py` as a **separate GUI process** — so a
-native window appears on the desktop even when the catalog itself runs on
-the TUI or web backend. That is the subprocess demonstrating the GUI
-feature, not the TUI/web backend growing OS windows.
+Consequences of the mapping:
 
-Two consequences fall out of the mapping:
-
+- Web fidelity is browser-gated and honest about it: popup blockers can
+  require the open to happen inside a user gesture, and `topmost`/geometry
+  are best-effort. Where a popup cannot open, the backend degrades that
+  window to a layer in the main canvas rather than failing the app.
 - A TUI "window" cannot escape the terminal: a balloon that would float over
-  *another app's* window on GUI can only float over PuiKit's own surface.
-  That is an honest, documented fidelity limit (like `os_drag_drop` falling
-  back to the clipboard), not something to emulate around.
-- Modality stays consistent: on both fidelities the topmost interactive
-  surface owns input, so a chooser popup behaves identically — list below,
-  keys go to the popup — whether it is an OS window or a layer.
+  *another app's* window on GUI can only float over PuiKit's own surface —
+  a documented fidelity limit (like `os_drag_drop` falling back to the
+  clipboard), not something to emulate around.
+- Modality stays consistent everywhere: the topmost interactive surface owns
+  input, so a chooser popup behaves identically whether it is an OS window,
+  a browser window, or a layer.
 
 ## `Backend.call_later(delay_seconds, callback) -> cancel`
 
