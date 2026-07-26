@@ -693,6 +693,7 @@ class WindowsBackend(Backend):
     # --- lifecycle -----------------------------------------------------------
 
     def open(self) -> None:
+        self._note_ui_thread()
         # Per-monitor DPI awareness must be set before the first window is
         # created; otherwise Windows bitmap-stretches a 96-DPI surface and text
         # blurs on any display scaled above 100%. Setting it here (rather than
@@ -1360,7 +1361,11 @@ class WindowsBackend(Backend):
     def call_later(self, delay_seconds: float, callback: Callable[[], None]) -> Callable[[], None]:
         """One-shot WM_TIMER on this window — a real OS timer instead of the
         base class's animation-tick fallback (which would keep the 60fps tick
-        alive for the whole wait)."""
+        alive for the whole wait). UI-thread-only, enforced — a worker-thread
+        call would happen to work here (window timers fire on the window's
+        thread), but the same mistake silently never fires on macOS, so it
+        fails identically everywhere instead."""
+        self._assert_ui_thread("call_later")
         if not self._hwnd:
             # Before open() there is no window to attach a timer to; the
             # animation-tick fallback still honors the contract.
@@ -1372,6 +1377,7 @@ class WindowsBackend(Backend):
         native.user32.SetTimer(self._hwnd, timer_id, max(1, int(delay_seconds * 1000)), None)
 
         def cancel() -> None:
+            self._assert_ui_thread("cancel (from call_later)")
             if self._later_timers.pop(timer_id, None) is not None and self._hwnd:
                 native.user32.KillTimer(self._hwnd, timer_id)
 

@@ -8,6 +8,7 @@ based on the backend's CapabilityProfile.
 
 from __future__ import annotations
 
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -728,16 +729,41 @@ class Backend(ABC):
     def quit(self) -> None:
         """Request the event loop to stop after the current iteration."""
 
+    # --- UI-thread guard ------------------------------------------------------
+
+    def _note_ui_thread(self) -> None:
+        """Record the calling thread as the UI thread. Every backend's open()
+        calls this, so UI-thread-only APIs can enforce their contract via
+        _assert_ui_thread and misuse fails identically on every backend —
+        instead of diverging per platform (e.g. an NSTimer scheduled from a
+        worker thread attaches to that thread's non-running run loop and
+        silently never fires)."""
+        self._ui_thread_ident = threading.get_ident()
+
+    def _assert_ui_thread(self, api: str) -> None:
+        """Raise when called off the UI thread. Inert until _note_ui_thread
+        has run (i.e. before open()), so headless construction in tests is
+        unaffected."""
+        ui = getattr(self, "_ui_thread_ident", None)
+        if ui is not None and threading.get_ident() != ui:
+            raise RuntimeError(
+                f"{api} must be called from the UI thread; from a worker "
+                f"thread, hand it over with call_on_main_thread(lambda: {api}(...))."
+            )
+
     def call_later(self, delay_seconds: float, callback: Callable[[], None]) -> Callable[[], None]:
         """Schedule ``callback`` to run once on the UI thread after
         ``delay_seconds``. Returns a zero-argument cancel function; calling it
         after the timer fired is a harmless no-op.
 
-        Not thread-safe (schedule from the UI thread; a worker thread pairs
-        this with ``call_on_main_thread``). The base implementation rides the
-        animation tick (so any backend with ``animation_ticks`` gets a working
-        timer at tick granularity); native backends override it with a real
-        OS timer (NSTimer / WM_TIMER)."""
+        UI-thread-only, and enforced: once the backend is open, calling this
+        (or the returned cancel) from another thread raises RuntimeError on
+        every backend. From a worker thread, pair with
+        ``call_on_main_thread``. The base implementation rides the animation
+        tick (so any backend with ``animation_ticks`` gets a working timer at
+        tick granularity); native backends override it with a real OS timer
+        (NSTimer / WM_TIMER)."""
+        self._assert_ui_thread("call_later")
         deadline = time.monotonic() + delay_seconds
         state = {"cancelled": False}
 
@@ -753,6 +779,7 @@ class Backend(ABC):
         self.request_animation_ticks(_tick)
 
         def cancel() -> None:
+            self._assert_ui_thread("cancel (from call_later)")
             state["cancelled"] = True
 
         return cancel

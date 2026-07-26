@@ -527,6 +527,7 @@ class CursesBackend(Backend):
     # --- lifecycle ---------------------------------------------------------
 
     def open(self) -> None:
+        self._note_ui_thread()
         # Adopt the user's locale BEFORE initscr() so ncurses emits the
         # terminal's encoding (UTF-8) and advances wide glyphs by two cells.
         # Without this, curses runs in the C locale and multibyte characters

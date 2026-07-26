@@ -120,11 +120,15 @@ class MemoryBackend(Backend):
 
     def call_later(self, delay_seconds: float, callback) -> Any:
         """Record the one-shot instead of scheduling it; tests fire pending
-        timers deterministically with fire_timers()."""
+        timers deterministically with fire_timers(). The UI-thread guard is
+        enforced here too, so the cross-backend contract is testable
+        headlessly."""
+        self._assert_ui_thread("call_later")
         state = {"live": True}
         self.later_timers.append((delay_seconds, callback, state))
 
         def cancel() -> None:
+            self._assert_ui_thread("cancel (from call_later)")
             state["live"] = False
 
         return cancel
@@ -171,7 +175,7 @@ class MemoryBackend(Backend):
     # --- lifecycle ---------------------------------------------------------
 
     def open(self) -> None:
-        pass
+        self._note_ui_thread()
 
     def close(self) -> None:
         pass

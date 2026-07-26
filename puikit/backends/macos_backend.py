@@ -1400,6 +1400,7 @@ class MacOSBackend(Backend):
     # --- lifecycle ---------------------------------------------------------
 
     def open(self) -> None:
+        self._note_ui_thread()
         app = NSApplication.sharedApplication()
         if self._activation_policy == "accessory":
             app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
@@ -2035,14 +2036,24 @@ class MacOSBackend(Backend):
     def call_later(self, delay_seconds: float, callback: Callable[[], None]) -> Callable[[], None]:
         """One-shot NSTimer on the main run loop — a real OS timer instead of
         the base class's animation-tick fallback, so a pending timer never
-        drags the 60fps tick alive."""
+        drags the 60fps tick alive. UI-thread-only, enforced: scheduledTimer
+        attaches to the CALLING thread's run loop, so a worker-thread call
+        would otherwise silently never fire."""
+        self._assert_ui_thread("call_later")
+
         def _fire(timer) -> None:
             callback()
 
         nstimer = NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
             delay_seconds, False, _fire
         )
-        return nstimer.invalidate
+
+        def cancel() -> None:
+            # NSTimer must also be invalidated on the thread that scheduled it.
+            self._assert_ui_thread("cancel (from call_later)")
+            nstimer.invalidate()
+
+        return cancel
 
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float,

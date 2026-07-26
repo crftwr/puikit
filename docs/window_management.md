@@ -108,5 +108,12 @@ One-shot timer on the UI thread; returns a zero-argument cancel function
   dragging the 60 fps tick alive during the wait.
 - `MemoryBackend`: records into `backend.later_timers`; tests fire pending
   timers deterministically with `backend.fire_timers()`.
-- **Not** thread-safe: schedule from the UI thread. A worker thread pairs it
-  with `call_on_main_thread`.
+- **UI-thread-only, and enforced.** Once the backend is open, calling
+  `call_later` (or the returned cancel) from another thread raises
+  `RuntimeError` — identically on every backend. Without the guard the
+  failure diverged per platform: an `NSTimer` scheduled from a worker thread
+  attaches to that thread's non-running run loop and *silently never fires*,
+  while the same mistake happened to work on Windows and the tick-fallback
+  backends. From a worker thread, hand the schedule over:
+  `panel.call_on_main_thread(lambda: panel.call_later(1.0, fn))`. (The guard
+  arms in `open()`; before it, headless construction stays unrestricted.)

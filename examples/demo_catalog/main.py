@@ -2454,8 +2454,10 @@ def build_timers_page(panel: Panel) -> VSplit:
         "(and your app) never branches. The returned cancel function is a "
         "no-op after the timer fired.\n"
         "\n"
-        "Not thread-safe by design — a worker thread hands the schedule to "
-        "the UI thread with panel.call_on_main_thread.",
+        "UI-thread-only, and enforced: calling it from a worker thread "
+        "raises RuntimeError on every backend (instead of a per-platform "
+        "surprise). A worker thread hands the schedule over with "
+        "panel.call_on_main_thread(lambda: panel.call_later(...)).",
         wrap=True,
     )
     return VSplit(

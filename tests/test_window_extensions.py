@@ -2,6 +2,7 @@
 
 import dataclasses
 import sys
+import threading
 
 import pytest
 
@@ -118,6 +119,79 @@ class TestCallLaterBaseFallback:
         now["t"] = 2.0
         backend.tick()
         assert fired == []
+        assert backend.tick_callbacks == []
+
+
+def _run_in_thread(fn):
+    """Run fn on a worker thread; return {'value': ...} or {'error': exc}."""
+    result = {}
+
+    def target():
+        try:
+            result["value"] = fn()
+        except Exception as e:
+            result["error"] = e
+
+    t = threading.Thread(target=target)
+    t.start()
+    t.join()
+    return result
+
+
+class TestUiThreadGuard:
+    """call_later is UI-thread-only and enforced identically on every backend.
+
+    Without the guard the failure diverged per platform: an NSTimer scheduled
+    from a worker thread attaches to that thread's non-running run loop and
+    silently never fires, while the same mistake happened to work on Windows
+    and the tick-fallback backends."""
+
+    def test_worker_thread_call_later_raises_after_open(self):
+        backend = MemoryBackend()
+        backend.open()  # arms the guard: this thread is the UI thread
+        result = _run_in_thread(lambda: backend.call_later(0.1, lambda: None))
+        assert isinstance(result.get("error"), RuntimeError)
+        assert "call_on_main_thread" in str(result["error"])
+        assert backend.later_timers == []      # nothing was scheduled
+
+    def test_worker_thread_cancel_raises_after_open(self):
+        backend = MemoryBackend()
+        backend.open()
+        cancel = backend.call_later(0.1, lambda: None)
+        result = _run_in_thread(cancel)
+        assert isinstance(result.get("error"), RuntimeError)
+        assert backend.fire_timers() == 1      # the failed cancel cancelled nothing
+
+    def test_ui_thread_still_works_after_open(self):
+        backend = MemoryBackend()
+        backend.open()
+        fired = []
+        backend.call_later(0.1, lambda: fired.append(1))
+        assert backend.fire_timers() == 1
+        assert fired == [1]
+
+    def test_guard_inert_before_open(self):
+        # Headless construction without open() (common in tests) stays
+        # unrestricted: the guard only arms once open() declares the UI thread.
+        backend = MemoryBackend()
+        result = _run_in_thread(lambda: backend.call_later(0.1, lambda: None))
+        assert "error" not in result
+
+    def test_base_fallback_guarded_too(self):
+        # The Backend base implementation (animation-tick fallback) enforces
+        # the same contract.
+        class TickBackend(MemoryBackend):
+            def call_later(self, delay_seconds, callback):
+                from puikit.backend import Backend
+                return Backend.call_later(self, delay_seconds, callback)
+
+            def request_animation_ticks(self, callback):
+                self.tick_callbacks.append(callback)
+
+        backend = TickBackend()
+        backend.open()
+        result = _run_in_thread(lambda: backend.call_later(0.1, lambda: None))
+        assert isinstance(result.get("error"), RuntimeError)
         assert backend.tick_callbacks == []
 
 
