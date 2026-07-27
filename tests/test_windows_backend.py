@@ -5,6 +5,7 @@ opening one is cheap and safe in CI on a Windows runner."""
 
 import struct
 import sys
+import threading
 import zlib
 
 import pytest
@@ -1051,3 +1052,166 @@ def test_system_tray_capability_matches_the_implementation():
     so — an app that asks before calling would otherwise skip a working tray."""
     assert WindowsBackend.PROFILE.supports("system_tray")
     assert WindowsBackend.set_tray is not Backend.set_tray
+
+
+# --- multi-window: create_window / WinWindowHandle -------------------------
+
+
+def _secondary(backend, w=30, h=5, **kw):
+    """A secondary window bound to a Panel, plus the panel."""
+    from puikit import Panel
+    win = backend.create_window(w, h, **kw)
+    return win, Panel(backend, window=win)
+
+
+def test_multi_window_capability_declared():
+    assert WindowsBackend.PROFILE.supports("multi_window")
+
+
+def test_create_window_before_open_raises():
+    backend = WindowsBackend(width=20, height=6)
+    with pytest.raises(RuntimeError):
+        backend.create_window(10, 3)
+
+
+def test_create_window_is_ui_thread_only():
+    backend = WindowsBackend(width=20, height=6, title="puikit-mw-thread")
+    backend.open()
+    try:
+        result = {}
+
+        def worker():
+            try:
+                backend.create_window(10, 3)
+            except Exception as e:  # noqa: BLE001 - the assertion is the type
+                result["error"] = e
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        assert isinstance(result.get("error"), RuntimeError)
+    finally:
+        backend.close()
+
+
+def test_secondary_window_has_its_own_hwnd_and_display_list():
+    from puikit import WindowStyle
+    from puikit.widgets import Label
+
+    backend = WindowsBackend(width=40, height=12, title="puikit-mw-main")
+    backend.open()
+    main = __import__("puikit").Panel(backend)
+    main.add(Label("main text"), 0, 0, 20, 1)
+    main.render()
+    try:
+        win, popup = _secondary(
+            backend, 30, 5, title="popup",
+            style=WindowStyle(frameless=True, topmost=True, activates=False))
+        popup.add(Label("popup text"), 0, 0, 20, 1)
+        popup.render()
+        main.render()  # re-render main AFTER the secondary
+
+        assert win.hwnd and win.hwnd != backend._hwnd
+        assert not win.closed
+        assert win.window_style.frameless is True
+        assert win.size_units == (30.0, 5.0)
+        # Each window owns its display list; neither leaks into the other.
+        main_text = [c[3] for c in backend._front_main if c and c[0] == "text"]
+        popup_text = [c[3] for c in win.front if c and c[0] == "text"]
+        assert "main text" in main_text and "popup text" not in main_text
+        assert "popup text" in popup_text and "main text" not in popup_text
+        # Its own swap chain on the shared device.
+        assert win.swap_chain is not None and win.target_bitmap is not None
+    finally:
+        backend.close()
+
+
+def test_secondary_window_paints_and_resizes():
+    from puikit.widgets import Label
+
+    backend = WindowsBackend(width=40, height=12, title="puikit-mw-paint")
+    backend.open()
+    try:
+        win, popup = _secondary(backend, 30, 5)
+        popup.add(Label("painted"), 0, 0, 20, 1)
+        popup.render()
+        # The real Direct2D path for a secondary window (retarget -> draw ->
+        # present), driven through the window procedure as WM_PAINT does.
+        backend._handle_message(win.hwnd, native.WM_PAINT, 0, 0)
+        # Resizing rebinds its swap-chain bitmap and leaves the device context
+        # pointed back at the MAIN window's target.
+        before = win.target_bitmap
+        backend._handle_message(win.hwnd, native.WM_SIZE, 0, (17 << 16) | 400)
+        assert win.target_bitmap is not None and win.target_bitmap is not before
+        assert backend._frame_target is backend._target_bitmap
+        # The main window still renders after all that.
+        backend._render()
+    finally:
+        backend.close()
+
+
+def test_secondary_input_goes_to_the_window_not_the_app_handler():
+    from puikit.event import EventType
+    from puikit.widgets import Button
+
+    backend = WindowsBackend(width=40, height=12, title="puikit-mw-input")
+    backend.open()
+    app_events = []
+    backend._handler = app_events.append
+    try:
+        clicked = []
+        win, popup = _secondary(backend, 30, 5)
+        popup.add(Button("Go", on_click=lambda: clicked.append(1)), 0, 0, 10, 1)
+        popup.render()
+        assert win.on_event is not None  # the Panel bound itself
+
+        # Click inside the button, in that window's client pixels.
+        px = int(2 * backend._base_w) | (int(0 * backend._base_h) << 16)
+        backend._handle_message(win.hwnd, native.WM_LBUTTONDOWN, 0, px)
+        backend._handle_message(win.hwnd, native.WM_LBUTTONUP, 0, px)
+        assert clicked == [1]
+        assert app_events == []  # the app's main-window handler saw nothing
+
+        # Keyboard too: a chooser's filter field is typed into, so WM_KEYDOWN /
+        # WM_CHAR must reach the window's handler, not the app's.
+        seen = []
+        win.on_event = seen.append
+        # VK_DOWN goes through WM_KEYDOWN (_VK_KEYS); a printable character
+        # arrives as WM_CHAR, the way TranslateMessage delivers it.
+        backend._handle_message(win.hwnd, native.WM_KEYDOWN, native.VK_DOWN, 0)
+        backend._handle_message(win.hwnd, native.WM_CHAR, ord("k"), 0)
+        assert [(e.type, e.key) for e in seen] == [
+            (EventType.KEY, "down"), (EventType.KEY, "k")]
+        assert app_events == []
+    finally:
+        backend._handler = None
+        backend.close()
+
+
+def test_user_close_fires_on_close_and_does_not_quit_the_app():
+    backend = WindowsBackend(width=40, height=12, title="puikit-mw-close")
+    backend.open()
+    try:
+        win, _popup = _secondary(backend, 30, 5)
+        closed = []
+        win.on_close = lambda: closed.append(1)
+        backend._handle_message(win.hwnd, native.WM_CLOSE, 0, 0)
+        assert closed == [1]
+        assert win.closed
+        assert not backend._quit_requested       # only the MAIN window quits
+        assert win not in backend._secondary_windows
+        assert win.swap_chain is None and win.target_bitmap is None
+        win.close()                              # idempotent
+    finally:
+        backend.close()
+
+
+def test_backend_close_closes_secondary_windows():
+    backend = WindowsBackend(width=40, height=12, title="puikit-mw-teardown")
+    backend.open()
+    win, _popup = _secondary(backend, 30, 5)
+    hwnd = win.hwnd
+    backend.close()
+    assert win.closed
+    assert backend._secondary_windows == []
+    assert hwnd not in backend._hwnd_windows

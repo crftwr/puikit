@@ -55,8 +55,7 @@ MacOSBackend(..., activation_policy="accessory")
 
 ## Multi-window (capability `multi_window`)
 
-**Status: shipped on macOS and MemoryBackend; Windows pending (needs
-per-hwnd D2D render targets); Web and TUI planned.**
+**Status: shipped on macOS, Windows and MemoryBackend; Web and TUI planned.**
 
 ```python
 win = backend.create_window(34, 4, title="Balloon",
@@ -76,6 +75,11 @@ win.on_close = ...                       # user clicked close
 - Per-window fidelity today: each secondary window has its own display list
   and input routing; backgrounds/post effects/IME composition remain
   main-window features for now.
+- On Windows each secondary window is a real `HWND` with its own DXGI swap
+  chain, but they all share the backend's one D3D11 device, Direct2D device
+  context, fonts and base unit — rendering retargets that context at the
+  window's swap-chain bitmap. A device-loss recreate rebuilds every window's
+  surface.
 - `MemoryBackend` windows record everything (`win.snapshot()`,
   `win.style_at()`), so multi-window UIs are testable headlessly.
 
