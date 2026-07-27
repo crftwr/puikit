@@ -710,8 +710,15 @@ class WindowsBackend(Backend):
             raise OSError(f"CreateWindowExW failed: {ctypes.get_last_error()}")
         _hwnd_backends[self._hwnd] = self
 
+        # _rebuild_fonts, not _init_fonts: text formats resolved *before* the
+        # window existed were built at the placeholder 1.0 scale, and they live
+        # in _style_fonts, which _init_fonts does not touch. A Panel measures at
+        # set_layout() time -- before open() -- so a content-sized widget's
+        # proportional UI font is normally already cached by now, and on a HiDPI
+        # monitor it would keep rasterizing (and measuring) at half size next to
+        # correctly scaled grid text. Discard everything DPI-derived instead.
         self._dpi_scale = native.get_dpi_for_window(self._hwnd) / 96.0
-        self._init_fonts()
+        self._rebuild_fonts()
         self._apply_initial_frame()
 
         self._create_render_resources()
@@ -746,10 +753,12 @@ class WindowsBackend(Backend):
 
     def _rebuild_fonts(self) -> None:
         """Recreate every cached text format at the current DPI scale and
-        re-derive the base unit from the rescaled base font. Called on
-        WM_DPICHANGED so glyphs re-rasterize at the new pixel density. Safe
-        between frames: the display list stores Style objects and resolves them
-        to text formats at paint time, never holding a format across frames."""
+        re-derive the base unit from the rescaled base font. Called whenever
+        _dpi_scale changes -- from open(), once the window's monitor is known,
+        and on WM_DPICHANGED -- so glyphs re-rasterize at the new pixel density.
+        Safe between frames: the display list stores Style objects and resolves
+        them to text formats at paint time, never holding a format across
+        frames."""
         for fmt in self._fonts.values():
             fmt.release()
         self._fonts.clear()
