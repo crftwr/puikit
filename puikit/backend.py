@@ -791,10 +791,11 @@ class Backend(ABC):
         """System tray icon / macOS menu bar extra (capability "system_tray").
         ``title`` is short text/emoji shown in the bar. ``image`` is a path to
         an icon file shown instead of the text; formats are per-OS (the caller
-        picks the asset, like an app icon): a ``.ico`` on Windows, a PNG on
-        macOS — where a ``…Template`` file name means AppKit template
-        rendering (alpha = ink, recolored for dark mode / highlight) and an
-        ``@2x`` sibling file is picked up for Retina. An image the OS cannot
+        picks the asset, like an app icon): a ``.ico`` on Windows, anything
+        NSImage loads on macOS — PNG, or SVG on macOS 11+ (vector, so no
+        Retina variant is needed) — where a ``…Template`` file name means
+        AppKit template rendering (alpha = ink, recolored for dark mode /
+        highlight) and an ``@2x`` sibling file is picked up for Retina. An image the OS cannot
         load falls back to the text / app icon. ``menu`` is a puikit Menu
         opened on click; passing neither ``title`` nor ``image`` removes the
         item."""

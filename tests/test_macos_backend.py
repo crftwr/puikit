@@ -780,3 +780,17 @@ def test_load_tray_image_plain_png_is_not_template(tmp_path):
 
 def test_load_tray_image_missing_file_returns_none(tmp_path):
     assert _load_tray_image(str(tmp_path / "nope.png")) is None
+
+
+def test_load_tray_image_svg_vector_template(tmp_path):
+    # NSImage loads SVG natively on macOS 11+, so a "…Template.svg" gives a
+    # resolution-independent template image — no @2x sibling needed (and the
+    # rep reports no fixed pixel size; it rasterizes on demand at any scale).
+    (tmp_path / "MenuExtraTemplate.svg").write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18">'
+        '<rect width="18" height="18"/></svg>')
+    image = _load_tray_image(str(tmp_path / "MenuExtraTemplate.svg"))
+    assert image is not None
+    assert image.isTemplate()
+    assert (image.size().width, image.size().height) == (18.0, 18.0)
+    assert len(image.representations()) == 1
