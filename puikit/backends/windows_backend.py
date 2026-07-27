@@ -18,9 +18,9 @@ rectangles, color text, and emoji icons here too.
 
 IME (mode-gated, inline preedit — see ``_win32_ime.py``) and both drag-and-drop
 directions (hand-built ``IDropTarget``/``IDropSource``/``IDataObject`` COM
-objects — see ``_win32_dragdrop.py``) are implemented; a few capabilities
-unused by any PuiKit app so far
-(``clipboard_rich``, ``native_file_dialog``, ``system_tray``, ``media_keys``)
+objects — see ``_win32_dragdrop.py``) are implemented, as is the system tray
+(``Shell_NotifyIconW`` — see ``set_tray``); a few capabilities unused by any
+PuiKit app so far (``clipboard_rich``, ``native_file_dialog``, ``media_keys``)
 remain deferred — see the PROFILE override below.
 """
 
@@ -485,11 +485,11 @@ class WindowsBackend(Backend):
             "drag_and_drop": True,  # drop-IN: IDropTarget + RegisterDragDrop (_win32_dragdrop.py)
             "os_drag_drop": True,  # drag-OUT: IDropSource + DoDragDrop (_win32_dragdrop.py)
             "ime": True,  # mode-gated, inline preedit (_win32_ime.py)
+            "system_tray": True,  # set_tray: Shell_NotifyIconW tray icon + menu
             # Unused by any PuiKit app to date (see MacOSBackend.PROFILE, which
-            # leaves the same four False) — not on this backend's punch list.
+            # leaves the same three False) — not on this backend's punch list.
             "clipboard_rich": False,
             "native_file_dialog": False,
-            "system_tray": False,
             # multi_window needs per-hwnd D2D render targets/swap chains on
             # this backend; off until that lands (macOS shipped first).
             "multi_window": False,

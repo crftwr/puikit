@@ -17,7 +17,7 @@ if sys.platform != "win32":
     pytest.skip("Windows-only backend", allow_module_level=True)
 
 from puikit import CRT, PostEffect, Rect  # noqa: E402
-from puikit.backend import Style, TextAttribute  # noqa: E402
+from puikit.backend import Backend, Style, TextAttribute  # noqa: E402
 from puikit.font import Font, FontWeight  # noqa: E402
 from puikit.backends.windows_backend import (  # noqa: E402
     Animation, WindowsBackend, _SHADOW_KERNEL, _drop_shadow_params, _glow_matrix,
@@ -226,10 +226,10 @@ def test_profile_declares_gui_capabilities():
     assert profile.supports("ime")
     assert profile.supports("drag_and_drop")
     assert profile.supports("os_drag_drop")
-    # Unused by any PuiKit app to date (see MacOSBackend.PROFILE, same four False):
+    assert profile.supports("system_tray")  # set_tray: Shell_NotifyIconW
+    # Unused by any PuiKit app to date (see MacOSBackend.PROFILE, same three False):
     assert not profile.supports("clipboard_rich")
     assert not profile.supports("native_file_dialog")
-    assert not profile.supports("system_tray")
     assert not profile.supports("media_keys")
 
 
@@ -1044,3 +1044,10 @@ def test_open_discards_fonts_resolved_before_the_window_existed():
         assert backend._width_cache == {}
     finally:
         backend.close()
+
+
+def test_system_tray_capability_matches_the_implementation():
+    """set_tray is implemented (Shell_NotifyIconW), so the capability must say
+    so — an app that asks before calling would otherwise skip a working tray."""
+    assert WindowsBackend.PROFILE.supports("system_tray")
+    assert WindowsBackend.set_tray is not Backend.set_tray
