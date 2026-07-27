@@ -88,6 +88,10 @@ class _MemoryWindowHandle(WindowHandle):
         self.title = title
         self.window_style = style if style is not None else WindowStyle()
         self.visible = True
+        # Portable frame in "pixels" (1 px per cell here), starting where the
+        # GUI backends create secondary windows.
+        self.x = 160.0
+        self.y = 160.0
         self._closed = False
         self.grid: list[list[str]] = [[" "] * width for _ in range(height)]
         self.styles: list[list[Style]] = [[DEFAULT_STYLE] * width for _ in range(height)]
@@ -106,6 +110,13 @@ class _MemoryWindowHandle(WindowHandle):
 
     def set_title(self, title: str) -> None:
         self.title = title
+
+    def frame_px(self) -> tuple[float, float, float, float] | None:
+        return (self.x, self.y, float(self.width), float(self.height))
+
+    def move_to_px(self, x: float, y: float) -> None:
+        self.x = float(x)
+        self.y = float(y)
 
     @property
     def closed(self) -> bool:

@@ -446,7 +446,17 @@ class WinWindowHandle(WindowHandle):
         if not self._closed:
             native.user32.SetWindowTextW(self.hwnd, title)
 
-    def move_px(self, x: float, y: float) -> None:
+    def frame_px(self) -> tuple[float, float, float, float] | None:
+        # Virtual-screen pixels are already the portable top-left convention.
+        if self._closed or not self.hwnd:
+            return None
+        rect = wintypes.RECT()
+        if not native.user32.GetWindowRect(self.hwnd, ctypes.byref(rect)):
+            return None
+        return (float(rect.left), float(rect.top),
+                float(rect.right - rect.left), float(rect.bottom - rect.top))
+
+    def move_to_px(self, x: float, y: float) -> None:
         if self._closed:
             return
         native.user32.SetWindowPos(
@@ -3001,9 +3011,9 @@ class WindowsBackend(Backend):
             native.user32.SetForegroundWindow(self._hwnd)
 
     def screen_frames(self) -> list:
-        """[(frame, work_area)] per monitor, primary first, in virtual-screen
-        pixel coordinates (top-left origin) - the Windows analogue of
-        MacOSBackend.screen_frames()."""
+        """[(frame, work_area)] per monitor, primary first, in portable
+        screen coordinates - virtual-screen pixels are already top-left
+        origin, the same space WindowHandle.frame_px()/move_to_px() use."""
         results = []
 
         def _cb(hmon, hdc, rect, lparam):

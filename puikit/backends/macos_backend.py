@@ -636,6 +636,18 @@ def translate_key(characters: str, modifier_flags: int = 0) -> Event | None:
 
 
 
+def _flip_height() -> float | None:
+    """Primary screen height, the constant that converts between AppKit's
+    bottom-left origin and the portable top-left origin (frame_px /
+    move_to_px / screen_frames). The primary screen is screens()[0], whose
+    AppKit origin is always (0, 0). None when headless."""
+    from AppKit import NSScreen
+    screens = NSScreen.screens()
+    if not screens:
+        return None
+    return float(screens[0].frame().size.height)
+
+
 def _ns_color(color: tuple[int, ...], alpha: float = 1.0):
     # An RGBA 4-tuple folds its alpha channel into the opacity; a 3-tuple is
     # opaque. ``alpha`` multiplies on top (e.g. a dim or shadow tint).
@@ -1286,8 +1298,20 @@ class MacWindowHandle(WindowHandle):
     def set_title(self, title: str) -> None:
         self.nswindow.setTitle_(title)
 
-    def move_px(self, x: float, y: float) -> None:
-        self.nswindow.setFrameOrigin_((x, y))
+    def frame_px(self) -> tuple[float, float, float, float] | None:
+        flip_h = _flip_height()
+        if flip_h is None:
+            return None
+        f = self.nswindow.frame()
+        return (float(f.origin.x), flip_h - float(f.origin.y) - float(f.size.height),
+                float(f.size.width), float(f.size.height))
+
+    def move_to_px(self, x: float, y: float) -> None:
+        flip_h = _flip_height()
+        if flip_h is None:
+            return
+        h = float(self.nswindow.frame().size.height)
+        self.nswindow.setFrameOrigin_((x, flip_h - y - h))
 
     @property
     def closed(self) -> bool:
@@ -1633,15 +1657,21 @@ class MacOSBackend(Backend):
             NSApp.activateIgnoringOtherApps_(True)
 
     def screen_frames(self) -> list:
-        """Provisional E5-lite: [(frame, visible_frame)] per screen, each an
-        (x, y, w, h) tuple in bottom-left-origin points; main screen first."""
+        """[(frame, visible_frame)] per screen, main screen first, each an
+        (x, y, w, h) tuple in portable screen coordinates - top-left origin,
+        the same space WindowHandle.frame_px()/move_to_px() use."""
         from AppKit import NSScreen
-        frames = []
-        for screen in NSScreen.screens():
-            f, v = screen.frame(), screen.visibleFrame()
-            frames.append(((f.origin.x, f.origin.y, f.size.width, f.size.height),
-                           (v.origin.x, v.origin.y, v.size.width, v.size.height)))
-        return frames
+        flip_h = _flip_height()
+        if flip_h is None:
+            return []
+
+        def _flip(r):
+            return (float(r.origin.x),
+                    flip_h - float(r.origin.y) - float(r.size.height),
+                    float(r.size.width), float(r.size.height))
+
+        return [(_flip(screen.frame()), _flip(screen.visibleFrame()))
+                for screen in NSScreen.screens()]
 
     def create_window(self, width: int, height: int, title: str = "",
                       style: WindowStyle | None = None) -> MacWindowHandle:

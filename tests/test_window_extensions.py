@@ -314,3 +314,39 @@ class TestMultiWindowMemory:
         from puikit.backend import Backend
         with pytest.raises(CapabilityNotSupported):
             Backend.create_window(backend, 10, 3)
+
+
+class TestWindowPositioning:
+    """frame_px()/move_to_px(): portable top-left screen coordinates."""
+
+    def _window(self):
+        backend = MemoryBackend(80, 24)
+        backend.open()
+        return backend.create_window(30, 10, title="pop")
+
+    def test_base_handle_defaults(self):
+        from puikit.backend import WindowHandle
+        handle = WindowHandle()
+        assert handle.frame_px() is None
+        handle.move_to_px(10, 20)  # base is a no-op, must not raise
+
+    def test_memory_frame_matches_gui_default_origin(self):
+        # GUI backends create secondary windows at (160, 160); the memory
+        # backend mirrors that so positioning logic is testable headless.
+        window = self._window()
+        assert window.frame_px() == (160.0, 160.0, 30.0, 10.0)
+
+    def test_move_to_px_round_trips_through_frame_px(self):
+        window = self._window()
+        window.move_to_px(415, 230)
+        assert window.frame_px() == (415.0, 230.0, 30.0, 10.0)
+
+    def test_macos_flip_math(self):
+        # The AppKit conversion both macOS methods share: portable y is
+        # measured from the primary screen's top edge.
+        flip_h, window_h = 1080.0, 200.0
+        appkit_y = 100.0                      # bottom-left origin
+        portable_y = flip_h - appkit_y - window_h
+        assert portable_y == 780.0
+        # and back again (move_to_px inverts frame_px)
+        assert flip_h - portable_y - window_h == appkit_y
