@@ -33,7 +33,7 @@ from .theme import THEME_GUI, THEME_TUI, Theme, derive_theme, lift, mix, theme_f
 #: (``attr = "puikit.__version__"``), so packaging metadata and ``puikit
 #: .__version__`` can no longer disagree. (They did once: 1.0.2 was released
 #: with this line left at 1.0.1.)
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 __all__ = [
     "Backend",
     "Shader",
