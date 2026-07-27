@@ -119,7 +119,19 @@ def test_style_font_is_cached():
 def test_measure_text_base_font_counts_columns():
     backend = MacOSBackend()
     backend._init_fonts()
-    assert backend.measure_text("hello") == 5.0
+    # The grid font is an explicit unsized/unnamed monospace request; the
+    # default style (font=None) is no longer grid - see the next test.
+    assert backend.measure_text("hello", Style(font=Font(monospace=True))) == 5.0
+
+
+def test_measure_text_default_style_measures_as_drawn():
+    backend = MacOSBackend()
+    backend._init_fonts()
+    # font=None draws as the proportional UI font (Panel._resolve), so it
+    # measures as that font too - mirroring measure_line_height. Measuring it
+    # by columns over-sized every content-sized default-font label.
+    assert backend.measure_text("hello") == backend.measure_text(
+        "hello", Style(font=Font()))
 
 
 def test_measure_text_proportional_is_not_column_count():

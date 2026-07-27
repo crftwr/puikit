@@ -1276,15 +1276,19 @@ class WindowsBackend(Backend):
         return -self._cjk_baseline_dy(self._resolve_style_font(style), self._resolve_style_cjk_font(style))
 
     def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
-        # A grid-aligned font (font=None, or an unsized/unnamed monospace
-        # request) tiles one glyph per base-unit column, so it measures in
-        # columns (display_width) — NOT by DirectWrite's natural advance. This
-        # mirrors the macOS backend's _is_grid_font test (grid_aligned here);
-        # measuring an explicit Font(monospace=True) by natural advance instead
-        # made a wide (CJK) glyph 1.67 columns rather than 2, so it rendered and
-        # wrapped unlike the same run on macOS (and unlike the base grid font).
-        if grid_aligned(style.font):
+        # A grid-aligned font (an unsized/unnamed monospace request) tiles one
+        # glyph per base-unit column, so it measures in columns (display_width)
+        # — NOT by DirectWrite's natural advance; measuring an explicit
+        # Font(monospace=True) by natural advance made a wide (CJK) glyph 1.67
+        # columns rather than 2, so it rendered and wrapped unlike macOS.
+        # font=None is NOT grid-aligned here, mirroring measure_line_height
+        # and the macOS backend: the Panel draws it as the proportional UI
+        # font, so it must measure as that font too.
+        font = style.font if style.font is not None else Font()
+        if grid_aligned(font):
             return float(display_width(text))
+        if style.font is None:
+            style = Style(attr=style.attr, font=font)
         # Measured through DirectWrite itself (the same system that renders
         # it via DrawText), not GDI: GDI's metrics for the same font/text can
         # disagree with DirectWrite's actual layout by a wide margin (verified

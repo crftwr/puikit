@@ -2018,12 +2018,22 @@ class MacOSBackend(Backend):
         return bool(bold) and _ensure_cjk_fonts()
 
     def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
-        """Displayed width in base units. A grid font (font=None or an unsized,
-        unnamed monospace face) tiles the grid one column per glyph; a real
-        per-Style font is measured natively and divided by the base unit width,
-        so the result stays in base units."""
-        if _is_grid_font(style.font):
+        """Displayed width in base units. A grid font (an unsized, unnamed
+        monospace face) tiles the grid one column per glyph; a real per-Style
+        font is measured natively and divided by the base unit width, so the
+        result stays in base units.
+
+        font=None is NOT a grid font here, mirroring measure_line_height:
+        Panel's _resolve() draws it as the proportional UI font, so it must be
+        measured as that font too — measuring it by columns over-sized every
+        content-sized default-font label to its monospace width, leaving dead
+        space between the drawn text and the next widget. Only an explicit
+        unsized/unnamed monospace request measures by columns."""
+        font = style.font if style.font is not None else Font()
+        if _is_grid_font(font):
             return float(display_width(text))
+        if style.font is None:
+            style = Style(attr=style.attr, font=font)
         ns_font = self._resolve_style_font(style)
         key = (text, id(ns_font))
         width = self._width_cache.get(key)
