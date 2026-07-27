@@ -355,8 +355,11 @@ def test_macos_faux_bold_does_not_move_advances(text):
     import macos_ink as ink
 
     be = ink.font_only_backend()
-    assert be.measure_text(text, Style()) == be.measure_text(
-        text, Style(attr=TextAttribute.BOLD))
+    # The grid face is the explicit monospace request (font=None now measures
+    # as the proportional UI font, whose Latin bold legitimately differs).
+    grid = Font(monospace=True)
+    assert be.measure_text(text, Style(font=grid)) == be.measure_text(
+        text, Style(font=grid, attr=TextAttribute.BOLD))
     if all(is_cjk(c) for c in text):
         assert be.measure_text(text, Style(font=Font())) == pytest.approx(
             be.measure_text(text, Style(font=Font(weight=FontWeight.BOLD))))
