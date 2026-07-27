@@ -1594,6 +1594,11 @@ WS_OVERLAPPEDWINDOW = (
     WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
 )
 WS_VISIBLE = 0x10000000
+WS_POPUP = 0x80000000
+
+WS_EX_TOPMOST = 0x00000008
+WS_EX_TOOLWINDOW = 0x00000080
+WS_EX_NOACTIVATE = 0x08000000
 
 CS_HREDRAW = 0x0002
 CS_VREDRAW = 0x0001
@@ -1603,6 +1608,7 @@ CW_USEDEFAULT = 0x80000000 - 0x100000000  # INT_MIN as a signed 32-bit value
 
 SW_SHOW = 5
 SW_SHOWNORMAL = 1
+SW_SHOWNA = 8  # show without activating (WindowStyle.activates=False)
 
 IDC_ARROW = 32512
 
@@ -1919,3 +1925,60 @@ user32.GetSubMenu.restype = ctypes.c_void_p
 user32.GetSubMenu.argtypes = [ctypes.c_void_p, ctypes.c_int]
 user32.GetMenuItemCount.argtypes = [ctypes.c_void_p]
 user32.SetForegroundWindow.argtypes = [HWND]
+
+
+# --- System tray (Shell_NotifyIconW) + monitor enumeration -------------------
+
+NIM_ADD = 0x0
+NIM_MODIFY = 0x1
+NIM_DELETE = 0x2
+NIF_MESSAGE = 0x1
+NIF_ICON = 0x2
+NIF_TIP = 0x4
+
+
+class NOTIFYICONDATAW(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("hWnd", HWND),
+        ("uID", wintypes.UINT),
+        ("uFlags", wintypes.UINT),
+        ("uCallbackMessage", wintypes.UINT),
+        ("hIcon", ctypes.c_void_p),
+        ("szTip", ctypes.c_wchar * 128),
+        ("dwState", wintypes.DWORD),
+        ("dwStateMask", wintypes.DWORD),
+        ("szInfo", ctypes.c_wchar * 256),
+        ("uVersion", wintypes.UINT),
+        ("szInfoTitle", ctypes.c_wchar * 64),
+        ("dwInfoFlags", wintypes.DWORD),
+        ("guidItem", ctypes.c_byte * 16),
+        ("hBalloonIcon", ctypes.c_void_p),
+    ]
+
+
+shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
+shell32.Shell_NotifyIconW.restype = wintypes.BOOL
+
+
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", wintypes.RECT),
+        ("rcWork", wintypes.RECT),
+        ("dwFlags", wintypes.DWORD),
+    ]
+
+
+MONITORINFOF_PRIMARY = 0x1
+MONITORENUMPROC = ctypes.WINFUNCTYPE(
+    wintypes.BOOL, ctypes.c_void_p, ctypes.c_void_p,
+    ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+user32.EnumDisplayMonitors.argtypes = [
+    ctypes.c_void_p, ctypes.c_void_p, MONITORENUMPROC, wintypes.LPARAM]
+user32.EnumDisplayMonitors.restype = wintypes.BOOL
+user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(MONITORINFO)]
+user32.GetMonitorInfoW.restype = wintypes.BOOL
+
+SW_HIDE = 0

@@ -298,6 +298,7 @@ class WebBackend(Backend):
     # --- lifecycle ---------------------------------------------------------
 
     def open(self) -> None:
+        self._note_ui_thread()
         self._quit = False
         server = WebServer(_ASSET_DIR, _FONT_DIR, self._on_message, self._on_connect)
         self._port = server.start()

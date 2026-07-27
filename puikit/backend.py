@@ -8,6 +8,8 @@ based on the backend's CapabilityProfile.
 
 from __future__ import annotations
 
+import threading
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -80,11 +82,86 @@ class Style:
 
 DEFAULT_STYLE = Style()
 
+
+@dataclass(frozen=True)
+class WindowStyle:
+    """How a GUI backend's window is framed and layered (capability
+    ``window_styles``). Passed to a GUI backend's constructor; every default
+    reproduces the pre-WindowStyle behavior (a normal resizable app window),
+    so ``None`` and ``WindowStyle()`` are equivalent.
+
+    Fields (append-only, per the API compatibility policy):
+
+    - ``frameless``: no title bar or border (macOS borderless NSWindow /
+      Win32 WS_POPUP). A frameless window does not take keyboard focus on
+      macOS (borderless windows cannot become key) — intended for tooltip /
+      balloon style overlays.
+    - ``topmost``: float above normal windows (NSFloatingWindowLevel /
+      WS_EX_TOPMOST).
+    - ``activates``: when False, showing the window does not steal focus
+      from the active application (ordered front without activation /
+      WS_EX_NOACTIVATE + SW_SHOWNA). Keyboard-taking non-activating panels
+      are a separate future feature; ``activates=False`` is for display-only
+      overlays.
+    - ``resizable``: user-resizable frame (ignored when ``frameless``).
+    - ``tool``: keep the window out of the taskbar / Alt-Tab list
+      (WS_EX_TOOLWINDOW). Windows-only today; no-op on macOS.
+
+    Backends without the ``window_styles`` capability accept the parameter
+    and ignore it (the base recipe: unknown requests degrade, not raise)."""
+
+    frameless: bool = False
+    topmost: bool = False
+    activates: bool = True
+    resizable: bool = True
+    tool: bool = False
+
+
 EventHandler = Callable[[Event], None]
 
 
 class CapabilityNotSupported(Exception):
     """Raised when an extended primitive is called on a backend without it."""
+
+
+class WindowHandle:
+    """A secondary window created by Backend.create_window() (capability
+    ``multi_window``).
+
+    Fidelity per backend (docs/window_management.md): a real OS window on
+    GUI-Desktop, a real browser window on Web (planned), a framed layer on
+    TUI (planned). Apps hold the handle and bind a Panel to it with
+    ``Panel(backend, window=handle)`` — the Panel then renders into this
+    window and receives its events.
+
+    - ``on_event``: callable receiving this window's events. A bound Panel
+      installs itself here (dispatch + render) unless the app already set one.
+    - ``on_close``: called when the user closes the window. Closing a
+      secondary window never quits the app (only the main window does).
+    """
+
+    on_event: Callable[[Event], None] | None = None
+    on_close: Callable[[], None] | None = None
+
+    def show(self) -> None: ...
+    def hide(self) -> None: ...
+    def close(self) -> None: ...
+    def set_title(self, title: str) -> None: ...
+
+    def move_px(self, x: float, y: float) -> None:
+        """Position the window at native screen coordinates (macOS:
+        bottom-left origin points). Provisional until screen_frames() ships
+        a portable coordinate story."""
+
+    @property
+    def closed(self) -> bool:
+        return False
+
+    @property
+    def size_units(self) -> tuple[float, float]:
+        """Drawable size in base units (the window's analogue of
+        Backend.size_units)."""
+        return (0.0, 0.0)
 
 
 class Backend(ABC):
@@ -691,6 +768,90 @@ class Backend(ABC):
     @abstractmethod
     def quit(self) -> None:
         """Request the event loop to stop after the current iteration."""
+
+    # --- multi-window (capability "multi_window") -----------------------------
+
+    def set_tray(self, title: str | None = None, menu: Any = None,
+                 tooltip: str | None = None) -> None:
+        """System tray icon / macOS menu bar extra (capability "system_tray").
+        ``title`` is short text/emoji shown in the bar (image support is a
+        future additive field); ``menu`` is a puikit Menu opened on click;
+        ``title=None`` removes the item."""
+        raise CapabilityNotSupported("system_tray")
+
+    def show_main_window(self) -> None:
+        """Re-show the main window (used with main_window_close="hide").
+        Base is a no-op."""
+
+    def create_window(self, width: int, height: int, title: str = "",
+                      style: "WindowStyle | None" = None) -> WindowHandle:
+        """Create a secondary window (base units). UI-thread-only. The main
+        window (the backend itself) must be open first — secondary windows
+        share its base unit and fonts. Bind a Panel with
+        ``Panel(backend, window=handle)``."""
+        raise CapabilityNotSupported("multi_window")
+
+    @contextmanager
+    def _window_scope(self, window: WindowHandle | None):
+        """Route rendering (draw primitives, present, size queries) to
+        ``window`` for the duration. The Panel brackets render/dispatch with
+        this; the base is a no-op so single-window backends cost nothing."""
+        yield
+
+    # --- UI-thread guard ------------------------------------------------------
+
+    def _note_ui_thread(self) -> None:
+        """Record the calling thread as the UI thread. Every backend's open()
+        calls this, so UI-thread-only APIs can enforce their contract via
+        _assert_ui_thread and misuse fails identically on every backend —
+        instead of diverging per platform (e.g. an NSTimer scheduled from a
+        worker thread attaches to that thread's non-running run loop and
+        silently never fires)."""
+        self._ui_thread_ident = threading.get_ident()
+
+    def _assert_ui_thread(self, api: str) -> None:
+        """Raise when called off the UI thread. Inert until _note_ui_thread
+        has run (i.e. before open()), so headless construction in tests is
+        unaffected."""
+        ui = getattr(self, "_ui_thread_ident", None)
+        if ui is not None and threading.get_ident() != ui:
+            raise RuntimeError(
+                f"{api} must be called from the UI thread; from a worker "
+                f"thread, hand it over with call_on_main_thread(lambda: {api}(...))."
+            )
+
+    def call_later(self, delay_seconds: float, callback: Callable[[], None]) -> Callable[[], None]:
+        """Schedule ``callback`` to run once on the UI thread after
+        ``delay_seconds``. Returns a zero-argument cancel function; calling it
+        after the timer fired is a harmless no-op.
+
+        UI-thread-only, and enforced: once the backend is open, calling this
+        (or the returned cancel) from another thread raises RuntimeError on
+        every backend. From a worker thread, pair with
+        ``call_on_main_thread``. The base implementation rides the animation
+        tick (so any backend with ``animation_ticks`` gets a working timer at
+        tick granularity); native backends override it with a real OS timer
+        (NSTimer / WM_TIMER)."""
+        self._assert_ui_thread("call_later")
+        deadline = time.monotonic() + delay_seconds
+        state = {"cancelled": False}
+
+        def _tick() -> bool:
+            if state["cancelled"]:
+                return False
+            if time.monotonic() >= deadline:
+                state["cancelled"] = True
+                callback()
+                return False
+            return True
+
+        self.request_animation_ticks(_tick)
+
+        def cancel() -> None:
+            self._assert_ui_thread("cancel (from call_later)")
+            state["cancelled"] = True
+
+        return cancel
 
     # --- shell-out ----------------------------------------------------------
 

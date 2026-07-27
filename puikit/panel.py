@@ -1427,8 +1427,17 @@ class _EffectAnimation:
 class Panel:
     """Owns widget layout, layers, focus, and event routing for one screen."""
 
-    def __init__(self, backend: Backend, theme: Theme | None = None):
+    def __init__(self, backend: Backend, theme: Theme | None = None,
+                 window: Any | None = None):
         self.backend = backend
+        # Secondary-window binding (capability "multi_window"): when set, this
+        # Panel renders into that WindowHandle and receives its events. None
+        # (the default) binds to the backend's main window, exactly as before.
+        self._window = window
+        if window is not None and window.on_event is None:
+            # Default event sink: dispatch + re-render, the canonical app loop
+            # body. An app that set its own on_event before binding keeps it.
+            window.on_event = self._on_window_event
         # The theme encodes the backend's region-separation strategy: GUI
         # themes separate surfaces with hairlines, TUI themes with
         # background contrast (a line would cost a whole base unit row/column).
@@ -1735,7 +1744,19 @@ class Panel:
         else:
             self.backend.end_text_input()
 
+    def _on_window_event(self, event: Event) -> None:
+        """Default event sink for a bound secondary window."""
+        self.dispatch_event(event)
+        self.render()
+
     def render(self) -> None:
+        if self._window is not None:
+            with self.backend._window_scope(self._window):
+                self._render_impl()
+            return
+        self._render_impl()
+
+    def _render_impl(self) -> None:
         self._sync_text_input()
         self._text_frame_reset()
         if self._layout is not None:
@@ -2290,6 +2311,16 @@ class Panel:
         self.backend.call_on_main_thread(callback)
         return True
 
+    def call_later(self, delay_seconds: float, callback: Any) -> Any:
+        """Schedule ``callback`` once on the UI thread after ``delay_seconds``;
+        returns a zero-argument cancel function. Available on every backend (a
+        native one-shot timer where the backend has one, the animation tick
+        otherwise), so apps need no capability check. UI-thread-only, and
+        enforced: once the backend is open, calling this (or the cancel) from
+        another thread raises RuntimeError — from a worker thread, hand it
+        over with ``call_on_main_thread(lambda: panel.call_later(...))``."""
+        return self.backend.call_later(delay_seconds, callback)
+
     def _start_geometry_animation(
         self, widget: Any, hints: dict[str, Any], stepped: bool
     ) -> None:
@@ -2586,6 +2617,14 @@ class Panel:
 
     def dispatch_event(self, event: Event) -> bool:
         """Route an event to widgets. Returns True if it was consumed."""
+        if self._window is not None:
+            # Size-dependent handling (layer placement, hit testing helpers)
+            # must see the bound window's geometry, not the main window's.
+            with self.backend._window_scope(self._window):
+                return self._dispatch_event_impl(event)
+        return self._dispatch_event_impl(event)
+
+    def _dispatch_event_impl(self, event: Event) -> bool:
         # Track the pointer for hover/press styling on any positioned mouse event.
         if event.x is not None and event.type in (
             EventType.MOUSE_CLICK, EventType.MOUSE_DOWN, EventType.MOUSE_UP,

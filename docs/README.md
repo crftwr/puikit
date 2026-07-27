@@ -22,6 +22,7 @@ Between them they cover the two seams every other system hangs off.
 | [`drag_drop.md`](drag_drop.md) | Drop-in (`drag_and_drop`) vs. drag-out (`os_drag_drop`) and the intent API |
 | [`images.md`](images.md) | `ImageView`'s five fits, the shared fit/aspect geometry, normalized zoom crops, and terminals that really draw images |
 | [`widget_catalog.md`](widget_catalog.md) | The existing widgets, and how we decide whether to add one |
+| [`window_management.md`](window_management.md) | `WindowStyle` (frameless / topmost / no-activate / tool), macOS `activation_policy` for agent apps, `call_later` one-shot timers |
 
 ## Surface effects
 

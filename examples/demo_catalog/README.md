@@ -168,6 +168,14 @@ since the emulator owns the window — so the Panel falls back to copying the
 paths to the clipboard. One intent (`panel.begin_file_drag`), resolved per
 backend. See [`docs/drag_drop.md`](../../docs/drag_drop.md).
 
+### ⏱️ Timers
+`panel.call_later(delay, callback) -> cancel` — one-shot timers on the UI
+thread, on **every** backend with no capability check: a real OS timer
+(one-shot `NSTimer` / `WM_TIMER`) on GUI-Desktop, the animation tick on TUI.
+The third button schedules and immediately cancels — proving a cancelled
+timer never fires. See
+[`docs/window_management.md`](../../docs/window_management.md).
+
 ---
 
 ## Motion & layers

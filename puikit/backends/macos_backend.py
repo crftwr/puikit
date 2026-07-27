@@ -22,6 +22,7 @@ import random
 import sys
 import time
 import warnings
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from collections.abc import Callable
 from typing import Any
@@ -29,6 +30,7 @@ from typing import Any
 from AppKit import (
     NSApp,
     NSApplication,
+    NSApplicationActivationPolicyAccessory,
     NSApplicationActivationPolicyRegular,
     NSAttributedString,
     NSBackingStoreBuffered,
@@ -90,7 +92,9 @@ from AppKit import (
     NSUnderlineStyleThick,
     NSView,
     NSWorkspace,
+    NSFloatingWindowLevel,
     NSWindow,
+    NSWindowStyleMaskBorderless,
     NSWindowStyleMaskClosable,
     NSWindowStyleMaskMiniaturizable,
     NSWindowStyleMaskResizable,
@@ -117,7 +121,7 @@ try:
     from Quartz import CAMetalLayer
 except ImportError:  # pragma: no cover - older/partial PyObjC
     CAMetalLayer = None
-from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, is_transparent
+from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, WindowHandle, WindowStyle, is_transparent
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..easing import resolve as _resolve_easing
 from ..event import Event, EventType, char_key_event
@@ -816,8 +820,26 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
         return True
 
     def drawRect_(self, rect):
-        if self.backend is not None:
+        if self.backend is None:
+            return
+        window_handle = getattr(self, "pk_window", None)
+        if window_handle is not None:
+            # A secondary window's view renders its own display list.
+            with self.backend._window_scope(window_handle):
+                self.backend._render_into_view()
+        else:
             self.backend._render_into_view()
+
+    def _pk_dispatch(self, event):
+        """Route input to this view's window: a secondary window's events go
+        to its WindowHandle.on_event (a bound Panel installs itself there);
+        the main window keeps the run_event_loop handler path."""
+        window_handle = getattr(self, "pk_window", None)
+        if window_handle is not None:
+            if window_handle.on_event is not None:
+                window_handle.on_event(event)
+            return
+        self.backend._dispatch(event)
 
     # --- IME state (set by the backend right after the view is created) -------
 
@@ -844,7 +866,7 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
                 ns_event.charactersIgnoringModifiers(), ns_event.modifierFlags()
             )
             if event is not None:
-                self.backend._dispatch(event)
+                self._pk_dispatch(event)
             return
         # A text widget holds focus: hand the key to the input context. It either
         # composes (setMarkedText:), commits text (insertText:), or issues an
@@ -943,7 +965,7 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
             target_end = int(selected_range.location + selected_range.length)
         else:
             target_start = target_end = 0
-        self.backend._dispatch(
+        self._pk_dispatch(
             Event(
                 type=EventType.IME_COMPOSITION,
                 hints={
@@ -960,7 +982,7 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
         self.marked_text = ""
         self.marked_range = NSMakeRange(NSNotFound, 0)
         self.selected_range = NSMakeRange(0, 0)
-        self.backend._dispatch(
+        self._pk_dispatch(
             Event(type=EventType.IME_COMPOSITION, hints={"preedit": "", "caret": 0})
         )
 
@@ -973,7 +995,7 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
         if not text:
             return
         # A commit ends composition; clear any lingering preedit in the widget.
-        self.backend._dispatch(
+        self._pk_dispatch(
             Event(type=EventType.IME_COMPOSITION, hints={"preedit": "", "caret": 0})
         )
         # Each committed character is delivered as a KEY event through the shared
@@ -985,7 +1007,7 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
         ns_event = getattr(self, "_last_key_event", None)
         mods = _modifier_names(ns_event.modifierFlags()) if ns_event is not None else frozenset()
         for ch in text:
-            self.backend._dispatch(char_key_event(ch, mods))
+            self._pk_dispatch(char_key_event(ch, mods))
 
     def doCommandBySelector_(self, selector):
         # Non-text keys (arrows, enter, tab, delete, escape, ...). Re-translate
@@ -996,7 +1018,7 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
                 ns_event.charactersIgnoringModifiers(), ns_event.modifierFlags()
             )
             if event is not None:
-                self.backend._dispatch(event)
+                self._pk_dispatch(event)
 
     def firstRectForCharacterRange_actualRange_(self, char_range, actual_range):
         # Position the candidate window at the widget's reported caret. This is
@@ -1055,7 +1077,7 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
 
     def mouseMoved_(self, ns_event):
         x, y = self._mouse_unit(ns_event)
-        self.backend._dispatch(Event(type=EventType.MOUSE_MOVE, x=x, y=y))
+        self._pk_dispatch(Event(type=EventType.MOUSE_MOVE, x=x, y=y))
 
     def cursorUpdate_(self, ns_event):
         # AppKit's chance to set the pointer as it enters/moves over the view.
@@ -1070,7 +1092,7 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
 
     def mouseExited_(self, ns_event):
         # Move the pointer off-canvas so nothing reads as hovered.
-        self.backend._dispatch(Event(type=EventType.MOUSE_MOVE, x=-1.0, y=-1.0))
+        self._pk_dispatch(Event(type=EventType.MOUSE_MOVE, x=-1.0, y=-1.0))
 
     def _mouse_unit(self, ns_event) -> tuple[float, float]:
         # Carry the *fractional* base-unit position. Flooring here would quantize
@@ -1089,21 +1111,21 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
         x, y = self._mouse_unit(ns_event)
         # Press and release are reported separately; the Panel decides when the
         # gesture becomes a click (release over the same widget).
-        self.backend._dispatch(Event(type=EventType.MOUSE_DOWN, x=x, y=y, button="left"))
+        self._pk_dispatch(Event(type=EventType.MOUSE_DOWN, x=x, y=y, button="left"))
 
     def mouseUp_(self, ns_event):
         x, y = self._mouse_unit(ns_event)
-        self.backend._dispatch(Event(type=EventType.MOUSE_UP, x=x, y=y, button="left"))
+        self._pk_dispatch(Event(type=EventType.MOUSE_UP, x=x, y=y, button="left"))
 
     def rightMouseDown_(self, ns_event):
         # Right-click acts on press (context menus), so it stays an atomic click.
         x, y = self._mouse_unit(ns_event)
-        self.backend._dispatch(Event(type=EventType.MOUSE_CLICK, x=x, y=y, button="right"))
+        self._pk_dispatch(Event(type=EventType.MOUSE_CLICK, x=x, y=y, button="right"))
 
     def mouseDragged_(self, ns_event):
         self._last_mouse_event = ns_event
         x, y = self._mouse_unit(ns_event)
-        self.backend._dispatch(Event(type=EventType.MOUSE_DRAG, x=x, y=y, button="left"))
+        self._pk_dispatch(Event(type=EventType.MOUSE_DRAG, x=x, y=y, button="left"))
 
     # NSDraggingSource: the operations this view offers as a drag source, set
     # per session by begin_file_drag (copy / move / link). The receiver picks
@@ -1157,7 +1179,7 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
         if not paths:
             return False
         x, y = self._drop_unit(sender)
-        self.backend._dispatch(
+        self._pk_dispatch(
             Event(type=EventType.FILE_DROP, x=x, y=y, hints={"paths": paths})
         )
         return True
@@ -1187,13 +1209,20 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
                 hints["scroll_units"] = delta / self.backend._base_h
             if delta_x != 0:
                 hints["scroll_units_x"] = delta_x / self.backend._base_w
-        self.backend._dispatch(
+        self._pk_dispatch(
             Event(type=EventType.MOUSE_SCROLL, x=x, y=y, scroll=scroll, hints=hints)
         )
 
 
 class _PuiKitWindowDelegate(NSObject):
     backend = None
+
+    def windowShouldClose_(self, sender):
+        backend = self.backend
+        if backend is not None and getattr(backend, "_main_window_close", "quit") == "hide":
+            sender.orderOut_(None)
+            return False
+        return True
 
     def windowWillClose_(self, notification):
         if self.backend is not None:
@@ -1202,6 +1231,90 @@ class _PuiKitWindowDelegate(NSObject):
     def windowDidResize_(self, notification):
         if self.backend is not None:
             self.backend._on_resize()
+
+
+class _PuiKitSecondaryWindowDelegate(NSObject):
+    """Delegate for secondary windows: closing one never quits the app."""
+
+    handle = None
+
+    def windowWillClose_(self, notification):
+        if self.handle is not None:
+            self.handle._on_user_close()
+
+    def windowDidResize_(self, notification):
+        if self.handle is not None:
+            self.handle._on_did_resize()
+
+
+class MacWindowHandle(WindowHandle):
+    """A real secondary NSWindow (capability "multi_window")."""
+
+    def __init__(self, backend, nswindow, view, delegate, style: WindowStyle):
+        self._backend = backend
+        self.nswindow = nswindow
+        self.view = view
+        self._delegate = delegate
+        self.window_style = style
+        # Per-window display list double buffer (routed to by the backend's
+        # _front/_back properties while this window is active).
+        self.front: list[tuple] = []
+        self.back: list[tuple] = []
+        self._closed = False
+
+    # -- WindowHandle -------------------------------------------------------
+
+    def show(self) -> None:
+        if self.window_style.activates:
+            self.nswindow.makeKeyAndOrderFront_(None)
+        else:
+            self.nswindow.orderFrontRegardless()
+
+    def hide(self) -> None:
+        self.nswindow.orderOut_(None)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.nswindow.setDelegate_(None)
+        self.nswindow.orderOut_(None)
+        if self in self._backend._secondary_windows:
+            self._backend._secondary_windows.remove(self)
+        self.view.pk_window = None
+
+    def set_title(self, title: str) -> None:
+        self.nswindow.setTitle_(title)
+
+    def move_px(self, x: float, y: float) -> None:
+        self.nswindow.setFrameOrigin_((x, y))
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    @property
+    def size_units(self) -> tuple[float, float]:
+        bounds = self.view.bounds()
+        return (bounds.size.width / self._backend._base_w,
+                bounds.size.height / self._backend._base_h)
+
+    # -- delegate callbacks ---------------------------------------------------
+
+    def _on_user_close(self) -> None:
+        # The user closed the window: unlike the main window this never quits
+        # the app; the app decides in on_close (e.g. Keyhac hides its console).
+        self._closed = True
+        if self in self._backend._secondary_windows:
+            self._backend._secondary_windows.remove(self)
+        if self.on_close is not None:
+            self.on_close()
+
+    def _on_did_resize(self) -> None:
+        if self.on_event is not None:
+            w, h = self.size_units
+            self.on_event(Event(type=EventType.RESIZE,
+                                hints={"w": int(w), "h": int(h)}))
 
 
 class MacOSBackend(Backend):
@@ -1217,7 +1330,7 @@ class MacOSBackend(Backend):
             "ime": True,
             "clipboard_rich": True,   # NSPasteboard multi-type write (HTML + plain)
             "native_file_dialog": False,
-            "system_tray": False,
+            "system_tray": True,   # set_tray: NSStatusItem menu bar extra
             "media_keys": False,
             "gpu_acceleration": False,
             "post_effects": True,    # Core Image content-filter composite; gated
@@ -1248,9 +1361,32 @@ class MacOSBackend(Backend):
 
     def __init__(self, width: int = 100, height: int = 30, title: str = "PuiKit",
                  base_font: Font | None = None, ui_font: Font | None = None,
-                 frame_autosave_name: str | None = None):
+                 frame_autosave_name: str | None = None,
+                 style: "WindowStyle | None" = None,
+                 activation_policy: str = "regular",
+                 main_window_close: str = "quit"):
         self._initial_size = (width, height)
         self._title = title
+        # Multi-window: secondary windows created via create_window(); while
+        # a Panel bound to one renders (or its view draws), _active_win routes
+        # the display-list/size properties to that window's state. Must be set
+        # before the _front/_back property assignments below.
+        self._active_win: MacWindowHandle | None = None
+        self._secondary_windows: list[MacWindowHandle] = []
+        # How the window is framed/layered (capability "window_styles"); None
+        # is equivalent to WindowStyle() and reproduces the classic app window.
+        self._window_style = style if style is not None else WindowStyle()
+        # "regular" (Dock icon, may steal focus on open) or "accessory" (an
+        # agent app: no Dock icon, never force-activates on open — for
+        # menu-bar-extra style apps). Unrecognized values degrade to "regular"
+        # per the additive-API recipe.
+        self._activation_policy = activation_policy
+        # "hide": the close button hides the main window instead of quitting
+        # (re-shown via show_main_window(), e.g. from a tray menu). Unknown
+        # values degrade to "quit", the classic behavior.
+        self._main_window_close = main_window_close
+        self._status_item = None      # NSStatusItem (set_tray)
+        self._tray_responder = None   # retained menu responder
         # When set, AppKit persists this window's frame (position + size) to the
         # user defaults under this name and restores it on the next launch — the
         # standard NSWindow frame-autosave feature. None keeps the default of
@@ -1337,9 +1473,12 @@ class MacOSBackend(Backend):
         # gate (see _roll_user_active). Seeded to launch time so a roll can fire
         # right away if the window opens focused.
         self._last_input_time: float = time.monotonic()
-        # Display list double buffer: widgets fill `_back`, drawRect reads `_front`.
-        self._back: list[tuple] = []
-        self._front: list[tuple] = []
+        # Display list double buffer: widgets fill `_back`, drawRect reads
+        # `_front`. Plain lists for the main window; the identically-named
+        # properties below route to a secondary window's lists while one is
+        # active (see _window_scope).
+        self._back_main: list[tuple] = []
+        self._front_main: list[tuple] = []
         self._fonts: dict[TextAttribute, Any] = {}
         # Per-Style font cache: resolved NSFonts keyed by (Font, bold, italic).
         self._style_fonts: dict[tuple, Any] = {}
@@ -1387,22 +1526,33 @@ class MacOSBackend(Backend):
     # --- lifecycle ---------------------------------------------------------
 
     def open(self) -> None:
+        self._note_ui_thread()
         app = NSApplication.sharedApplication()
-        app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+        if self._activation_policy == "accessory":
+            app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+        else:  # "regular" and anything unrecognized degrade to the old behavior
+            app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
 
         self._init_fonts()
         w_px = self._initial_size[0] * self._base_w
         h_px = self._initial_size[1] * self._base_h
-        style = (
-            NSWindowStyleMaskTitled
-            | NSWindowStyleMaskClosable
-            | NSWindowStyleMaskMiniaturizable
-            | NSWindowStyleMaskResizable
-        )
+        ws = self._window_style
+        if ws.frameless:
+            style = NSWindowStyleMaskBorderless
+        else:
+            style = (
+                NSWindowStyleMaskTitled
+                | NSWindowStyleMaskClosable
+                | NSWindowStyleMaskMiniaturizable
+            )
+            if ws.resizable:
+                style |= NSWindowStyleMaskResizable
         self._window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(120, 120, w_px, h_px), style, NSBackingStoreBuffered, False
         )
         self._window.setTitle_(self._title)
+        if ws.topmost:
+            self._window.setLevel_(NSFloatingWindowLevel)
 
         self._view = _PuiKitView.alloc().initWithFrame_(NSMakeRect(0, 0, w_px, h_px))
         self._view.backend = self
@@ -1445,10 +1595,110 @@ class MacOSBackend(Backend):
         self._delegate.backend = self
         self._window.setDelegate_(self._delegate)
 
-        self._window.makeKeyAndOrderFront_(None)
-        app.activateIgnoringOtherApps_(True)
+        if self._window_style.activates:
+            self._window.makeKeyAndOrderFront_(None)
+            # An accessory (agent) app must not yank focus from the frontmost
+            # app at launch; its window still becomes key when clicked.
+            if self._activation_policy != "accessory":
+                app.activateIgnoringOtherApps_(True)
+        else:
+            # Display-only overlay: show without taking key status or focus.
+            self._window.orderFrontRegardless()
+
+    def set_tray(self, title: str | None = None, menu: Any = None,
+                 tooltip: str | None = None) -> None:
+        from AppKit import NSStatusBar, NSVariableStatusItemLength
+        if title is None:
+            if self._status_item is not None:
+                NSStatusBar.systemStatusBar().removeStatusItem_(self._status_item)
+                self._status_item = None
+                self._tray_responder = None
+            return
+        if self._status_item is None:
+            self._status_item = NSStatusBar.systemStatusBar().statusItemWithLength_(
+                NSVariableStatusItemLength)
+        button = self._status_item.button()
+        button.setTitle_(title)
+        if tooltip is not None:
+            button.setToolTip_(tooltip)
+        if menu is not None:
+            from ._macos_menu import build_popup_menu
+            ns_menu, responder = build_popup_menu(menu)
+            self._tray_responder = responder  # NSMenuItem does not retain targets
+            self._status_item.setMenu_(ns_menu)
+
+    def show_main_window(self) -> None:
+        if self._window is not None:
+            self._window.makeKeyAndOrderFront_(None)
+            NSApp.activateIgnoringOtherApps_(True)
+
+    def screen_frames(self) -> list:
+        """Provisional E5-lite: [(frame, visible_frame)] per screen, each an
+        (x, y, w, h) tuple in bottom-left-origin points; main screen first."""
+        from AppKit import NSScreen
+        frames = []
+        for screen in NSScreen.screens():
+            f, v = screen.frame(), screen.visibleFrame()
+            frames.append(((f.origin.x, f.origin.y, f.size.width, f.size.height),
+                           (v.origin.x, v.origin.y, v.size.width, v.size.height)))
+        return frames
+
+    def create_window(self, width: int, height: int, title: str = "",
+                      style: WindowStyle | None = None) -> MacWindowHandle:
+        """A real secondary NSWindow sharing this backend's base unit and
+        fonts. Bind a Panel with Panel(backend, window=handle)."""
+        self._assert_ui_thread("create_window")
+        if self._view is None:
+            raise RuntimeError("open() the backend before create_window()")
+
+        ws = style if style is not None else WindowStyle()
+        w_px = width * self._base_w
+        h_px = height * self._base_h
+        if ws.frameless:
+            mask = NSWindowStyleMaskBorderless
+        else:
+            mask = (NSWindowStyleMaskTitled
+                    | NSWindowStyleMaskClosable
+                    | NSWindowStyleMaskMiniaturizable)
+            if ws.resizable:
+                mask |= NSWindowStyleMaskResizable
+        nswindow = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(160, 160, w_px, h_px), mask, NSBackingStoreBuffered, False
+        )
+        nswindow.setTitle_(title)
+        if ws.topmost:
+            nswindow.setLevel_(NSFloatingWindowLevel)
+        # AppKit's default releases a closed window while the Python handle
+        # still references it; lifetime stays with the handle instead.
+        nswindow.setReleasedWhenClosed_(False)
+
+        view = _PuiKitView.alloc().initWithFrame_(NSMakeRect(0, 0, w_px, h_px))
+        view.backend = self
+        view.marked_text = ""
+        view.marked_range = NSMakeRange(NSNotFound, 0)
+        view.selected_range = NSMakeRange(0, 0)
+        view._input_context = NSTextInputContext.alloc().initWithClient_(view)
+        nswindow.setContentView_(view)
+        nswindow.setAcceptsMouseMovedEvents_(True)
+        nswindow.makeFirstResponder_(view)
+
+        delegate = _PuiKitSecondaryWindowDelegate.alloc().init()
+        handle = MacWindowHandle(self, nswindow, view, delegate, ws)
+        view.pk_window = handle
+        delegate.handle = handle
+        nswindow.setDelegate_(delegate)
+
+        if ws.activates:
+            nswindow.makeKeyAndOrderFront_(None)
+        else:
+            nswindow.orderFrontRegardless()
+
+        self._secondary_windows.append(handle)
+        return handle
 
     def close(self) -> None:
+        for handle in list(self._secondary_windows):
+            handle.close()
         if self._anim_timer is not None:
             self._anim_timer.invalidate()
             self._anim_timer = None
@@ -1799,18 +2049,56 @@ class MacOSBackend(Backend):
 
     # --- geometry ----------------------------------------------------------
 
+    # --- multi-window routing ------------------------------------------------
+
+    @property
+    def _front(self) -> list:
+        return self._active_win.front if self._active_win else self._front_main
+
+    @_front.setter
+    def _front(self, value: list) -> None:
+        if self._active_win:
+            self._active_win.front = value
+        else:
+            self._front_main = value
+
+    @property
+    def _back(self) -> list:
+        return self._active_win.back if self._active_win else self._back_main
+
+    @_back.setter
+    def _back(self, value: list) -> None:
+        if self._active_win:
+            self._active_win.back = value
+        else:
+            self._back_main = value
+
+    def _target_view(self):
+        return self._active_win.view if self._active_win else self._view
+
+    @contextmanager
+    def _window_scope(self, window):
+        previous = self._active_win
+        self._active_win = window
+        try:
+            yield
+        finally:
+            self._active_win = previous
+
     @property
     def size(self) -> tuple[int, int]:
-        if self._view is None:
+        view = self._target_view()
+        if view is None:
             return self._initial_size
-        bounds = self._view.bounds()
+        bounds = view.bounds()
         return (int(bounds.size.width // self._base_w), int(bounds.size.height // self._base_h))
 
     @property
     def size_units(self) -> tuple[float, float]:
-        if self._view is None:
+        view = self._target_view()
+        if view is None:
             return (float(self._initial_size[0]), float(self._initial_size[1]))
-        bounds = self._view.bounds()
+        bounds = view.bounds()
         return (bounds.size.width / self._base_w, bounds.size.height / self._base_h)
 
     @property
@@ -2002,6 +2290,28 @@ class MacOSBackend(Backend):
             # queues. No-op (same rate) in steady state.
             self._ensure_animation_timer()
 
+    def call_later(self, delay_seconds: float, callback: Callable[[], None]) -> Callable[[], None]:
+        """One-shot NSTimer on the main run loop — a real OS timer instead of
+        the base class's animation-tick fallback, so a pending timer never
+        drags the 60fps tick alive. UI-thread-only, enforced: scheduledTimer
+        attaches to the CALLING thread's run loop, so a worker-thread call
+        would otherwise silently never fire."""
+        self._assert_ui_thread("call_later")
+
+        def _fire(timer) -> None:
+            callback()
+
+        nstimer = NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
+            delay_seconds, False, _fire
+        )
+
+        def cancel() -> None:
+            # NSTimer must also be invalidated on the thread that scheduled it.
+            self._assert_ui_thread("cancel (from call_later)")
+            nstimer.invalidate()
+
+        return cancel
+
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float,
         style: Style = DEFAULT_STYLE, orientation: str = "vertical",
@@ -2022,7 +2332,8 @@ class MacOSBackend(Backend):
     def present(self) -> None:
         self._front = self._back
         self._back = []
-        if self._view is not None:
+        view = self._target_view()
+        if view is not None:
             # Mark the view dirty and let AppKit coalesce the actual redraw to
             # one drawRect_ per display refresh. Do NOT force a synchronous draw
             # here (displayIfNeeded): a trackpad emits a flood of precise scroll
@@ -2032,7 +2343,7 @@ class MacOSBackend(Backend):
             # rasterization of the latest frame — the intermediate frames'
             # expensive draw work is skipped. The display list itself is rebuilt
             # per event, but that is cheap; the cost was always the rasterization.
-            self._view.setNeedsDisplay_(True)
+            view.setNeedsDisplay_(True)
 
     # --- pixel rendering (called from the view's drawRect) --------------------
 
@@ -2044,7 +2355,10 @@ class MacOSBackend(Backend):
         # a dark scene line reads against it, rather than muddying toward near-black.
         # No effect when no background / no backdrop.
         clear = _DEFAULT_BG
-        bg = self._background
+        # Backgrounds (wallpaper/shader) and post effects composite on the
+        # main window only; a secondary window renders its display list over
+        # the plain clear color.
+        bg = None if self._active_win is not None else self._background
         if bg is not None and getattr(bg, "backdrop", None) is not None:
             clear = bg.backdrop
         if isinstance(bg, Shader) and self._metal_layer is not None:
@@ -2056,12 +2370,12 @@ class MacOSBackend(Backend):
             NSGraphicsContext.currentContext().setCompositingOperation_(
                 NSCompositingOperationCopy)
             NSColor.clearColor().setFill()
-            NSRectFill(self._view.bounds())
+            NSRectFill(self._target_view().bounds())
             NSGraphicsContext.currentContext().setCompositingOperation_(
                 NSCompositingOperationSourceOver)
         else:
             _ns_color(clear).setFill()
-            NSRectFill(self._view.bounds())
+            NSRectFill(self._target_view().bounds())
         now = time.monotonic()
         # The background is drawn *before* the display list, so every widget paints
         # over it — it shows through only where the UI leaves the cleared background
@@ -2122,7 +2436,8 @@ class MacOSBackend(Backend):
         # Scanlines are painted here (not as a CIFilter): AppKit's content filters
         # drop custom CIFilters, so the color chain (tint/glow/bloom/vignette) runs
         # as content filters over this whole frame — these dark rows included.
-        effect = self._post_effect
+        # Post effects are main-window-only (their geometry reads the main view).
+        effect = None if self._active_win is not None else self._post_effect
         if effect is not None and effect.scanline > 0:
             self._render_scanlines(effect.scanline)
         if effect is not None and effect.vignette > 0 and _HAS_QUARTZ:
