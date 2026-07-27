@@ -148,10 +148,25 @@ class WindowHandle:
     def close(self) -> None: ...
     def set_title(self, title: str) -> None: ...
 
-    def move_px(self, x: float, y: float) -> None:
-        """Position the window at native screen coordinates (macOS:
-        bottom-left origin points). Provisional until screen_frames() ships
-        a portable coordinate story."""
+    def frame_px(self) -> tuple[float, float, float, float] | None:
+        """The window frame (x, y, w, h) in portable screen coordinates:
+        top-left origin with the primary screen's top-left corner at (0, 0),
+        in the backend's native scale (macOS points / Windows physical
+        pixels). This is the space CoreGraphics (CGDisplayBounds,
+        CGWindowList) already uses on macOS and the virtual screen uses on
+        Windows; only AppKit's bottom-left origin differs, and the macOS
+        backend flips internally. Backend.screen_frames() reports the same
+        space. Returns None where the position is unknown (the base, and
+        windows without a native frame)."""
+        return None
+
+    def move_to_px(self, x: float, y: float) -> None:
+        """Move the window's top-left corner to (x, y) in the same portable
+        coordinates frame_px() reports. Absolute, like DOM moveTo (a
+        relative move_by_px may arrive later). The base is a no-op.
+
+        (Replaces 1.0.5's provisional native-coordinates move_px(), which
+        meant a different origin per OS and was removed with no callers.)"""
 
     @property
     def closed(self) -> bool:
