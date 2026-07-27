@@ -35,6 +35,7 @@ import threading
 import time
 from ctypes import wintypes
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -42,7 +43,10 @@ from . import _win32_dragdrop, _win32_ime
 from . import _win32_native as native
 from ._d3d_shader import HAVE_D3D_SHADER, D3DShaderBackground
 from ..background import Shader, Wallpaper
-from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, WindowStyle, is_transparent
+from ..backend import (
+    Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, WindowHandle,
+    WindowStyle, is_transparent,
+)
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..easing import resolve as _resolve_easing
 from ..event import Event, EventType, char_key_event
@@ -370,6 +374,112 @@ _WM_TRAY_CALLBACK = native.WM_APP + 2
 _TRAY_ICON_ID = 1
 
 
+def _window_style_flags(ws: WindowStyle) -> tuple[int, int]:
+    """A WindowStyle as (ex_style, style) Win32 flags — the mapping documented
+    in docs/window_management.md. Shared by the main window (open) and every
+    secondary one (create_window), so the two cannot drift."""
+    if ws.frameless:
+        style = native.WS_POPUP
+    else:
+        style = native.WS_OVERLAPPEDWINDOW
+        if not ws.resizable:
+            style &= ~(native.WS_THICKFRAME | native.WS_MAXIMIZEBOX)
+    ex_style = 0
+    if ws.topmost:
+        ex_style |= native.WS_EX_TOPMOST
+    if not ws.activates:
+        ex_style |= native.WS_EX_NOACTIVATE
+    if ws.tool:
+        ex_style |= native.WS_EX_TOOLWINDOW
+    return ex_style, style
+
+
+class WinWindowHandle(WindowHandle):
+    """A real secondary HWND (capability "multi_window").
+
+    Secondary windows share the backend's D3D11 device, ID2D1DeviceContext,
+    fonts and base unit; only the DXGI swap chain and its target bitmap are
+    per-window. Rendering retargets the shared device context at that bitmap
+    (_render_window), which is the standard Direct2D 1.1 multi-window shape
+    and far cheaper than a device per window.
+    """
+
+    def __init__(self, backend: "WindowsBackend", hwnd: int, style: WindowStyle):
+        self._backend = backend
+        self.hwnd = hwnd
+        self.window_style = style
+        # Per-window display list double buffer (the backend's _front/_back
+        # route here while this window is the active one — see _window_scope).
+        self.front: list[tuple] = []
+        self.back: list[tuple] = []
+        # Per-window swap chain + its bound target bitmap; recreated with the
+        # device on loss (see WindowsBackend._create_render_resources).
+        self.swap_chain: Any = None
+        self.target_bitmap: Any = None
+        self._closed = False
+
+    # -- WindowHandle ---------------------------------------------------------
+
+    def show(self) -> None:
+        if self._closed:
+            return
+        # SW_SHOWNA for a display-only overlay: shown without taking activation,
+        # matching WS_EX_NOACTIVATE and MacWindowHandle.orderFrontRegardless.
+        native.user32.ShowWindow(
+            self.hwnd,
+            native.SW_SHOW if self.window_style.activates else native.SW_SHOWNA)
+
+    def hide(self) -> None:
+        if not self._closed:
+            native.user32.ShowWindow(self.hwnd, native.SW_HIDE)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._backend._forget_window(self)
+        hwnd, self.hwnd = self.hwnd, 0
+        if hwnd:
+            native.user32.DestroyWindow(hwnd)
+
+    def set_title(self, title: str) -> None:
+        if not self._closed:
+            native.user32.SetWindowTextW(self.hwnd, title)
+
+    def move_px(self, x: float, y: float) -> None:
+        if self._closed:
+            return
+        native.user32.SetWindowPos(
+            self.hwnd, None, int(x), int(y), 0, 0,
+            native.SWP_NOZORDER | native.SWP_NOACTIVATE | native.SWP_NOSIZE)
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    @property
+    def size_units(self) -> tuple[float, float]:
+        cw, ch = self._client_size_px()
+        return (cw / self._backend._base_w, ch / self._backend._base_h)
+
+    # -- internals ------------------------------------------------------------
+
+    def _client_size_px(self) -> tuple[int, int]:
+        if self._closed or not self.hwnd:
+            return (1, 1)
+        rect = wintypes.RECT()
+        native.user32.GetClientRect(self.hwnd, ctypes.byref(rect))
+        return (max(rect.right - rect.left, 1), max(rect.bottom - rect.top, 1))
+
+    def _on_user_close(self) -> None:
+        # The user clicked the close button. Unlike the main window this never
+        # quits the app; the app decides in on_close.
+        on_close = self.on_close
+        self.close()
+        if on_close is not None:
+            on_close()
+
+
 def _global_wndproc(hwnd: int, msg: int, wparam: int, lparam: int) -> int:
     backend = _hwnd_backends.get(hwnd)
     if backend is not None:
@@ -490,9 +600,9 @@ class WindowsBackend(Backend):
             "clipboard_rich": False,
             "native_file_dialog": False,
             "system_tray": False,
-            # multi_window needs per-hwnd D2D render targets/swap chains on
-            # this backend; off until that lands (macOS shipped first).
-            "multi_window": False,
+            "multi_window": True,  # create_window: a real HWND per window, each
+                                   # with its own DXGI swap chain on the shared
+                                   # D3D device (see WinWindowHandle).
             "media_keys": False,
             "post_effects": True,  # Direct2D-effects CRT composite (set_post_effect)
             "background": True,  # a wallpaper image drawn under the UI in the
@@ -630,9 +740,16 @@ class WindowsBackend(Backend):
         # _TIMER_ID so the animation timer's id can never collide.
         self._later_timers: dict[int, Callable[[], None]] = {}
         self._later_timer_next_id = 1000
-        # Display list double buffer: widgets fill `_back`, WM_PAINT reads `_front`.
-        self._back: list[tuple] = []
-        self._front: list[tuple] = []
+        # Display list double buffer: widgets fill `_back`, WM_PAINT reads
+        # `_front`. Accessed through the _front/_back properties, which route
+        # to the active secondary window's own pair when one is scoped.
+        self._back_main: list[tuple] = []
+        self._front_main: list[tuple] = []
+        # Secondary windows (capability multi_window), and the one currently
+        # scoped by _window_scope (None == the main window).
+        self._secondary_windows: list[WinWindowHandle] = []
+        self._hwnd_windows: dict[int, WinWindowHandle] = {}
+        self._active_win: WinWindowHandle | None = None
         self._fonts: dict[TextAttribute, Any] = {}
         # Per-Style text formats cached by (Font, bold, italic).
         self._style_fonts: dict[tuple, Any] = {}
@@ -836,9 +953,18 @@ class WindowsBackend(Backend):
         # background yet, so this no-ops). _release_render_resources dropped the
         # stale one, which pointed at the now-freed device.
         self._sync_shader_layer()
+        # Secondary windows' swap chains live on the same device, so a
+        # device-loss recreate has to rebuild theirs too (empty at first open).
+        for handle in self._secondary_windows:
+            self._create_window_surface(handle)
 
     def _release_render_resources(self) -> None:
         self._release_crt_chain()
+        # Secondary swap chains ride on the device being torn down; drop them
+        # first. The handles survive — _create_render_resources rebuilds their
+        # surfaces on the new device.
+        for handle in self._secondary_windows:
+            self._release_window_surface(handle)
         # Recorded against this device context, so they cannot outlive it.
         self._invalidate_ui_cache()
         for caster in self._shadow_casters.values():
@@ -1225,6 +1351,8 @@ class WindowsBackend(Backend):
     # --- geometry ----------------------------------------------------------
 
     def _client_size_px(self) -> tuple[int, int]:
+        if self._active_win is not None:
+            return self._active_win._client_size_px()
         if not self._hwnd:
             return (
                 max(int(self._initial_size[0] * self._base_w), 1),
@@ -1233,6 +1361,42 @@ class WindowsBackend(Backend):
         rect = wintypes.RECT()
         native.user32.GetClientRect(self._hwnd, ctypes.byref(rect))
         return (max(rect.right - rect.left, 1), max(rect.bottom - rect.top, 1))
+
+    # --- multi-window routing ----------------------------------------------
+
+    @property
+    def _front(self) -> list:
+        return self._active_win.front if self._active_win else self._front_main
+
+    @_front.setter
+    def _front(self, value: list) -> None:
+        if self._active_win:
+            self._active_win.front = value
+        else:
+            self._front_main = value
+
+    @property
+    def _back(self) -> list:
+        return self._active_win.back if self._active_win else self._back_main
+
+    @_back.setter
+    def _back(self, value: list) -> None:
+        if self._active_win:
+            self._active_win.back = value
+        else:
+            self._back_main = value
+
+    def _target_hwnd(self) -> int:
+        return self._active_win.hwnd if self._active_win else self._hwnd
+
+    @contextmanager
+    def _window_scope(self, window):
+        previous = self._active_win
+        self._active_win = window
+        try:
+            yield
+        finally:
+            self._active_win = previous
 
     @property
     def size(self) -> tuple[int, int]:
@@ -1438,9 +1602,14 @@ class WindowsBackend(Backend):
     def present(self) -> None:
         self._front = self._back
         self._back = []
-        self._invalidate_ui_cache()  # a new display list to record
-        if self._hwnd:
-            native.user32.InvalidateRect(self._hwnd, None, False)
+        # The recorded command list caches the MAIN window's display list only;
+        # a secondary window renders its list inline (see _render_window), so
+        # presenting one must not throw the main window's recording away.
+        if self._active_win is None:
+            self._invalidate_ui_cache()  # a new display list to record
+        hwnd = self._target_hwnd()
+        if hwnd:
+            native.user32.InvalidateRect(hwnd, None, False)
 
     def set_post_effect(self, effect: Any | None) -> None:
         """Composite a CRT / phosphor effect over the whole window, or clear it
@@ -2852,8 +3021,117 @@ class WindowsBackend(Backend):
         results.sort(key=lambda e: not e[1])  # primary first
         return [frames for frames, _primary in results]
 
+    # --- multi-window (capability "multi_window") --------------------------
+
+    def create_window(self, width: int, height: int, title: str = "",
+                      style: WindowStyle | None = None) -> WinWindowHandle:
+        """A real secondary HWND sharing this backend's D3D device, device
+        context, fonts and base unit. Bind a Panel with
+        Panel(backend, window=handle)."""
+        self._assert_ui_thread("create_window")
+        if not self._hwnd or self._render_target is None:
+            raise RuntimeError("open() the backend before create_window()")
+
+        ws = style if style is not None else WindowStyle()
+        ex_style, win_style = _window_style_flags(ws)
+        w_px = int(width * self._base_w)
+        h_px = int(height * self._base_h)
+        hwnd = native.user32.CreateWindowExW(
+            ex_style, _CLASS_NAME, title, win_style,
+            160, 160, w_px, h_px, None, None, native.get_module_handle(), None,
+        )
+        if not hwnd:
+            raise OSError(f"CreateWindowExW failed: {ctypes.get_last_error()}")
+
+        handle = WinWindowHandle(self, hwnd, ws)
+        # Registered before the first paint: WM_PAINT can arrive from inside
+        # ShowWindow below, and _handle_message needs the handle to route it.
+        _hwnd_backends[hwnd] = self
+        self._hwnd_windows[hwnd] = handle
+        self._secondary_windows.append(handle)
+        self._create_window_surface(handle)
+
+        # CreateWindowExW's w/h include the non-client frame; correct the frame
+        # so the *client* area is the requested base-unit size (same +16/+39
+        # padding rationale as _apply_initial_frame).
+        if not ws.frameless:
+            native.user32.SetWindowPos(
+                hwnd, None, 0, 0, w_px + 16, h_px + 39,
+                native.SWP_NOZORDER | native.SWP_NOACTIVATE | native.SWP_NOMOVE)
+        handle.show()
+        return handle
+
+    def _create_window_surface(self, handle: WinWindowHandle) -> None:
+        """Build (or rebuild) a secondary window's swap chain + target bitmap on
+        the backend's current D3D device."""
+        if self._render_target is None or handle.closed:
+            return
+        cw, ch = handle._client_size_px()
+        handle.swap_chain = native.create_swapchain_for_hwnd(self._d3d_device, handle.hwnd, cw, ch)
+        handle.target_bitmap = native.swapchain_bind_target(self._render_target, handle.swap_chain, cw, ch)
+        # swapchain_bind_target leaves the device context pointed at the bitmap
+        # it just bound; the main window's target must stay the DC's default so
+        # an unscoped _render draws where it expects to.
+        native.dc_set_target(self._render_target, self._target_bitmap)
+        self._frame_target = self._target_bitmap
+
+    def _release_window_surface(self, handle: WinWindowHandle) -> None:
+        for attr in ("target_bitmap", "swap_chain"):
+            obj = getattr(handle, attr)
+            if obj is not None:
+                obj.release()
+                setattr(handle, attr, None)
+
+    def _forget_window(self, handle: WinWindowHandle) -> None:
+        """Drop a secondary window's GPU surfaces and registrations. Called from
+        WinWindowHandle.close() before the HWND is destroyed."""
+        self._release_window_surface(handle)
+        if handle.hwnd:
+            _hwnd_backends.pop(handle.hwnd, None)
+            self._hwnd_windows.pop(handle.hwnd, None)
+        if handle in self._secondary_windows:
+            self._secondary_windows.remove(handle)
+        if self._active_win is handle:
+            self._active_win = None
+
+    def _render_window(self, handle: WinWindowHandle) -> None:
+        """Rasterize a secondary window's display list by retargeting the shared
+        device context at its swap-chain bitmap.
+
+        Deliberately the simple path: no CRT composite, no shader background and
+        no recorded-command-list cache — those stay main-window features (see
+        docs/window_management.md), and a secondary window is a small popup
+        whose list is cheap to replay inline.
+        """
+        rt = self._render_target
+        if rt is None or handle.closed or handle.target_bitmap is None:
+            return
+        now = time.monotonic()
+        # Shadow casters are recorded by retargeting the DC, which is illegal
+        # inside an open draw batch — same ordering as _render.
+        self._prepare_shadows()
+        native.dc_set_target(rt, handle.target_bitmap)
+        self._frame_target = handle.target_bitmap
+        native.rt_begin_draw(rt)
+        native.rt_set_antialias_mode(rt, native.D2D1_ANTIALIAS_MODE_PER_PRIMITIVE)
+        native.rt_clear(rt, native.D2D1_COLOR_F(
+            _DEFAULT_BG[0] / 255, _DEFAULT_BG[1] / 255, _DEFAULT_BG[2] / 255, 1.0))
+        self._render_display_list(now)
+        hr = native.rt_end_draw(rt)
+        # Restore the main window's target before anything else can draw.
+        native.dc_set_target(rt, self._target_bitmap)
+        self._frame_target = self._target_bitmap
+        device_lost = (hr & 0xFFFFFFFF) == 0x8899000C  # D2DERR_RECREATE_TARGET
+        if not device_lost:
+            present_hr = native.swapchain_present(handle.swap_chain) & 0xFFFFFFFF
+            device_lost = present_hr in (0x887A0005, 0x887A0007)
+        if device_lost:
+            self._recreate_render_target()
+
     def close(self) -> None:
         self.set_tray(None)
+        for handle in list(self._secondary_windows):
+            handle.close()
         self._close_impl()
 
     def popup_menu(self, menu: Any, x: float, y: float, on_done: Callable[[], None] | None = None) -> None:
@@ -2875,7 +3153,69 @@ class WindowsBackend(Backend):
 
     # --- message handling -------------------------------------------------
 
+    def _handle_secondary_message(self, handle: WinWindowHandle, hwnd: int,
+                                  msg: int, wparam: int, lparam: int) -> int:
+        """Window procedure for a secondary window. Runs inside
+        _window_scope(handle), so everything it delegates to already reads and
+        writes that window's state."""
+        if msg == native.WM_PAINT:
+            self._render_window(handle)
+            native.user32.ValidateRect(hwnd, None)
+            return 0
+        if msg == native.WM_ERASEBKGND:
+            return 1  # D2D repaints the full client area; skip the GDI erase
+        if msg == native.WM_SIZE:
+            cw, ch = native.loword(lparam), native.hiword(lparam)
+            if self._render_target is not None and handle.swap_chain is not None and cw and ch:
+                handle.target_bitmap = native.swapchain_resize(
+                    self._render_target, handle.swap_chain, handle.target_bitmap, cw, ch)
+                # swapchain_resize leaves the DC bound to the resized bitmap.
+                native.dc_set_target(self._render_target, self._target_bitmap)
+                self._frame_target = self._target_bitmap
+            sw, sh = self.size
+            self._dispatch(Event(type=EventType.RESIZE, hints={"w": sw, "h": sh}))
+            return 0
+        if msg == native.WM_CLOSE:
+            # Closing a secondary window never quits the app (only the main
+            # window does); the app decides in on_close.
+            handle._on_user_close()
+            return 0
+        if msg == native.WM_DESTROY:
+            self._forget_window(handle)
+            return 0
+        if msg in (native.WM_LBUTTONDOWN, native.WM_RBUTTONDOWN, native.WM_MBUTTONDOWN):
+            return self._on_mouse_down(msg, lparam)
+        if msg in (native.WM_LBUTTONUP, native.WM_RBUTTONUP, native.WM_MBUTTONUP):
+            return self._on_mouse_up(msg, lparam)
+        if msg == native.WM_MOUSEMOVE:
+            return self._on_mouse_move(wparam, lparam)
+        if msg == native.WM_MOUSELEAVE:
+            self._tracking_mouse = False
+            self._dispatch(Event(type=EventType.MOUSE_MOVE, x=-1.0, y=-1.0))
+            return 0
+        if msg == native.WM_MOUSEWHEEL:
+            return self._on_mouse_wheel(wparam, lparam)
+        if msg in (native.WM_KEYDOWN, native.WM_SYSKEYDOWN):
+            self._on_key_down(wparam)
+            if msg == native.WM_SYSKEYDOWN:
+                return native.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+            return 0
+        if msg == native.WM_CHAR:
+            self._on_char(wparam)
+            return 0
+        return native.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
     def _dispatch(self, event: Event) -> None:
+        # A scoped secondary window takes its own events (WindowHandle.on_event,
+        # which a bound Panel installs); only the main window reaches the app's
+        # run_event_loop handler.
+        if self._active_win is not None:
+            if self._active_win.on_event is not None:
+                self._active_win.on_event(event)
+            return
+        return self._dispatch_main(event)
+
+    def _dispatch_main(self, event: Event) -> None:
         # Stamp activity and re-arm a parked roll ticker: a roll only starts while
         # the app is in use, and the ticker drops itself after an idle stretch, so
         # the next input has to wake it (see _crt_roll_tick / _ensure_roll_ticker).
@@ -3025,6 +3365,13 @@ class WindowsBackend(Backend):
         return 0
 
     def _handle_message(self, hwnd: int, msg: int, wparam: int, lparam: int) -> int:
+        handle = self._hwnd_windows.get(hwnd)
+        if handle is not None:
+            # Scope the whole handler to that window: _front/_back, size and
+            # _dispatch all follow _active_win, so the shared mouse/key/IME
+            # paths below need no per-window variants.
+            with self._window_scope(handle):
+                return self._handle_secondary_message(handle, hwnd, msg, wparam, lparam)
         if msg == native.WM_PAINT:
             self._render()
             native.user32.ValidateRect(hwnd, None)
