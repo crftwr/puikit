@@ -280,12 +280,13 @@ Full derivation, math, and the macOS/Windows symbol table:
 | `post_effects` | `True` | Direct2D-effects CRT composite |
 | `background` | `True` | wallpaper image drawn under the UI |
 | `background_shader` | `True`\* | D3D11 + HLSL; \*gated on `HAVE_D3D_SHADER` at runtime |
+| `system_tray` | `True` | `set_tray`: `Shell_NotifyIconW` icon (from the host exe or a `.ico` path) + click menu |
 | `clipboard_rich` | `False` | unused by any PuiKit app to date |
 | `native_file_dialog` | `False` | " |
-| `system_tray` | `False` | " |
 | `media_keys` | `False` | " |
 
-`MacOSBackend.PROFILE` leaves the same four `False`; neither is on a punch list.
+`MacOSBackend.PROFILE` also leaves `native_file_dialog` and `media_keys`
+`False`; neither is on a punch list.
 
 ---
 

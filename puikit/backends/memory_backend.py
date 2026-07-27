@@ -184,7 +184,7 @@ class MemoryBackend(Backend):
         # call_later one-shots, recorded (delay, callback, live-flag dict);
         # tests fire them deterministically with fire_timers().
         self.later_timers: list[tuple[float, Any, dict]] = []
-        self.tray_calls: list[tuple] = []  # (title, menu, tooltip) per set_tray
+        self.tray_calls: list[tuple] = []  # (title, menu, tooltip, image) per set_tray
         self.clear()
 
     def call_later(self, delay_seconds: float, callback) -> Any:
@@ -264,8 +264,8 @@ class MemoryBackend(Backend):
         else:
             self._styles_main = value
 
-    def set_tray(self, title=None, menu=None, tooltip=None) -> None:
-        self.tray_calls.append((title, menu, tooltip))
+    def set_tray(self, title=None, menu=None, tooltip=None, image=None) -> None:
+        self.tray_calls.append((title, menu, tooltip, image))
 
     def create_window(self, width: int, height: int, title: str = "",
                       style: WindowStyle | None = None) -> _MemoryWindowHandle:

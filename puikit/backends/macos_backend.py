@@ -1341,6 +1341,43 @@ class MacWindowHandle(WindowHandle):
                                 hints={"w": int(w), "h": int(h)}))
 
 
+def _tray_image_2x_path(path: str) -> str:
+    """The Retina sibling of an image path: ``icon.png`` -> ``icon@2x.png``."""
+    root, ext = os.path.splitext(path)
+    return root + "@2x" + ext
+
+
+def _tray_image_is_template(path: str) -> bool:
+    """AppKit's ``imageNamed:`` template convention applied to a file path: a
+    stem ending in "Template" (before any ``@2x`` scale suffix) marks a
+    template image (alpha = ink, recolored by the system)."""
+    stem = os.path.splitext(os.path.basename(path))[0]
+    if stem.endswith("@2x"):
+        stem = stem[: -len("@2x")]
+    return stem.endswith("Template")
+
+
+def _load_tray_image(path: str):
+    """NSImage for a status-item button. Images loaded by *path* get none of
+    the ``imageNamed:`` conveniences, so apply them here: add the ``@2x``
+    sibling as an extra representation at the same point size, and honor the
+    "…Template" naming convention. Returns None when the file cannot be
+    loaded."""
+    from AppKit import NSBitmapImageRep, NSImage
+    image = NSImage.alloc().initWithContentsOfFile_(path)
+    if image is None:
+        return None
+    two_x = _tray_image_2x_path(path)
+    if os.path.isfile(two_x):
+        rep = NSBitmapImageRep.imageRepWithContentsOfFile_(two_x)
+        if rep is not None:
+            rep.setSize_(image.size())
+            image.addRepresentation_(rep)
+    if _tray_image_is_template(path):
+        image.setTemplate_(True)
+    return image
+
+
 class MacOSBackend(Backend):
     """macOS GUI backend (PyObjC). Coordinates stay base unit-based; this backend
     owns the base unit size and converts to pixels at render time."""
@@ -1630,9 +1667,10 @@ class MacOSBackend(Backend):
             self._window.orderFrontRegardless()
 
     def set_tray(self, title: str | None = None, menu: Any = None,
-                 tooltip: str | None = None) -> None:
-        from AppKit import NSStatusBar, NSVariableStatusItemLength
-        if title is None:
+                 tooltip: str | None = None, image: str | None = None) -> None:
+        from AppKit import (NSImageLeading, NSImageOnly, NSNoImage,
+                            NSStatusBar, NSVariableStatusItemLength)
+        if title is None and image is None:
             if self._status_item is not None:
                 NSStatusBar.systemStatusBar().removeStatusItem_(self._status_item)
                 self._status_item = None
@@ -1642,7 +1680,15 @@ class MacOSBackend(Backend):
             self._status_item = NSStatusBar.systemStatusBar().statusItemWithLength_(
                 NSVariableStatusItemLength)
         button = self._status_item.button()
-        button.setTitle_(title)
+        ns_image = _load_tray_image(image) if image is not None else None
+        button.setImage_(ns_image)
+        button.setTitle_(title or "")
+        if ns_image is None:
+            button.setImagePosition_(NSNoImage)
+        elif title:
+            button.setImagePosition_(NSImageLeading)
+        else:
+            button.setImagePosition_(NSImageOnly)
         if tooltip is not None:
             button.setToolTip_(tooltip)
         if menu is not None:
