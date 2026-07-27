@@ -1007,3 +1007,40 @@ def test_render_with_drop_shadow_effect():
         backend._render()   # paints the offset shadow ink inline
     finally:
         backend.close()
+
+
+# --- DPI scale vs. cached text formats -------------------------------------
+
+
+def test_style_font_cache_does_not_survive_a_dpi_change():
+    """A text format is created at a point size already multiplied by
+    _dpi_scale, so one cached at a different scale draws and measures at the
+    wrong size. _rebuild_fonts must drop them all."""
+    backend = WindowsBackend()
+    prop = Style(font=Font())
+    backend._dpi_scale = 1.0
+    backend._init_fonts()
+    small_px = backend.measure_line_height(prop) * backend._base_h
+    backend._dpi_scale = 2.0
+    backend._rebuild_fonts()
+    large_px = backend.measure_line_height(prop) * backend._base_h
+    assert large_px == pytest.approx(2 * small_px, rel=0.05)
+
+
+def test_open_discards_fonts_resolved_before_the_window_existed():
+    """A Panel measures its content-sized widgets at set_layout() time, before
+    open() -- when _dpi_scale is still the 1.0 placeholder. open() is the first
+    point the window's monitor is known, so nothing resolved before it may
+    survive, or on a HiDPI display that text renders at half the size of the
+    grid text beside it (which _init_fonts always builds at the real scale)."""
+    backend = WindowsBackend(width=40, height=12, title="puikit-dpi-test")
+    backend.measure_line_height(Style(font=Font()))
+    backend.measure_text("Keyboard hook", Style(font=Font()))
+    assert backend._style_fonts, "precondition: the pre-open measure cached a format"
+    backend.open()
+    try:
+        assert backend._style_fonts == {}
+        assert backend._line_height_cache == {}
+        assert backend._width_cache == {}
+    finally:
+        backend.close()
