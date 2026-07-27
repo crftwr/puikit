@@ -6,6 +6,10 @@ dist/
 build/
 .venv/
 
+# PyPI long description — generated at build time by scripts/gen_pypi_readme.py
+# (make build): README.md with relative links rewritten to version-tagged URLs.
+README.pypi.md
+
 # Tooling
 .pytest_cache/
 .mypy_cache/

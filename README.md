@@ -13,6 +13,17 @@ See the [documentation](https://github.com/crftwr/puikit/tree/main/docs) for
 design notes and per-system guides (layout, rendering, color, animation, fonts,
 widgets, and more).
 
+## Screenshots
+
+The bundled demo catalog, running unchanged on the macOS GUI backend and in a
+terminal (curses backend).
+
+| macOS GUI backend | Curses (terminal) backend |
+| --- | --- |
+| ![Widgets page of the demo catalog on the macOS GUI backend](docs/images/demo-widgets-mac.png) | ![Widgets page of the demo catalog on the curses TUI backend](docs/images/demo-widgets-tui.png) |
+| ![MarkdownView page of the demo catalog on the macOS GUI backend](docs/images/demo-markdown-mac.png) | ![MarkdownView page of the demo catalog on the curses TUI backend](docs/images/demo-markdown-tui.png) |
+| ![Modal confirm dialog with drop shadow and dimmed backdrop on the macOS GUI backend](docs/images/demo-messagebox-mac.png) | ![Modal confirm dialog with shadow and dimmed backdrop on the curses TUI backend](docs/images/demo-messagebox-tui.png) |
+
 ## Status
 
 Stable release (1.0). Implemented:

@@ -140,11 +140,18 @@ bg3d-gui: $(VENV_STAMP)
 # PuiKit, so they are installed on demand here rather than bloating the base
 # venv. Invoked as `python -m ...` (not the venv's console scripts) so the same
 # recipe works on Windows, where those scripts live in Scripts/ and end in .exe.
+# The PyPI long description (README.pypi.md) is generated here on the fly and
+# never committed: README.md keeps repo-relative image/link targets for GitHub,
+# and gen_pypi_readme.py rewrites them to version-tagged GitHub URLs so they
+# render on the PyPI page. `twine check --strict` promotes twine's
+# "description missing" warning to a failure, so a build that somehow skipped
+# generation can never upload an empty description.
 build: $(VENV_STAMP)
 	$(VENV_PIP) install --quiet build twine
 	rm -rf dist build puikit.egg-info
+	$(VENV_PYTHON) scripts/gen_pypi_readme.py
 	$(VENV_PYTHON) -m build
-	$(VENV_PYTHON) -m twine check dist/*
+	$(VENV_PYTHON) -m twine check --strict dist/*
 
 publish-testpypi: build
 	$(VENV_PYTHON) -m twine upload -r testpypi dist/*
@@ -185,5 +192,6 @@ release: $(VENV_STAMP)
 
 clean:
 	rm -rf build dist *.egg-info
+	rm -f README.pypi.md
 	find . -name __pycache__ -type d -not -path "./$(VENV)/*" -exec rm -rf {} +
 	rm -rf .pytest_cache
