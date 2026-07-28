@@ -1644,6 +1644,17 @@ WM_GETMINMAXINFO = 0x0024
 WM_DPICHANGED = 0x02E0
 WM_APP = 0x8000
 
+# PeekMessageW: pull the message out of the queue rather than leaving it there.
+PM_REMOVE = 0x0001
+
+# MsgWaitForMultipleObjectsEx: wake for any queued input, and also when the
+# queue already holds a message an earlier PeekMessageW marked as seen —
+# without MWMO_INPUTAVAILABLE such a message would not wake the wait, so a
+# peek-then-wait loop can block with work already pending.
+QS_ALLINPUT = 0x04FF
+MWMO_INPUTAVAILABLE = 0x0004
+INFINITE = 0xFFFFFFFF
+
 # SetWindowPos flags.
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
@@ -1716,6 +1727,13 @@ user32.DispatchMessageW.restype = LRESULT
 user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
 user32.PostQuitMessage.argtypes = [ctypes.c_int]
 user32.PostMessageW.argtypes = [HWND, ctypes.c_uint, WPARAM, LPARAM]
+# Block until a message arrives OR the timeout expires — the event loop's wait,
+# in place of GetMessageW, so an animation deadline can bound the sleep
+# (nCount 0 / pHandles NULL waits on the message queue alone).
+user32.MsgWaitForMultipleObjectsEx.restype = ctypes.c_uint32
+user32.MsgWaitForMultipleObjectsEx.argtypes = [
+    ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32,
+]
 
 user32.LoadCursorW.restype = ctypes.c_void_p
 user32.LoadCursorW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]

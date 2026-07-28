@@ -319,6 +319,9 @@ WHEEL_DELTA = 120  # one notch of a classic wheel; Precision Touchpad gestures
 
 _WIDTH_CACHE_MAX = 8192
 _TIMER_ID = 1
+#: Target interval between animation ticks (~60fps). The deadline the event
+#: loop's wait is bounded by, and the rate limit both tick sources share.
+_ANIM_FRAME_SECONDS = 1.0 / 60.0
 _WM_ACTIVATE = 0x0006  # wParam low word: 0 = WA_INACTIVE, nonzero = activated
 
 
@@ -777,6 +780,11 @@ class WindowsBackend(Backend):
         self._width_cache: dict[tuple, float] = {}
         self._animations: dict[int, Animation] = {}
         self._anim_timer_running = False
+        # Deadline for the next animation tick, time.monotonic()-based. Both
+        # tick sources (the event loop's bounded wait and WM_TIMER) go through
+        # _pump_animation_tick, which honors this, so whichever gets there first
+        # drives the frame and the other one no-ops.
+        self._anim_next_tick = 0.0
         self._tick_callbacks: list[Any] = []
         self._transform_stack: list[Any] = [native.D2D1_MATRIX_3X2_F.identity()]
         self._input_caret: tuple[float, float] = (0.0, 0.0)
@@ -1553,8 +1561,46 @@ class WindowsBackend(Backend):
     def _ensure_animation_timer(self) -> None:
         if self._anim_timer_running or not self._hwnd:
             return
+        # Two sources drive the tick, because neither alone is enough. The event
+        # loop's own deadline (see run_event_loop) is the reliable one: WM_TIMER
+        # is the *lowest-priority* message on Windows — GetMessageW/PeekMessageW
+        # hand back input and WM_PAINT first and only report a timer when the
+        # queue has nothing else, so held-down key autorepeat (each repeat
+        # re-rendering and invalidating) starves it indefinitely and an animated
+        # background freezes for as long as the key is held. macOS has no such
+        # ordering: its NSTimer is serviced by the run loop alongside key events.
+        # The WM_TIMER is still worth keeping as the second source: while a
+        # native modal loop is pumping messages (a tracked popup menu, a drag),
+        # our loop is not running and the timer is all that keeps ticking.
+        self._anim_next_tick = time.monotonic()
         native.user32.SetTimer(self._hwnd, _TIMER_ID, 16, None)  # ~60fps
         self._anim_timer_running = True
+
+    def _pump_animation_tick(self) -> None:
+        """Run one animation tick if the frame deadline has passed. The single
+        entry point for both tick sources, so a frame is produced at most once
+        per _ANIM_FRAME_SECONDS however many of them fire."""
+        if not self._anim_timer_running:
+            return
+        now = time.monotonic()
+        if now < self._anim_next_tick:
+            return
+        # Advance from the deadline, not from `now`, so a tick that ran a little
+        # late doesn't push the whole schedule out behind it — but never to a
+        # deadline already past, or a slow frame would make every pump fire
+        # immediately and spin the loop instead of pacing it.
+        self._anim_next_tick += _ANIM_FRAME_SECONDS
+        if self._anim_next_tick <= now:
+            self._anim_next_tick = now + _ANIM_FRAME_SECONDS
+        self._on_animation_tick()
+
+    def _animation_wait_ms(self) -> int:
+        """How long the event loop may block waiting for a message: until the
+        next animation frame is due, or indefinitely with nothing animating."""
+        if not self._anim_timer_running:
+            return native.INFINITE
+        remaining = self._anim_next_tick - time.monotonic()
+        return max(0, int(remaining * 1000.0))
 
     def call_later(self, delay_seconds: float, callback: Callable[[], None]) -> Callable[[], None]:
         """One-shot WM_TIMER on this window — a real OS timer instead of the
@@ -3434,7 +3480,7 @@ class WindowsBackend(Backend):
             return 0
         if msg == native.WM_TIMER:
             if wparam == _TIMER_ID:
-                self._on_animation_tick()
+                self._pump_animation_tick()
             else:
                 # A call_later one-shot: fire exactly once, then kill.
                 callback = self._later_timers.pop(wparam, None)
@@ -3520,12 +3566,28 @@ class WindowsBackend(Backend):
     # --- event loop ----------------------------------------------------------
 
     def run_event_loop(self, handler: EventHandler) -> None:
+        """Peek-dispatch one message per turn, ticking animations on their own
+        deadline rather than waiting for a WM_TIMER to make it through the queue.
+
+        GetMessageW cannot express this: it blocks until a message arrives, and
+        the timer message it would eventually deliver ranks below input and
+        WM_PAINT (see _ensure_animation_timer). Bounding the wait by the frame
+        deadline instead means a saturated queue — key autorepeat, each repeat
+        dragging a repaint behind it — still yields a tick between dispatches,
+        and an idle app still sleeps in the wait until something happens.
+        """
         self._handler = handler
         self._quit_requested = False
         msg = wintypes.MSG()
         while not self._quit_requested:
-            result = native.user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
-            if result <= 0:
+            self._pump_animation_tick()
+            if not native.user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, native.PM_REMOVE):
+                native.user32.MsgWaitForMultipleObjectsEx(
+                    0, None, self._animation_wait_ms(),
+                    native.QS_ALLINPUT, native.MWMO_INPUTAVAILABLE,
+                )
+                continue
+            if msg.message == native.WM_QUIT:
                 break
             native.user32.TranslateMessage(ctypes.byref(msg))
             native.user32.DispatchMessageW(ctypes.byref(msg))
@@ -3535,12 +3597,19 @@ class WindowsBackend(Backend):
         if self._quit_requested:
             return False
         self._handler = handler
+        # An embedder driving the loop by hand gets the same deadline-driven
+        # tick the built-in loop does.
+        self._pump_animation_tick()
         msg = wintypes.MSG()
-        if native.user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
+        if native.user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, native.PM_REMOVE):
             native.user32.TranslateMessage(ctypes.byref(msg))
             native.user32.DispatchMessageW(ctypes.byref(msg))
         elif timeout_ms > 0:
-            time.sleep(min(timeout_ms, 50) / 1000.0)
+            # Never sleep past the next animation frame, or a hand-driven loop
+            # would animate at the caller's poll rate instead of 60fps.
+            budget = min(timeout_ms, 50, self._animation_wait_ms())
+            if budget > 0:
+                time.sleep(budget / 1000.0)
         self._handler = None
         return not self._quit_requested
 

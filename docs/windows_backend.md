@@ -266,6 +266,33 @@ group opacity, which double-blends overlapping content.
 Full derivation, math, and the macOS/Windows symbol table:
 [`animation.md`](animation.md) §3 and §6.
 
+### The 60 fps tick is paced by the event loop, not by `WM_TIMER`
+
+`WM_TIMER` is the **lowest-priority message on Windows**: `GetMessageW` /
+`PeekMessageW` hand back sent messages, posted messages and input first, then
+`WM_PAINT`, and only report a timer when the queue has nothing else at all. A
+held-down arrow key is enough to starve it — autorepeat delivers a `WM_KEYDOWN`
+every ~33 ms, each one re-rendering and invalidating, so the queue is never
+empty and the timer never arrives. An animated background (whose clock advances
+only in `_background_tick`) then freezes for as long as the key is held, while
+every repaint re-renders the same shader frame. macOS has no such ordering: its
+`NSTimer` is serviced by the run loop alongside key events, which is why the
+symptom is Windows-only.
+
+So `run_event_loop` peek-dispatches **one message per turn** and bounds its wait
+by the next frame deadline (`MsgWaitForMultipleObjectsEx` with `QS_ALLINPUT |
+MWMO_INPUTAVAILABLE`, or `INFINITE` when nothing is animating). A saturated
+queue therefore still yields a tick between dispatches, and an idle app still
+sleeps in the wait instead of spinning.
+
+The `SetTimer` / `WM_TIMER` source is kept as a *second* source, because a
+native modal loop (a tracked popup menu, `DoDragDrop`) pumps messages while
+`run_event_loop` is not running, and there the timer is all that keeps ticking.
+Both sources go through `_pump_animation_tick`, which fires at most one frame
+per `_ANIM_FRAME_SECONDS` and never leaves the next deadline in the past — so
+they cannot double-tick a frame, and a slow frame cannot turn the bounded wait
+into a busy loop.
+
 ---
 
 ## 11. Capability profile

@@ -25,6 +25,7 @@ from puikit.backends.windows_backend import (  # noqa: E402
     _roll_band_top, _roll_falloff, _shadow_tap_alpha, _tint_matrix,
 )
 from puikit.backends import _win32_native as native  # noqa: E402
+from puikit.backends import windows_backend  # noqa: E402
 
 # A tinted, strongly-rolling effect for the tint / roll coverage (no named preset
 # ships a tint). Mirrors tests/test_posteffect.py's TINTED.
@@ -1215,3 +1216,159 @@ def test_backend_close_closes_secondary_windows():
     assert win.closed
     assert backend._secondary_windows == []
     assert hwnd not in backend._hwnd_windows
+
+
+# --- animation pacing (WM_TIMER starvation; see _ensure_animation_timer) -------
+
+
+class _FakeClock:
+    """A monotonic clock that advances a fixed step on every read, so the pacing
+    logic can be driven deterministically without sleeping."""
+
+    def __init__(self, step=0.010):
+        self.now = 1000.0
+        self.step = step
+
+    def monotonic(self):
+        self.now += self.step
+        return self.now
+
+
+def _armed(monkeypatch, clock):
+    """A headless backend with the animation tick armed and _on_animation_tick
+    counting instead of rendering. Returns (backend, ticks)."""
+    monkeypatch.setattr(windows_backend.time, "monotonic", clock.monotonic)
+    be = WindowsBackend()
+    ticks = []
+    be._on_animation_tick = lambda: ticks.append(1)
+    be._anim_timer_running = True
+    be._anim_next_tick = clock.now
+    return be, ticks
+
+
+def test_pump_animation_tick_honors_the_frame_deadline(monkeypatch):
+    clock = _FakeClock(step=0.001)
+    be, ticks = _armed(monkeypatch, clock)
+    try:
+        be._pump_animation_tick()            # deadline already reached: ticks
+        assert len(ticks) == 1
+        be._pump_animation_tick()            # 1ms later: too early, no frame
+        assert len(ticks) == 1
+        for _ in range(30):                  # past the ~16ms frame: ticks again
+            be._pump_animation_tick()
+        assert len(ticks) == 2
+    finally:
+        be.close()
+
+
+def test_pump_animation_tick_is_inert_when_nothing_animates(monkeypatch):
+    clock = _FakeClock()
+    be, ticks = _armed(monkeypatch, clock)
+    try:
+        be._anim_timer_running = False
+        be._pump_animation_tick()
+        assert ticks == []
+    finally:
+        be.close()
+
+
+def test_a_slow_frame_never_leaves_the_deadline_in_the_past(monkeypatch):
+    # Guards against a tick-storm: advancing the deadline by one frame from a
+    # deadline long past would land it behind `now`, so the next pump would fire
+    # immediately, _animation_wait_ms would stay 0, and the loop would spin.
+    clock = _FakeClock(step=0.200)           # every "frame" takes 200ms
+    be, _ticks = _armed(monkeypatch, clock)
+    try:
+        be._pump_animation_tick()
+        assert be._anim_next_tick > clock.now
+        clock.step = 0.0                     # hold the clock at the frame it ended on
+        assert be._animation_wait_ms() > 0   # so the loop sleeps instead of spinning
+    finally:
+        be.close()
+
+
+def test_animation_wait_is_infinite_while_idle_and_bounded_while_animating(monkeypatch):
+    clock = _FakeClock(step=0.0)
+    be, _ticks = _armed(monkeypatch, clock)
+    try:
+        assert be._animation_wait_ms() == 0   # a frame is already due
+        be._anim_next_tick = clock.now + 0.010
+        assert 0 < be._animation_wait_ms() <= 16
+        be._anim_timer_running = False
+        assert be._animation_wait_ms() == native.INFINITE
+    finally:
+        be.close()
+
+
+def test_saturated_message_queue_still_animates(monkeypatch):
+    # The regression this pacing exists for: holding a key down floods the queue
+    # with autorepeat WM_KEYDOWNs, each dragging a repaint behind it, and WM_TIMER
+    # is the lowest-priority message on Windows -- so a loop that waited for the
+    # timer to arrive would never tick and an animated background froze until the
+    # key was released. Here PeekMessageW always reports a message (the queue is
+    # never empty), and frames must still be produced.
+    clock = _FakeClock(step=0.010)
+    be, ticks = _armed(monkeypatch, clock)
+    dispatched = []
+
+    def peek(_msg, _hwnd, _lo, _hi, _flags):
+        return 1                              # a message is always waiting
+
+    def dispatch(_msg):
+        dispatched.append(1)
+        if len(dispatched) >= 20:
+            be._quit_requested = True
+        return 0
+
+    def never_waits(*_args):
+        raise AssertionError("waited for a message while the queue was full")
+
+    monkeypatch.setattr(native.user32, "PeekMessageW", peek)
+    monkeypatch.setattr(native.user32, "TranslateMessage", lambda _msg: None)
+    monkeypatch.setattr(native.user32, "DispatchMessageW", dispatch)
+    monkeypatch.setattr(native.user32, "MsgWaitForMultipleObjectsEx", never_waits)
+    try:
+        be.run_event_loop(lambda _event: None)
+        assert len(dispatched) == 20
+        # 20 dispatches x 10ms of clock, one frame per ~16ms: several ticks, not none.
+        assert len(ticks) >= 5
+    finally:
+        be.close()
+
+
+def test_idle_loop_waits_on_the_queue_instead_of_spinning(monkeypatch):
+    # The other half: an empty queue must block in the wait (bounded by the frame
+    # deadline) rather than peek in a tight loop.
+    clock = _FakeClock(step=0.010)
+    be, _ticks = _armed(monkeypatch, clock)
+    be._anim_timer_running = False            # nothing animating: an indefinite wait
+    waits = []
+
+    def wait(count, handles, timeout, wake_mask, flags):
+        waits.append((count, handles, timeout, wake_mask, flags))
+        be._quit_requested = True
+        return 0
+
+    monkeypatch.setattr(native.user32, "PeekMessageW", lambda *_a: 0)
+    monkeypatch.setattr(native.user32, "MsgWaitForMultipleObjectsEx", wait)
+    try:
+        be.run_event_loop(lambda _event: None)
+        assert waits == [(0, None, native.INFINITE, native.QS_ALLINPUT,
+                          native.MWMO_INPUTAVAILABLE)]
+    finally:
+        be.close()
+
+
+def test_wm_timer_still_ticks_for_native_modal_loops(monkeypatch):
+    # The SetTimer source is kept because a native modal loop (a tracked popup
+    # menu, a drag) pumps messages while run_event_loop is not running. It goes
+    # through the same deadline gate, so it never double-ticks a frame.
+    clock = _FakeClock(step=0.001)
+    be, ticks = _armed(monkeypatch, clock)
+    try:
+        be._handle_message(0, native.WM_TIMER, windows_backend._TIMER_ID, 0)
+        assert len(ticks) == 1
+        be._handle_message(0, native.WM_TIMER, windows_backend._TIMER_ID, 0)
+        assert len(ticks) == 1                # same frame: gated, not run twice
+    finally:
+        be.close()
