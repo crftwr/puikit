@@ -552,6 +552,25 @@ def _load_app_icons() -> tuple[int, int]:
     return h_big, h_small
 
 
+def _load_icon_file(path: str) -> int:
+    """Load a ``.ico`` file as an HICON at the small-icon metric (what the
+    tray renders at: 16 px at 100% DPI, scaling with the display). The shell
+    picks the best-fitting size out of the file. Returns 0 on failure; the
+    caller owns the handle (DestroyIcon)."""
+    u = native.user32
+    u.LoadImageW.restype = ctypes.c_void_p
+
+    IMAGE_ICON = 1
+    LR_LOADFROMFILE = 0x0010
+    SM_CXSMICON, SM_CYSMICON = 49, 50
+
+    return u.LoadImageW(
+        None, path, IMAGE_ICON,
+        u.GetSystemMetrics(SM_CXSMICON), u.GetSystemMetrics(SM_CYSMICON),
+        LR_LOADFROMFILE,
+    ) or 0
+
+
 def _register_window_class() -> None:
     global _class_registered
     if _class_registered:
@@ -659,6 +678,7 @@ class WindowsBackend(Backend):
         self._main_window_close = main_window_close
         self._tray_installed = False
         self._tray_menu = None
+        self._tray_hicon = 0  # HICON loaded from set_tray(image=…); ours to destroy
         # Windows has no built-in analogue of AppKit's NSWindow frame-autosave,
         # so this is emulated with a registry value under this name: the frame
         # is restored from it on open() and written back to it in close().
@@ -3029,31 +3049,47 @@ class WindowsBackend(Backend):
         native.user32.SetMenu(self._hwnd, self._menu_bar_hmenu)
 
     def set_tray(self, title: str | None = None, menu: Any = None,
-                 tooltip: str | None = None) -> None:
-        """System tray icon (Shell_NotifyIconW). The icon is the host exe's
-        embedded icon (same as the window class); ``title`` is used as the
-        tooltip fallback since a text glyph cannot be a tray icon on Windows.
-        Left or right click opens ``menu``. ``title=None`` removes."""
+                 tooltip: str | None = None, image: str | None = None) -> None:
+        """System tray icon (Shell_NotifyIconW). ``image`` is a path to a
+        ``.ico``, loaded at the small-icon metric; without it (or when loading
+        fails) the icon is the host exe's embedded icon (same as the window
+        class). ``title`` is used as the tooltip fallback since a text glyph
+        cannot be a tray icon on Windows. Left or right click opens ``menu``.
+        Passing neither ``title`` nor ``image`` removes."""
         data = native.NOTIFYICONDATAW()
         data.cbSize = ctypes.sizeof(native.NOTIFYICONDATAW)
         data.hWnd = self._hwnd
         data.uID = _TRAY_ICON_ID
-        if title is None:
+        if title is None and image is None:
             if self._tray_installed:
                 native.shell32.Shell_NotifyIconW(native.NIM_DELETE, ctypes.byref(data))
                 self._tray_installed = False
                 self._tray_menu = None
+            self._destroy_tray_icon()
             return
+        h_file_icon = _load_icon_file(image) if image is not None else 0
         h_icon, h_icon_sm = _load_app_icons()
         data.uFlags = native.NIF_MESSAGE | native.NIF_ICON | native.NIF_TIP
         data.uCallbackMessage = _WM_TRAY_CALLBACK
-        data.hIcon = h_icon_sm or h_icon
-        data.szTip = (tooltip or title)[:127]
+        data.hIcon = h_file_icon or h_icon_sm or h_icon
+        data.szTip = (tooltip or title or "")[:127]
         native.shell32.Shell_NotifyIconW(
             native.NIM_MODIFY if self._tray_installed else native.NIM_ADD,
             ctypes.byref(data))
+        # The shell copies the icon on NIM_ADD/NIM_MODIFY, so the previously
+        # loaded handle (if any) can be released only now, after it stopped
+        # being the displayed one.
+        self._destroy_tray_icon()
+        self._tray_hicon = h_file_icon
         self._tray_installed = True
         self._tray_menu = menu
+
+    def _destroy_tray_icon(self) -> None:
+        if self._tray_hicon:
+            u = native.user32
+            u.DestroyIcon.argtypes = (ctypes.c_void_p,)
+            u.DestroyIcon(ctypes.c_void_p(self._tray_hicon))
+            self._tray_hicon = 0
 
     def show_main_window(self) -> None:
         if self._hwnd:

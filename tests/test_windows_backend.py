@@ -1051,8 +1051,12 @@ def test_open_discards_fonts_resolved_before_the_window_existed():
 def test_system_tray_capability_matches_the_implementation():
     """set_tray is implemented (Shell_NotifyIconW), so the capability must say
     so — an app that asks before calling would otherwise skip a working tray."""
+    import inspect
+
     assert WindowsBackend.PROFILE.supports("system_tray")
     assert WindowsBackend.set_tray is not Backend.set_tray
+    # The additive image parameter (a .ico path) is part of the override too.
+    assert "image" in inspect.signature(WindowsBackend.set_tray).parameters
 
 
 # --- multi-window: create_window / WinWindowHandle -------------------------

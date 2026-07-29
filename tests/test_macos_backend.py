@@ -19,6 +19,9 @@ from puikit.backends.macos_backend import (  # noqa: E402
     _PuiKitView,
     _attr_string,
     _ensure_bundled_fonts,
+    _load_tray_image,
+    _tray_image_2x_path,
+    _tray_image_is_template,
     translate_key,
 )
 from puikit.event import EventType  # noqa: E402
@@ -719,3 +722,75 @@ def test_solo_fit_seats_an_oversized_glyph_without_touching_one_that_fits():
         assert backend._solo_fit(ns_font, glyph, 2 * cell) is None, glyph
     for glyph in "ｱｲｳ":  # halfwidth katakana: one column, narrow ink
         assert backend._solo_fit(ns_font, glyph, cell) is None, glyph
+
+
+# --- set_tray image loading -------------------------------------------------
+
+def _write_png(path, size, rgba=(0, 0, 0, 255)):
+    """Minimal solid-color RGBA PNG, enough for NSImage to load."""
+    import struct
+    import zlib
+
+    def chunk(tag, data):
+        body = tag + data
+        return struct.pack(">I", len(data)) + body + struct.pack(
+            ">I", zlib.crc32(body))
+
+    raw = b"".join(b"\x00" + bytes(rgba) * size for _ in range(size))
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+
+
+def test_tray_image_template_naming_convention():
+    # AppKit's imageNamed: rule, applied to paths: "Template" stem suffix,
+    # judged before the @2x scale suffix.
+    assert _tray_image_is_template("/a/MenuExtraTemplate.png")
+    assert _tray_image_is_template("/a/MenuExtraTemplate@2x.png")
+    assert not _tray_image_is_template("/a/icon.png")
+    assert not _tray_image_is_template("/a/icon@2x.png")
+    assert not _tray_image_is_template("/a/Template-notes.png")  # prefix only
+    assert _tray_image_2x_path("/a/icon.png") == "/a/icon@2x.png"
+
+
+def test_load_tray_image_applies_template_and_2x_sibling(tmp_path):
+    _write_png(tmp_path / "MenuExtraTemplate.png", 18)
+    _write_png(tmp_path / "MenuExtraTemplate@2x.png", 36)
+    image = _load_tray_image(str(tmp_path / "MenuExtraTemplate.png"))
+    assert image is not None
+    assert image.isTemplate()
+    # The point size stays the 1x size; the @2x file rides along as a second
+    # representation at that same point size, so AppKit picks it on Retina.
+    assert (image.size().width, image.size().height) == (18.0, 18.0)
+    assert len(image.representations()) == 2
+    assert all((rep.size().width, rep.size().height) == (18.0, 18.0)
+               for rep in image.representations())
+
+
+def test_load_tray_image_plain_png_is_not_template(tmp_path):
+    _write_png(tmp_path / "icon.png", 16)
+    image = _load_tray_image(str(tmp_path / "icon.png"))
+    assert image is not None
+    assert not image.isTemplate()
+    assert len(image.representations()) == 1
+
+
+def test_load_tray_image_missing_file_returns_none(tmp_path):
+    assert _load_tray_image(str(tmp_path / "nope.png")) is None
+
+
+def test_load_tray_image_svg_vector_template(tmp_path):
+    # NSImage loads SVG natively on macOS 11+, so a "…Template.svg" gives a
+    # resolution-independent template image — no @2x sibling needed (and the
+    # rep reports no fixed pixel size; it rasterizes on demand at any scale).
+    (tmp_path / "MenuExtraTemplate.svg").write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18">'
+        '<rect width="18" height="18"/></svg>')
+    image = _load_tray_image(str(tmp_path / "MenuExtraTemplate.svg"))
+    assert image is not None
+    assert image.isTemplate()
+    assert (image.size().width, image.size().height) == (18.0, 18.0)
+    assert len(image.representations()) == 1

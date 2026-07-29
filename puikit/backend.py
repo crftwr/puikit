@@ -787,11 +787,18 @@ class Backend(ABC):
     # --- multi-window (capability "multi_window") -----------------------------
 
     def set_tray(self, title: str | None = None, menu: Any = None,
-                 tooltip: str | None = None) -> None:
+                 tooltip: str | None = None, image: str | None = None) -> None:
         """System tray icon / macOS menu bar extra (capability "system_tray").
-        ``title`` is short text/emoji shown in the bar (image support is a
-        future additive field); ``menu`` is a puikit Menu opened on click;
-        ``title=None`` removes the item."""
+        ``title`` is short text/emoji shown in the bar. ``image`` is a path to
+        an icon file shown instead of the text; formats are per-OS (the caller
+        picks the asset, like an app icon): a ``.ico`` on Windows, anything
+        NSImage loads on macOS — PNG, or SVG on macOS 11+ (vector, so no
+        Retina variant is needed) — where a ``…Template`` file name means
+        AppKit template rendering (alpha = ink, recolored for dark mode /
+        highlight) and an ``@2x`` sibling file is picked up for Retina. An image the OS cannot
+        load falls back to the text / app icon. ``menu`` is a puikit Menu
+        opened on click; passing neither ``title`` nor ``image`` removes the
+        item."""
         raise CapabilityNotSupported("system_tray")
 
     def show_main_window(self) -> None:
