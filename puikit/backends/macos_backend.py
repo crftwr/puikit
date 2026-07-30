@@ -1425,7 +1425,8 @@ class MacOSBackend(Backend):
                  frame_autosave_name: str | None = None,
                  style: "WindowStyle | None" = None,
                  activation_policy: str = "regular",
-                 main_window_close: str = "quit"):
+                 main_window_close: str = "quit",
+                 start_hidden: bool = False):
         self._initial_size = (width, height)
         self._title = title
         # Multi-window: secondary windows created via create_window(); while
@@ -1446,6 +1447,10 @@ class MacOSBackend(Backend):
         # (re-shown via show_main_window(), e.g. from a tray menu). Unknown
         # values degrade to "quit", the classic behavior.
         self._main_window_close = main_window_close
+        # True: open() creates the window without ordering it in (a tray app
+        # restoring a hidden-at-exit main window); show_main_window() reveals
+        # it. The run loop and timers are unaffected while hidden.
+        self._start_hidden = start_hidden
         self._status_item = None      # NSStatusItem (set_tray)
         self._tray_responder = None   # retained menu responder
         # When set, AppKit persists this window's frame (position + size) to the
@@ -1656,7 +1661,9 @@ class MacOSBackend(Backend):
         self._delegate.backend = self
         self._window.setDelegate_(self._delegate)
 
-        if self._window_style.activates:
+        if self._start_hidden:
+            pass  # window stays ordered out; show_main_window() reveals it
+        elif self._window_style.activates:
             self._window.makeKeyAndOrderFront_(None)
             # An accessory (agent) app must not yank focus from the frontmost
             # app at launch; its window still becomes key when clicked.
@@ -1701,6 +1708,14 @@ class MacOSBackend(Backend):
         if self._window is not None:
             self._window.makeKeyAndOrderFront_(None)
             NSApp.activateIgnoringOtherApps_(True)
+
+    def hide_main_window(self) -> None:
+        # Same as the windowShouldClose_ "hide" path: order out, keep running.
+        if self._window is not None:
+            self._window.orderOut_(None)
+
+    def is_main_window_visible(self) -> bool:
+        return self._window is not None and bool(self._window.isVisible())
 
     def screen_frames(self) -> list:
         """[(frame, visible_frame)] per screen, main screen first, each an

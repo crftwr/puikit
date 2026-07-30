@@ -805,6 +805,18 @@ class Backend(ABC):
         """Re-show the main window (used with main_window_close="hide").
         Base is a no-op."""
 
+    def hide_main_window(self) -> None:
+        """Hide the main window without closing it — the programmatic
+        counterpart of the close button under main_window_close="hide";
+        show_main_window() re-shows it. Base is a no-op."""
+
+    def is_main_window_visible(self) -> bool:
+        """Whether the main window is currently shown on screen (False while
+        hidden via hide_main_window() / a main_window_close="hide" close, or
+        when opened with start_hidden=True). Base returns True, matching
+        backends that cannot hide their surface."""
+        return True
+
     def create_window(self, width: int, height: int, title: str = "",
                       style: "WindowStyle | None" = None) -> WindowHandle:
         """Create a secondary window (base units). UI-thread-only. The main

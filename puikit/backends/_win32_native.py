@@ -1744,6 +1744,8 @@ user32.GetWindowRect.argtypes = [HWND, ctypes.POINTER(wintypes.RECT)]
 user32.GetWindowRect.restype = wintypes.BOOL
 user32.IsIconic.argtypes = [HWND]
 user32.IsIconic.restype = wintypes.BOOL
+user32.IsWindowVisible.argtypes = [HWND]
+user32.IsWindowVisible.restype = wintypes.BOOL
 
 
 class WINDOWPLACEMENT(ctypes.Structure):
