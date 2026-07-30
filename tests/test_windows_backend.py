@@ -3,10 +3,12 @@ test_macos_backend.py's philosophy); a couple exercise a real window since,
 unlike PyObjC/AppKit, this backend's only dependency is ctypes/stdlib, so
 opening one is cheap and safe in CI on a Windows runner."""
 
+import ctypes
 import struct
 import sys
 import threading
 import zlib
+from ctypes import wintypes
 
 import pytest
 
@@ -316,6 +318,96 @@ def test_open_close_roundtrip_creates_real_window():
     finally:
         backend.close()
     assert backend._hwnd == 0
+
+
+# --- frame autosave: minimized saves and unreachable restores ---
+
+
+def _delete_autosave(name):
+    import winreg
+
+    try:
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, rf"Software\PuiKit\FrameAutosave\{name}")
+    except OSError:
+        pass
+
+
+def test_autosave_while_minimized_saves_the_normal_frame():
+    """Saving with the window minimized must not persist the iconic
+    placeholder rect (parked at -32000,-32000, caption-bar sized) — the next
+    launch would restore the window unreachably off-screen, leaving only a
+    taskbar button whose hover thumbnail is a bare title bar."""
+    name = "puikit-test-autosave-iconic"
+    _delete_autosave(name)
+    backend = WindowsBackend(width=40, height=12, title="puikit-test",
+                             frame_autosave_name=name)
+    backend.open()
+    try:
+        before = wintypes.RECT()
+        assert native.user32.GetWindowRect(backend._hwnd, ctypes.byref(before))
+        native.user32.ShowWindow(backend._hwnd, native.SW_MINIMIZE)
+        backend._save_autosave_frame()
+        saved = windows_backend._load_autosave_rect(name)
+        assert saved is not None
+        x, y, w, h = saved
+        # The normal-state frame: same size as before minimizing, nowhere
+        # near the -32000 parking position. (x/y may differ from the screen
+        # rect by the work-area offset — placement coordinates.)
+        assert (w, h) == (before.right - before.left, before.bottom - before.top)
+        assert x > -30000 and y > -30000
+    finally:
+        backend.close()
+        _delete_autosave(name)
+
+
+def test_unreachable_autosave_frame_is_ignored():
+    """A saved frame on no current monitor (a disconnected display, or a
+    poisoned pre-fix iconic rect) is discarded in favor of the default
+    frame, not restored to where the user cannot reach it."""
+    name = "puikit-test-autosave-offscreen"
+    windows_backend._save_autosave_rect(name, -32000, -32000, 314, 71)
+    backend = WindowsBackend(width=40, height=12, title="puikit-test",
+                             frame_autosave_name=name)
+    backend.open()
+    try:
+        rect = wintypes.RECT()
+        assert native.user32.GetWindowRect(backend._hwnd, ctypes.byref(rect))
+        assert rect.left > -30000 and rect.top > -30000
+        assert rect.right - rect.left > 314  # default frame, not the saved one
+    finally:
+        backend.close()
+        _delete_autosave(name)
+
+
+def test_autosave_roundtrip_restores_a_visible_frame():
+    name = "puikit-test-autosave-roundtrip"
+    _delete_autosave(name)
+    first = WindowsBackend(width=40, height=12, title="puikit-test",
+                           frame_autosave_name=name)
+    first.open()
+    native.user32.SetWindowPos(first._hwnd, None, 220, 140, 500, 320,
+                               native.SWP_NOZORDER | native.SWP_NOACTIVATE)
+    first.close()  # saves the frame
+    second = WindowsBackend(width=40, height=12, title="puikit-test",
+                            frame_autosave_name=name)
+    second.open()
+    try:
+        rect = wintypes.RECT()
+        assert native.user32.GetWindowRect(second._hwnd, ctypes.byref(rect))
+        assert (rect.left, rect.top) == (220, 140)
+        assert (rect.right - rect.left, rect.bottom - rect.top) == (500, 320)
+    finally:
+        second.close()
+        _delete_autosave(name)
+
+
+def test_autosave_rect_on_screen_validation():
+    # The minimized parking rect and degenerate sizes are rejected...
+    assert not windows_backend._autosave_rect_on_screen(-32000, -32000, 314, 71)
+    assert not windows_backend._autosave_rect_on_screen(100, 100, 0, 0)
+    # ...while a rect overlapping the primary monitor (which owns the
+    # origin by definition) is accepted.
+    assert windows_backend._autosave_rect_on_screen(10, 10, 300, 200)
 
 
 def test_draw_shadow_renders_with_blur_effect():
