@@ -1742,6 +1742,23 @@ user32.SetCursor.argtypes = [ctypes.c_void_p]
 user32.GetClientRect.argtypes = [HWND, ctypes.POINTER(wintypes.RECT)]
 user32.GetWindowRect.argtypes = [HWND, ctypes.POINTER(wintypes.RECT)]
 user32.GetWindowRect.restype = wintypes.BOOL
+user32.IsIconic.argtypes = [HWND]
+user32.IsIconic.restype = wintypes.BOOL
+
+
+class WINDOWPLACEMENT(ctypes.Structure):
+    _fields_ = [
+        ("length", wintypes.UINT),
+        ("flags", wintypes.UINT),
+        ("showCmd", wintypes.UINT),
+        ("ptMinPosition", wintypes.POINT),
+        ("ptMaxPosition", wintypes.POINT),
+        ("rcNormalPosition", wintypes.RECT),
+    ]
+
+
+user32.GetWindowPlacement.argtypes = [HWND, ctypes.POINTER(WINDOWPLACEMENT)]
+user32.GetWindowPlacement.restype = wintypes.BOOL
 user32.ValidateRect.argtypes = [HWND, ctypes.c_void_p]
 user32.InvalidateRect.argtypes = [HWND, ctypes.c_void_p, wintypes.BOOL]
 user32.DestroyWindow.argtypes = [HWND]
@@ -1999,5 +2016,9 @@ user32.EnumDisplayMonitors.argtypes = [
 user32.EnumDisplayMonitors.restype = wintypes.BOOL
 user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(MONITORINFO)]
 user32.GetMonitorInfoW.restype = wintypes.BOOL
+user32.MonitorFromRect.argtypes = [ctypes.POINTER(wintypes.RECT), wintypes.DWORD]
+user32.MonitorFromRect.restype = ctypes.c_void_p
+MONITOR_DEFAULTTONULL = 0
 
 SW_HIDE = 0
+SW_MINIMIZE = 6

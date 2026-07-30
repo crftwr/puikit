@@ -616,6 +616,19 @@ def _save_autosave_rect(name: str, x: int, y: int, w: int, h: int) -> None:
         winreg.SetValueEx(key, "Frame", 0, winreg.REG_SZ, f"{x},{y},{w},{h}")
 
 
+def _autosave_rect_on_screen(x: int, y: int, w: int, h: int) -> bool:
+    """Whether a saved frame would actually be reachable if restored: a
+    positive size on some current monitor. Guards against restoring a frame
+    from a since-disconnected display, or the minimized placeholder rect at
+    (-32000, -32000) that pre-fix saves could persist — either would show a
+    window the user cannot find. Falling back to the default frame is always
+    the better outcome."""
+    if w <= 0 or h <= 0:
+        return False
+    rect = wintypes.RECT(x, y, x + w, y + h)
+    return bool(native.user32.MonitorFromRect(ctypes.byref(rect), native.MONITOR_DEFAULTTONULL))
+
+
 class WindowsBackend(Backend):
     """Windows GUI backend (ctypes + Direct2D/DirectWrite). Coordinates stay
     base unit-based; this backend owns the base unit size and converts to
@@ -935,7 +948,7 @@ class WindowsBackend(Backend):
         flags = native.SWP_NOZORDER | native.SWP_NOACTIVATE
         if self._frame_autosave_name:
             saved = _load_autosave_rect(self._frame_autosave_name)
-            if saved is not None:
+            if saved is not None and _autosave_rect_on_screen(*saved):
                 x, y, w, h = saved
                 native.user32.SetWindowPos(self._hwnd, None, x, y, w, h, flags)
                 return
@@ -1022,16 +1035,32 @@ class WindowsBackend(Backend):
         self._frame_target = None
 
     def _save_autosave_frame(self) -> None:
-        if self._frame_autosave_name and self._hwnd:
+        if not (self._frame_autosave_name and self._hwnd):
+            return
+        if native.user32.IsIconic(self._hwnd):
+            # GetWindowRect on a minimized window reports the iconic
+            # placeholder parked at (-32000, -32000), caption-bar sized;
+            # persisting that strands the window far off-screen on the next
+            # launch. The placement's rcNormalPosition is the restored-state
+            # frame. Its workspace-vs-screen origin can differ by the work
+            # area offset when the taskbar sits at the top/left edge — a
+            # bounded skew, unlike the poisoned frame.
+            wp = native.WINDOWPLACEMENT()
+            wp.length = ctypes.sizeof(wp)
+            if not native.user32.GetWindowPlacement(self._hwnd, ctypes.byref(wp)):
+                return
+            rect = wp.rcNormalPosition
+        else:
             rect = wintypes.RECT()
-            if native.user32.GetWindowRect(self._hwnd, ctypes.byref(rect)):
-                _save_autosave_rect(
-                    self._frame_autosave_name,
-                    rect.left,
-                    rect.top,
-                    rect.right - rect.left,
-                    rect.bottom - rect.top,
-                )
+            if not native.user32.GetWindowRect(self._hwnd, ctypes.byref(rect)):
+                return
+        _save_autosave_rect(
+            self._frame_autosave_name,
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+        )
 
     def _close_impl(self) -> None:
         self._save_autosave_frame()
