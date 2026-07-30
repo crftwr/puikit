@@ -145,6 +145,7 @@ class MemoryBackend(Backend):
         capabilities: CapabilityProfile | None = None,
         style: WindowStyle | None = None,
         activation_policy: str = "regular",
+        start_hidden: bool = False,
     ):
         self._width_main = width
         self._height_main = height
@@ -158,6 +159,12 @@ class MemoryBackend(Backend):
         # headless grid has no real window to style).
         self.window_style = style if style is not None else WindowStyle()
         self.activation_policy = activation_policy
+        # Headless stand-in for the GUI backends' main-window visibility:
+        # open() applies start_hidden, show/hide_main_window() flip it, and
+        # is_main_window_visible() reports it — so tray-app show/hide logic
+        # is testable without a real window.
+        self._start_hidden = start_hidden
+        self._main_window_visible = False
         self._grid: list[list[str]] = []
         self._styles: list[list[Style]] = []
         self._events: deque[Event] = deque()
@@ -313,9 +320,19 @@ class MemoryBackend(Backend):
 
     def open(self) -> None:
         self._note_ui_thread()
+        self._main_window_visible = not self._start_hidden
 
     def close(self) -> None:
         pass
+
+    def show_main_window(self) -> None:
+        self._main_window_visible = True
+
+    def hide_main_window(self) -> None:
+        self._main_window_visible = False
+
+    def is_main_window_visible(self) -> bool:
+        return self._main_window_visible
 
     # --- geometry ----------------------------------------------------------
 

@@ -677,6 +677,7 @@ class WindowsBackend(Backend):
         style: WindowStyle | None = None,
         activation_policy: str = "regular",
         main_window_close: str = "quit",
+        start_hidden: bool = False,
     ):
         self._initial_size = (width, height)
         self._title = title
@@ -689,6 +690,11 @@ class WindowsBackend(Backend):
         # "hide": the close button hides the main window instead of quitting
         # (re-shown via show_main_window(), e.g. from the tray menu).
         self._main_window_close = main_window_close
+        # True: open() creates the window without showing it (a tray app
+        # restoring a hidden-at-exit main window); show_main_window() reveals
+        # it. Everything else about open() — fonts, swap chain, timers — is
+        # unaffected, so the event loop runs normally while hidden.
+        self._start_hidden = start_hidden
         self._tray_installed = False
         self._tray_menu = None
         self._tray_hicon = 0  # HICON loaded from set_tray(image=…); ours to destroy
@@ -937,9 +943,10 @@ class WindowsBackend(Backend):
         _win32_dragdrop.ensure_ole_initialized()
         self._drop_target = _win32_dragdrop.register_drop_target(self._hwnd, self._dispatch_file_drop)
 
-        show_cmd = native.SW_SHOW if self._window_style.activates else native.SW_SHOWNA
-        native.user32.ShowWindow(self._hwnd, show_cmd)
-        native.user32.UpdateWindow(self._hwnd)
+        if not self._start_hidden:
+            show_cmd = native.SW_SHOW if self._window_style.activates else native.SW_SHOWNA
+            native.user32.ShowWindow(self._hwnd, show_cmd)
+            native.user32.UpdateWindow(self._hwnd)
 
     def _apply_initial_frame(self) -> None:
         """Size (and optionally position) the window to the requested base-unit
@@ -3124,6 +3131,17 @@ class WindowsBackend(Backend):
         if self._hwnd:
             native.user32.ShowWindow(self._hwnd, native.SW_SHOW)
             native.user32.SetForegroundWindow(self._hwnd)
+
+    def hide_main_window(self) -> None:
+        if self._hwnd:
+            # Same order as the WM_CLOSE "hide" path: capture the frame while
+            # the window still has one (GetWindowRect keeps answering for a
+            # hidden window, but saving now keeps the two paths identical).
+            self._save_autosave_frame()
+            native.user32.ShowWindow(self._hwnd, native.SW_HIDE)
+
+    def is_main_window_visible(self) -> bool:
+        return bool(self._hwnd) and bool(native.user32.IsWindowVisible(self._hwnd))
 
     def screen_frames(self) -> list:
         """[(frame, work_area)] per monitor, primary first, in portable
