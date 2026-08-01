@@ -2,7 +2,8 @@
 
 import pytest
 
-from puikit import Event, EventType, Panel, PROFILE_GUI_DESKTOP, PROFILE_TUI, Style
+from puikit import Event, EventType, Font, Panel, PROFILE_GUI_DESKTOP, PROFILE_TUI, Style
+from puikit.backend import DEFAULT_STYLE
 from puikit.backends.memory_backend import MemoryBackend
 from puikit.text import display_width, wrap_text
 from puikit.widgets import LogView
@@ -293,6 +294,82 @@ def test_logview_padding_insets_rows_and_shrinks_viewport(backend):
     assert snap[3].startswith(" line2")     # view_h shrank 5 -> 3, so lines 0..2
     assert snap[4].strip() == ""            # bottom pad row
     assert log._view_h == 3.0
+
+
+class SizedFontMemoryBackend(MemoryBackend):
+    """MemoryBackend with GUI-style font measuring — a sized font's advance
+    scales with its point size relative to the base font, like the real GUI
+    backends — and a record of every draw_text run, so a test can assert what
+    a widget actually handed the backend (the character grid can't retain a
+    sub-column glyph)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.drawn: list[tuple[float, float, str]] = []
+
+    def _scale(self, style: Style) -> float:
+        font = style.font
+        if font is not None and font.size is not None:
+            return font.size / self.BASE_FONT_SIZE
+        return 1.0
+
+    def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
+        return float(display_width(text)) * self._scale(style)
+
+    def measure_line_height(self, style: Style = DEFAULT_STYLE) -> float:
+        return self._scale(style)
+
+    def draw_text(self, x, y, text, style: Style = DEFAULT_STYLE) -> None:
+        self.drawn.append((x, y, text))
+        super().draw_text(x, y, text, style)
+
+
+# Half the 14pt base size: exactly two glyphs per base unit, so the expected
+# glyph counts below stay whole numbers.
+_SMALL = Style(font=Font(size=7.0, monospace=True))
+
+
+def _sized_font_view(text, *, wrap, width=10):
+    backend = SizedFontMemoryBackend(width=20, height=10, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    log = LogView([(text, _SMALL)], wrap=wrap, auto_scroll=False)
+    panel.add(log, x=0, y=0, w=width, h=10)
+    panel.render()
+    return backend, panel, log
+
+
+def test_logview_sized_font_wrap_keeps_every_glyph():
+    # A row styled with a smaller real font packs more glyphs than the pane
+    # has columns; the draw must clip it by the same measure the wrap used.
+    # Clipping by column count instead cut the tail off every full row (the
+    # reported bug: an 11pt log under a 12pt base lost ~9% of each row).
+    text = "abcdefghijklmnopqrstuvwxyz0123456789"  # one unbreakable 36-glyph token
+    backend, _panel, log = _sized_font_view(text, wrap="word")
+    # Wrap width 9 units (10 - the reserved gutter) holds 18 half-unit glyphs.
+    assert log._total_rows == 2
+    assert "".join(t for _x, _y, t in backend.drawn) == text
+
+
+def test_logview_sized_font_unwrapped_clips_by_measure():
+    # Unwrapped, the one row must clip at the pane's measured width — 20
+    # half-unit glyphs across 10 base units — not at 10 grid columns.
+    text = "abcdefghijklmnopqrst" + "!" * 20
+    backend, _panel, log = _sized_font_view(text, wrap=False)
+    assert log._total_rows == 1
+    assert backend.drawn == [(0.0, 0.0, text[:20])]
+
+
+def test_logview_sized_font_click_maps_by_measure():
+    # Pointer hit-testing must use the same half-unit advance the glyphs are
+    # drawn with: x=5 base units is 10 glyphs in, not 5.
+    text = "abcdefghijklmnopqrst"
+    _backend, panel, log = _sized_font_view(text, wrap=False)
+    assert log._pos_at(5, 0) == (0, 10)
+    # And the full gesture agrees: press at x=1 (glyph 2), drag to x=4
+    # (glyph 8) selects the six glyphs between them.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=1, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=4, y=0, button="left"))
+    assert log.selection_text() == "cdefgh"
 
 
 def test_logview_padding_maps_clicks_through_the_inset(backend):
