@@ -83,7 +83,24 @@ def test_measure_text_base_font_counts_columns():
     backend = WindowsBackend()
     backend._init_fonts()
     try:
-        assert backend.measure_text("hello") == 5.0
+        # The grid font is an explicit unsized/unnamed monospace request; the
+        # default style (font=None) is no longer grid - see the next test.
+        # (Mirrors test_macos_backend.py, which was updated when font=None
+        # started measuring as the UI font; this twin was left behind.)
+        assert backend.measure_text("hello", Style(font=Font(monospace=True))) == 5.0
+    finally:
+        backend.close()
+
+
+def test_measure_text_default_style_measures_as_drawn():
+    backend = WindowsBackend()
+    backend._init_fonts()
+    try:
+        # font=None draws as the proportional UI font (Panel._resolve), so it
+        # measures as that font too - mirroring measure_line_height. Measuring
+        # it by columns over-sized every content-sized default-font label.
+        assert backend.measure_text("hello") == backend.measure_text(
+            "hello", Style(font=Font()))
     finally:
         backend.close()
 

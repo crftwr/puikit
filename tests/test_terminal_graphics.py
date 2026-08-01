@@ -77,12 +77,21 @@ def test_cell_pixels_divides_fractionally(monkeypatch):
     # exact multiple of the row count), losing a pixel per row -> a couple of
     # blank rows across a tall image and a mismatched cell aspect. Keep the
     # fraction so a scaled image lines up with the emulator's real cell grid.
-    import fcntl
     import struct
+    import sys
+    import types
 
     # rows=80, cols=100, xpixel=805, ypixel=1290 -> cell 8.05 x 16.125 (not 8x16).
     packed = struct.pack("HHHH", 80, 100, 805, 1290)
-    monkeypatch.setattr(fcntl, "ioctl", lambda *a, **k: packed)
+    # fcntl/termios are Unix-only, so inject stand-in modules rather than
+    # monkeypatching the real ones: the division under test is pure arithmetic
+    # and must stay exercised on Windows too (where the real probe returns None).
+    fake_fcntl = types.ModuleType("fcntl")
+    fake_fcntl.ioctl = lambda *a, **k: packed
+    fake_termios = types.ModuleType("termios")
+    fake_termios.TIOCGWINSZ = 0x5413
+    monkeypatch.setitem(sys.modules, "fcntl", fake_fcntl)
+    monkeypatch.setitem(sys.modules, "termios", fake_termios)
     w, h = tg.cell_pixels(fd=1)
     assert w == pytest.approx(805 / 100)
     assert h == pytest.approx(1290 / 80)  # 16.125, not truncated to 16

@@ -179,5 +179,8 @@ class TestBackendGate:
     def test_backend_declares_shader_capability_when_available(self):
         from puikit.backends.windows_backend import WindowsBackend
         b = WindowsBackend()
-        assert b.capabilities.supports("background_3d")
+        # The wallpaper background is unconditional; the shader background is
+        # declared only when the D3D11 shader-compile path is actually usable.
+        # (background_3d was the non-shader 3D feature, removed in 9fe7538.)
+        assert b.capabilities.supports("background")
         assert b.capabilities.supports("background_shader") == HAVE_D3D_SHADER
