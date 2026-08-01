@@ -87,6 +87,19 @@ def _col_to_index(glyphs: list[str], target_col: int) -> int:
     return idx
 
 
+def _index_at_x(glyphs: list[str], target_x: float, measure) -> int:
+    """Glyph index at horizontal offset ``target_x`` (base units): the
+    measured-font counterpart of :func:`_col_to_index`, for rows whose style
+    names a real font and therefore doesn't land one glyph per column.
+    ``measure`` is applied to the growing prefix string so kerning is honored —
+    the same rule as ``_selection._col_to_index``, which serves the static text
+    widgets."""
+    idx = 0
+    while idx < len(glyphs) and measure("".join(glyphs[: idx + 1])) <= target_x:
+        idx += 1
+    return idx
+
+
 def _glyphs_and_widths(text: str) -> tuple[list[str], list[int]]:
     """Split ``text`` into display glyphs and their column widths in a single
     pass, with an inline fast path for ASCII (one char = one column, no lookup).
@@ -314,6 +327,11 @@ class LogView(Widget):
         # (on empty space or another widget) and wandered in is ignored.
         self._pressed = False
         self._panel = None
+        # Prefix-width measure for pointer hit-testing on rows whose style names
+        # a real font; each draw replaces it with the context's font-aware one
+        # (mirroring ``_selection._set_selection_rows``). The column-count
+        # default keeps hit-testing sane before the first draw.
+        self._measure = lambda text, style: float(display_width(text))
 
     # --- buffer management ---------------------------------------------------
 
@@ -460,6 +478,7 @@ class LogView(Widget):
 
     def draw(self, ctx: DrawContext) -> None:
         self._panel = ctx.panel
+        self._measure = ctx.measure_text
         bw, bh = ctx.base_size
         pad_x, pad_y = self._padding(ctx.vector_shapes, bw, bh)
         self._pad_x, self._pad_y = pad_x, pad_y
@@ -526,7 +545,18 @@ class LogView(Widget):
     def _draw_row(
         self, ctx: DrawContext, index: int, text: str, y: float, style: Style, width: int, theme
     ) -> None:
-        clipped = truncate_to_width(text, width)
+        if _grid_aligned(style.font):
+            clipped = truncate_to_width(text, width)
+        else:
+            # A row styled with a real font doesn't land one glyph per column,
+            # so it must clip by measured width — _wrap_line packed it by this
+            # same measure, and a column clip would cut the tail off every full
+            # row of a smaller-than-base font. The common case (a wrapped
+            # segment that already fits) costs a single measure.
+            measure = lambda t: ctx.measure_text(t, style)
+            clipped = text
+            if measure(text) > width:
+                clipped = truncate_to_width(text, width, measure=measure)
         # A log stream is the case the default "animate when the widget appears"
         # trigger cannot serve: the view stays on screen for the life of the app
         # while its content keeps arriving. Naming each line's stable identity
@@ -608,8 +638,14 @@ class LogView(Widget):
         # Undo the draw-time padding so a click maps to the row/column drawn there.
         row = int((self.offset + max(0.0, y - self._pad_y)) / self._pitch)
         row = max(0, min(row, self._total_rows - 1))
-        glyphs = glyph_runs(self._row_at(row)[0])
-        return (row, _col_to_index(glyphs, int(max(0.0, x - self._pad_x))))
+        text, style = self._row_at(row)
+        glyphs = glyph_runs(text)
+        x_rel = max(0.0, x - self._pad_x)
+        if _grid_aligned(style.font):
+            return (row, _col_to_index(glyphs, int(x_rel)))
+        # A row styled with a real font hit-tests by measured prefix width, the
+        # same measurement its highlight is drawn with.
+        return (row, _index_at_x(glyphs, x_rel, lambda t: self._measure(t, style)))
 
     def _word_span(self, pos: Pos) -> tuple[Pos, Pos]:
         """The (start, end) positions of the word under ``pos`` — the maximal
