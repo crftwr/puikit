@@ -140,3 +140,31 @@ re-encodes; without it, a terminal falls back to what it can do unaided.
 - [`widget_catalog.md`](widget_catalog.md) — `ImageView` in context
 - `examples/demo_catalog/main.py` — the **Images**, **Alpha**, and **Blending**
   pages exercise all five fits, per-pixel alpha, and compositing
+
+---
+
+## 7. Document sources: `base_dir` and `http(s)://` (`MarkdownView`)
+
+A backend opens image *files*; the path string travels from widget to backend
+untouched, and it is also the cache key in four places (the macOS/Windows
+decoded-image dicts, the web backend's sent-asset set, the `image_size` LRU).
+Both facts pin where document-level sources get resolved: **in the widget,
+before layout**, so `measure_image` and `draw_image` read the same real file
+and no backend learns URLs exist.
+
+- **Relative paths.** `MarkdownView(..., base_dir=...)` resolves a relative
+  `![alt](docs/a.png)` against the document's own directory — `from_file`
+  defaults it — the way the same file renders on GitHub. No `base_dir` keeps
+  the old meaning: relative to the process CWD.
+- **Remote URLs.** `puikit/_remote_image.py` (internal) downloads an
+  `http(s)://` source once into `<tempdir>/puikit-remote-images/<digest>`,
+  on a daemon thread, and the widget substitutes that local path. The write
+  is atomic (a `.part` renamed into place), so a path the pipeline ever sees
+  always names a complete file — the caches above never pin a half-written
+  read. While the fetch is in flight the document shows the image's alt text;
+  when it settles the view invalidates its layout and repaints — handed to
+  the UI thread via `call_on_main_thread` on `main_thread_dispatch` backends,
+  drained by a `request_animation_ticks` callback elsewhere (curses, web),
+  and picked up by the next natural draw as a last resort. A failed download
+  is remembered for the life of the process, like the Windows backend's
+  negative decode cache, not re-attempted every layout pass.
