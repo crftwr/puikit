@@ -186,7 +186,12 @@ Inline mixed styles, links, flowing content.
   (`Panel.open_url`, new `os_open` capability, clipboard fallback on TUI, a
   `pointer` cursor over a link's hit rect, `#heading` anchors scroll in-document),
   and **block images** (sized to aspect ratio via `aspect_extent`, alt glyph on
-  TUI). Inline runs cover bold / italic / **strikethrough** (`~~…~~`, a real
+  TUI; a table cell that is *exactly one* image renders it fitted to its column
+  — the side-by-side screenshot table. A relative path resolves against
+  `base_dir` — `from_file` defaults it to the document's directory — and an
+  `http(s)://` source is fetched once into a temp cache by a background thread,
+  the alt text standing in until the view re-renders; see
+  [`images.md`](images.md) §7). Inline runs cover bold / italic / **strikethrough** (`~~…~~`, a real
   `TextAttribute.STRIKETHROUGH`) / code / links, including `<autolinks>`, bare
   URLs, and `[text][ref]` reference links; blocks cover ATX **and setext**
   headings, **hard line breaks**, and **nested / reflowed block quotes**.
@@ -230,9 +235,10 @@ intent and never branches (mirroring the `os_open` link fallback above). Images
 carry no spans, so they are not part of a selection.
 
 ##### Future work (TODO)
-1. **Inline images.** Only standalone `![alt](url)` lines are blocks today;
-   a mid-paragraph image *run* (a row as tall as its tallest run) is rare and
-   layout-heavy, so it stays deferred.
+1. **Inline images.** A standalone `![alt](url)` line is a block, and a table
+   cell that is exactly one image renders it — but a mid-paragraph image *run*
+   (a row as tall as its tallest run) is rare and layout-heavy, so it stays
+   deferred.
 2. **Themeable syntax palette.** The seven syntax colors are fixed module
    constants (VS Code Dark+ hues, mirroring XeFM's `xefm.colors` categories); lift
    them onto `Theme` if a light-surface code block ever needs different hues.

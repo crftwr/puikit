@@ -43,8 +43,11 @@ paragraphs with hard line breaks (two trailing spaces or a backslash),
 ``-``/``*``/``+`` and ordered list items (nested by indentation) including
 ``[ ]`` / ``[x]`` task items, ``>`` block quotes (nested and multi-line,
 reflowed), ``` ``` ``` /
-``~~~`` fenced code, ``---`` horizontal rules, GFM pipe ``| tables |``, block
-images, and the inline runs ``**bold**``, ``*italic*`` / ``_italic_``,
+``~~~`` fenced code, ``---`` horizontal rules, GFM pipe ``| tables |`` (a cell
+that is exactly one image renders it, sized to its column), block images —
+relative paths resolving against ``base_dir``, and ``http(s)://`` sources
+fetched once into a cache by a background thread, the view re-rendering when
+they land — and the inline runs ``**bold**``, ``*italic*`` / ``_italic_``,
 ``~~strikethrough~~``, ```` `code` ````, ``[text](url)`` / ``[text][ref]``
 reference links, ``<autolinks>`` and bare URLs, and backslash escapes. A
 ``[jump](#heading)`` link scrolls the view to that heading.
@@ -53,10 +56,12 @@ reference links, ``<autolinks>`` and bare URLs, and backslash escapes. A
 from __future__ import annotations
 
 import bisect
+import os
 import re
 from dataclasses import dataclass, field, replace
 from html import escape as _html_escape
 
+from .. import _remote_image
 from ..backend import DEFAULT_STYLE, Color, Style, TextAttribute
 from ..event import Event, EventType
 from ..font import Font
@@ -192,7 +197,8 @@ _FENCE_RE = re.compile(r"^\s*(```+|~~~+)")
 _LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)\s]*)(?:\s+\"[^\"]*\")?\)")
 # A standalone image line: ![alt](path). Rendered as its own block, sized to
 # the image's aspect ratio (the inline form mid-paragraph is intentionally not
-# supported — an image is a block here).
+# supported — an image is a block here; the one other placement is a table
+# cell whose entire content is one image, matched with this same regex).
 _IMAGE_RE = re.compile(r"^!\[([^\]]*)\]\(([^)\s]*)(?:\s+\"[^\"]*\")?\)$")
 # A setext underline turns the paragraph line(s) above it into a heading: a run
 # of ``=`` is level 1, a run of ``-`` is level 2. Only reached with paragraph
@@ -220,13 +226,29 @@ _TABLE_DELIM_RE = re.compile(r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$")
 
 
 @dataclass
-class _Table:
-    """A parsed GFM pipe table: each header/body cell is a list of inline runs,
-    and ``aligns`` is one of ``left`` / ``center`` / ``right`` per column."""
+class _CellImage:
+    """A table cell whose entire content is one ``![alt](path)`` image — the
+    only image form a cell renders, mirroring the block-level rule that an
+    image is never inline within text. ``path`` is the raw source as written;
+    resolution (``base_dir``, the remote-download cache) happens at layout."""
 
-    header: list[list[InlineRun]]
+    alt: str
+    path: str
+
+
+# A table cell: its parsed inline runs, or a whole-cell image.
+_Cell = "list[InlineRun] | _CellImage"
+
+
+@dataclass
+class _Table:
+    """A parsed GFM pipe table: each header/body cell is a list of inline runs
+    (or a whole-cell image), and ``aligns`` is one of ``left`` / ``center`` /
+    ``right`` per column."""
+
+    header: list[_Cell]
     aligns: list[str]
-    rows: list[list[list[InlineRun]]]
+    rows: list[list[_Cell]]
 
 
 @dataclass
@@ -256,7 +278,7 @@ class _Row:
     hanging indent under a list marker / quote bar); ``height`` is the row's own
     height (a sized heading or an image is taller than body text). A text row
     carries ``spans``; an ``image`` row carries ``(path, alt, w, h)`` instead and
-    is drawn with ``draw_image``."""
+    is drawn with ``draw_image`` (``path`` already resolved to a local file)."""
 
     x0: float
     spans: list[Span]
@@ -296,6 +318,10 @@ class _TableRow:
     pad_v: float = 0.0  # inner top/bottom margin so text clears the rules (vector)
     bg: Color | None = None  # row band fill (header / zebra stripe), else surface
     header: bool = False  # the table's header text row (copies its cells as <th>)
+    # Per-cell image payloads, aligned with ``cells``: ``(path, alt, w, h)`` for
+    # a whole-cell image (path resolved, sized to its column), else None. None
+    # for the whole list on a row with no image cells, the common case.
+    images: list[tuple[str, str | None, float, float] | None] | None = None
 
 
 # Box-drawing glyph for a junction by which of its four arms carry a line. Used
@@ -690,15 +716,23 @@ def _parse_lines(lines: list[str], refs: dict[str, str]) -> list[_SemLine]:
             ncol = len(header)
             aligns = [_delim_align(d) for d in _split_table_row(lines[i + 1])]
             aligns = (aligns + ["left"] * ncol)[:ncol]
+
+            def cell(text: str) -> "list[InlineRun] | _CellImage":
+                # A cell that is exactly one image renders as one (the common
+                # side-by-side screenshot table); any text around it keeps the
+                # cell textual, like an inline image anywhere else.
+                m = _IMAGE_RE.match(text)
+                if m:
+                    return _CellImage(m.group(1), m.group(2))
+                return _parse_inline(text, refs)
+
             i += 2
-            body: list[list[list[InlineRun]]] = []
+            body: list[list["list[InlineRun] | _CellImage"]] = []
             while i < n and lines[i].strip() and "|" in lines[i] and not _is_block_break(lines[i]):
                 cells = (_split_table_row(lines[i]) + [""] * ncol)[:ncol]
-                body.append([_parse_inline(c, refs) for c in cells])
+                body.append([cell(c) for c in cells])
                 i += 1
-            tbl = _Table(
-                header=[_parse_inline(c, refs) for c in header], aligns=aligns, rows=body
-            )
+            tbl = _Table(header=[cell(c) for c in header], aligns=aligns, rows=body)
             out.append(_SemLine("table", 0, "", [], wrap=False, table=tbl))
             continue
 
@@ -925,12 +959,18 @@ class MarkdownView(Widget):
         code_font: Font = DEFAULT_CODE_FONT,
         heading_scales: dict[int, float] = DEFAULT_HEADING_SCALES,
         selectable: bool = False,
+        base_dir: str | None = None,
     ):
         self.style = style
         # Prose face (proportional on GUI) and code face (monospace). Both fold
         # to the single grid font on a terminal; bold/italic survive as attrs.
         self.text_font = text_font
         self.code_font = code_font
+        # Directory a relative image path resolves against (the document's own
+        # directory, normally — from_file defaults it). None keeps the historical
+        # behavior: the path goes to the backend as written, i.e. relative to
+        # the process CWD.
+        self.base_dir = base_dir
         # Heading size per level, as a multiple of the body font size (visual
         # only; dropped on a terminal). Resolved to absolute points at layout.
         self.heading_scales = heading_scales
@@ -1012,6 +1052,18 @@ class MarkdownView(Widget):
         # default keeps it sane before the first draw.
         self._measure = lambda text, style=None: float(len(text))
 
+        # Remote (http/https) image bookkeeping. ``_remote_pending`` — a layout
+        # pass saw a URL whose download hasn't settled; ``_remote_dirty`` — a
+        # download settled since that layout (set from the fetch worker thread).
+        # On a main-thread-dispatch backend the worker hands the rebuild straight
+        # to the UI thread; elsewhere draw() registers ``_remote_tick`` (while
+        # anything is pending) and the tick drains the flag — the same two
+        # shapes Panel documents for its producer queues. ``_remote_ticking``
+        # keeps the registration single.
+        self._remote_pending = False
+        self._remote_dirty = False
+        self._remote_ticking = False
+
     # --- construction ---------------------------------------------------------
 
     @classmethod
@@ -1023,8 +1075,11 @@ class MarkdownView(Widget):
         code_font: Font = DEFAULT_CODE_FONT,
         heading_scales: dict[int, float] = DEFAULT_HEADING_SCALES,
         selectable: bool = False,
+        base_dir: str | None = None,
     ) -> "MarkdownView":
-        """Build a view from a ``*.md`` file (read as UTF-8)."""
+        """Build a view from a ``*.md`` file (read as UTF-8). Relative image
+        paths resolve against the file's own directory unless ``base_dir``
+        overrides it — the way the same document renders on GitHub."""
         with open(path, encoding="utf-8") as f:
             return cls(
                 f.read(),
@@ -1033,6 +1088,7 @@ class MarkdownView(Widget):
                 code_font=code_font,
                 heading_scales=heading_scales,
                 selectable=selectable,
+                base_dir=base_dir or os.path.dirname(os.path.abspath(path)),
             )
 
     def set_source(self, source: str) -> None:
@@ -1045,6 +1101,67 @@ class MarkdownView(Widget):
         self._cache_view_h = -1.0
         self.clear_search()
         self.clear_selection()
+
+    # --- image sources --------------------------------------------------------
+
+    def _resolve_src(self, src: str) -> str | None:
+        """A drawable local path for an image source as written in the document:
+        an ``http(s)://`` URL maps into the download cache (None while its fetch
+        is in flight or after it failed — the layout shows the alt text), a
+        relative path resolves against ``base_dir`` when one is set, and
+        anything else passes through untouched. Resolving here — before the row
+        is built — keeps layout (measure_image) and draw (draw_image) reading
+        the same file, and keeps every backend URL-unaware."""
+        if _remote_image.is_remote(src):
+            path = _remote_image.get(src, self._on_remote_done)
+            if path is None:
+                self._remote_pending = True
+            return path
+        if self.base_dir and not os.path.isabs(src):
+            return os.path.join(self.base_dir, src)
+        return src
+
+    def _on_remote_done(self, _url: str) -> None:
+        # Fetch-worker side of a settled download: mark the layout stale, and
+        # where the backend can dispatch, hand the rebuild to the UI thread now.
+        # Elsewhere the animation tick registered by draw() picks the flag up.
+        self._remote_dirty = True
+        panel = self._panel
+        if panel is not None and panel.dispatches_to_main_thread:
+            panel.call_on_main_thread(self._remote_refresh)
+
+    def _remote_invalidate(self) -> None:
+        """Drop the memoized layout after a download settled: the URL now
+        resolves to a real file — or to a permanent failure whose alt text
+        stays. The next layout re-resolves and re-arms ``_remote_pending`` if
+        other URLs remain in flight."""
+        self._remote_dirty = False
+        self._remote_pending = False
+        self._rows = None
+        self._wrap_width = -1.0
+        self._wrap_view_h = -1.0
+        self._layout_cache.clear()
+        self._cache_view_h = -1.0
+
+    def _remote_refresh(self) -> None:
+        """UI-thread rebuild after a download settled: invalidate and repaint."""
+        if not self._remote_dirty:
+            return
+        self._remote_invalidate()
+        if self._panel is not None:
+            self._panel.render()
+
+    def _remote_tick(self) -> bool:
+        """Per-frame drain for backends without main-thread dispatch (curses,
+        web): rebuild when a download has settled, keep ticking while any is
+        still in flight. The refresh re-lays-out, which re-arms
+        ``_remote_pending`` if URLs remain outstanding."""
+        if self._remote_dirty:
+            self._remote_refresh()
+        if not self._remote_pending:
+            self._remote_ticking = False
+            return False
+        return True
 
     # --- layout ---------------------------------------------------------------
 
@@ -1112,19 +1229,29 @@ class MarkdownView(Widget):
                 # against the rules on GUI. The grid keeps borders in their own
                 # rows (natural gap) and must stay integer-aligned, so 0 there.
                 cell_pad_v = max(2.0 / bh, 0.1 * self._line_pitch) if ctx.vector_shapes else 0.0
+
+                def get_lc():
+                    # Lazy like the image block's ``lc``: built only when a
+                    # table actually holds an image cell.
+                    nonlocal lc
+                    if lc is None:
+                        lc = ctx.layout_context()
+                    return lc
+
                 rows.extend(
                     self._layout_table(
                         sem.table, width - qind, measure, theme, qd, border_h,
-                        cell_pad_v, ctx.vector_shapes,
+                        cell_pad_v, ctx.vector_shapes, get_lc,
                     )
                 )
                 continue
             if sem.block == "image":
                 if lc is None:
                     lc = ctx.layout_context()
-                size = lc.measure_image(sem.data) if sem.data else None
+                src = self._resolve_src(sem.data) if sem.data else None
+                size = lc.measure_image(src) if src else None
                 alt = sem.runs[0][0] if sem.runs else None
-                if size and size[0] > 0 and size[1] > 0:
+                if src and size and size[0] > 0 and size[1] > 0:
                     w = width
                     h = aspect_extent(w, True, size[0], size[1], lc.base_w, lc.base_h)
                     # An image taller than the viewport is contained to fit it
@@ -1134,11 +1261,21 @@ class MarkdownView(Widget):
                         w *= self._view_h / h
                         h = self._view_h
                     x0 = max(0.0, (width - w) / 2.0)
+                    rows.append(_Row(x0, [], h, image=(src, alt, w, h), quote=qd))
+                elif src:
+                    # A real path we cannot size (unreadable / unknown format):
+                    # reserve one line and let the backend draw the alt glyph
+                    # (TUI) or its own missing-image treatment.
+                    rows.append(_Row(0.0, [], self._line_pitch,
+                                     image=(src, alt, width, self._line_pitch), quote=qd))
                 else:
-                    # Unknown / unreadable image: reserve one line and let the
-                    # backend draw the alt glyph (TUI) or its own missing-image.
-                    w, h, x0 = width, self._line_pitch, 0.0
-                rows.append(_Row(x0, [], h, image=(sem.data, alt, w, h), quote=qd))
+                    # A remote image still downloading (or failed for good):
+                    # show the alt text as a muted line, the way a browser does,
+                    # and let a completed fetch re-layout it into the real image.
+                    st = replace(Style(fg=self.style.fg, bg=self.style.bg,
+                                       font=self.text_font), fg=theme.muted_text)
+                    rows.append(_Row(qind, [(alt or "", st, None)],
+                                     self._line_pitch, quote=qd))
                 continue
             base = _block_style(
                 sem.block, sem.level, self.style, theme,
@@ -1222,7 +1359,7 @@ class MarkdownView(Widget):
 
     def _layout_table(
         self, tbl: _Table, width: float, measure, theme: Theme, qd: int,
-        border_h: float, cell_pad_v: float, vector: bool,
+        border_h: float, cell_pad_v: float, vector: bool, get_lc=None,
     ) -> list[_Row]:
         """Lay a GFM table out as one ``_Row`` per grid row. Columns take their
         natural content width, scaled down proportionally (with a floor) when the
@@ -1250,12 +1387,37 @@ class MarkdownView(Widget):
         def cell_w(spans: list[Span]) -> float:
             return sum(measure(t, st) for t, st, _ in spans if t)
 
-        header_spans = [to_spans(c, hdr) for c in tbl.header]
-        body_spans = [[to_spans(c, base) for c in r] for r in tbl.rows]
+        # An image cell resolves its source and natural pixel size once, here;
+        # ``sized`` maps the cell to (path, (iw, ih)). A cell whose image can't
+        # be sized yet (downloading / failed / unreadable) falls back to its alt
+        # text and lays out as an ordinary text cell.
+        sized: dict[int, tuple[str, tuple[int, int]]] = {}
+
+        def norm(c: "list[InlineRun] | _CellImage") -> "list[InlineRun] | _CellImage":
+            if isinstance(c, _CellImage):
+                src = self._resolve_src(c.path) if c.path else None
+                size = get_lc().measure_image(src) if get_lc and src else None
+                if src and size and size[0] > 0 and size[1] > 0:
+                    sized[id(c)] = (src, size)
+                    return c
+                return [(c.alt, frozenset(), None)] if c.alt else []
+            return c
+
+        header_cells = [norm(c) for c in tbl.header]
+        body_cells = [[norm(c) for c in r] for r in tbl.rows]
+
+        def natural_w(c: "list[InlineRun] | _CellImage", b: Style) -> float:
+            if isinstance(c, _CellImage):
+                src_size = sized[id(c)]
+                # The image's own width in base units — the scale-to-fit pass
+                # below then shares the row like any wide text column.
+                return src_size[1][0] / max(1.0, get_lc().base_w)
+            return cell_w(to_spans(c, b))
+
         content_w = [
             max(
-                [cell_w(header_spans[j])]
-                + [cell_w(r[j]) for r in body_spans if j < len(r)]
+                [natural_w(header_cells[j], hdr)]
+                + [natural_w(r[j], base) for r in body_cells if j < len(r)]
             )
             for j in range(ncol)
         ]
@@ -1282,23 +1444,42 @@ class MarkdownView(Widget):
             return _Row(qind, [], border_h, quote=qd, table=_TableRow([], edges, hline=True, role=role))
 
         def band_row(
-            cell_runs: list[list[InlineRun]], base_style: Style,
+            cell_runs: "list[list[InlineRun] | _CellImage]", base_style: Style,
             band_bg: Color | None, header: bool = False,
         ) -> _Row:
             # Cell text carries the band bg per glyph (a grid draw_text replaces the
             # whole cell style, so the fill alone would be erased under the text);
             # draw() also fills the band across the row so the gaps carry it too.
             cells: list[tuple[float, float, str, list[list[Span]]]] = []
+            images: list[tuple[str, str | None, float, float] | None] = []
             n_lines = 1
+            img_h = 0.0
             for j, (text_x, w, align) in enumerate(cols):
-                runs = cell_runs[j] if j < len(cell_runs) else []
-                lines = _wrap_spans(to_spans(runs, base_style), w, measure, word=True)
+                c = cell_runs[j] if j < len(cell_runs) else []
+                if isinstance(c, _CellImage):
+                    src, (pw, ph) = sized[id(c)]
+                    glc = get_lc()
+                    # Natural size up to the column width (no upscaling a small
+                    # icon to fill its column), height following the aspect
+                    # ratio, capped to the viewport like a block image.
+                    iw = min(w, pw / max(1.0, glc.base_w))
+                    ih = aspect_extent(iw, True, pw, ph, glc.base_w, glc.base_h)
+                    if self._view_h > 0 and ih > self._view_h:
+                        iw *= self._view_h / ih
+                        ih = self._view_h
+                    img_h = max(img_h, ih)
+                    images.append((src, c.alt or None, iw, ih))
+                    cells.append((text_x, w, align, [[]]))
+                    continue
+                images.append(None)
+                lines = _wrap_spans(to_spans(c, base_style), w, measure, word=True)
                 n_lines = max(n_lines, len(lines))
                 cells.append((text_x, w, align, lines))
-            height = n_lines * self._line_pitch + 2 * cell_pad_v
+            height = max(n_lines * self._line_pitch, img_h) + 2 * cell_pad_v
             return _Row(
                 qind, [], height, quote=qd,
-                table=_TableRow(cells, edges, pad_v=cell_pad_v, bg=band_bg, header=header),
+                table=_TableRow(cells, edges, pad_v=cell_pad_v, bg=band_bg, header=header,
+                                images=images if any(images) else None),
             )
 
         # The header always takes a distinct fill. Body rows: a vector backend
@@ -1318,10 +1499,10 @@ class MarkdownView(Widget):
         stripe_bg = lift(surface, 0.08)
         rows: list[_Row] = [
             hline("top"),
-            band_row(tbl.header, replace(hdr, bg=header_bg), header_bg, header=True),
+            band_row(header_cells, replace(hdr, bg=header_bg), header_bg, header=True),
             hline("mid"),
         ]
-        for i, r in enumerate(tbl.rows):
+        for i, r in enumerate(body_cells):
             if i > 0 and vector:
                 rows.append(hline("mid"))
             band = None if vector else (stripe_bg if i % 2 == 1 else None)
@@ -1343,6 +1524,12 @@ class MarkdownView(Widget):
         full_w, view_h = ctx.size_units
         self._view_h = view_h
 
+        # A remote image that settled since the last layout: rebuild now — this
+        # catches backends whose downloads land between natural repaints without
+        # the tick/dispatch hooks below ever firing.
+        if self._remote_dirty:
+            self._remote_invalidate()
+
         # Whether the bar shows depends on the content height, which depends on
         # the wrap width, which depends on whether the bar shows. Lay out once at
         # the full width to learn if the content overflows, then (only if it
@@ -1354,6 +1541,14 @@ class MarkdownView(Widget):
             rows = self._layout(full_w - 1.0, ctx)
             content_h = self._row_tops[-1]
         self._clamp(content_h)
+
+        # Downloads in flight on a backend without main-thread dispatch: ride
+        # the animation tick to notice them settling (curses / web). Desktop
+        # backends skip this — the fetch worker dispatches the rebuild directly.
+        if (self._remote_pending and not self._remote_ticking
+                and ctx.panel is not None
+                and not ctx.panel.dispatches_to_main_thread):
+            self._remote_ticking = ctx.panel.request_animation_ticks(self._remote_tick)
 
         # Reconcile the search match set with this (possibly re-wrapped) layout,
         # then note which row is the current match so it highlights firmer.
@@ -1475,6 +1670,19 @@ class MarkdownView(Widget):
             for j in range(len(tr.edges) - 1):
                 x0 = tr.edges[j] + inset
                 ctx.fill_rect(x0, y, tr.edges[j + 1] + end - x0, height, Style(bg=tr.bg))
+        if tr.images:
+            for (text_x, w, align, _lines), img in zip(tr.cells, tr.images):
+                if img is None:
+                    continue
+                path, alt, iw, ih = img
+                if align == "right":
+                    ox = max(0.0, w - iw)
+                elif align == "center":
+                    ox = max(0.0, (w - iw) / 2.0)
+                else:
+                    ox = 0.0
+                ctx.draw_image(text_x + ox, y + tr.pad_v, path,
+                               hints={"w": iw, "h": ih, "fit": "contain", "alt": alt})
         for text_x, w, align, lines in tr.cells:
             for li, line in enumerate(lines):
                 lw = sum(ctx.measure_text(t, st) for t, st, _ in line if t)

@@ -360,6 +360,187 @@ def test_image_alt_glyph_on_terminal(tmp_path):
     panel.render()  # TUI has no images: the Panel draws the alt glyph, no raise
 
 
+# --- image path resolution (base_dir) -----------------------------------------
+
+
+def test_image_relative_path_resolves_against_base_dir(tmp_path):
+    (tmp_path / "docs" / "images").mkdir(parents=True)
+    png = tmp_path / "docs" / "images" / "shot.png"
+    png.write_bytes(_png_bytes(40, 20))
+    backend = MemoryBackend(width=20, height=40, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    view = MarkdownView("![w](docs/images/shot.png)", base_dir=str(tmp_path))
+    panel.add(view, x=0, y=0, w=20, h=40)
+    panel.render()
+    row = view._rows[0]
+    assert row.image is not None
+    assert row.image[0] == str(png)
+    # The aspect height proves the resolved file was really measured.
+    assert abs(row.height - 10.0) < 0.01
+    assert [c[2] for c in backend.image_calls] == [str(png)]
+
+
+def test_image_absolute_path_ignores_base_dir(tmp_path):
+    png = tmp_path / "abs.png"
+    png.write_bytes(_png_bytes(40, 20))
+    backend = MemoryBackend(width=20, height=40, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    view = MarkdownView(f"![w]({png})", base_dir="/nowhere/else")
+    panel.add(view, x=0, y=0, w=20, h=40)
+    panel.render()
+    assert view._rows[0].image[0] == str(png)
+
+
+def test_from_file_defaults_base_dir_to_documents_directory(tmp_path):
+    (tmp_path / "img.png").write_bytes(_png_bytes(40, 20))
+    md = tmp_path / "doc.md"
+    md.write_text("![w](img.png)\n", encoding="utf-8")
+    view = MarkdownView.from_file(str(md))
+    assert view.base_dir == str(tmp_path)
+    backend = MemoryBackend(width=20, height=40, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=20, h=40)
+    panel.render()
+    assert [c[2] for c in backend.image_calls] == [str(tmp_path / "img.png")]
+
+
+# --- images in table cells ----------------------------------------------------
+
+
+_IMAGE_TABLE = (
+    "| left | right |\n"
+    "| --- | --- |\n"
+    "| ![one](a.png) | ![two](b.png) |\n"
+)
+
+
+def test_table_cell_images_render(tmp_path):
+    # The README screenshot shape: every body cell is exactly one image.
+    (tmp_path / "a.png").write_bytes(_png_bytes(400, 200))
+    (tmp_path / "b.png").write_bytes(_png_bytes(400, 200))
+    backend = MemoryBackend(width=40, height=60, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    view = MarkdownView(_IMAGE_TABLE, base_dir=str(tmp_path))
+    panel.add(view, x=0, y=0, w=40, h=60)
+    panel.render()
+    drawn = sorted(c[2] for c in backend.image_calls)
+    assert drawn == [str(tmp_path / "a.png"), str(tmp_path / "b.png")]
+    # The image row reserves the images' aspect height, not one text line.
+    img_rows = [r for r in (view._rows or []) if r.table and r.table.images]
+    assert len(img_rows) == 1
+    assert img_rows[0].height > 2.0
+
+
+def test_table_cell_image_scales_into_its_column(tmp_path):
+    # A 400px-wide image in a ~17-unit column must be drawn at the column
+    # width, height following the 2:1 aspect — never at natural size.
+    (tmp_path / "a.png").write_bytes(_png_bytes(400, 200))
+    (tmp_path / "b.png").write_bytes(_png_bytes(400, 200))
+    backend = MemoryBackend(width=40, height=60, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    view = MarkdownView(_IMAGE_TABLE, base_dir=str(tmp_path))
+    panel.add(view, x=0, y=0, w=40, h=60)
+    panel.render()
+    for _x, _y, _path, hints in backend.image_calls:
+        assert hints["w"] < 20.0
+        assert abs(hints["h"] - hints["w"] / 2.0) < 0.5
+
+
+def test_table_cell_image_mixed_with_text_stays_text(tmp_path):
+    (tmp_path / "a.png").write_bytes(_png_bytes(40, 20))
+    src = "| c |\n| --- |\n| see ![one](a.png) here |\n"
+    backend = MemoryBackend(width=40, height=20, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    panel.add(MarkdownView(src, base_dir=str(tmp_path)), x=0, y=0, w=40, h=20)
+    panel.render()
+    assert backend.image_calls == []  # an image inline within text never draws
+
+
+def test_table_cell_image_missing_file_falls_back_to_alt_text(tmp_path):
+    src = "| c |\n| --- |\n| ![a chart](gone.png) |\n"
+    backend = MemoryBackend(width=40, height=20, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(backend)
+    view = MarkdownView(src, base_dir=str(tmp_path))
+    panel.add(view, x=0, y=0, w=40, h=20)
+    panel.render()
+    assert backend.image_calls == []
+    body = [r for r in view._rows if r.table and not r.table.hline][-1]
+    cell_text = "".join(
+        t for _x, _w, _a, lines in body.table.cells for line in lines for t, _s, _h in line
+    )
+    assert cell_text == "a chart"
+
+
+# --- remote (http/https) images -----------------------------------------------
+
+
+def test_remote_image_alt_while_loading_then_swaps_in(tmp_path, monkeypatch):
+    from puikit import _remote_image
+
+    png = tmp_path / "r.png"
+    png.write_bytes(_png_bytes(40, 20))
+    url = "https://example.test/r.png"
+    state = {"ready": False, "on_done": None}
+
+    def fake_get(u, on_done=None):
+        assert u == url
+        state["on_done"] = on_done
+        return str(png) if state["ready"] else None
+
+    monkeypatch.setattr(_remote_image, "get", fake_get)
+    backend = MemoryBackend(width=20, height=40, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+    view = MarkdownView(f"![loading cat]({url})")
+    panel.add(view, x=0, y=0, w=20, h=40)
+    panel.render()
+
+    # While the fetch is in flight: the alt text renders as a plain line and
+    # the view rides the animation tick (TUI has no main-thread dispatch).
+    row = view._rows[0]
+    assert row.image is None
+    assert "loading cat" in "".join(t for t, _s, _h in row.spans)
+    assert view._remote_pending
+    assert backend.tick_callbacks
+
+    # The download lands (worker-thread side), the tick drains it: the alt
+    # line becomes the real image at its aspect height.
+    state["ready"] = True
+    state["on_done"](url)
+    assert view._remote_dirty
+    backend.run_animation_ticks()
+    row = view._rows[0]
+    assert row.image is not None and row.image[0] == str(png)
+    assert not view._remote_ticking
+    assert backend.tick_callbacks == []
+
+
+def test_remote_image_settled_download_caught_by_natural_repaint(tmp_path, monkeypatch):
+    # Without a tick in between, an ordinary render after the download settles
+    # must also pick it up (the draw-start drain).
+    from puikit import _remote_image
+
+    png = tmp_path / "r.png"
+    png.write_bytes(_png_bytes(40, 20))
+    url = "https://example.test/r2.png"
+    state = {"ready": False}
+
+    def fake_get(u, on_done=None):
+        return str(png) if state["ready"] else None
+
+    monkeypatch.setattr(_remote_image, "get", fake_get)
+    backend = MemoryBackend(width=20, height=40, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+    view = MarkdownView(f"![w]({url})")
+    panel.add(view, x=0, y=0, w=20, h=40)
+    panel.render()
+    assert view._rows[0].image is None
+
+    state["ready"] = True
+    view._remote_dirty = True  # what _on_remote_done sets from the worker
+    panel.render()
+    assert view._rows[0].image is not None and view._rows[0].image[0] == str(png)
+
+
 # --- hyperlinks --------------------------------------------------------------
 
 
