@@ -794,3 +794,97 @@ def test_load_tray_image_svg_vector_template(tmp_path):
     assert image.isTemplate()
     assert (image.size().width, image.size().height) == (18.0, 18.0)
     assert len(image.representations()) == 1
+
+
+# --- native menu: key equivalents stay display-only --------------------------
+#
+# A puikit MenuItem.shortcut is a display hint; the app owns key dispatch
+# (_NonFiringMenu). But an active app's menu-bar dispatch can fire an item
+# from AppKit's cached equivalent table without consulting that override, so
+# _MenuResponder.fire_ re-routes an activation carried by the item's own chord
+# back to the app's key handling. These cover that routing decision.
+
+
+class _FakeKeyEvent:
+    """Stands in for the NSEvent _current_key_event returns: fire_'s matching
+    only reads charactersIgnoringModifiers() and modifierFlags()."""
+
+    def __init__(self, chars, flags):
+        self._chars = chars
+        self._flags = flags
+
+    def charactersIgnoringModifiers(self):
+        return self._chars
+
+    def modifierFlags(self):
+        return self._flags
+
+
+def _menu_fixture(forward=None, shortcut="Command-Shift-C"):
+    """A responder plus one registered NSMenuItem carrying ``shortcut``.
+    Returns (responder, ns_item, activated) where ``activated`` records the
+    puikit item's on_select firing."""
+    from puikit.backends import _macos_menu
+    from puikit.menu import Menu, MenuItem
+
+    activated = []
+    menu = Menu(MenuItem("Copy", on_select=lambda: activated.append(True),
+                         shortcut=shortcut))
+    ns_menu, responder = _macos_menu.build_popup_menu(menu)
+    responder._forward_key = forward
+    return responder, ns_menu.itemArray()[0], activated
+
+
+def test_menu_fire_forwards_its_own_key_equivalent(monkeypatch):
+    from AppKit import NSEventModifierFlagCommand, NSEventModifierFlagShift
+
+    from puikit.backends import _macos_menu
+
+    forwarded = []
+    responder, ns_item, activated = _menu_fixture(forward=forwarded.append)
+    chord = _FakeKeyEvent("C", NSEventModifierFlagCommand | NSEventModifierFlagShift)
+    monkeypatch.setattr(_macos_menu, "_current_key_event", lambda: chord)
+    responder.fire_(ns_item)
+    assert forwarded == [chord]
+    assert activated == []
+
+
+def test_menu_fire_activates_on_mouse_selection(monkeypatch):
+    from puikit.backends import _macos_menu
+
+    forwarded = []
+    responder, ns_item, activated = _menu_fixture(forward=forwarded.append)
+    # A mouse activation has no keyDown as the current event.
+    monkeypatch.setattr(_macos_menu, "_current_key_event", lambda: None)
+    responder.fire_(ns_item)
+    assert activated == [True]
+    assert forwarded == []
+
+
+def test_menu_fire_activates_on_return_over_open_menu(monkeypatch):
+    from puikit.backends import _macos_menu
+
+    forwarded = []
+    responder, ns_item, activated = _menu_fixture(forward=forwarded.append)
+    # Keyboard navigation of an OPEN menu ends in a Return keyDown — a real
+    # interactive selection, which must keep activating (it does not match the
+    # item's own equivalent).
+    monkeypatch.setattr(_macos_menu, "_current_key_event",
+                        lambda: _FakeKeyEvent("\r", 0))
+    responder.fire_(ns_item)
+    assert activated == [True]
+    assert forwarded == []
+
+
+def test_menu_fire_without_forwarder_always_activates(monkeypatch):
+    from AppKit import NSEventModifierFlagCommand, NSEventModifierFlagShift
+
+    from puikit.backends import _macos_menu
+
+    # A popup's responder has no forwarder: even a matching chord activates
+    # (an equivalent pressed while a popup is open is an interactive choice).
+    responder, ns_item, activated = _menu_fixture(forward=None)
+    chord = _FakeKeyEvent("C", NSEventModifierFlagCommand | NSEventModifierFlagShift)
+    monkeypatch.setattr(_macos_menu, "_current_key_event", lambda: chord)
+    responder.fire_(ns_item)
+    assert activated == [True]

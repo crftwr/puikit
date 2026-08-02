@@ -3873,7 +3873,19 @@ class MacOSBackend(Backend):
     def set_menu_bar(self, menu: Any) -> None:
         from ._macos_menu import install_menu_bar
 
-        self._menu_responder = install_menu_bar(menu, self._title)
+        self._menu_responder = install_menu_bar(
+            menu, self._title, forward_key=self._forward_menu_key
+        )
+
+    def _forward_menu_key(self, ns_event) -> None:
+        """Deliver a menu-bar key-equivalent chord to the ordinary key path.
+        Shortcut hints on puikit menu items are display-only (_NonFiringMenu),
+        but AppKit can fire one from its cached equivalent table anyway; the
+        responder hands the keystroke back here so it dispatches — and the app
+        repaints — exactly as if the menu had never seen it."""
+        view = self._view
+        if view is not None:
+            view.keyDown_(ns_event)
 
     def popup_menu(
         self, menu: Any, x: float, y: float, on_done: Any | None = None

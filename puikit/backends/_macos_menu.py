@@ -21,6 +21,7 @@ from AppKit import (
     NSEventModifierFlagControl,
     NSEventModifierFlagOption,
     NSEventModifierFlagShift,
+    NSEventTypeKeyDown,
     NSMenu,
     NSMenuItem,
 )
@@ -28,6 +29,35 @@ from Foundation import NSObject
 import objc
 
 from ..menu import Menu, MenuItem, MenuSeparator
+
+
+def _current_key_event():
+    """The event that triggered the running dispatch, if it is a keyDown —
+    the signature of a menu item fired through a key equivalent rather than
+    an interactive selection. Module-level so tests can substitute it."""
+    ev = NSApp.currentEvent()
+    if ev is not None and ev.type() == NSEventTypeKeyDown:
+        return ev
+    return None
+
+
+#: The modifier bits a key equivalent is matched on.
+_EQUIV_MASK = (NSEventModifierFlagCommand | NSEventModifierFlagControl
+               | NSEventModifierFlagOption | NSEventModifierFlagShift)
+
+
+def _matches_equivalent(ns_item, ev) -> bool:
+    """Whether keyDown ``ev`` is the very chord ``ns_item`` displays as its
+    key equivalent — i.e. the item was fired *by that keystroke*, not by an
+    interactive selection (Return/arrow keys on an open menu are keyDowns too,
+    but they do not match the item's own equivalent)."""
+    equivalent = str(ns_item.keyEquivalent() or "")
+    if not equivalent:
+        return False
+    chars = str(ev.charactersIgnoringModifiers() or "").lower()
+    if chars != equivalent:
+        return False
+    return (int(ev.modifierFlags()) & _EQUIV_MASK) == int(ns_item.keyEquivalentModifierMask())
 
 
 class _MenuResponder(NSObject):
@@ -42,12 +72,30 @@ class _MenuResponder(NSObject):
         # Plain Python attributes (not Objective-C methods): map an item's tag
         # to its puikit MenuItem. The builder fills this via _register below.
         self._by_tag = {}
+        # Where a key-equivalent activation is re-routed (the backend's
+        # keyDown path) instead of firing the item — see fire_. None (a
+        # popup's responder) keeps every activation interactive.
+        self._forward_key = None
         return self
 
     def fire_(self, sender) -> None:
         item = self._by_tag.get(int(sender.tag()))
-        if item is not None:
-            item.activate()
+        if item is None:
+            return
+        # _NonFiringMenu's decline covers the documented performKeyEquivalent:
+        # walk, but an active app's menu-bar dispatch can match a Cmd-chord
+        # against its own cached equivalent table and fire the item without
+        # ever consulting that override. Honor the display-only contract here
+        # too: an activation carried by the item's own chord goes back to the
+        # app's key handling (which also repaints), exactly as if the menu had
+        # declined. An interactive selection — mouse, or Return on an open
+        # menu — activates as normal.
+        if self._forward_key is not None:
+            ev = _current_key_event()
+            if ev is not None and _matches_equivalent(sender, ev):
+                self._forward_key(ev)
+                return
+        item.activate()
 
     def validateMenuItem_(self, ns_item) -> bool:
         item = self._by_tag.get(int(ns_item.tag()))
@@ -79,7 +127,13 @@ class _NonFiringMenu(NSMenu):
     reached the view — including while a text field is focused — breaking typing
     in dialogs. Declining here keeps the native look without the hijack. Genuine
     accelerators that *should* fire (e.g. the ⌘Q in the application menu) live in
-    a standard ``NSMenu`` and are unaffected."""
+    a standard ``NSMenu`` and are unaffected.
+
+    Declining is necessary but not sufficient: an active app's menu-bar
+    dispatch can match a Cmd-chord against its own cached equivalent table and
+    fire the item without consulting this override. ``_MenuResponder.fire_``
+    closes that path, re-routing such an activation back to the app's key
+    handling."""
 
     def performKeyEquivalent_(self, event) -> bool:
         return False
@@ -166,10 +220,15 @@ def _build_menu(menu: Menu, responder: _MenuResponder) -> Any:
     return ns_menu
 
 
-def build_menu_bar(menu: Menu, app_title: str) -> tuple[Any, _MenuResponder]:
+def build_menu_bar(
+    menu: Menu, app_title: str, forward_key: Any | None = None
+) -> tuple[Any, _MenuResponder]:
     """Build the NSMenu main menu: a standard application menu (with Quit)
-    followed by one bar entry per top-level item in ``menu``."""
+    followed by one bar entry per top-level item in ``menu``. ``forward_key``
+    receives the NSEvent of a key-equivalent activation instead of the item
+    firing (see ``_MenuResponder.fire_``)."""
     responder = _MenuResponder.alloc().init()
+    responder._forward_key = forward_key
     main = NSMenu.alloc().init()
 
     # The application menu (its title is ignored; macOS shows the app name).
@@ -202,12 +261,15 @@ def build_popup_menu(menu: Menu) -> tuple[Any, _MenuResponder]:
     return _build_menu(menu, responder), responder
 
 
-def install_menu_bar(menu: Menu | None, app_title: str) -> _MenuResponder | None:
+def install_menu_bar(
+    menu: Menu | None, app_title: str, forward_key: Any | None = None
+) -> _MenuResponder | None:
     """Set (or clear) the application main menu. Returns the responder, which
-    the caller must retain so the item callbacks survive."""
+    the caller must retain so the item callbacks survive. ``forward_key`` is
+    passed through to ``build_menu_bar``."""
     if menu is None:
         NSApp.setMainMenu_(NSMenu.alloc().init())
         return None
-    main, responder = build_menu_bar(menu, app_title)
+    main, responder = build_menu_bar(menu, app_title, forward_key)
     NSApp.setMainMenu_(main)
     return responder
