@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="docs/images/banner.svg" alt="PuiKit — capability-based Python UI framework for terminal and GUI" width="100%">
-</p>
-
 # PuiKit
 
 PuiKit is a capability-based Python UI framework that supports both TUI

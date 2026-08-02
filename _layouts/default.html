@@ -24,13 +24,23 @@
 </head>
 <body>
   <div class="container-lg px-3 my-5 markdown-body">
-    {% unless page.url == "/" %}
-    <p class="f5 mb-4"><a href="{{ '/' | relative_url }}">&larr; {{ site.title | escape }}</a></p>
-    {% endunless %}
+    <header class="d-flex flex-justify-between mb-4 f5">
+      <span>
+        {% unless page.url == "/" %}
+        <a href="{{ '/' | relative_url }}">&larr; {{ site.title | escape }}</a>
+        {% endunless %}
+      </span>
+      <span>
+        <a href="{{ site.github.repository_url }}">{{ site.github.repository_nwo }} on GitHub</a> &middot;
+        <a href="https://sites.google.com/site/craftware/">craftware</a>
+      </span>
+    </header>
+    {% if page.url == "/" %}
+    <p><img src="{{ '/docs/images/banner.svg' | relative_url }}" alt="PuiKit &mdash; capability-based Python UI framework for terminal and GUI" width="100%"></p>
+    {% endif %}
     {{ content }}
     <footer class="mt-5 pt-3 border-top f6 text-gray color-fg-muted">
       <a href="{{ site.github.repository_url }}">{{ site.github.repository_nwo }} on GitHub</a> &middot;
-      <a href="{{ site.github.repository_url }}/edit/{{ site.github.source.branch }}/{{ page.path }}">Improve this page</a> &middot;
       <a href="https://sites.google.com/site/craftware/">craftware</a>
     </footer>
   </div>
