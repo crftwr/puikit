@@ -24,6 +24,19 @@ terminal (curses backend).
 | ![MarkdownView page of the demo catalog on the macOS GUI backend](docs/images/demo-markdown-mac.png) | ![MarkdownView page of the demo catalog on the curses TUI backend](docs/images/demo-markdown-tui.png) |
 | ![Modal confirm dialog with drop shadow and dimmed backdrop on the macOS GUI backend](docs/images/demo-messagebox-mac.png) | ![Modal confirm dialog with shadow and dimmed backdrop on the curses TUI backend](docs/images/demo-messagebox-tui.png) |
 
+## Apps built with PuiKit
+
+- [**XeFM**](https://github.com/crftwr/xefm) — a dual-pane file manager that
+  runs as a native desktop app on Windows and macOS, and in the terminal on all
+  platforms, from a single codebase. PuiKit's first and most demanding user:
+  archive / SFTP / S3 browsing, rich built-in viewers, and themes with GPU
+  background shaders and CRT post effects.
+- [**Keyhac 2**](https://github.com/crftwr/keyhac) — Python-scriptable keyboard
+  customization for Windows and macOS, successor to Keyhac for Windows and
+  Keyhac for macOS. Its UI is built on PuiKit.
+
+Building something with PuiKit? Open an issue or PR to get it listed here.
+
 ## Status
 
 Stable release (1.0). Implemented:
@@ -119,6 +132,12 @@ python3.14 -m venv .venv
 # Run the tests
 .venv/bin/python -m pytest
 ```
+
+## Contact & Support
+
+- **GitHub Issues**: [Report bugs or request features](https://github.com/crftwr/puikit/issues)
+- **PyPI**: [pypi.org/project/puikit](https://pypi.org/project/puikit/) — released versions (`pip install puikit`)
+- **Author's X (Twitter)**: [@crftwr](https://x.com/crftwr)
 
 ## License
 
