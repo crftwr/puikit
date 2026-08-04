@@ -25,6 +25,11 @@ from ..text import truncate_to_width as _truncate_to_width
 from . import _terminal_graphics
 from ..theme import DEFAULT_THEME, THEME_TUI
 
+# On Windows the curses module is windows-curses (PDCurses wincon), whose color
+# model differs from ncurses in ways _bind_palette must branch on. Module-level
+# so tests can pin either branch regardless of the host platform.
+_PDCURSES = sys.platform == "win32"
+
 # RGB values of the 8 basic curses colors, used for nearest-color mapping.
 _BASIC_COLORS = [
     (curses.COLOR_BLACK, (0, 0, 0)),
@@ -1645,6 +1650,11 @@ class CursesBackend(Backend):
         gets a slot, so quantization always lands on a defined slot — no
         on-demand allocation, no clobbering.
 
+        On Windows (windows-curses / PDCurses) the same slot binding goes
+        through ``curses.init_color()`` instead of OSC-4: PDCurses then emits
+        those slots as exact truecolor from its own table, whereas an OSC-4
+        palette write is lost through ConPTY (see the body).
+
         Fallback: terminals that cannot redefine colors map each curated color
         to the nearest entry in the terminal's existing palette.
 
@@ -1666,28 +1676,57 @@ class CursesBackend(Backend):
         mode = os.environ.get("PUIKIT_TUI_PALETTE", "init").lower()
         bound = False
         if mode != "native" and can_change and colors >= base + len(_TUI_PALETTE):
-            # Redefine every curated color in ONE OSC-4 escape. ncurses'
-            # init_color() does the same via the terminfo ``initc`` string, but
-            # emits one OSC-4 per color — 240 of them — and iTerm2 re-renders the
-            # screen on each palette change, so 240 back-to-back sets cost ~2-3s
-            # at launch (Terminal.app coalesces and stays instant). OSC-4 accepts
-            # many ``index;spec`` pairs in a single sequence, which the terminal
-            # applies as one change. Bypassing init_color() is safe: cells draw
-            # through init_pair(), which passes the slot INDEX and lets the
-            # terminal resolve it against the palette set here — ncurses never
-            # needs these RGBs. Hex comes straight from the 0-255 authored
-            # channels (init_color's 0-1000 round-trip loses up to 1/255 each).
-            pairs = ";".join(
-                f"{base + i};rgb:{r:02x}/{g:02x}/{b:02x}"
-                for i, (r, g, b) in enumerate(_TUI_PALETTE)
-            )
-            try:
-                self._raw_out.write(f"\x1b]4;{pairs}\x1b\\")
-                self._raw_out.flush()
-                self._palette_term = [base + i for i in range(len(_TUI_PALETTE))]
-                bound = True
-            except (OSError, ValueError):
-                pass
+            if _PDCURSES:
+                # windows-curses (PDCurses wincon) renders a cell whose color
+                # index is 16..255 as "38;5;N" against the TERMINAL's palette —
+                # unless the slot was redefined through init_color(), which
+                # flags it "mapped" and makes PDCurses emit exact truecolor
+                # "38;2;r;g;b" from its own table instead, never consulting the
+                # terminal palette. The OSC-4 write below does not survive the
+                # trip through ConPTY, so un-mapped slots resolved against the
+                # standard xterm cube: the dark surface grays occupy the first
+                # curated slots (17..21), which in the standard cube are the
+                # black->blue ramp — every pane rendered saturated blue. So on
+                # Windows the binding goes through init_color(), per slot. The
+                # iTerm2 batching concern that motivates OSC-4 on the ncurses
+                # path does not apply: init_color here is a table write with no
+                # terminal I/O until cells draw. The 0-1000 scale round-trips
+                # 0-255 channels exactly (both directions round).
+                try:
+                    for i, (r, g, b) in enumerate(_TUI_PALETTE):
+                        curses.init_color(
+                            base + i,
+                            round(r * 1000 / 255),
+                            round(g * 1000 / 255),
+                            round(b * 1000 / 255),
+                        )
+                    self._palette_term = [base + i for i in range(len(_TUI_PALETTE))]
+                    bound = True
+                except curses.error:
+                    pass
+            else:
+                # Redefine every curated color in ONE OSC-4 escape. ncurses'
+                # init_color() does the same via the terminfo ``initc`` string, but
+                # emits one OSC-4 per color — 240 of them — and iTerm2 re-renders the
+                # screen on each palette change, so 240 back-to-back sets cost ~2-3s
+                # at launch (Terminal.app coalesces and stays instant). OSC-4 accepts
+                # many ``index;spec`` pairs in a single sequence, which the terminal
+                # applies as one change. Bypassing init_color() is safe: cells draw
+                # through init_pair(), which passes the slot INDEX and lets the
+                # terminal resolve it against the palette set here — ncurses never
+                # needs these RGBs. Hex comes straight from the 0-255 authored
+                # channels (init_color's 0-1000 round-trip loses up to 1/255 each).
+                pairs = ";".join(
+                    f"{base + i};rgb:{r:02x}/{g:02x}/{b:02x}"
+                    for i, (r, g, b) in enumerate(_TUI_PALETTE)
+                )
+                try:
+                    self._raw_out.write(f"\x1b]4;{pairs}\x1b\\")
+                    self._raw_out.flush()
+                    self._palette_term = [base + i for i in range(len(_TUI_PALETTE))]
+                    bound = True
+                except (OSError, ValueError):
+                    pass
         if not bound:
             self._palette_term = [self._nearest_color(c) for c in _TUI_PALETTE]
 

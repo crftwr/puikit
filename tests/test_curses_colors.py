@@ -4,6 +4,7 @@ import pytest
 
 curses = pytest.importorskip("curses")
 
+from puikit.backends import curses_backend  # noqa: E402
 from puikit.backends.curses_backend import CursesBackend, _TUI_PALETTE  # noqa: E402
 from puikit.theme import THEME_TUI  # noqa: E402
 
@@ -51,6 +52,7 @@ def test_bind_palette_redefines_slots_on_ccc_terminal(monkeypatch):
     # that re-renders on palette changes (iTerm2) pays a single invalidation.
     import io
 
+    monkeypatch.setattr(curses_backend, "_PDCURSES", False)  # the ncurses path
     monkeypatch.setattr(curses, "can_change_color", lambda: True)
     monkeypatch.setattr(curses, "COLORS", 256, raising=False)
     # A stray init_color would defeat the batching — make it fail loudly.
@@ -74,6 +76,38 @@ def test_bind_palette_redefines_slots_on_ccc_terminal(monkeypatch):
     # Slot 0's color appears at index 16, hex straight from its 0-255 channels.
     r, g, b = _TUI_PALETTE[0]
     assert f"16;rgb:{r:02x}/{g:02x}/{b:02x}" in written
+
+
+def test_bind_palette_uses_init_color_on_pdcurses(monkeypatch):
+    # Windows regression: PDCurses (windows-curses) renders slots 16..255 as
+    # "38;5;N" against the terminal's palette unless a slot was redefined via
+    # init_color() (which flips it to exact truecolor from PDCurses' own
+    # table). The OSC-4 palette write is lost through ConPTY, so the standard
+    # xterm cube showed through — the dark surface grays sit on the cube's
+    # black->blue ramp (slots 17..21) and every pane rendered saturated blue.
+    # On Windows the binding must go through init_color, one call per slot,
+    # with no OSC-4 write.
+    import io
+
+    calls = []
+    monkeypatch.setattr(curses_backend, "_PDCURSES", True)
+    monkeypatch.setattr(curses, "can_change_color", lambda: True)
+    monkeypatch.setattr(curses, "COLORS", 256, raising=False)
+    monkeypatch.setattr(curses, "init_color", lambda *a: calls.append(a))
+
+    backend = CursesBackend()
+    out = io.StringIO()
+    backend._raw_out = out
+    backend._bind_palette()
+
+    assert backend._palette_term == list(range(16, 16 + len(_TUI_PALETTE)))
+    assert out.getvalue() == ""  # no OSC-4 on this path
+    assert [c[0] for c in calls] == list(range(16, 16 + len(_TUI_PALETTE)))
+    # The 0-1000 curses scale must round-trip the authored 0-255 channels
+    # exactly under PDCurses' DIVROUND(v * 255, 1000) readback.
+    for (slot, r, g, b), authored in zip(calls, _TUI_PALETTE):
+        assert all(0 <= v <= 1000 for v in (r, g, b))
+        assert (round(r * 255 / 1000), round(g * 255 / 1000), round(b * 255 / 1000)) == authored
 
 
 def test_bind_palette_falls_back_to_existing_without_ccc(monkeypatch):
