@@ -582,7 +582,9 @@ class CursesBackend(Backend):
         # input loop makes drag selection work on any SGR-capable terminal
         # (VS Code, iTerm2, modern Terminal.app), independent of the linked
         # ncurses. 1002 = report motion only while a button is held (so no hover
-        # flood); 1006 = SGR extended coordinates.
+        # flood); 1006 = SGR extended coordinates. On Windows the trade-off
+        # inverts and this same call enables mousemask/KEY_MOUSE instead — see
+        # _set_mouse_tracking.
         self._set_mouse_tracking(True)
 
     def close(self) -> None:
@@ -646,7 +648,28 @@ class CursesBackend(Backend):
         Motion mode is 1002 (report motion only while a button is held, so no
         hover flood) by default; with pointer shapes enabled it is 1003 (report
         all motion), so bare hover is delivered as MOUSE_MOVE and the Panel can
-        resolve a per-region cursor shape."""
+        resolve a per-region cursor shape.
+
+        On Windows, windows-curses (PDCurses) reads console input records, not
+        a VT byte stream, so the DECSET escapes would never produce SGR reports
+        on stdin and mouse input would simply not exist. There the tracking
+        goes through the channel this backend deliberately skips on ncurses:
+        mousemask() + KEY_MOUSE / getmouse() (translated in _nc_mouse_event).
+        mouseinterval(0) stops PDCurses folding a press+release into a CLICKED
+        report, so the Panel receives the same MOUSE_DOWN / MOUSE_UP gesture as
+        on every other backend."""
+        if _PDCURSES:
+            try:
+                if on:
+                    curses.mouseinterval(0)
+                    curses.mousemask(
+                        curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION
+                    )
+                else:
+                    curses.mousemask(0)
+            except (curses.error, AttributeError):
+                pass
+            return
         verb = "h" if on else "l"
         motion = 1003 if self._pointer_shape_enabled else 1002
         try:
@@ -1969,6 +1992,10 @@ class CursesBackend(Backend):
         if ch == curses.KEY_RESIZE:
             w, h = self.size
             return Event(type=EventType.RESIZE, hints={"w": w, "h": h})
+        if ch == getattr(curses, "KEY_MOUSE", None):
+            # Only the PDCurses path arrives here: mousemask() is never set on
+            # ncurses, where mouse reports come in as SGR escape bytes instead.
+            return self._nc_mouse_event()
         if ch == getattr(curses, "KEY_BTAB", 0x161):
             # Shift+Tab arrives as a distinct key code in curses, not as a
             # modified tab; deliver it as one so focus traversal goes backward.
@@ -2086,3 +2113,61 @@ class CursesBackend(Backend):
         if b & self._SGR_ALT:
             names.append("alt")
         return frozenset(names)
+
+    def _nc_mouse_event(self) -> "Event | None":
+        """Translate a KEY_MOUSE report (curses.getmouse()) into an Event —
+        the PDCurses (windows-curses) mouse channel, enabled in
+        _set_mouse_tracking. The gesture model mirrors _parse_sgr_mouse: a
+        left press arms drag tracking and pairs with its release in the Panel;
+        other buttons act on press; held-button motion is a drag; bare motion
+        is hover only under pointer shapes. The wheel arrives as BUTTON4 (up)
+        / BUTTON5 (down) presses. Constants that a given curses build may lack
+        read as 0, so their branches just never match."""
+        try:
+            _id, x, y, _z, bstate = curses.getmouse()
+        except curses.error:
+            return None
+        mods = frozenset(
+            name
+            for flag, name in (
+                (getattr(curses, "BUTTON_SHIFT", 0), "shift"),
+                (getattr(curses, "BUTTON_CTRL", 0), "ctrl"),
+                (getattr(curses, "BUTTON_ALT", 0), "alt"),
+            )
+            if bstate & flag
+        )
+        if bstate & getattr(curses, "BUTTON4_PRESSED", 0):
+            return Event(type=EventType.MOUSE_SCROLL, x=x, y=y, scroll=1, modifiers=mods)
+        if bstate & getattr(curses, "BUTTON5_PRESSED", 0):
+            return Event(type=EventType.MOUSE_SCROLL, x=x, y=y, scroll=-1, modifiers=mods)
+        if bstate & curses.BUTTON1_PRESSED:
+            self._mouse_down = True
+            return Event(type=EventType.MOUSE_DOWN, x=x, y=y, button="left", modifiers=mods)
+        if bstate & curses.BUTTON1_RELEASED:
+            was_left = self._mouse_down
+            self._mouse_down = False
+            if was_left:
+                return Event(type=EventType.MOUSE_UP, x=x, y=y, button="left", modifiers=mods)
+            return None
+        # mouseinterval(0) disables press/release folding, but be tolerant of a
+        # build that still reports a folded click: deliver the atomic
+        # MOUSE_CLICK the event contract allows for backends without down/up.
+        if bstate & (
+            curses.BUTTON1_CLICKED | getattr(curses, "BUTTON1_DOUBLE_CLICKED", 0)
+        ):
+            self._mouse_down = False
+            return Event(type=EventType.MOUSE_CLICK, x=x, y=y, button="left", modifiers=mods)
+        for prefix, button in (("BUTTON2", "middle"), ("BUTTON3", "right")):
+            pressed = getattr(curses, prefix + "_PRESSED", 0)
+            clicked = getattr(curses, prefix + "_CLICKED", 0)
+            if bstate & (pressed | clicked):
+                # Non-left buttons have no down/up gesture: click on press,
+                # exactly as the SGR path delivers them.
+                self._mouse_down = False
+                return Event(type=EventType.MOUSE_CLICK, x=x, y=y, button=button, modifiers=mods)
+        if bstate & getattr(curses, "REPORT_MOUSE_POSITION", 0):
+            if self._mouse_down:
+                return Event(type=EventType.MOUSE_DRAG, x=x, y=y, button="left", modifiers=mods)
+            if self._pointer_shape_enabled:
+                return Event(type=EventType.MOUSE_MOVE, x=x, y=y, modifiers=mods)
+        return None

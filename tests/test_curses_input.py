@@ -6,6 +6,9 @@ These exercise the pure translation logic without opening a real terminal
 
 import curses
 
+import pytest
+
+from puikit.backends import curses_backend
 from puikit.backends.curses_backend import (
     CursesBackend,
     _csi_modifiers,
@@ -431,3 +434,135 @@ def test_drag_coalesce_defers_release():
     events = _drain(be)
     assert [e.type for e in events] == [EventType.MOUSE_DRAG, EventType.MOUSE_UP]
     assert (events[0].x, events[0].y) == (12, 2)
+
+
+# --- PDCurses (windows-curses) KEY_MOUSE translation -----------------------------
+#
+# windows-curses reads console input records, not a VT byte stream, so mouse
+# input arrives as KEY_MOUSE + getmouse() (enabled via mousemask in
+# _set_mouse_tracking) and must translate to the same gesture stream as the SGR
+# parser. Every constant _nc_mouse_event reads is pinned to a known value so
+# the tests are deterministic on any curses build (ncurses and PDCurses assign
+# different bits, and some builds lack BUTTON5_*).
+
+_NC_BITS = {
+    "BUTTON1_PRESSED": 0x1, "BUTTON1_RELEASED": 0x2, "BUTTON1_CLICKED": 0x4,
+    "BUTTON1_DOUBLE_CLICKED": 0x8,
+    "BUTTON2_PRESSED": 0x10, "BUTTON2_CLICKED": 0x20,
+    "BUTTON3_PRESSED": 0x40, "BUTTON3_CLICKED": 0x80,
+    "BUTTON4_PRESSED": 0x100, "BUTTON5_PRESSED": 0x200,
+    "REPORT_MOUSE_POSITION": 0x400,
+    "BUTTON_SHIFT": 0x1000, "BUTTON_CTRL": 0x2000, "BUTTON_ALT": 0x4000,
+    "ALL_MOUSE_EVENTS": 0x7FF,
+}
+
+
+@pytest.fixture
+def nc_mouse(monkeypatch):
+    for name, value in _NC_BITS.items():
+        monkeypatch.setattr(curses, name, value, raising=False)
+
+    def feed(be, bstate, x=5, y=3):
+        monkeypatch.setattr(curses, "getmouse", lambda: (0, x, y, 0, bstate))
+        return be._nc_mouse_event()
+
+    return feed
+
+
+def test_nc_mouse_press_drag_release(nc_mouse):
+    be = CursesBackend()
+    press = nc_mouse(be, _NC_BITS["BUTTON1_PRESSED"], x=5, y=3)
+    assert press.type is EventType.MOUSE_DOWN
+    assert (press.x, press.y, press.button) == (5, 3, "left")
+    drag = nc_mouse(be, _NC_BITS["REPORT_MOUSE_POSITION"], x=8, y=3)
+    assert drag.type is EventType.MOUSE_DRAG and (drag.x, drag.y) == (8, 3)
+    release = nc_mouse(be, _NC_BITS["BUTTON1_RELEASED"], x=8, y=3)
+    assert release.type is EventType.MOUSE_UP and release.button == "left"
+    # A stray motion after release (button no longer held) is ignored.
+    assert nc_mouse(be, _NC_BITS["REPORT_MOUSE_POSITION"], x=9, y=3) is None
+
+
+def test_nc_mouse_bare_motion_is_move_only_under_pointer_shapes(nc_mouse):
+    assert nc_mouse(CursesBackend(), _NC_BITS["REPORT_MOUSE_POSITION"]) is None
+    ev = nc_mouse(CursesBackend(pointer_shape=True), _NC_BITS["REPORT_MOUSE_POSITION"])
+    assert ev.type is EventType.MOUSE_MOVE
+
+
+def test_nc_mouse_wheel(nc_mouse):
+    be = CursesBackend()
+    up = nc_mouse(be, _NC_BITS["BUTTON4_PRESSED"])
+    down = nc_mouse(be, _NC_BITS["BUTTON5_PRESSED"])
+    assert up.type is EventType.MOUSE_SCROLL and up.scroll == 1
+    assert down.type is EventType.MOUSE_SCROLL and down.scroll == -1
+
+
+def test_nc_mouse_non_left_buttons_click_on_press(nc_mouse):
+    be = CursesBackend()
+    middle = nc_mouse(be, _NC_BITS["BUTTON2_PRESSED"])
+    right = nc_mouse(be, _NC_BITS["BUTTON3_PRESSED"])
+    assert middle.type is EventType.MOUSE_CLICK and middle.button == "middle"
+    assert right.type is EventType.MOUSE_CLICK and right.button == "right"
+
+
+def test_nc_mouse_folded_click_is_atomic_click(nc_mouse):
+    # mouseinterval(0) should prevent folding, but a build that still reports
+    # BUTTON1_CLICKED gets the atomic click the event contract allows.
+    ev = nc_mouse(CursesBackend(), _NC_BITS["BUTTON1_CLICKED"])
+    assert ev.type is EventType.MOUSE_CLICK and ev.button == "left"
+
+
+def test_nc_mouse_modifiers(nc_mouse):
+    be = CursesBackend()
+    ev = nc_mouse(be, _NC_BITS["BUTTON1_PRESSED"] | _NC_BITS["BUTTON_SHIFT"])
+    assert ev.type is EventType.MOUSE_DOWN and ev.modifiers == frozenset({"shift"})
+    ev = nc_mouse(be, _NC_BITS["BUTTON4_PRESSED"] | _NC_BITS["BUTTON_CTRL"])
+    assert ev.type is EventType.MOUSE_SCROLL and ev.modifiers == frozenset({"ctrl"})
+
+
+def test_key_mouse_keycode_routes_through_getmouse(nc_mouse, monkeypatch):
+    # The event loop path: get_wch() returns the KEY_MOUSE keycode, and the
+    # backend resolves it via getmouse() into a pointer event.
+    monkeypatch.setattr(curses, "KEY_MOUSE", 0o631, raising=False)
+    be = CursesBackend()
+    monkeypatch.setattr(curses, "getmouse", lambda: (0, 4, 2, 0, _NC_BITS["BUTTON1_PRESSED"]))
+    be._stdscr = _FakeStdscr([0o631])
+    events = []
+    be.run_event_loop_iteration(events.append, timeout_ms=0)
+    assert len(events) == 1
+    assert events[0].type is EventType.MOUSE_DOWN and (events[0].x, events[0].y) == (4, 2)
+
+
+def test_set_mouse_tracking_uses_mousemask_on_pdcurses(monkeypatch):
+    # On Windows no DECSET escapes are written (there is no VT input stream to
+    # answer them); the classic mousemask channel is enabled instead, with
+    # mouseinterval(0) so press/release arrive unfolded.
+    import io
+
+    calls = []
+    monkeypatch.setattr(curses_backend, "_PDCURSES", True)
+    monkeypatch.setattr(curses, "ALL_MOUSE_EVENTS", 0x7FF, raising=False)
+    monkeypatch.setattr(curses, "REPORT_MOUSE_POSITION", 0x400, raising=False)
+    monkeypatch.setattr(curses, "mousemask", lambda m: calls.append(("mask", m)), raising=False)
+    monkeypatch.setattr(curses, "mouseinterval", lambda ms: calls.append(("interval", ms)), raising=False)
+
+    be = CursesBackend()
+    out = io.StringIO()
+    be._raw_out = out
+    be._set_mouse_tracking(True)
+    be._set_mouse_tracking(False)
+
+    assert out.getvalue() == ""  # no xterm tracking escapes on this path
+    assert ("interval", 0) in calls
+    assert ("mask", 0x7FF | 0x400) in calls
+    assert calls[-1] == ("mask", 0)
+
+
+def test_set_mouse_tracking_writes_decset_on_ncurses(monkeypatch):
+    import io
+
+    monkeypatch.setattr(curses_backend, "_PDCURSES", False)
+    be = CursesBackend()
+    out = io.StringIO()
+    be._raw_out = out
+    be._set_mouse_tracking(True)
+    assert out.getvalue() == "\x1b[?1000h\x1b[?1002h\x1b[?1006h"
