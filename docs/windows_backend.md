@@ -178,6 +178,16 @@ Because the `WM_IME_COMPOSITION` handler returns 0 instead of forwarding to
 produce for a commit — so the commit's `GCS_RESULTSTR` is read here and turned
 into the KEY event itself.
 
+**All three are per-window.** IMM32 associations are per-`HWND`, so a secondary
+window (`create_window`) needs its own: `create_window` detaches its context at
+creation and saves the handle on the `WinWindowHandle`, and the three IMM
+entry points (`begin_text_input` / `end_text_input` / `request_text_input`)
+plus `_handle_ime_message` address `_target_hwnd()` — the window the calling
+Panel is scoped to (`Panel.render` enters `_window_scope` before
+`_sync_text_input`), not `self._hwnd`. Addressing the main window instead left
+a popup's field composing into a window the user was not typing in, which is
+what made a chooser's filter box accept ASCII but never compose Japanese.
+
 See [`keyboard_contract.md`](keyboard_contract.md) §6 for the focus gating.
 
 ---

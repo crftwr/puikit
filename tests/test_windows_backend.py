@@ -1331,6 +1331,134 @@ def test_backend_close_closes_secondary_windows():
     assert hwnd not in backend._hwnd_windows
 
 
+# --- multi-window IME: per-window context association ------------------------
+#
+# IMM32 associates an input context per HWND, so everything the main window
+# does for the IME has to be done for a popup too, against the popup's own
+# HWND — otherwise a chooser's filter box types ASCII but never composes.
+
+
+def _has_ime_context(hwnd):
+    """ImmGetContext != NULL, i.e. this window currently has an input context
+    attached (text mode). NULL == detached by disable_ime (command mode)."""
+    from puikit.backends import _win32_ime
+
+    himc = _win32_ime.imm32.ImmGetContext(hwnd)
+    if himc:
+        _win32_ime.imm32.ImmReleaseContext(hwnd, himc)
+    return bool(himc)
+
+
+def test_secondary_window_starts_ime_gated_like_the_main_window():
+    backend = WindowsBackend(width=40, height=12, title="puikit-mw-ime-gate")
+    backend.open()
+    try:
+        win, _popup = _secondary(backend, 30, 5)
+        # Its own saved default context, and detached until a field asks for it
+        # — a bare `j` in a popup's list must stay a command key.
+        assert win.default_himc != 0
+        assert not _has_ime_context(win.hwnd)
+    finally:
+        backend.close()
+
+
+def test_text_input_engages_the_scoped_window_not_the_main_one():
+    backend = WindowsBackend(width=40, height=12, title="puikit-mw-ime-scope")
+    backend.open()
+    try:
+        win, _popup = _secondary(backend, 30, 5)
+        # Panel.render() enters _window_scope before _sync_text_input, so this
+        # is the state begin_text_input actually sees for a popup's field.
+        with backend._window_scope(win):
+            backend.begin_text_input()
+        assert backend._text_input_hwnd == win.hwnd
+        assert _has_ime_context(win.hwnd)
+        assert not _has_ime_context(backend._hwnd)  # main window stays gated
+
+        with backend._window_scope(win):
+            backend.end_text_input()
+        assert backend._text_input_hwnd == 0
+        assert not _has_ime_context(win.hwnd)
+    finally:
+        backend.close()
+
+
+def test_closing_a_window_mid_text_input_releases_the_flag():
+    backend = WindowsBackend(width=40, height=12, title="puikit-mw-ime-close")
+    backend.open()
+    try:
+        win, _popup = _secondary(backend, 30, 5)
+        with backend._window_scope(win):
+            backend.begin_text_input()
+        win.close()  # the popup's Panel never gets to call end_text_input
+        assert backend._text_input_active is False
+        assert backend._text_input_hwnd == 0
+    finally:
+        backend.close()
+
+
+def test_secondary_window_composition_reaches_its_own_panel():
+    """WM_IME_COMPOSITION on a popup must produce an IME_COMPOSITION event for
+    that window's Panel (inline preedit), not fall through to DefWindowProc's
+    floating composition box, and must read the composition from the popup's
+    HWND."""
+    from puikit.backends import _win32_ime
+    from puikit.event import EventType
+
+    backend = WindowsBackend(width=40, height=12, title="puikit-mw-ime-compose")
+    backend.open()
+    app_events = []
+    backend._handler = app_events.append
+    try:
+        win, _popup = _secondary(backend, 30, 5)
+        seen = []
+        win.on_event = seen.append
+        read_hwnds = []
+
+        original = _win32_ime.read_composition
+
+        def fake(hwnd, lparam):
+            read_hwnds.append(hwnd)
+            return ("あ", 1, 0, None)
+
+        _win32_ime.read_composition = fake
+        try:
+            result = backend._handle_message(
+                win.hwnd, _win32_ime.WM_IME_COMPOSITION, 0, _win32_ime.GCS_COMPSTR)
+        finally:
+            _win32_ime.read_composition = original
+
+        assert result == 0  # handled here, never forwarded to DefWindowProc
+        assert read_hwnds == [win.hwnd]
+        assert [(e.type, e.hints) for e in seen] == [
+            (EventType.IME_COMPOSITION, {"preedit": "あ", "caret": 1, "target_start": 0})]
+        assert app_events == []  # the main window's handler saw nothing
+    finally:
+        backend._handler = None
+        backend.close()
+
+
+def test_secondary_window_setcontext_suppresses_the_os_composition_box():
+    from puikit.backends import _win32_ime
+
+    backend = WindowsBackend(width=40, height=12, title="puikit-mw-ime-setctx")
+    backend.open()
+    try:
+        win, _popup = _secondary(backend, 30, 5)
+        seen = []
+        original = _win32_ime.strip_show_composition_window
+        _win32_ime.strip_show_composition_window = lambda lp: (seen.append(lp), original(lp))[1]
+        try:
+            backend._handle_message(
+                win.hwnd, _win32_ime.WM_IME_SETCONTEXT, 1,
+                _win32_ime.ISC_SHOWUICOMPOSITIONWINDOW)
+        finally:
+            _win32_ime.strip_show_composition_window = original
+        assert seen == [_win32_ime.ISC_SHOWUICOMPOSITIONWINDOW]
+    finally:
+        backend.close()
+
+
 # --- animation pacing (WM_TIMER starvation; see _ensure_animation_timer) -------
 
 

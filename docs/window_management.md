@@ -72,9 +72,11 @@ win.on_close = ...                       # user clicked close
   (secondary windows share the main window's base unit and fonts).
 - A bound Panel installs itself as `win.on_event` (dispatch + render) unless
   the app set its own handler first.
-- Per-window fidelity today: each secondary window has its own display list
-  and input routing; backgrounds/post effects/IME composition remain
-  main-window features for now.
+- Per-window fidelity today: each secondary window has its own display list,
+  input routing and — on Windows — its own IME input context (mode-gated at
+  creation, inline preedit routed to its Panel; see
+  [`windows_backend.md`](windows_backend.md) §6). Backgrounds and post effects
+  remain main-window features for now.
 - On Windows each secondary window is a real `HWND` with its own DXGI swap
   chain, but they all share the backend's one D3D11 device, Direct2D device
   context, fonts and base unit — rendering retargets that context at the
