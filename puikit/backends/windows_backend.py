@@ -411,6 +411,12 @@ class WinWindowHandle(WindowHandle):
         self._backend = backend
         self.hwnd = hwnd
         self.window_style = style
+        # This window's own IME default input context, detached at creation so
+        # the window starts in command mode like the main one; re-attached
+        # while a text widget in it has focus (see _win32_ime.py). IMM32
+        # associations are per-HWND, so a popup needs its own saved handle —
+        # the main window's is useless to it.
+        self.default_himc = 0
         # Per-window display list double buffer (the backend's _front/_back
         # route here while this window is the active one — see _window_scope).
         self.front: list[tuple] = []
@@ -831,6 +837,10 @@ class WindowsBackend(Backend):
         # context, detached in command mode and re-attached in text mode.
         self._text_input_active = False
         self._default_himc = 0
+        # Which HWND begin_text_input() last engaged, so closing a secondary
+        # window that still holds text input releases the flag (its Panel goes
+        # away with it and never gets to call end_text_input).
+        self._text_input_hwnd = 0
         # WM_CHAR delivers one UTF-16 code unit per message; a non-BMP
         # character (astral emoji, some CJK) arrives as a high surrogate then
         # a low one across two messages — this holds the high half while
@@ -1466,6 +1476,12 @@ class WindowsBackend(Backend):
 
     def _target_hwnd(self) -> int:
         return self._active_win.hwnd if self._active_win else self._hwnd
+
+    def _target_himc(self) -> int:
+        """The saved default IME context of the window `_target_hwnd` names.
+        IMM32 associates contexts per-HWND, so text input in a secondary window
+        must re-attach *that* window's context, not the main window's."""
+        return self._active_win.default_himc if self._active_win else self._default_himc
 
     @contextmanager
     def _window_scope(self, window):
@@ -2999,26 +3015,38 @@ class WindowsBackend(Backend):
 
     # --- text input / IME (see _win32_ime.py) ---------------------------------
 
+    # All three act on _target_hwnd(), not on the main window: a Panel bound to
+    # a secondary window renders inside _window_scope(that window), and these
+    # are called from that render (Panel._sync_text_input on a focus change,
+    # request_text_input from a focused field's draw). Addressing self._hwnd
+    # here would enable the IME on the main window while the user is typing in
+    # a popup's field — the popup's own context stays detached, so composition
+    # never engages there (the chooser filter box typing ASCII only).
     def begin_text_input(self) -> None:
-        """A text widget took focus: re-attach the window's IME context so
+        """A text widget took focus: re-attach that window's IME context so
         composition can engage (mirrors MacOSBackend.begin_text_input)."""
+        hwnd = self._target_hwnd()
         self._text_input_active = True
-        if self._hwnd:
-            _win32_ime.enable_ime(self._hwnd, self._default_himc)
+        self._text_input_hwnd = hwnd
+        if hwnd:
+            _win32_ime.enable_ime(hwnd, self._target_himc())
 
     def end_text_input(self) -> None:
         """Focus left the text widget: detach the IME context again (plain
         command keys must not be swallowed into composition) and cancel any
         in-progress composition so it can't leak into the next field."""
+        hwnd = self._target_hwnd()
         self._text_input_active = False
-        if self._hwnd:
-            _win32_ime.cancel_composition(self._hwnd)
-            _win32_ime.disable_ime(self._hwnd)
+        self._text_input_hwnd = 0
+        if hwnd:
+            _win32_ime.cancel_composition(hwnd)
+            _win32_ime.disable_ime(hwnd)
 
     def request_text_input(self, x: int, y: int, hints: dict[str, Any] | None = None) -> None:
         self._input_caret = (float(x), float(y))
-        if self._text_input_active and self._hwnd:
-            _win32_ime.set_composition_position(self._hwnd, int(x * self._base_w), int(y * self._base_h))
+        hwnd = self._target_hwnd()
+        if self._text_input_active and hwnd:
+            _win32_ime.set_composition_position(hwnd, int(x * self._base_w), int(y * self._base_h))
 
     # --- clipboard -----------------------------------------------------------
 
@@ -3192,6 +3220,14 @@ class WindowsBackend(Backend):
         _hwnd_backends[hwnd] = self
         self._hwnd_windows[hwnd] = handle
         self._secondary_windows.append(handle)
+        # Mode-gate the new window the way open() gates the main one: a popup
+        # opens in command mode, so a bare `j` in a chooser's list dispatches
+        # as a command instead of being swallowed into composition by a CJK
+        # input source. CreateWindowExW attaches the thread's default context,
+        # which is what comes back here; the fallback covers an IMM32-less
+        # session (ImmDisableIME), where the main window's handle is 0 too and
+        # enable_ime then no-ops.
+        handle.default_himc = _win32_ime.disable_ime(hwnd) or self._default_himc
         self._create_window_surface(handle)
 
         # CreateWindowExW's w/h include the non-client frame; correct the frame
@@ -3230,6 +3266,13 @@ class WindowsBackend(Backend):
         WinWindowHandle.close() before the HWND is destroyed."""
         self._release_window_surface(handle)
         if handle.hwnd:
+            if self._text_input_hwnd == handle.hwnd:
+                # This window's field had text input engaged; its Panel dies
+                # with it and will never call end_text_input, so release the
+                # flag here or the next request_text_input would try to
+                # position a composition on a destroyed HWND.
+                self._text_input_active = False
+                self._text_input_hwnd = 0
             _hwnd_backends.pop(handle.hwnd, None)
             self._hwnd_windows.pop(handle.hwnd, None)
         if handle in self._secondary_windows:
@@ -3346,6 +3389,9 @@ class WindowsBackend(Backend):
         if msg == native.WM_CHAR:
             self._on_char(wparam)
             return 0
+        result = self._handle_ime_message(hwnd, msg, wparam, lparam)
+        if result is not None:
+            return result
         return native.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
     def _dispatch(self, event: Event) -> None:
@@ -3422,8 +3468,38 @@ class WindowsBackend(Backend):
             # other backend — not ('!', {shift}). Ctrl/Alt survive.
             self._dispatch(char_key_event(ch, mods))
 
+    def _handle_ime_message(self, hwnd: int, msg: int, wparam: int, lparam: int) -> int | None:
+        """The WM_IME_* branch of a window procedure, shared by the main and
+        secondary paths — returns the result to send back, or None when `msg`
+        is not an IME message and the caller should carry on.
+
+        Both callers run scoped to their own window (`_handle_message` enters
+        `_window_scope` before delegating), so `hwnd` here is that window and
+        the IMM calls below address the context the user is actually typing
+        into. Without this on the secondary path a popup's composition fell to
+        DefWindowProc: the OS drew its own floating composition box and the
+        widget never saw an IME_COMPOSITION event to render preedit inline."""
+        if msg == _win32_ime.WM_IME_SETCONTEXT:
+            # Clear ISC_SHOWUICOMPOSITIONWINDOW so the OS doesn't draw its own
+            # floating composition box; the widget renders preedit inline
+            # from the IME_COMPOSITION events _on_ime_composition dispatches.
+            lparam = _win32_ime.strip_show_composition_window(lparam)
+            return native.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+        if msg == _win32_ime.WM_IME_STARTCOMPOSITION:
+            cx, cy = self._input_caret
+            _win32_ime.set_composition_position(hwnd, int(cx * self._base_w), int(cy * self._base_h))
+            return native.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+        if msg == _win32_ime.WM_IME_COMPOSITION:
+            self._on_ime_composition(lparam)
+            return 0
+        if msg == _win32_ime.WM_IME_ENDCOMPOSITION:
+            self._dispatch(Event(type=EventType.IME_COMPOSITION, hints={"preedit": "", "caret": 0}))
+            return native.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+        return None
+
     def _on_ime_composition(self, lparam: int) -> None:
-        preedit, cursor, target_start, result_text = _win32_ime.read_composition(self._hwnd, lparam)
+        preedit, cursor, target_start, result_text = _win32_ime.read_composition(
+            self._target_hwnd(), lparam)
         if preedit is not None:
             self._dispatch(
                 Event(
@@ -3628,22 +3704,9 @@ class WindowsBackend(Backend):
         if msg == native.WM_CHAR:
             self._on_char(wparam)
             return 0
-        if msg == _win32_ime.WM_IME_SETCONTEXT:
-            # Clear ISC_SHOWUICOMPOSITIONWINDOW so the OS doesn't draw its own
-            # floating composition box; the widget renders preedit inline
-            # from the IME_COMPOSITION events _on_ime_composition dispatches.
-            lparam = _win32_ime.strip_show_composition_window(lparam)
-            return native.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
-        if msg == _win32_ime.WM_IME_STARTCOMPOSITION:
-            cx, cy = self._input_caret
-            _win32_ime.set_composition_position(hwnd, int(cx * self._base_w), int(cy * self._base_h))
-            return native.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
-        if msg == _win32_ime.WM_IME_COMPOSITION:
-            self._on_ime_composition(lparam)
-            return 0
-        if msg == _win32_ime.WM_IME_ENDCOMPOSITION:
-            self._dispatch(Event(type=EventType.IME_COMPOSITION, hints={"preedit": "", "caret": 0}))
-            return native.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+        result = self._handle_ime_message(hwnd, msg, wparam, lparam)
+        if result is not None:
+            return result
         return native.user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
     # --- event loop ----------------------------------------------------------

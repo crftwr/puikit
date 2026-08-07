@@ -19,7 +19,10 @@ module was wired into ``WindowsBackend``:
   re-attaches the same context to re-enable it. The context handle returned by
   the first detach *is* the window's default context (verified: re-associating
   it round-trips ``ImmGetContext`` back to the original handle), so one saved
-  handle suffices for the window's lifetime.
+  handle suffices for the window's lifetime. The association is **per-HWND**,
+  so every window the backend owns — the main one and each ``create_window``
+  secondary — detaches and saves its own handle, and every call below takes
+  the ``hwnd`` it acts on rather than assuming the main window.
 - **Position (A2).** ``ImmSetCompositionWindow`` with ``CFS_POINT`` moves the
   (suppressed) inline composition anchor to the live caret, in pixels. That
   alone does *not* move the candidate/conversion list — IMM32 treats it as a
