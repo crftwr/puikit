@@ -51,10 +51,14 @@ from ..text import (
     wrap_text,
 )
 from ..theme import DEFAULT_THEME
-from ._input import MultiClickTracker
+from ._input import EdgeAutoScroll, MultiClickTracker
 from .base import Widget
 
 _ZWJ = "‍"  # zero-width joiner: glues emoji into one combined glyph
+
+# Keeps a position taken at the bottom of the viewport inside the last visible
+# row rather than on the boundary of the next one.
+_EDGE_INSET = 1e-3
 
 # A line as stored: its text and the style it draws in.
 LogLine = tuple[str, Style]
@@ -285,8 +289,6 @@ class LogView(Widget):
         # tell a genuinely new line from an old one scrolled back into view
         # (see DrawContext.draw_text's anim_key).
         self._dropped = 0
-        if lines is not None:
-            self.extend(lines)
 
         # Top of the viewport, in base units (== display rows when the row pitch
         # is one unit; fractional on backends that scroll by sub-unit deltas).
@@ -326,12 +328,25 @@ class LogView(Widget):
         # extends the selection while it is set, so a press that began outside
         # (on empty space or another widget) and wandered in is ignored.
         self._pressed = False
+        # Drag held past an edge: keeps scrolling the log under it so a selection
+        # can run past one screenful. Remembers the drag's horizontal position
+        # and which edge it left by, to place the selection's moving end on each
+        # scrolled row.
+        self._edge_scroll = EdgeAutoScroll(self._edge_scroll_step)
+        self._drag_x = 0.0
+        self._edge_dir = 0
         self._panel = None
         # Prefix-width measure for pointer hit-testing on rows whose style names
         # a real font; each draw replaces it with the context's font-aware one
         # (mirroring ``_selection._set_selection_rows``). The column-count
         # default keeps hit-testing sane before the first draw.
         self._measure = lambda text, style: float(display_width(text))
+
+        # Last, not beside ``self.lines``: seeding a buffer that already overruns
+        # ``max_lines`` trims on the way in, and trimming resets the selection
+        # and the wrap cache — which have to exist by then.
+        if lines is not None:
+            self.extend(lines)
 
     # --- buffer management ---------------------------------------------------
 
@@ -588,6 +603,7 @@ class LogView(Widget):
         self._sel_cursor = None
         self._sel_base = None
         self._sel_granularity = 1
+        self._edge_scroll.stop()  # nothing left to drag the selection over
         # A buffer edit shifts row indices, so a stale press position must not
         # count toward a later double-click.
         self._clicks.reset()
@@ -743,16 +759,23 @@ class LogView(Widget):
     def _handle_mouse(self, event: Event) -> bool:
         if event.type is EventType.MOUSE_UP:
             self._pressed = False  # gesture ends; a later stray drag won't extend
+            self._edge_scroll.stop()
             return False
-        pos = self._pos_at(event.x or 0, event.y or 0)
         if event.type is EventType.MOUSE_DRAG:
             # A drag only counts as part of a selection the press began here; one
             # that wandered in from an outside press leaves the selection alone.
             if not self._pressed:
                 return False
             self._clicks.note_drag()
-            self._extend_to(pos)
+            # A drag can be outside the view (the gesture is captured by it until
+            # the release), so its endpoint goes through _drag_pos; a press is by
+            # definition inside, and reads the pointer straight.
+            self._extend_to(self._drag_pos(event.x or 0, self._pointer_y(event)))
+            # Held past an edge, the drag also scrolls: without it the selection
+            # could never grow beyond the rows already on screen.
+            self._update_edge_scroll(event)
             return True
+        pos = self._pos_at(event.x or 0, event.y or 0)
         # MOUSE_DOWN: a press escalates the selection granularity by how many
         # times it repeats in place (caret -> word -> line), then wraps back.
         self._pressed = True
@@ -771,6 +794,67 @@ class LogView(Widget):
             self._sel_base = None
             self._sel_anchor = pos  # a plain press starts a fresh selection here
             self._sel_cursor = pos
+        return True
+
+    # --- drag past the edge --------------------------------------------------
+
+    def _pointer_y(self, event: Event) -> float:
+        """The drag's true vertical position in this view's coordinates. The
+        Panel pins a gesture dragged out of the window onto the nearest edge and
+        hands back what it clamped away, so how far outside the pointer is
+        survives the routing (see ``Event.hints``)."""
+        y = event.hints.get("pointer_y")
+        return float(y if y is not None else (event.y or 0.0))
+
+    def _drag_pos(self, x: float, y: float) -> Pos:
+        """Where a drag endpoint lands, with the pointer first pulled back into
+        the visible band: a drag past the edge selects *to* the edge row and lets
+        the auto-scroll bring further rows into view, rather than silently
+        selecting ahead of what the user can see.
+
+        Past an edge the row's *whole* text comes along — the end of the bottom
+        row, the start of the top one — because a pointer below a row is past it
+        in reading order, whatever column it sits over. That is what makes
+        dragging down out of the view take whole lines, as it does in an editor
+        or a browser."""
+        top = self._pad_y
+        bottom = top + self._view_h
+        if top <= y <= bottom:
+            return self._pos_at(x, y)
+        if self._total_rows == 0:
+            return (0, 0)
+        if y < top:
+            return (self._pos_at(x, top)[0], 0)
+        row = self._pos_at(x, max(top, bottom - _EDGE_INSET))[0]
+        return (row, len(glyph_runs(self._row_at(row)[0])))
+
+    def _update_edge_scroll(self, event: Event) -> None:
+        """Arm, re-aim or stop the auto-scroll from where this drag now sits."""
+        y = self._pointer_y(event)
+        top, bottom = self._pad_y, self._pad_y + self._view_h
+        if y < top:
+            direction, overshoot = -1, top - y
+        elif y > bottom:
+            direction, overshoot = 1, y - bottom
+        else:
+            direction, overshoot = 0, 0.0
+        self._drag_x = event.x or 0.0
+        self._edge_dir = direction
+        self._edge_scroll.update(self._panel, direction, overshoot)
+
+    def _edge_scroll_step(self, rows: float) -> bool:
+        """One auto-scroll step of ``rows`` display rows (fractional, signed),
+        taking the selection's moving end with it so the newly revealed rows join
+        the selection. False once the buffer is against that end and the view no
+        longer moves, which retires the timer."""
+        before = self.offset
+        self.scroll_by(rows * self._pitch)
+        if self.offset == before:
+            return False
+        # One unit outside on the side the drag left by, so the endpoint lands on
+        # the whole edge row the same way the drag events themselves do.
+        edge_y = self._pad_y - 1.0 if self._edge_dir < 0 else self._pad_y + self._view_h + 1.0
+        self._extend_to(self._drag_pos(self._drag_x, edge_y))
         return True
 
     def _extend_to(self, pos: Pos) -> None:

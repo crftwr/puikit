@@ -2,12 +2,25 @@
 
 import pytest
 
-from puikit import Event, EventType, Font, Panel, PROFILE_GUI_DESKTOP, PROFILE_TUI, Style
+from puikit import (
+    CapabilityProfile,
+    Event,
+    EventType,
+    Font,
+    Panel,
+    PROFILE_GUI_DESKTOP,
+    PROFILE_TUI,
+    Style,
+)
 from puikit.backend import DEFAULT_STYLE
 from puikit.backends.memory_backend import MemoryBackend
 from puikit.text import display_width, wrap_text
-from puikit.widgets import LogView
+from puikit.widgets import LogView, _input
 from puikit.widgets.log_view import wrap_columns
+
+# Neither composited animation nor timed ticks: the "still" backend an edge
+# auto-scroll has to degrade on.
+PROFILE_STILL = CapabilityProfile({**PROFILE_TUI, "animation_ticks": False})
 
 
 @pytest.mark.parametrize(
@@ -383,3 +396,147 @@ def test_logview_padding_maps_clicks_through_the_inset(backend):
     assert log._pos_at(2, 2)[0] == 1
     # Column undo: screen col 1 is the row's first glyph (col 0) after the pad.
     assert log._pos_at(1, 1) == (0, 0)
+
+
+# --- drag past the edge auto-scrolls -----------------------------------------
+#
+# A selection drag held outside the view keeps scrolling it, so a selection can
+# run past the one screenful the pointer can reach. The scroll is time-based
+# (one rate on a 60fps GUI tick and a terminal's slower one), so these tests
+# drive a fake clock rather than real elapsed time.
+
+
+class _Clock:
+    """A monotonic clock the test advances by hand."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    c = _Clock()
+    monkeypatch.setattr(_input.time, "monotonic", c)
+    return c
+
+
+def _edge_drag_view(backend, lines=60, **kwargs):
+    panel = Panel(backend)
+    log = LogView([f"line{i}" for i in range(lines)], auto_scroll=False, **kwargs)
+    panel.add(log, x=0, y=0, w=20, h=5)
+    panel.render()
+    return panel, log
+
+
+def test_logview_drag_below_the_view_scrolls_and_extends(backend, clock):
+    panel, log = _edge_drag_view(backend)
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=0, y=0, button="left"))
+    # Drag well below the pane: the Panel clamps the coordinate onto the bottom
+    # edge, so the selection alone would stop at the last visible row.
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=6, y=40, button="left"))
+    assert log._sel_cursor[0] == 4  # the last row on screen, for now
+    for _ in range(10):
+        clock.advance(1 / 60)
+        backend.run_animation_ticks()
+    # A sixth of a second past the edge has brought further rows into view, and
+    # the selection grew with them rather than stopping at the old bottom row.
+    assert log.offset > 0
+    assert log._sel_cursor[0] > 4
+    assert log.selection_text().startswith("line0\nline1")
+    assert log.selection_text().splitlines()[-1].startswith("line")
+
+
+def test_logview_drag_above_the_view_scrolls_back_up(backend, clock):
+    panel, log = _edge_drag_view(backend)
+    log.scroll_by(30.0)  # start part-way down the buffer
+    panel.render()
+    start = log.offset
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=0, y=4, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=0, y=-8, button="left"))
+    for _ in range(10):
+        clock.advance(1 / 60)
+        backend.run_animation_ticks()
+    assert log.offset < start
+    assert log.selection_text() != ""
+
+
+def test_logview_edge_scroll_speed_ramps_with_distance(backend, clock):
+    # Further past the edge scrolls faster: the same elapsed time covers more
+    # rows. Without the ramp, selecting through a long log means waiting at one
+    # fixed rate no matter how far out the pointer is pulled.
+    def travelled(y):
+        _panel, log = _edge_drag_view(backend)
+        _panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=0, y=0, button="left"))
+        _panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=0, y=y, button="left"))
+        clock.advance(0.25)
+        backend.run_animation_ticks()
+        return log.offset
+
+    assert travelled(20) > travelled(6) > 0
+
+
+def test_logview_edge_scroll_stops_at_the_end_of_the_buffer(backend, clock):
+    panel, log = _edge_drag_view(backend, lines=8)
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=0, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=0, y=40, button="left"))
+    for _ in range(50):
+        clock.advance(1 / 60)
+        backend.run_animation_ticks()
+    # Hard against the bottom: the whole buffer is selected and the timer has
+    # retired itself rather than re-rendering every frame for nothing.
+    assert log.offset == pytest.approx(log._content_h - log._view_h)
+    assert log.selection_text().endswith("line7")
+    assert backend.tick_callbacks == []
+
+
+def test_logview_drag_inside_the_view_does_not_scroll(backend, clock):
+    panel, log = _edge_drag_view(backend)
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=0, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=4, y=3, button="left"))
+    for _ in range(10):
+        clock.advance(1 / 60)
+        backend.run_animation_ticks()
+    assert log.offset == 0.0
+    # Inside, the pointer's column still decides the endpoint (x=4 is 4 glyphs
+    # into row 3) — the whole-row rule applies only past an edge.
+    assert log.selection_text() == "line0\nline1\nline2\nline"
+
+
+def test_logview_release_stops_the_edge_scroll(backend, clock):
+    panel, log = _edge_drag_view(backend)
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=0, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=0, y=40, button="left"))
+    clock.advance(1 / 60)
+    backend.run_animation_ticks()
+    panel.dispatch_event(Event(type=EventType.MOUSE_UP, x=0, y=40, button="left"))
+    settled = (log.offset, log._sel_cursor)
+    for _ in range(10):
+        clock.advance(1 / 60)
+        backend.run_animation_ticks()
+    assert (log.offset, log._sel_cursor) == settled
+    assert backend.tick_callbacks == []
+
+
+def test_logview_edge_scroll_steps_per_event_without_a_timer(clock):
+    # A backend with no animation ticks at all still scrolls — one step per drag
+    # event, so a moving drag works and only a held-still one stalls.
+    still = MemoryBackend(width=20, height=5, capabilities=PROFILE_STILL)
+    panel, log = _edge_drag_view(still)
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=0, y=0, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=0, y=40, button="left"))
+    assert log.offset > 0
+    assert still.tick_callbacks == []
+
+
+def test_logview_seeded_over_max_lines_trims_on_construction():
+    # Trimming resets the selection and the wrap cache, so a buffer seeded past
+    # its own cap has to find that state already built.
+    log = LogView([f"line{i}" for i in range(500)], max_lines=100)
+    assert len(log.lines) == 100
+    assert log.lines[-1] == ("line499", log.style)

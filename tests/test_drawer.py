@@ -276,3 +276,28 @@ def test_tui_drawer_has_flat_fill_and_no_shadow():
     panel.render()
     assert backend.round_rect_calls == []
     assert backend.shadow_calls == []
+
+
+def test_drag_out_of_the_content_keeps_reaching_it(backend):
+    # A gesture that began inside the drawer belongs to the content for its whole
+    # life: the drag keeps arriving (a text selection would otherwise stall the
+    # moment the pointer crossed onto the scrim), and the release out there is a
+    # cancelled click — not a scrim tap that dismisses the drawer.
+    seen = []
+
+    class Spy(Label):
+        def handle_event(self, event):
+            seen.append(event.type.name)
+            return True
+
+    panel = Panel(backend)
+    show_drawer(panel, Spy("x"), side="left", size=20)
+    panel.render()
+    _settle_animations(panel)
+    rect = panel._layers[0].rect
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=rect.x + 2, y=rect.y + 2, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=50, y=10, button="left"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_UP, x=50, y=10, button="left"))
+    _settle_animations(panel)
+    assert seen[:2] == ["MOUSE_DOWN", "MOUSE_DRAG"]
+    assert len(panel._layers) == 1

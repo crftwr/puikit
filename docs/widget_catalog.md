@@ -33,8 +33,8 @@ One implementation each, running unchanged on every backend.
 | `BusyIndicator` | `busy_indicator.py` | Indeterminate activity spinner (`animation` fallback) |
 | `Splitter` | `splitter.py` | Two panes with a draggable divider (drag to resize) |
 | `ListView` | `list.py` | Scrollable selectable rows; text by default (over-long rows clip, or elide with `ellipsis`/`elide_where`), or a widget per row via `row_factory` |
-| `LogView` | `log_view.py` | Virtualized append-only stream; per-line color, wrap, drag-select + copy, tail-follow |
-| `MarkdownView` | `markdown_view.py` | Scrolling read-only Markdown viewer; proportional prose + monospace/sized headings, clickable links, images; opt-in `selectable` (drag-select + copy as plain **and** rich HTML) |
+| `LogView` | `log_view.py` | Virtualized append-only stream; per-line color, wrap, drag-select + copy (a drag held past an edge keeps scrolling, so a selection runs past one screenful), tail-follow |
+| `MarkdownView` | `markdown_view.py` | Scrolling read-only Markdown viewer; proportional prose + monospace/sized headings, clickable links, images; opt-in `selectable` (drag-select + copy as plain **and** rich HTML; a drag held past an edge keeps scrolling) |
 | `TreeView` / `TreeNode` | `tree.py` | Expandable hierarchical rows with indentation |
 | `Tabs` | `tabs.py` | Title strip swapping a content pane |
 | `MenuBar` / `MenuPopup` | `menu.py` | Widget-rendered menu fallback (non-`native_menus` backends) |

@@ -16,6 +16,7 @@ from ..event import Event, EventType
 from ..focus import FocusContainer, focus_on_click
 from ..layout import SizeRequest
 from ..panel import DrawContext, Rect
+from ._input import MouseCapture
 from .base import Widget
 
 
@@ -36,6 +37,9 @@ class LayoutView(FocusContainer, Widget):
         # Resolved (widget, rect) pairs from the last draw, for event routing.
         self._placements: list[tuple[Any, Rect]] = []
         self._focused: Any | None = None
+        # The child a press went to: the rest of that gesture keeps reaching it
+        # even once the pointer has left it (see MouseCapture).
+        self._capture: MouseCapture[Any] = MouseCapture()
 
     def set_layout(self, layout: Any) -> None:
         """Replace the hosted layout (e.g. switching pages) and re-pick focus
@@ -43,6 +47,7 @@ class LayoutView(FocusContainer, Widget):
         self.layout = layout
         self._placements = []
         self._focused = None
+        self._capture.release()
 
     def focus_children(self) -> list[Any]:
         # Resolved from the last draw; the hosted layout's focusable widgets in
@@ -101,13 +106,33 @@ class LayoutView(FocusContainer, Widget):
             EventType.MOUSE_CLICK, EventType.MOUSE_DRAG, EventType.MOUSE_SCROLL,
             EventType.FILE_DROP,
         ):
+            # The drag and release belong to the child the press began in, not to
+            # whatever the pointer has since crossed — the same capture rule the
+            # Panel applies to its own slots.
+            captured = self._capture.target(event)
+            if captured is not None:
+                for widget, rect in self._placements:
+                    if widget is captured:
+                        return self._deliver_captured(widget, rect, event)
             for widget, rect in reversed(self._placements):
                 if event.x is not None and rect.contains(event.x, event.y):
                     if event.type is EventType.MOUSE_DOWN:
                         focus_on_click(self, widget)
+                        self._capture.press(widget)
                     local = event.translated(-rect.x, -rect.y)
                     return bool(widget.handle_event(local))
+            if event.type is EventType.MOUSE_DOWN:
+                self._capture.press(None)  # pressed on a margin / divider
             return False
         if self._focused is not None:
             return bool(self._focused.handle_event(event))
         return False
+
+    def _deliver_captured(self, widget: Any, rect: Rect, event: Event) -> bool:
+        if event.type is EventType.MOUSE_CLICK and not (
+            event.x is not None and rect.contains(event.x, event.y)
+        ):
+            # Released away from the child the press began in: a cancelled click,
+            # not a click on whatever the pointer now happens to cover.
+            return False
+        return bool(widget.handle_event(event.translated(-rect.x, -rect.y)))

@@ -2732,5 +2732,11 @@ class Panel:
             x = min(max(local.x, 0.0), max(0.0, slot.rect.w - _EDGE_EPS))
             y = min(max(local.y, 0.0), max(0.0, slot.rect.h - _EDGE_EPS))
             if (x, y) != (local.x, local.y):
-                local = replace(local, x=x, y=y)
+                # Keep the pre-clamp position alongside it: a widget that acts on
+                # *how far outside* itself the pointer is (a selection drag past
+                # the edge, which scrolls faster the further out it goes) cannot
+                # recover that from a coordinate pinned to its own edge. Everyone
+                # else keeps reading the in-bounds x/y and never looks.
+                hints = {**local.hints, "pointer_x": local.x, "pointer_y": local.y}
+                local = replace(local, x=x, y=y, hints=hints)
         return bool(slot.widget.handle_event(local))
