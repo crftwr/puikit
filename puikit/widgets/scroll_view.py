@@ -25,6 +25,7 @@ from ..backend import DEFAULT_STYLE, Style
 from ..event import Event, EventType
 from ..focus import FocusContainer, focus_on_click
 from ..panel import DrawContext
+from ._input import MouseCapture
 from .base import Widget
 
 
@@ -54,6 +55,10 @@ class ScrollView(FocusContainer, Widget):
         self._focused: Any | None = next(
             (w for w, _ in self._items if getattr(w, "focusable", False)), None
         )
+        # The child a press went to: the rest of that gesture keeps reaching it
+        # even after the pointer (or the scrolling content) has moved it out from
+        # under the pointer (see MouseCapture).
+        self._capture: MouseCapture[Any] = MouseCapture()
 
     # --- focus ----------------------------------------------------------------
 
@@ -162,14 +167,31 @@ class ScrollView(FocusContainer, Widget):
         if event.x is None:
             return False
         content_y = event.y + self.offset
-        for widget, top, h in self._entries()[0]:
+        entries = self._entries()[0]
+        # The drag and release belong to the child the press began in, not to
+        # whatever the pointer has since crossed.
+        captured = self._capture.target(event)
+        if captured is not None:
+            for widget, top, h in entries:
+                if widget is captured:
+                    if event.type is EventType.MOUSE_CLICK and not (
+                        top <= content_y < top + h
+                    ):
+                        # Released away from the child the press began in: a
+                        # cancelled click, not a click on its neighbor.
+                        return False
+                    return bool(widget.handle_event(event.translated(0, self.offset - top)))
+        for widget, top, h in entries:
             if top <= content_y < top + h:
                 # Focus descends on the press so a click focuses the child
                 # immediately, not on release.
                 if event.type is EventType.MOUSE_DOWN:
                     focus_on_click(self, widget)
+                    self._capture.press(widget)
                 local = event.translated(0, self.offset - top)
                 return bool(widget.handle_event(local))
+        if event.type is EventType.MOUSE_DOWN:
+            self._capture.press(None)  # pressed on a gap between children
         return False
 
     def _handle_key(self, event: Event) -> bool:

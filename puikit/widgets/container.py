@@ -15,6 +15,7 @@ from typing import Any
 from ..event import Event, EventType
 from ..focus import FocusContainer, focus_on_click
 from ..panel import DrawContext, Rect
+from ._input import MouseCapture
 from .base import Widget
 
 
@@ -34,6 +35,9 @@ class Container(FocusContainer, Widget):
         # Container extent (base units) from the last draw; lets stretched slots
         # be hit-tested at the size they were actually drawn.
         self._size: tuple[float, float] = (0.0, 0.0)
+        # The slot a press went to: the rest of that gesture keeps reaching it
+        # even once the pointer has left it (see MouseCapture).
+        self._capture: MouseCapture[_ChildSlot] = MouseCapture()
 
     # --- tree management -------------------------------------------------------
 
@@ -53,10 +57,12 @@ class Container(FocusContainer, Widget):
         self._children = [s for s in self._children if s.widget is not widget]
         if self._focused is widget:
             self._focused = None
+        self._capture.release()
 
     def clear(self) -> None:
         self._children.clear()
         self._focused = None
+        self._capture.release()
 
     def focus(self, widget: Any) -> None:
         self._focused = widget
@@ -88,6 +94,12 @@ class Container(FocusContainer, Widget):
             EventType.MOUSE_DOWN, EventType.MOUSE_UP,
             EventType.MOUSE_CLICK, EventType.MOUSE_DRAG, EventType.MOUSE_SCROLL
         ):
+            # The drag and release belong to the child the press began in, not to
+            # whatever the pointer has since crossed — the same capture rule the
+            # Panel applies to its own slots.
+            captured = self._capture.target(event)
+            if captured is not None and any(s is captured for s in self._children):
+                return self._deliver_captured(captured, event)
             for slot in reversed(self._children):
                 rect = self._slot_rect(slot)
                 if event.x is not None and rect.contains(event.x, event.y):
@@ -95,11 +107,24 @@ class Container(FocusContainer, Widget):
                     # the child immediately, not on release.
                     if event.type is EventType.MOUSE_DOWN:
                         focus_on_click(self, slot.widget)
+                        self._capture.press(slot)
                     local = event.translated(-rect.x, -rect.y)
                     return bool(slot.widget.handle_event(local))
+            if event.type is EventType.MOUSE_DOWN:
+                self._capture.press(None)  # pressed on bare container space
             return False
         if self._focused is not None:
             for slot in self._children:
                 if slot.widget is self._focused:
                     return bool(slot.widget.handle_event(event))
         return False
+
+    def _deliver_captured(self, slot: _ChildSlot, event: Event) -> bool:
+        rect = self._slot_rect(slot)
+        if event.type is EventType.MOUSE_CLICK and not (
+            event.x is not None and rect.contains(event.x, event.y)
+        ):
+            # Released away from the child the press began in: a cancelled click,
+            # not a click on whatever the pointer now happens to cover.
+            return False
+        return bool(slot.widget.handle_event(event.translated(-rect.x, -rect.y)))

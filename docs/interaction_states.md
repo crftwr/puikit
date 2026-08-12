@@ -238,6 +238,25 @@ Three Panel-layer additions, the first two **implemented**, the third partial:
    at sub-unit precision. Read only by **action controls** (§2). Backends with
    no down/up may still emit an atomic `MOUSE_CLICK`.
 
+   **Capture holds all the way down the tree.** A container (`Container`,
+   `LayoutView`, `Splitter`, `ScrollView`, `Drawer`) hit-tests the *press* only; the drag,
+   release and synthesized click go to the child that took it, via
+   `widgets._input.MouseCapture` — the Panel's `_press_slot` rule one level
+   down. Without it a gesture silently changed owner mid-drag: a text selection
+   dragged out of a pane became the neighbor's event, so the widget the user was
+   actually dragging in stopped hearing its own gesture, and a sweep across a
+   `Splitter`'s grab margin hijacked the selection into moving the divider. A
+   release *off* the pressed child delivers no click at all — the gesture was
+   cancelled, and the sibling under the pointer was never pressed.
+
+   The child then sees coordinates outside its own rect (negative, or past its
+   height), which is what a widget needs in order to tell how far out the drag
+   has gone. Only the window boundary still clamps, and what it clamps away
+   comes along in `event.hints["pointer_x"]` / `["pointer_y"]` — the unclamped
+   pointer in that widget's own frame, translated on the way down. It is absent
+   when nothing was clamped, so `hints.get("pointer_y", event.y)` is the whole
+   contract.
+
 2. **`Panel.draw_caret` intent + blink** ✅ — a capability-resolved caret
    (vector: thin blinking I-beam in the foreground color; grid: reverse block),
    driven by `DrawContext.caret_visible` + `request_animation_ticks`, so the

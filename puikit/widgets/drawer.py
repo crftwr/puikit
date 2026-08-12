@@ -29,6 +29,7 @@ from ..event import Event, EventType
 from ..focus import FocusContainer, focus_on_click, move_focus
 from ..panel import DrawContext, Rect
 from ..theme import DEFAULT_THEME
+from ._input import MouseCapture
 from .base import Widget
 
 _BOLD = Style(attr=TextAttribute.BOLD)
@@ -104,6 +105,9 @@ class Drawer(FocusContainer, Widget):
         # time so event handling can tell a content click from a scrim click.
         self._size: tuple[float, float] = (0.0, 0.0)
         self._content_rect = Rect(0.0, 0.0, 0.0, 0.0)
+        # Set when a press lands in the content, so the rest of that gesture
+        # keeps reaching it after the pointer crosses onto the scrim.
+        self._capture: MouseCapture[Any] = MouseCapture()
         self._focused: Any | None = (
             content if getattr(content, "focusable", False) else None
         )
@@ -235,12 +239,21 @@ class Drawer(FocusContainer, Widget):
             EventType.MOUSE_CLICK, EventType.MOUSE_DRAG, EventType.MOUSE_SCROLL
         ):
             inside = event.x is not None and self._content_rect.contains(event.x, event.y)
-            if inside:
+            if event.type is EventType.MOUSE_DOWN:
+                # Remember whether the gesture began in the content, so its drag
+                # and release keep reaching the content even once the pointer has
+                # left it — a selection dragged toward the scrim must not stall,
+                # nor read as a dismissing tap on the scrim.
+                self._capture.press(self.content if inside else None)
+            captured = self._capture.target(event) is not None
+            if inside or (captured and event.type is not EventType.MOUSE_CLICK):
                 if event.type is EventType.MOUSE_DOWN:
                     focus_on_click(self, self.content)
                 local = event.translated(-self._content_rect.x, -self._content_rect.y)
                 self.content.handle_event(local)
                 return True
+            if captured:
+                return True  # released off the content: a cancelled click
             # A click on the dimmed scrim (outside the drawer rect, delivered to
             # us because we are the top layer) dismisses a modal drawer.
             if (

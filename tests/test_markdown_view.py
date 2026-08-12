@@ -6,7 +6,7 @@ import pytest
 
 from puikit import CapabilityProfile, Event, EventType, Panel, PROFILE_GUI_DESKTOP, PROFILE_TUI, Style, TextAttribute
 from puikit.backends.memory_backend import MemoryBackend
-from puikit.widgets import MarkdownView
+from puikit.widgets import MarkdownView, _input
 from puikit.widgets.markdown_view import (
     DEFAULT_CODE_FONT,
     DEFAULT_HEADING_SCALES,
@@ -1338,3 +1338,58 @@ def test_hit_test_on_indented_row(backend):
     _r, _c, _l, col = view._pos_at(row.x0 + 6.0, y)   # 6 glyphs in from content start
     assert glyphs[col] == "w"                  # "hello_" is 6 chars
     assert view._pos_at(0.0, y) == (0, 0, 0, 0)  # left of the pad -> row start
+
+
+# --- drag past the edge auto-scrolls ------------------------------------------
+
+
+class _Clock:
+    """A monotonic clock the test advances by hand, so the time-based
+    auto-scroll rate is deterministic."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    c = _Clock()
+    monkeypatch.setattr(_input.time, "monotonic", c)
+    return c
+
+
+def test_selection_drag_below_the_view_scrolls_and_extends(backend, clock):
+    doc = "\n\n".join(f"paragraph {i} text" for i in range(40))
+    panel, view = _mk(backend, source=doc, h=6)
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=0.0, y=0.0))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=2.0, y=40.0))
+    on_screen = view.selection_text()
+    for _ in range(10):
+        clock.advance(1 / 60)
+        backend.run_animation_ticks()
+    assert view.offset > 0
+    # Rows the pointer could never reach have joined the selection.
+    assert len(view.selection_text()) > len(on_screen)
+    assert view.selection_text().startswith("paragraph 0")
+
+
+def test_selection_drag_release_stops_the_edge_scroll(backend, clock):
+    doc = "\n\n".join(f"paragraph {i} text" for i in range(40))
+    panel, view = _mk(backend, source=doc, h=6)
+    panel.dispatch_event(Event(type=EventType.MOUSE_DOWN, x=0.0, y=0.0))
+    panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=2.0, y=40.0))
+    clock.advance(1 / 60)
+    backend.run_animation_ticks()
+    panel.dispatch_event(Event(type=EventType.MOUSE_UP, x=2.0, y=40.0))
+    settled = (view.offset, view.selection_text())
+    for _ in range(10):
+        clock.advance(1 / 60)
+        backend.run_animation_ticks()
+    assert (view.offset, view.selection_text()) == settled
+    assert backend.tick_callbacks == []

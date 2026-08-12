@@ -26,6 +26,7 @@ from ..event import Event, EventType
 from ..focus import FocusContainer, focus_on_click
 from ..panel import DrawContext, Rect
 from ..theme import DEFAULT_THEME
+from ._input import MouseCapture
 from .base import Widget
 from .dragbar import DragBar
 
@@ -98,6 +99,11 @@ class Splitter(FocusContainer, Widget):
         # ``grab_*`` band doesn't snap the boundary under the pointer), hover dwell,
         # and the neutral band brighten. See ``DragBar``.
         self._drag = DragBar()
+        # Which pane a press went to: the rest of that gesture keeps reaching it
+        # even once the pointer has crossed into the other pane or left the
+        # splitter entirely (see MouseCapture). Stores "first"/"second" rather
+        # than a rect, since the panes move as the fraction changes.
+        self._capture: MouseCapture[str] = MouseCapture()
 
     @staticmethod
     def _is_focusable(child: Any) -> bool:
@@ -279,7 +285,13 @@ class Splitter(FocusContainer, Widget):
     def _handle_mouse(self, event: Event) -> bool:
         x, y = event.x, event.y
         on_handle = self._near_handle(x, y)
-        if event.type is EventType.MOUSE_DRAG and (self._drag.dragging or on_handle):
+        # A drag grabs the handle only if it began on it: once a gesture is
+        # captured by a pane (a text selection under way), sweeping across the
+        # grab margin must not hijack it into moving the divider.
+        if event.type is EventType.MOUSE_DRAG and (
+            self._drag.dragging
+            or (on_handle and self._capture.target(event) is None)
+        ):
             if not self._drag.dragging:
                 self._begin_drag(x, y)
             self._drag_to(x, y)
@@ -292,14 +304,34 @@ class Splitter(FocusContainer, Widget):
             self._drag.end()  # a press elsewhere ends any drag
         if event.type is EventType.MOUSE_UP:
             self._drag.end()
-        for child, rect in (
-            (self.first, self._first_rect), (self.second, self._second_rect)
+        # A drag or release continues the gesture in the pane it began in — a
+        # selection dragged out of the log into the pane above it must keep
+        # reaching the log, not start acting on its neighbor.
+        captured = self._capture.target(event)
+        if captured is not None:
+            child, rect = (
+                (self.first, self._first_rect) if captured == "first"
+                else (self.second, self._second_rect)
+            )
+            if event.type is EventType.MOUSE_CLICK and not (
+                x is not None and rect.contains(x, y)
+            ):
+                # Released away from the pane the press began in: a cancelled
+                # click, not a click on the other pane.
+                return False
+            return bool(child.handle_event(event.translated(-rect.x, -rect.y)))
+        for name, child, rect in (
+            ("first", self.first, self._first_rect),
+            ("second", self.second, self._second_rect),
         ):
             if x is not None and rect.contains(x, y):
                 if event.type is EventType.MOUSE_DOWN:
                     focus_on_click(self, child)
+                    self._capture.press(name)
                 local = event.translated(-rect.x, -rect.y)
                 return bool(child.handle_event(local))
+        if event.type is EventType.MOUSE_DOWN:
+            self._capture.press(None)  # pressed on the handle / grab margin
         return False
 
     def _near_handle(self, x: float | None, y: float | None) -> bool:

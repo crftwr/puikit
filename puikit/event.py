@@ -54,6 +54,12 @@ class Event:
     # units, for pixel-granular smooth scrolling.
     scroll: int = 0
     modifiers: frozenset[str] = frozenset()
+    # Mouse events whose x/y the Panel pulled back onto the widget's edge (a
+    # gesture dragged out of the window) also carry the *unclamped* pointer
+    # position here, as ``pointer_x`` / ``pointer_y`` in the same coordinates as
+    # x/y. Absent means x/y already is the pointer. A widget that reacts to how
+    # far outside itself a drag has gone (edge auto-scroll) reads it; everything
+    # else ignores it and sees the clamped, in-bounds coordinate as before.
     hints: dict[str, Any] = field(default_factory=dict)
 
     def translated(self, dx: float, dy: float) -> "Event":
@@ -67,6 +73,17 @@ class Event:
         floor the value themselves where they need it."""
         if self.x is None or self.y is None:
             return self
+        hints = self.hints
+        if "pointer_x" in hints or "pointer_y" in hints:
+            # The unclamped pointer is in the same frame as x/y, so it has to
+            # travel with them — otherwise it reads as this widget's coordinate
+            # while still measured from an ancestor's origin. Copied, never
+            # mutated: one hints dict is shared by every translation of an event.
+            hints = {**hints}
+            if "pointer_x" in hints:
+                hints["pointer_x"] += dx
+            if "pointer_y" in hints:
+                hints["pointer_y"] += dy
         return Event(
             type=self.type,
             key=self.key,
@@ -76,7 +93,7 @@ class Event:
             button=self.button,
             scroll=self.scroll,
             modifiers=self.modifiers,
-            hints=self.hints,
+            hints=hints,
         )
 
 

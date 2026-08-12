@@ -69,7 +69,7 @@ from ..image import aspect_extent
 from ..panel import DrawContext
 from ..text import glyph_runs, word_bounds
 from ..theme import DEFAULT_THEME, Theme, lift
-from ._input import MultiClickTracker
+from ._input import EdgeAutoScroll, MultiClickTracker
 from .base import Widget
 
 # Syntax highlighting is optional: if Pygments is installed a fenced code block
@@ -88,6 +88,10 @@ except Exception:  # pragma: no cover
 # document still reads correctly there (see docs/font_system.md §6).
 DEFAULT_TEXT_FONT = Font()
 DEFAULT_CODE_FONT = Font(monospace=True)
+
+# Keeps a position taken at the bottom of the viewport inside the last visible
+# row rather than on the boundary of the next one.
+_EDGE_INSET = 1e-3
 
 # Heading sizes per level, as MULTIPLES of the body font size (## smaller than
 # #, down to 1.0 = body size at level 6). Kept relative, not absolute points, so
@@ -1047,6 +1051,12 @@ class MarkdownView(Widget):
         self._sel_clicks: MultiClickTracker[tuple[int, int, int, int]] = MultiClickTracker()
         self._sel_pressed = False   # set between a press in this widget and release
         self._sel_dragged = False   # a drag happened, so the trailing click won't open a link
+        # Drag held past the top/bottom edge: keeps scrolling the document under
+        # it, so a selection can run past one screenful. ``_sel_drag_x`` /
+        # ``_sel_edge_dir`` place the selection's moving end on each scrolled row.
+        self._sel_edge_scroll = EdgeAutoScroll(self._sel_edge_step)
+        self._sel_drag_x = 0.0
+        self._sel_edge_dir = 0
         # Text measurement from the last draw (style-aware), used to hit-test a
         # pointer to a glyph and to place the selection highlight. The column-count
         # default keeps it sane before the first draw.
@@ -1966,15 +1976,24 @@ class MarkdownView(Widget):
         guarded by ``_sel_dragged`` in ``_handle_click``."""
         if event.type is EventType.MOUSE_UP:
             self._sel_pressed = False
+            self._sel_edge_scroll.stop()
             return True
-        pos = self._pos_at(event.x or 0.0, event.y or 0.0)
         if event.type is EventType.MOUSE_DRAG:
             if not self._sel_pressed:
                 return False
             self._sel_clicks.note_drag()
             self._sel_dragged = True
-            self._sel_extend_to(pos)
+            # A drag can be outside the widget (the gesture is captured by it
+            # until the release), so its endpoint goes through _sel_drag_pos; a
+            # press is by definition inside, and reads the pointer straight.
+            self._sel_extend_to(
+                self._sel_drag_pos(event.x or 0.0, self._sel_pointer_y(event))
+            )
+            # Held past an edge, the drag also scrolls: without it the selection
+            # could never grow beyond the rows already on screen.
+            self._sel_update_edge_scroll(event)
             return True
+        pos = self._pos_at(event.x or 0.0, event.y or 0.0)
         # MOUSE_DOWN
         self._sel_pressed = True
         self._sel_dragged = False
@@ -1993,6 +2012,62 @@ class MarkdownView(Widget):
             self._sel_base = None
             self._sel_anchor = pos  # a plain press starts a fresh selection here
             self._sel_cursor = pos
+        return True
+
+    # --- drag past the edge ---------------------------------------------------
+
+    def _sel_pointer_y(self, event: Event) -> float:
+        """The drag's true vertical position in this widget's coordinates. The
+        Panel pins a gesture dragged out of the window onto the nearest edge and
+        hands back what it clamped away, so how far outside the pointer is
+        survives the routing (see ``Event.hints``)."""
+        y = event.hints.get("pointer_y")
+        return float(y if y is not None else (event.y or 0.0))
+
+    def _sel_drag_pos(self, x: float, y: float) -> tuple[int, int, int, int]:
+        """Where a drag endpoint lands, with the pointer first pulled back into
+        the viewport: a drag past the edge selects *to* the edge row and lets the
+        auto-scroll bring further rows into view, rather than silently selecting
+        ahead of what the user can see.
+
+        Past an edge the row's *whole* text comes along — the end of the bottom
+        row, the start of the top one — because a pointer below a row is past it
+        in reading order, whatever column it sits over."""
+        if 0.0 <= y <= self._view_h:
+            return self._pos_at(x, y)
+        if not self._rows:
+            return (0, 0, 0, 0)
+        if y < 0.0:
+            return (self._pos_at(x, 0.0)[0], 0, 0, 0)
+        row = self._pos_at(x, max(0.0, self._view_h - _EDGE_INSET))[0]
+        return (row,) + self._row_end_sub(row)
+
+    def _sel_update_edge_scroll(self, event: Event) -> None:
+        """Arm, re-aim or stop the auto-scroll from where this drag now sits."""
+        y = self._sel_pointer_y(event)
+        if y < 0.0:
+            direction, overshoot = -1, -y
+        elif y > self._view_h:
+            direction, overshoot = 1, y - self._view_h
+        else:
+            direction, overshoot = 0, 0.0
+        self._sel_drag_x = event.x or 0.0
+        self._sel_edge_dir = direction
+        self._sel_edge_scroll.update(self._panel, direction, overshoot)
+
+    def _sel_edge_step(self, rows: float) -> bool:
+        """One auto-scroll step of ``rows`` text rows (fractional, signed), taking
+        the selection's moving end with it so the newly revealed rows join the
+        selection. False once the document is against that end and the view no
+        longer moves, which retires the timer."""
+        before = self.offset
+        self.scroll_by(rows * self._line_pitch)
+        if self.offset == before:
+            return False
+        # One unit outside on the side the drag left by, so the endpoint lands on
+        # the whole edge row the same way the drag events themselves do.
+        edge_y = -1.0 if self._sel_edge_dir < 0 else self._view_h + 1.0
+        self._sel_extend_to(self._sel_drag_pos(self._sel_drag_x, edge_y))
         return True
 
     def _sel_extend_to(self, pos: tuple[int, int, int, int]) -> None:
