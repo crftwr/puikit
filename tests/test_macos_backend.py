@@ -299,18 +299,23 @@ def test_animation_kinds_carry_their_hints():
 
 
 class _FakeTimer:
-    """Stand-in for NSTimer that records its interval and invalidation."""
+    """Stand-in for NSTimer that records its interval, invalidation, and the
+    run-loop mode it was added in (None until added)."""
 
     def __init__(self, interval):
         self.interval = interval
         self.invalidated = False
+        self.mode = None
 
     def invalidate(self):
         self.invalidated = True
 
 
 def _patch_nstimer(monkeypatch):
-    """Replace NSTimer so the frame timer can be exercised without a run loop."""
+    """Replace NSTimer and NSRunLoop so the frame timer can be exercised without
+    a real run loop. The frame timer is created unscheduled and added in the
+    common modes (see _ensure_animation_timer); the fake run loop records the
+    mode on the timer so a test can assert it."""
     from puikit.backends import macos_backend as mb
 
     created = []
@@ -322,7 +327,22 @@ def _patch_nstimer(monkeypatch):
             created.append(timer)
             return timer
 
+        @staticmethod
+        def timerWithTimeInterval_repeats_block_(interval, repeats, block):
+            timer = _FakeTimer(interval)
+            created.append(timer)
+            return timer
+
+    class _FakeNSRunLoop:
+        @staticmethod
+        def currentRunLoop():
+            return _FakeNSRunLoop()
+
+        def addTimer_forMode_(self, timer, mode):
+            timer.mode = mode
+
     monkeypatch.setattr(mb, "NSTimer", _FakeNSTimer)
+    monkeypatch.setattr(mb, "NSRunLoop", _FakeNSRunLoop)
     return created
 
 
@@ -356,6 +376,19 @@ def test_frame_timer_speeds_up_for_animation_then_slows_back(monkeypatch):
     backend._on_animation_tick(fast_timer)
     assert fast_timer.invalidated
     assert backend._anim_timer.interval == pytest.approx(MacOSBackend._IDLE_TICK_INTERVAL)
+
+
+def test_frame_timer_fires_during_live_resize_tracking(monkeypatch):
+    # The frame timer is added in the *common* run-loop modes: a default-mode
+    # timer stops firing while the loop is in event-tracking mode (a live window
+    # resize, menu tracking), which froze the shader background for the whole
+    # drag and left the newly exposed window area white (xefm issue #290).
+    from puikit.backends.macos_backend import NSRunLoopCommonModes
+
+    _patch_nstimer(monkeypatch)
+    backend = MacOSBackend()
+    backend.request_animation_ticks(lambda: True)
+    assert backend._anim_timer.mode == NSRunLoopCommonModes
 
 
 def test_frame_timer_stops_when_nothing_left(monkeypatch):

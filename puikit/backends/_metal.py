@@ -157,12 +157,20 @@ class MetalBackground:
         encoder.endEncoding()
         return command
 
-    def render_to_layer(self, layer: Any, elapsed: float, fade: float = 1.0) -> bool:
+    def render_to_layer(self, layer: Any, elapsed: float, fade: float = 1.0,
+                        wait: bool = False) -> bool:
         """Draw one frame into ``layer``'s next drawable and present it.
 
         Returns False when there is nothing to draw or the layer has no drawable
         available (the compositor can withhold one while occluded or mid-resize),
         which the caller treats as "skip this frame" rather than an error.
+
+        ``wait`` selects the presentation pattern for a layer whose
+        ``presentsWithTransaction`` is on (the backend turns it on for the span of
+        a live window resize): commit, block until the GPU has scheduled the work,
+        then present the drawable directly, so the new frame joins the Core
+        Animation transaction that is resizing the window instead of arriving a
+        beat after it. The default is the ordinary asynchronous present.
         """
         if self._pipeline is None or not self.available:
             return False
@@ -172,8 +180,13 @@ class MetalBackground:
         size = layer.drawableSize()
         command = self._encode(drawable.texture(), size.width, size.height,
                                elapsed, fade)
-        command.presentDrawable_(drawable)
-        command.commit()
+        if wait:
+            command.commit()
+            command.waitUntilScheduled()
+            drawable.present()
+        else:
+            command.presentDrawable_(drawable)
+            command.commit()
         return True
 
     def render_to_texture(self, width: int, height: int, elapsed: float,
