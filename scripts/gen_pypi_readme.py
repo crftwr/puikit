@@ -12,9 +12,9 @@ rewriting every relative target to an absolute, version-tagged GitHub URL:
         -> https://github.com/crftwr/puikit/blob/v1.0.5/docs/README.md
 
 Tag URLs, not ``main``, so the PyPI page for a release keeps showing that
-release's images forever, however far ``main`` moves on. `make release` bumps
-the version and pushes the ``vX.Y.Z`` tag before `twine upload`, so the URLs
-resolve by the time the PyPI page updates. Between releases the rewrite
+release's images forever, however far ``main`` moves on. `make tag` bumps
+the version and pushes the ``vX.Y.Z`` tag before `make release-whl` runs
+`twine upload`, so the URLs resolve by the time the PyPI page updates. Between releases the rewrite
 targets the *previous* tag — a screenshot added mid-cycle reaches PyPI at the
 next release, which is inherent to tagged URLs.
 

@@ -1,11 +1,17 @@
-"""Fail-fast checks run before `make release` mutates anything.
+"""Fail-fast checks run before `make tag` mutates anything.
 
-The release recipe does irreversible things (pushes a tag, uploads to PyPI —
-a PyPI version can never be reused). This script runs FIRST and refuses the
-release unless every precondition holds, so a dirty tree, a stale checkout, a
-duplicate version, or a missing/​unauthenticated `gh` fails loudly *before* any
-commit, tag, upload, or push happens. It collects all problems and reports them
-together rather than stopping at the first.
+`make tag` does one irreversible thing: it pushes a tag that every later
+release-* target names. This script runs FIRST and refuses to tag unless every
+precondition holds, so a dirty tree, a stale checkout or a duplicate version
+fails loudly *before* any commit, tag or push happens. It collects all problems
+and reports them together rather than stopping at the first.
+
+Publishing is not checked here — each release-* target guards its own upload.
+In particular the PyPI upload's irreversibility (a version can never be reused)
+is guarded by `make release-whl`, which requires HEAD to sit on the release tag.
+
+Warnings (printed, non-fatal) cover whether `gh` — needed by every target after
+this one, but not by `make tag` itself — is ready to go.
 
 Usage: release_preflight.py <new-version>
 """
@@ -42,6 +48,7 @@ def main() -> int:
         return 2
     new = sys.argv[1]
     problems: list[str] = []
+    warnings: list[str] = []
 
     # 1. Version string is well-formed.
     if not VERSION_RE.match(new):
@@ -90,11 +97,17 @@ def main() -> int:
         if behind and behind != "0":
             problems.append(f"local branch is {behind} commit(s) behind {upstream.stdout.strip()} — pull first")
 
-    # 7. gh is installed and authenticated (this release creates a GitHub Release).
+    # 7. Non-fatal: `gh` is usable. `make tag` is pure git + version work and does
+    #    not touch GitHub, so a missing `gh` must not block it — but the targets
+    #    that follow (release-github, release-whl) need it, so surfacing it here
+    #    saves finding out after the tag is public.
     if shutil.which("gh") is None:
-        problems.append("`gh` not found — install it (`brew install gh`) and run `gh auth login`")
+        warnings.append(
+            "`gh` not found — install it (`brew install gh`) and run `gh auth login` "
+            "before `make release-github`"
+        )
     elif subprocess.run(["gh", "auth", "status"], capture_output=True).returncode != 0:
-        problems.append("`gh` is not authenticated — run `gh auth login`")
+        warnings.append("`gh` is not authenticated — run `gh auth login` before `make release-github`")
 
     if problems:
         print("Release preflight failed:", file=sys.stderr)
@@ -102,6 +115,8 @@ def main() -> int:
             print(f"  ✗ {p}", file=sys.stderr)
         return 1
 
+    for w in warnings:
+        print(f"  ! {w}")
     print(f"Preflight OK: {current} -> {new} on {branch}")
     return 0
 
