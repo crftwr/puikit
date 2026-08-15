@@ -676,6 +676,40 @@ def test_textedit_paste_flattens_newlines(backend):
     assert field.text == "a b c"  # single-line field flattens newlines
 
 
+def test_textedit_paste_large_text_lands_with_caret_visible(backend):
+    panel = Panel(backend)
+    field = TextEdit("", width=12)
+    panel.add(field, x=0, y=0, w=12, h=1)
+    panel.render()
+    panel.set_clipboard("a" * 5_000)
+    panel.dispatch_event(_key("v", char="v", modifiers=frozenset({"cmd"})))
+    panel.render()
+    assert field.text == "a" * 5_000 and field.cursor == 5_000
+    assert field._view > 0  # scrolled so the caret (the text's end) is visible
+
+
+def test_textedit_scroll_into_view_work_is_bounded_by_field_width():
+    # Scrolling the caret into view walks back from the caret, so the measured
+    # runs are bounded by the field width, not the text length. The old forward
+    # scan advanced one character at a time re-measuring the whole remainder —
+    # O(n^2) in the text length, which froze the app when a large clipboard was
+    # pasted into a field (xefm#276).
+    field = TextEdit("x" * 50_000)
+    field.cursor = len(field.text)
+
+    class _Ctx:
+        chars = 0
+
+        @staticmethod
+        def measure_text(t):
+            _Ctx.chars += len(t)
+            return float(len(t))
+
+    field._scroll_into_view(_Ctx, field.cursor, field_w=20)
+    assert field._view == 50_000 - 19  # the caret sits at the right edge
+    assert _Ctx.chars < 51_000  # one full-span measure + a field-width walk
+
+
 def test_textedit_selection_renders_highlight(backend):
     panel = Panel(backend)
     field = TextEdit("hello", width=12)
