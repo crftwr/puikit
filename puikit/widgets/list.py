@@ -48,7 +48,7 @@ class ListView(Widget):
         self._ellipsis = ellipsis
         self._elide_where = elide_where
         self.style = style
-        self.selected = 0
+        self._selected = 0  # backing store; the `selected` property scrolls
         # First visible item, measured in base units (== rows when each row is
         # one unit tall). Whole on whole-unit backends; fractional on backends
         # whose scroll events carry sub-unit deltas, which yields pixel-granular
@@ -72,6 +72,31 @@ class ListView(Widget):
         self._rows: list[Widget | None] = [None] * len(self.items)
         self._viewport_h = 1     # whole visible rows, used by paging keys
         self._view_h = 1.0       # exact viewport height in base units
+
+    # --- selection -------------------------------------------------------------
+
+    @property
+    def selected(self) -> int:
+        """Index of the selected row.
+
+        Assigning clamps into range and scrolls the selection into view, the
+        same as the widget's own key handling does — so a host that moves the
+        selection programmatically (a chooser routing keys through its own
+        text field, a filter re-pointing at the best match) never leaves the
+        highlight off-screen (keyhac#27). Assigning the *current* value is a
+        no-op that never touches the viewport: a redraw that re-asserts the
+        selection must not yank back a viewport the user has deliberately
+        wheel-scrolled away.
+        """
+        return self._selected
+
+    @selected.setter
+    def selected(self, index: int) -> None:
+        index = max(0, min(int(index), len(self.items) - 1)) if self.items else 0
+        if index == self._selected:
+            return
+        self._selected = index
+        self._ensure_selected_visible()
 
     # --- item management -----------------------------------------------------
 
@@ -237,12 +262,14 @@ class ListView(Widget):
         self.offset = max(0, min(self.offset, max(0, len(self.items) * self._row_h - viewport_h)))
 
     def _ensure_selected_visible(self) -> None:
+        # Writes _selected directly: the property setter calls this, so going
+        # through the property here would recurse.
         if not self.items:
-            self.selected = 0
+            self._selected = 0
             self.offset = 0
             return
-        self.selected = max(0, min(self.selected, len(self.items) - 1))
-        top = self.selected * self._row_h
+        self._selected = max(0, min(self._selected, len(self.items) - 1))
+        top = self._selected * self._row_h
         if top < self.offset:
             self.offset = top
         elif top + self._row_h > self.offset + self._view_h:

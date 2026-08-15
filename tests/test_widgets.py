@@ -237,6 +237,44 @@ def test_listview_keyboard_pulls_selection_back_into_view(backend):
     assert listview.offset == 1  # viewport follows the selection again
 
 
+def test_listview_assigned_selection_scrolls_into_view(backend):
+    # A host that routes keys itself and assigns `selected` (keyhac's chooser:
+    # its text field owns the keyboard) must get the same scroll the widget's
+    # own key handling does - keyhac#27 was the highlight walking off-screen.
+    panel = Panel(backend)
+    listview = ListView([f"item{i}" for i in range(20)])
+    panel.add(listview, x=0, y=0, w=10, h=5)
+    panel.render()
+    listview.selected = 7
+    panel.render()
+    assert backend.snapshot()[4].startswith("item7")
+    listview.selected = 0
+    assert listview.offset == 0
+
+
+def test_listview_assigned_selection_clamps(backend):
+    panel = Panel(backend)
+    listview = ListView([f"item{i}" for i in range(20)])
+    panel.add(listview, x=0, y=0, w=10, h=5)
+    listview.selected = 99
+    assert listview.selected == 19
+    listview.selected = -5
+    assert listview.selected == 0
+
+
+def test_listview_reassigning_the_same_selection_keeps_the_viewport(backend):
+    # Re-asserting the current selection (a redraw path, a host state sync)
+    # must not yank back a viewport the user deliberately wheel-scrolled away.
+    panel = Panel(backend)
+    listview = ListView([f"item{i}" for i in range(20)])
+    panel.add(listview, x=0, y=0, w=10, h=5)
+    panel.render()
+    panel.dispatch_event(Event(type=EventType.MOUSE_SCROLL, x=1, y=1, scroll=-10))
+    assert listview.offset == 10
+    listview.selected = 0  # the value it already has
+    assert listview.offset == 10
+
+
 def test_listview_on_change_fires_only_when_selection_moves(backend):
     changes = []
     panel = Panel(backend)
