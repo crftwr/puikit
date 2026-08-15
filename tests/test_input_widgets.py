@@ -536,6 +536,33 @@ def test_textedit_word_move_at_edges_is_a_noop_but_consumed(backend):
     assert field.text == "hi"
 
 
+def test_textedit_cmd_left_right_jump_to_line_ends(backend):
+    # Cmd+Left/Right (macOS) carry the Home/End motion: the caret jumps to the
+    # beginning / end of the text instead of dying as an unknown Cmd chord.
+    panel = Panel(backend)
+    field = TextEdit("foo bar baz", width=16)
+    panel.add(field, x=0, y=0, w=16, h=1)
+    panel.dispatch_event(_key("home"))
+    panel.dispatch_event(_key("right"))
+    panel.dispatch_event(_key("right", modifiers=frozenset({"cmd"})))
+    assert field.cursor == len("foo bar baz")
+    panel.dispatch_event(_key("left", modifiers=frozenset({"cmd"})))
+    assert field.cursor == 0
+
+
+def test_textedit_cmd_shift_left_right_extend_to_line_ends(backend):
+    panel = Panel(backend)
+    field = TextEdit("foo bar baz", width=16)
+    panel.add(field, x=0, y=0, w=16, h=1)
+    panel.dispatch_event(_key("home"))
+    for _ in range(4):
+        panel.dispatch_event(_key("right"))
+    panel.dispatch_event(_key("right", modifiers=frozenset({"cmd", "shift"})))
+    assert field.selection_text == "bar baz"
+    panel.dispatch_event(_key("left", modifiers=frozenset({"cmd", "shift"})))
+    assert field.selection_text == "foo "
+
+
 def test_textedit_mouse_drag_selects(backend):
     panel = Panel(backend)
     field = TextEdit("hello", width=12)
@@ -647,6 +674,40 @@ def test_textedit_paste_flattens_newlines(backend):
     panel.set_clipboard("a\nb\r\nc")
     panel.dispatch_event(_key("v", char="v", modifiers=frozenset({"cmd"})))
     assert field.text == "a b c"  # single-line field flattens newlines
+
+
+def test_textedit_paste_large_text_lands_with_caret_visible(backend):
+    panel = Panel(backend)
+    field = TextEdit("", width=12)
+    panel.add(field, x=0, y=0, w=12, h=1)
+    panel.render()
+    panel.set_clipboard("a" * 5_000)
+    panel.dispatch_event(_key("v", char="v", modifiers=frozenset({"cmd"})))
+    panel.render()
+    assert field.text == "a" * 5_000 and field.cursor == 5_000
+    assert field._view > 0  # scrolled so the caret (the text's end) is visible
+
+
+def test_textedit_scroll_into_view_work_is_bounded_by_field_width():
+    # Scrolling the caret into view walks back from the caret, so the measured
+    # runs are bounded by the field width, not the text length. The old forward
+    # scan advanced one character at a time re-measuring the whole remainder —
+    # O(n^2) in the text length, which froze the app when a large clipboard was
+    # pasted into a field (xefm#276).
+    field = TextEdit("x" * 50_000)
+    field.cursor = len(field.text)
+
+    class _Ctx:
+        chars = 0
+
+        @staticmethod
+        def measure_text(t):
+            _Ctx.chars += len(t)
+            return float(len(t))
+
+    field._scroll_into_view(_Ctx, field.cursor, field_w=20)
+    assert field._view == 50_000 - 19  # the caret sits at the right edge
+    assert _Ctx.chars < 51_000  # one full-span measure + a field-width walk
 
 
 def test_textedit_selection_renders_highlight(backend):

@@ -367,8 +367,17 @@ class TextEdit(Widget):
         disp = mtext[: self.cursor] + self._display(self._preedit) + mtext[self.cursor :]
         if caret < self._view:
             self._view = caret
-        while self._view < caret and ctx.measure_text(disp[self._view : caret]) > field_w - 1:
-            self._view += 1
+        elif self._view < caret and ctx.measure_text(disp[self._view : caret]) > field_w - 1:
+            # The caret ran off the right edge: re-find the window start from
+            # the caret backwards, keeping the longest suffix that still fits.
+            # The walk (and each measured run) is bounded by the field width;
+            # advancing one character from the left and re-measuring the whole
+            # remainder each step is O(n^2) in the text length, which froze the
+            # app when a large clipboard was pasted into a field (xefm#276).
+            view = caret
+            while view > 0 and ctx.measure_text(disp[view - 1 : caret]) <= field_w - 1:
+                view -= 1
+            self._view = view
         self._view = max(0, min(self._view, len(disp)))
 
     # --- events --------------------------------------------------------------
@@ -444,6 +453,13 @@ class TextEdit(Widget):
         # chord like Ctrl+Left is a word move, not an unhandled command chord.
         if event.modifiers & {"ctrl", "alt"} and event.key in _WORD_KEYS:
             return self._handle_key(event)
+
+        # Cmd+Left/Right (macOS) jump the caret to the ends of the line — the
+        # same motion as Home/End — and Shift extends the selection there.
+        # Handled before the command branch so they don't die as unknown chords.
+        if "cmd" in event.modifiers and event.key in ("left", "right"):
+            return self._move("home" if event.key == "left" else "end",
+                              "shift" in event.modifiers)
 
         # Command shortcuts (Cmd/Ctrl) are consumed before text insertion, so a
         # chord like Cmd+A never types its letter into the field.
