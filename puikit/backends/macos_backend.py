@@ -108,6 +108,8 @@ from Foundation import (
     NSNotFound,
     NSNumber,
     NSObject,
+    NSRunLoop,
+    NSRunLoopCommonModes,
     NSURL,
     NSZeroPoint,
 )
@@ -118,9 +120,10 @@ from ..background import Shader, Wallpaper
 from ._metal import HAVE_METAL as _HAS_METAL, MetalBackground, PIXEL_FORMAT as _METAL_PIXEL_FORMAT
 
 try:
-    from Quartz import CAMetalLayer
+    from Quartz import CAMetalLayer, CATransaction
 except ImportError:  # pragma: no cover - older/partial PyObjC
     CAMetalLayer = None
+    CATransaction = None
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, WindowHandle, WindowStyle, is_transparent
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..easing import resolve as _resolve_easing
@@ -1244,6 +1247,14 @@ class _PuiKitWindowDelegate(NSObject):
         if self.backend is not None:
             self.backend._on_resize()
 
+    def windowWillStartLiveResize_(self, notification):
+        if self.backend is not None:
+            self.backend._on_live_resize(True)
+
+    def windowDidEndLiveResize_(self, notification):
+        if self.backend is not None:
+            self.backend._on_live_resize(False)
+
 
 class _PuiKitSecondaryWindowDelegate(NSObject):
     """Delegate for secondary windows: closing one never quits the app."""
@@ -1526,6 +1537,11 @@ class MacOSBackend(Backend):
         self._container: Any = None
         self._metal: Any = None
         self._metal_layer: Any = None
+        # True for the span of a live window resize (delegate bracket). While set,
+        # the GPU layer presents inside the resize's CA transaction — see
+        # _on_live_resize — so the shader tracks the dragged edge instead of
+        # lagging it.
+        self._in_live_resize: bool = False
         # Opacity of UI surface fills (1 = opaque UI); lower composites them
         # translucently so a wallpaper behind them shows through. Backend-wide and
         # wallpaper-agnostic — set from the active theme via set_surface_opacity,
@@ -2351,9 +2367,16 @@ class MacOSBackend(Backend):
         if self._anim_timer is not None:
             self._anim_timer.invalidate()
         self._anim_timer_interval = interval
-        self._anim_timer = NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
+        self._anim_timer = NSTimer.timerWithTimeInterval_repeats_block_(
             interval, True, self._on_animation_tick
         )
+        # Added in the *common* modes, not the default mode a scheduledTimer gets:
+        # a live window resize (and menu/scroll tracking) runs the loop in the
+        # event-tracking mode, where a default-mode timer stops firing — which
+        # froze the shader background for the whole drag and left the newly
+        # exposed window area blank (issue: white band while resizing).
+        NSRunLoop.currentRunLoop().addTimer_forMode_(self._anim_timer,
+                                                     NSRunLoopCommonModes)
 
     def _on_animation_tick(self, timer) -> None:
         now = time.monotonic()
@@ -2647,7 +2670,8 @@ class MacOSBackend(Backend):
             return True
         mark = time.perf_counter() if _BG_PROFILE else 0.0
         drawn = self._metal.render_to_layer(self._metal_layer, self._bg_clock,
-                                            _smoothstep(self._bg_fade))
+                                            _smoothstep(self._bg_fade),
+                                            wait=self._in_live_resize)
         if _BG_PROFILE:
             self._bg_profile_tick(time.perf_counter() - mark)
         return drawn
@@ -3533,10 +3557,26 @@ class MacOSBackend(Backend):
             layer.setFramebufferOnly_(True)
             # The compositor, not a timer, decides when this is presented; drawing
             # is driven from the same frame tick as the UI so the two stay in step.
-            layer.setPresentsWithTransaction_(False)
+            # (During a live resize the present is transactional instead — see
+            # _on_live_resize — and a layer born mid-drag starts that way.)
+            layer.setPresentsWithTransaction_(self._in_live_resize)
             self._container.setWantsLayer_(True)
             self._container.layer().insertSublayer_atIndex_(layer, 0)
             self._metal_layer = layer
+        if self._container is not None and self._container.layer() is not None:
+            # The container's own layer wears the scene's backdrop color. It only
+            # shows in the sliver a resize step exposes before the GPU layer's
+            # next frame covers it — which used to be the window's default white,
+            # the most visible thing a dark scene could flash. 0.08 grey mirrors
+            # the renderer's backdrop default (_metal._rgba).
+            backdrop = getattr(shader, "backdrop", None)
+            if backdrop is None:
+                r = g = b = 0.08
+            else:
+                r, g, b = (backdrop[0] / 255.0, backdrop[1] / 255.0,
+                           backdrop[2] / 255.0)
+            self._container.layer().setBackgroundColor_(
+                NSColor.colorWithSRGBRed_green_blue_alpha_(r, g, b, 1.0).CGColor())
         self._fit_shader_layer()
 
     def _fit_shader_layer(self) -> None:
@@ -3551,11 +3591,22 @@ class MacOSBackend(Backend):
         # renders below native resolution and lets the compositor scale it up — on a
         # Retina display that is the difference between affordable and not.
         shader_scale = getattr(self._background, "resolution_scale", 1.0)
-        self._metal_layer.setFrame_(bounds)
-        self._metal_layer.setContentsScale_(scale)
-        self._metal_layer.setDrawableSize_(
-            NSMakeSize(max(1.0, bounds.size.width * scale * shader_scale),
-                       max(1.0, bounds.size.height * scale * shader_scale)))
+        # Implicit actions off: this layer is app-managed (not view-managed), so a
+        # bare setFrame_ would be animated over CA's default quarter second — a
+        # layer chasing the window edge through a resize, blank behind it. The
+        # geometry must land in this transaction, not ease toward it.
+        if CATransaction is not None:
+            CATransaction.begin()
+            CATransaction.setDisableActions_(True)
+        try:
+            self._metal_layer.setFrame_(bounds)
+            self._metal_layer.setContentsScale_(scale)
+            self._metal_layer.setDrawableSize_(
+                NSMakeSize(max(1.0, bounds.size.width * scale * shader_scale),
+                           max(1.0, bounds.size.height * scale * shader_scale)))
+        finally:
+            if CATransaction is not None:
+                CATransaction.commit()
 
     def set_surface_opacity(self, opacity: float) -> None:
         """Set the opacity of UI surface fills so a wallpaper shows through (see the
@@ -3916,8 +3967,29 @@ class MacOSBackend(Backend):
         # CALayer, not a view), so it is refitted here — otherwise the shader would
         # keep rendering at the old resolution and stretch.
         self._fit_shader_layer()
+        # And immediately draw a frame at the new size. The frame timer alone
+        # leaves a beat between the window reaching a size and the shader next
+        # painting it, and during a live resize that beat is exactly the blank
+        # band at the dragged edge. windowDidResize fires per step of the drag,
+        # so rendering here keeps the scene glued to the edge; the clock is not
+        # advanced (the tick owns that), this is the same frame at the new size.
+        if isinstance(self._background, Shader) and self._metal_layer is not None:
+            self._render_shader(self._background, time.monotonic())
         w, h = self.size
         self._dispatch(Event(type=EventType.RESIZE, hints={"w": w, "h": h}))
+
+    def _on_live_resize(self, active: bool) -> None:
+        """Bracket a live window resize (delegate will-start / did-end).
+
+        While the user drags, the layer presents with the Core Animation
+        transaction (and _render_shader waits for it — see render_to_layer's
+        ``wait``), so each frame lands in the same commit that moves the window
+        edge; presented asynchronously instead, the layer trails the edge and the
+        gap shows as a blank band. The transactional present costs a scheduling
+        wait per frame, so it is confined to the drag rather than left on."""
+        self._in_live_resize = active
+        if self._metal_layer is not None:
+            self._metal_layer.setPresentsWithTransaction_(active)
 
     def run_event_loop(self, handler: EventHandler) -> None:
         self._handler = handler
