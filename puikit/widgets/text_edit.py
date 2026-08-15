@@ -445,6 +445,13 @@ class TextEdit(Widget):
         if event.modifiers & {"ctrl", "alt"} and event.key in _WORD_KEYS:
             return self._handle_key(event)
 
+        # Cmd+Left/Right (macOS) jump the caret to the ends of the line — the
+        # same motion as Home/End — and Shift extends the selection there.
+        # Handled before the command branch so they don't die as unknown chords.
+        if "cmd" in event.modifiers and event.key in ("left", "right"):
+            return self._move("home" if event.key == "left" else "end",
+                              "shift" in event.modifiers)
+
         # Command shortcuts (Cmd/Ctrl) are consumed before text insertion, so a
         # chord like Cmd+A never types its letter into the field.
         if event.modifiers & {"ctrl", "cmd"}:

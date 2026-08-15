@@ -536,6 +536,33 @@ def test_textedit_word_move_at_edges_is_a_noop_but_consumed(backend):
     assert field.text == "hi"
 
 
+def test_textedit_cmd_left_right_jump_to_line_ends(backend):
+    # Cmd+Left/Right (macOS) carry the Home/End motion: the caret jumps to the
+    # beginning / end of the text instead of dying as an unknown Cmd chord.
+    panel = Panel(backend)
+    field = TextEdit("foo bar baz", width=16)
+    panel.add(field, x=0, y=0, w=16, h=1)
+    panel.dispatch_event(_key("home"))
+    panel.dispatch_event(_key("right"))
+    panel.dispatch_event(_key("right", modifiers=frozenset({"cmd"})))
+    assert field.cursor == len("foo bar baz")
+    panel.dispatch_event(_key("left", modifiers=frozenset({"cmd"})))
+    assert field.cursor == 0
+
+
+def test_textedit_cmd_shift_left_right_extend_to_line_ends(backend):
+    panel = Panel(backend)
+    field = TextEdit("foo bar baz", width=16)
+    panel.add(field, x=0, y=0, w=16, h=1)
+    panel.dispatch_event(_key("home"))
+    for _ in range(4):
+        panel.dispatch_event(_key("right"))
+    panel.dispatch_event(_key("right", modifiers=frozenset({"cmd", "shift"})))
+    assert field.selection_text == "bar baz"
+    panel.dispatch_event(_key("left", modifiers=frozenset({"cmd", "shift"})))
+    assert field.selection_text == "foo "
+
+
 def test_textedit_mouse_drag_selects(backend):
     panel = Panel(backend)
     field = TextEdit("hello", width=12)
