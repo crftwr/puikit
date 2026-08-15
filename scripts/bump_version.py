@@ -1,6 +1,6 @@
 """Rewrite the `__version__ = "..."` literal in puikit/__init__.py.
 
-Used by `make release VERSION=x.y.z`. That literal is the single source of
+Used by `make tag VERSION=x.y.z`. That literal is the single source of
 truth for the version: pyproject.toml derives it via setuptools' dynamic
 ``version = { attr = "puikit.__version__" }``, so bumping this one line moves
 the packaging metadata and ``puikit.__version__`` together and they cannot

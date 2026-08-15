@@ -405,11 +405,14 @@ first change that does should add one rather than hand-roll a second style.
 `__version__` in `puikit/__init__.py` is the single source of truth
 (`pyproject.toml` derives it), and it is semver: **patch** for fixes, **minor**
 for additive features — the recipe above — and **major** for anything a pinned
-app could notice. Release tooling lives in `scripts/` (`make release`).
+app could notice. Release tooling lives in `scripts/`, driven by the Makefile's
+release pipeline — `make tag VERSION=x.y.z`, then `make release-github`, then
+`make release-whl` (the same shape as XeFM's; `make release-status` shows
+progress).
 
 ### Release notes
 
-`make release` calls `gh release create --generate-notes`, which produces little
+`make release-github` calls `gh release create --generate-notes`, which produces little
 more than a compare link here — this repo lands work as direct commits, and the
 generator has only merged PRs to list. So every release gets hand-written notes
 afterwards:
