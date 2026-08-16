@@ -104,6 +104,13 @@ class VTGrid:
         if self._clip_stack:
             self._clip_stack.pop()
 
+    def current_clip(self) -> tuple[int, int, int, int] | None:
+        """The active clip rect, or None when nothing is clipped. Exposed for
+        content the grid does not own — an inline image is painted over the
+        cells rather than into them, so the backend has to apply the clip to it
+        by hand."""
+        return self._clip_stack[-1] if self._clip_stack else None
+
     def _clip(self) -> tuple[int, int, int, int]:
         if self._clip_stack:
             x0, y0, x1, y1 = self._clip_stack[-1]
@@ -190,6 +197,38 @@ class VTGrid:
         if 0 <= x < self._w and 0 <= y < self._h:
             return self._buf[y][x]
         return None
+
+    def rect_is_dirty(self, x: int, y: int, w: int, h: int) -> bool:
+        """Whether the next render will re-send any cell in this rect.
+
+        Asked about an inline image's footprint: the pixels sit on top of the
+        cells, so re-sending any of those cells as text paints over the picture.
+        An unchanged placement would otherwise never be re-transmitted and the
+        image would simply vanish — which is what happens to an ImageButton when
+        a click restyles the cells beneath it.
+        """
+        for row in range(max(0, y), min(y + h, self._h)):
+            cur, prev = self._buf[row], self._prev[row]
+            for col in range(max(0, x), min(x + w, self._w)):
+                if cur[col] != prev[col]:
+                    return True
+        return False
+
+    def invalidate(self, x: int, y: int, w: int, h: int) -> None:
+        """Force the cells in this rect to be re-sent by the next render, even if
+        they did not change.
+
+        Used to erase something painted over the grid out of band — an inline
+        image — on a protocol with no delete verb: the covered cells are re-sent
+        as text, which overwrites the pixels. The curses backend has to repaint
+        the WHOLE screen for this (``redrawwin``), because its diff is ncurses'
+        and it cannot mark a region; here the previous frame is ours to edit, so
+        only the image's own footprint is paid for.
+        """
+        for row in range(max(0, y), min(y + h, self._h)):
+            prev = self._prev[row]
+            for col in range(max(0, x), min(x + w, self._w)):
+                prev[col] = None
 
     def set_cell(self, x: int, y: int, cell: Cell) -> None:
         """Replace one cell outright, keeping whatever width relationship it

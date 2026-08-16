@@ -421,6 +421,26 @@ class CursesBackend(Backend):
         # backend and paints real pixels in present(); otherwise the capability
         # stays off and the Panel substitutes the alt glyph, exactly as before.
         self._term_graphics = _terminal_graphics.detect_protocol()
+        _forced = (os.environ.get("PUIKIT_TERM_GRAPHICS") or "").strip().lower()
+        if (sys.platform == "win32" and self._term_graphics is not None
+                and _forced not in _terminal_graphics.PROTOCOLS):
+            # Windows Terminal decodes sixel, so detection finds a protocol here
+            # — but PDCurses displays a screen buffer of its own, and the image
+            # escape is written to sys.__stdout__, which addresses the buffer
+            # nobody is looking at. The pixels are emitted and never appear
+            # (xefm#306). Claiming the capability would replace the Panel's alt
+            # glyph, which at least shows something, with nothing at all — so
+            # this backend declines it on Windows and the VT backend, which owns
+            # its output stream, is where inline images actually work.
+            #
+            # Only AUTO-detection is suppressed: PUIKIT_TERM_GRAPHICS naming a
+            # protocol is a deliberate opt-in and still wins, so the behaviour
+            # stays reachable for anyone testing the path on Windows.
+            _terminal_graphics.debug(
+                f"[init] protocol={self._term_graphics} suppressed on win32 "
+                "(PDCurses owns a separate screen buffer; use --backend vt)"
+            )
+            self._term_graphics = None
         overrides: dict[str, bool] = {}
         if self._pointer_shape_enabled:
             overrides["pointer_shape"] = True
