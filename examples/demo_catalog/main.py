@@ -2517,7 +2517,12 @@ PAGES = [
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="PuiKit widget catalog")
-    parser.add_argument("--backend", default="tui", help="backend name (tui, gui, web, memory)")
+    parser.add_argument(
+        "--backend",
+        default="tui",
+        help="backend name (tui, gui, web, memory; vt = experimental TUI without "
+             "curses — no mouse or inline images yet)",
+    )
     parser.add_argument(
         "--font-size",
         type=float,

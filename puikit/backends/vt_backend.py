@@ -12,23 +12,42 @@ the console directly. Drawing goes into a :class:`~puikit.backends._vt.VTGrid`,
 which knows the column each glyph really occupies, and a frame leaves as one
 batched ``WriteConsoleW``.
 
-Status: a spike. It implements enough of the Backend surface to run the demo
-catalog (``--backend vt``) and deliberately leaves the rest raising or no-op
-rather than half-built, so what is finished stays honest. Inline images
-(xefm#306) and the shared-base extraction discussed in puikit#98 §3 come after
-the surface is filled, not before.
+Status: a spike, and **not the default** — ``--backend tui`` stays on curses.
+It implements enough of the Backend surface to run the demo catalog
+(``--backend vt``) and deliberately leaves the rest unbuilt rather than
+half-built, so what is finished stays honest.
+
+Mouse, wheel and inline images (xefm#306) all work: Windows delivers mouse
+records through ``ReadConsoleInputW`` rather than as escape sequences to parse,
+and an image escape reaches the screen here precisely because nothing else owns
+the output stream.
+
+Not implemented, deliberately, rather than half-built:
+
+* **Hover.** ``hover`` stays false in the profile and bare pointer motion is
+  dropped. A terminal repaints the whole frame to show a hover cue, and motion
+  arrives for every cell crossed.
+* **Alpha.** Sixel carries none, so a transparent pixel is composited onto black
+  by the encoder. A character grid cannot reproduce what a compositing backend
+  shows through it.
+* **The shared-base extraction** (puikit#98 §3), which that section argues should
+  follow a second implementation rather than precede it.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import sys
 from typing import Any, Callable
 
 from ..backend import Backend, Color, DEFAULT_STYLE, EventHandler, Style, TextAttribute
-from ..capability import PROFILE_TUI
+from ..capability import CapabilityProfile, PROFILE_TUI
 from ..event import Event, EventType
+from ..image import CONTAIN, COVER, contain_box, cover_source
+from ..image import image_size as _natural_size
 from ..text import display_width
+from . import _terminal_graphics
 from ._vt import VTGrid
 
 _IS_WINDOWS = sys.platform == "win32"
@@ -47,7 +66,35 @@ _STD_INPUT_HANDLE = -10
 _STD_OUTPUT_HANDLE = -11
 
 _KEY_EVENT = 0x0001
+_MOUSE_EVENT = 0x0002
 _WINDOW_BUFFER_SIZE_EVENT = 0x0004
+
+# Quick Edit turns a drag into a console text selection and swallows the mouse
+# report, so it has to be cleared — and clearing any extended flag requires
+# setting ENABLE_EXTENDED_FLAGS in the same call.
+_ENABLE_QUICK_EDIT_MODE = 0x0040
+
+# MOUSE_EVENT_RECORD.dwEventFlags
+_MOUSE_MOVED = 0x0001
+_DOUBLE_CLICK = 0x0002
+_MOUSE_WHEELED = 0x0004
+_MOUSE_HWHEELED = 0x0008
+
+# MOUSE_EVENT_RECORD.dwButtonState (low word)
+_FROM_LEFT_1ST_BUTTON = 0x0001
+_RIGHTMOST_BUTTON = 0x0002
+_FROM_LEFT_2ND_BUTTON = 0x0004
+
+#: How many encoded image payloads to keep. Each is the wire form of one
+#: picture at one size; a few dozen covers a page of thumbnails without
+#: letting a long browse grow without bound.
+_ENCODED_CACHE_MAX = 32
+
+_BUTTON_NAMES = (
+    (_FROM_LEFT_1ST_BUTTON, "left"),
+    (_RIGHTMOST_BUTTON, "right"),
+    (_FROM_LEFT_2ND_BUTTON, "middle"),
+)
 
 # ControlKeyState bits. The reason modifiers are worth having natively: on a VT
 # stream they only arrive encoded in CSI byte sequences, which is why the curses
@@ -87,6 +134,20 @@ class VTBackend(Backend):
         self._clipboard = ""
         self._input_pos: tuple[int, int] | None = None
         self._frames = 0
+        self._mouse_buttons = 0
+        # Inline-image placements for this frame and the last, keyed by draw
+        # order, so present() can tell which moved, changed or vanished and
+        # re-transmit only those — a payload can be hundreds of KB.
+        self._images: dict[int, tuple] = {}
+        self._prev_images: dict[int, tuple] = {}
+        # Encoded payloads, keyed by picture + cell box (see _emit_images).
+        self._encoded: dict[tuple, str] = {}
+        # The protocol this terminal decodes, or None. Unlike the curses backend
+        # this is not merely detected but ACTIONABLE: owning the output stream is
+        # what lets the escape reach the screen (xefm#306).
+        self._term_graphics = _terminal_graphics.detect_protocol()
+        if self._term_graphics is not None:
+            self.PROFILE = CapabilityProfile({**PROFILE_TUI, "images": True})
 
     # --- lifecycle -----------------------------------------------------------
 
@@ -118,6 +179,10 @@ class VTBackend(Backend):
     def clear(self) -> None:
         assert self._grid is not None
         self._input_pos = None
+        # Keep the previous frame's placements (a fresh dict, not .clear(), so
+        # the saved reference survives) so present() can diff against them.
+        self._prev_images = self._images
+        self._images = {}
         self._grid.clear()
 
     def push_clip(self, x: float, y: float, w: float, h: float) -> None:
@@ -218,6 +283,147 @@ class VTBackend(Backend):
                 filled = top <= i < top + thumb
                 self.draw_text(x + i, y, "▄" if filled else "▁", bar_style)
 
+    def draw_image(self, x: int, y: int, path: str, hints: dict[str, Any] | None = None) -> None:
+        """Record an inline-image placement for this frame.
+
+        Nothing is emitted here: pixels must land after the text, or the frame's
+        own cells would paint over them. present() writes the grid first, then
+        every recorded placement — the same ordering the curses backend uses, for
+        the same reason, except that here the escape actually reaches the screen.
+        """
+        assert self._grid is not None
+        if self._term_graphics is None:
+            return
+        hints = hints or {}
+        x, y = float(x), float(y)
+        cols = float(hints.get("w", self.size[0] - x))
+        rows = float(hints.get("h", self.size[1] - y))
+        if cols <= 0 or rows <= 0:
+            return
+        src = hints.get("src")
+        # Object-fit, resolved against the cell's PHYSICAL aspect so the three
+        # fits read distinctly on a terminal too. An explicit src means the
+        # caller already chose the crop and the destination box; leave it be.
+        if src is None:
+            fit = hints.get("fit", "fill")
+            size = _natural_size(path) if fit in (CONTAIN, COVER) else None
+            if size is not None:
+                iw, ih = size
+                cw, ch = self.base_pixel_size
+                tw, th = cols * cw, rows * ch
+                if fit == CONTAIN:
+                    ox, oy, bw, bh = contain_box(tw, th, iw, ih)
+                    x, y = x + ox / cw, y + oy / ch
+                    cols, rows = bw / cw, bh / ch
+                else:  # COVER: sample the centered crop matching the box aspect
+                    sx, sy, sw, sh = cover_source(iw, ih, tw, th)
+                    src = (sx / iw, sy / ih, sw / iw, sh / ih)
+            src = src if src is not None else (0.0, 0.0, 1.0, 1.0)
+        # The pixels are painted out of band, so push_clip — which trims text —
+        # does not trim them. Intersect the footprint with the current clip and
+        # crop the source to match, or an oversized image draws over its
+        # neighbours and off the bottom of the screen.
+        gw, gh = self.size
+        cx0, cy0, cx1, cy1 = 0.0, 0.0, float(gw), float(gh)
+        clip = self._grid.current_clip()
+        if clip is not None:
+            sx0, sy0, sx1, sy1 = clip
+            cx0, cy0 = max(cx0, float(sx0)), max(cy0, float(sy0))
+            cx1, cy1 = min(cx1, float(sx1)), min(cy1, float(sy1))
+        vx0, vy0 = max(x, cx0), max(y, cy0)
+        vx1, vy1 = min(x + cols, cx1), min(y + rows, cy1)
+        if vx1 - vx0 < 1.0 or vy1 - vy0 < 1.0:
+            return  # nothing at least a cell wide and tall survives
+        if (vx0, vy0, vx1, vy1) != (x, y, x + cols, y + rows):
+            src = _crop_src(src, (vx0 - x) / cols, (vy0 - y) / rows,
+                            (vx1 - vx0) / cols, (vy1 - vy0) / rows)
+            x, y, cols, rows = vx0, vy0, vx1 - vx0, vy1 - vy0
+        x, y, cols, rows = int(x), int(y), int(cols), int(rows)
+        if cols <= 0 or rows <= 0:
+            return
+        # Ids start at 1 (kitty treats 0 as unspecified) and follow draw order,
+        # so the same screen redrawn reuses the same ids and one erase clears it.
+        image_id = len(self._images) + 1
+        self._images[image_id] = (x, y, cols, rows, path, src)
+
+    def _erase_stale_images(self) -> str:
+        """Clear placements that moved, changed source, or vanished.
+
+        kitty has a delete verb. iTerm2 and sixel do not, so the cells the image
+        covered are marked dirty and the frame's own text repaints over the
+        pixels. The curses backend must repaint the WHOLE screen to achieve that
+        (and then re-send every image, because the repaint wiped them all); here
+        the previous frame is ours to edit, so only the stale image's footprint
+        is invalidated and the rest keep their diff.
+        """
+        assert self._grid is not None
+        protocol = self._term_graphics
+        if protocol is None:
+            return ""
+        stale = [k for k, v in self._prev_images.items() if self._images.get(k) != v]
+        if not stale:
+            return ""
+        erase = "".join(_terminal_graphics.clear(protocol, k) for k in stale)
+        if erase:
+            return erase
+        for k in stale:
+            ix, iy, icols, irows, _path, _src = self._prev_images[k]
+            self._grid.invalidate(ix, iy, icols, irows)
+        return ""
+
+    def _emit_images(self, overpainted: frozenset[int] = frozenset()) -> str:
+        """This frame's placements, skipping any that have not changed — a
+        payload can be hundreds of KB and re-sending it every frame would make
+        scrolling crawl.
+
+        ``overpainted`` names placements whose cells the grid re-sent as text
+        this frame. Those have to go out again even though the placement itself
+        did not change: the text landed on top of the pixels and erased them.
+        """
+        protocol = self._term_graphics
+        if protocol is None or not self._images:
+            return ""
+        fresh = {k: v for k, v in self._images.items()
+                 if k in overpainted or self._prev_images.get(k) != v}
+        if not fresh:
+            return ""
+        cell_w, cell_h = self.base_pixel_size
+        parts = []
+        for image_id, (x, y, cols, rows, path, src) in fresh.items():
+            # Encoding is the expensive step — sixel walks every pixel — and a
+            # placement is re-sent whenever the text overpaints it, which a
+            # click or a scroll does constantly. The bytes depend only on the
+            # picture and the box it is drawn into, never on where it sits, so
+            # they are worth keeping: revisiting a page or restyling a button
+            # then costs nothing.
+            key = (path, cols, rows, src, cell_w, cell_h, protocol, image_id)
+            sequence = self._encoded.get(key)
+            if sequence is None:
+                rendered = _terminal_graphics.render(path, cols * cell_w, rows * cell_h, src)
+                if rendered is None:
+                    continue  # Pillow could not open it
+                image, png = rendered
+                sequence = _terminal_graphics.encode(
+                    protocol, image, png, cols, rows, image_id, fill=src is not None
+                )
+                if not sequence:
+                    continue
+                self._encoded[key] = sequence
+                # Bounded, and evicted oldest-first: a file browser walking a
+                # directory of photos would otherwise hold every one it passed.
+                while len(self._encoded) > _ENCODED_CACHE_MAX:
+                    self._encoded.pop(next(iter(self._encoded)))
+            # Address the cell absolutely per image, so one image's cursor drift
+            # never offsets the next.
+            parts.append(f"\x1b[{y + 1};{x + 1}H{sequence}")
+        if not parts:
+            return ""
+        # Save and restore the cursor around the batch (DECSC/DECRC): iTerm2 and
+        # sixel advance the cursor when they draw and offer no "keep it put"
+        # option, so an image low on the screen would scroll the alternate screen
+        # and push itself out of view — the exact "no image appears" symptom.
+        return "\x1b7" + "".join(parts) + "\x1b8"
+
     def request_text_input(self, x: int, y: int, hints: dict[str, Any] | None = None) -> None:
         """Where the terminal should compose. In a TUI the IME composes inline at
         the hardware cursor, so the caret position is the composition position.
@@ -230,8 +436,19 @@ class VTBackend(Backend):
 
     def present(self) -> None:
         assert self._grid is not None
-        out = self._grid.render()
+        # Stale images first: on a protocol with no delete verb this marks the
+        # covered cells dirty, so it has to run BEFORE the grid renders.
+        erase = self._erase_stale_images()
+        # Which placements this frame's text is about to paint over. Asked before
+        # render(), because render() is what consumes the diff.
+        overpainted = frozenset(
+            k for k, (ix, iy, icols, irows, _p, _s) in self._images.items()
+            if self._grid.rect_is_dirty(ix, iy, icols, irows)
+        )
+        out = erase + self._grid.render()
         self._grid.flip()
+        # Then the pixels, on top of a grid that has just been committed.
+        out += self._emit_images(overpainted)
         if self._input_pos is not None:
             cx, cy = self._input_pos
             out += f"\x1b[{cy + 1};{cx + 1}H\x1b[?25h"
@@ -279,12 +496,83 @@ class VTBackend(Backend):
             self._run_ticks()
             return not self._quit_requested
         for record in events:
+            if record.get("type") == "mouse":
+                self._pending.extend(self._mouse_events(record))
+                continue
             event = self._to_event(record)
             if event is not None:
                 self._pending.append(event)
+        self._pending = _coalesce(self._pending)
         if self._pending:
             handler(self._pending.pop(0))
         return not self._quit_requested
+
+    def _mouse_events(self, record: dict) -> list[Event]:
+        """Turn one MOUSE_EVENT record into puikit events.
+
+        Windows reports mouse state, not gestures: each record carries which
+        buttons are down *now*. The press/release/drag contract comes from
+        comparing that against the last record — which is also why the previous
+        state has to be tracked here rather than derived per record.
+
+        Unlike the curses path there is no SGR parsing: that backend has to write
+        DECSET itself and decode ``ESC [ < b ; x ; y M`` by hand, because the
+        ncurses that ships on macOS will not decode modes 1002/1003/1006.
+        """
+        x, y = record["x"], record["y"]
+        flags = record["flags"]
+        buttons = record["buttons"]
+        state = record.get("control", 0)
+        mods = set()
+        if state & _SHIFT_PRESSED:
+            mods.add("shift")
+        if state & (_LEFT_CTRL_PRESSED | _RIGHT_CTRL_PRESSED):
+            mods.add("ctrl")
+        if state & (_LEFT_ALT_PRESSED | _RIGHT_ALT_PRESSED):
+            mods.add("alt")
+        mods = frozenset(mods)
+
+        if flags & (_MOUSE_WHEELED | _MOUSE_HWHEELED):
+            wheel = record.get("wheel", 0)
+            if not wheel:
+                return []
+            # One notch is WHEEL_DELTA (120). Positive is away from the user,
+            # which is puikit's positive scroll too.
+            notches = max(1, abs(wheel) // 120)
+            step = 1 if wheel > 0 else -1
+            hints = {}
+            if flags & _MOUSE_HWHEELED:
+                # A horizontal wheel reports on the same axis field; hand it to
+                # the Panel as a horizontal sub-unit delta.
+                hints = {"scroll_units_x": float(step * notches)}
+            return [Event(EventType.MOUSE_SCROLL, x=float(x), y=float(y),
+                          scroll=step * notches, modifiers=mods, hints=hints)]
+
+        previous = self._mouse_buttons
+        self._mouse_buttons = buttons
+        pressed = buttons & ~previous
+        released = previous & ~buttons
+        events: list[Event] = []
+        for mask, name in _BUTTON_NAMES:
+            if pressed & mask:
+                events.append(Event(EventType.MOUSE_DOWN, x=float(x), y=float(y),
+                                    button=name, modifiers=mods))
+            if released & mask:
+                events.append(Event(EventType.MOUSE_UP, x=float(x), y=float(y),
+                                    button=name, modifiers=mods))
+        if events:
+            return events
+        if flags & _MOUSE_MOVED:
+            if buttons:
+                name = next((n for m, n in _BUTTON_NAMES if buttons & m), "left")
+                return [Event(EventType.MOUSE_DRAG, x=float(x), y=float(y),
+                              button=name, modifiers=mods)]
+            # Bare motion. The profile leaves ``hover`` off — a terminal app
+            # re-renders the whole frame to show a hover cue, and motion arrives
+            # for every cell crossed — so this is dropped rather than flooding
+            # the loop with repaints nothing is listening for.
+            return []
+        return []
 
     def _to_event(self, record: dict) -> Event | None:
         kind = record.get("type")
@@ -327,6 +615,45 @@ class VTBackend(Backend):
 
     def frames_presented(self) -> int:
         return self._frames
+
+
+def _crop_src(src, fx: float, fy: float, fw: float, fh: float):
+    """Narrow a normalized source window to the sub-fraction (fx, fy, fw, fh) of
+    itself, so a clipped destination shows the matching part of the picture
+    rather than the whole thing squashed into it."""
+    if src is None:
+        return (fx, fy, fw, fh)
+    sx, sy, sw, sh = src
+    return (sx + fx * sw, sy + fy * sh, fw * sw, fh * sh)
+
+
+def _coalesce(events: list[Event]) -> list[Event]:
+    """Collapse a burst of same-kind pointer events into one.
+
+    A wheel spin or a quick drag delivers a run of records at once, and rendering
+    per record caps the wheel's speed and lags the drag behind the pointer. Runs
+    of scrolls sum their notches; runs of drags keep the last position. Order is
+    preserved and nothing of another kind is dropped.
+    """
+    out: list[Event] = []
+    for event in events:
+        if not out:
+            out.append(event)
+            continue
+        last = out[-1]
+        if (event.type is EventType.MOUSE_SCROLL
+                and last.type is EventType.MOUSE_SCROLL
+                and last.modifiers == event.modifiers):
+            out[-1] = Event(EventType.MOUSE_SCROLL, x=event.x, y=event.y,
+                            scroll=last.scroll + event.scroll,
+                            modifiers=event.modifiers, hints=event.hints)
+        elif (event.type is EventType.MOUSE_DRAG
+                and last.type is EventType.MOUSE_DRAG
+                and last.button == event.button):
+            out[-1] = event  # only the newest position matters
+        else:
+            out.append(event)
+    return out
 
 
 def _blend(a: Color, b: Color, t: float) -> Color:
@@ -404,10 +731,29 @@ class _WindowsConsole:
         self._wintypes = wintypes
         self._k32 = ctypes.WinDLL("kernel32", use_last_error=True)
         self._u32 = ctypes.WinDLL("user32", use_last_error=True)
+        # ctypes defaults every restype to c_int. On 64-bit Windows that
+        # TRUNCATES any returned handle or pointer to 32 bits, and the truncated
+        # value then fails — or, worse, is passed to memmove as a wild pointer.
+        # Every call below that returns one has to say so explicitly.
+        self._k32.GetStdHandle.restype = wintypes.HANDLE
+        self._k32.GlobalAlloc.restype = wintypes.HGLOBAL
+        self._k32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+        self._k32.GlobalLock.restype = wintypes.LPVOID
+        self._k32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+        self._k32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+        self._u32.GetClipboardData.restype = wintypes.HANDLE
+        self._u32.GetClipboardData.argtypes = [wintypes.UINT]
+        self._u32.SetClipboardData.restype = wintypes.HANDLE
+        self._u32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+        self._u32.OpenClipboard.argtypes = [wintypes.HWND]
         self._hout = self._k32.GetStdHandle(_STD_OUTPUT_HANDLE)
         self._hin = self._k32.GetStdHandle(_STD_INPUT_HANDLE)
         self._saved_out: int | None = None
         self._saved_in: int | None = None
+        self._cell_px: tuple[float, float] | None = None
+        # Input records read while probing for the cell size that were not part
+        # of the reply; handed to the first real read_input() so nothing is lost.
+        self._deferred: list[dict] = []
 
     # --- mode ---
 
@@ -431,8 +777,13 @@ class _WindowsConsole:
             self._k32.SetConsoleMode(
                 self._hin,
                 (in_mode.value
-                 & ~(_ENABLE_LINE_INPUT | _ENABLE_ECHO_INPUT | _ENABLE_PROCESSED_INPUT))
+                 & ~(_ENABLE_LINE_INPUT | _ENABLE_ECHO_INPUT | _ENABLE_PROCESSED_INPUT
+                     # Quick Edit would turn a drag into a console text selection
+                     # and never report it; clearing it needs EXTENDED_FLAGS set
+                     # in the same call.
+                     | _ENABLE_QUICK_EDIT_MODE))
                 | _ENABLE_WINDOW_INPUT
+                | _ENABLE_MOUSE_INPUT
                 | _ENABLE_EXTENDED_FLAGS,
             )
         # Alternate screen, so the shell's scrollback survives the session.
@@ -471,6 +822,23 @@ class _WindowsConsole:
         return (max(1, w), max(1, h))
 
     def cell_pixels(self) -> tuple[float, float]:
+        """Pixel size of one character cell.
+
+        Asked of the TERMINAL, not of the console API. ``GetCurrentConsoleFontEx``
+        reports the conhost font — 8x16 by default — but Windows Terminal draws
+        with its own font at its own DPI and does not render at that size at all.
+        Since every inline image is scaled to ``cols * cell_w`` by
+        ``rows * cell_h``, believing 8x16 renders the picture at roughly 60% of
+        the box it was given: the text grid stays right and the image inside it
+        comes out small. The XTWINOPS pair below gets the real number; the
+        console API is only the fallback for a terminal that will not answer.
+        """
+        if self._cell_px is not None:
+            return self._cell_px
+        self._cell_px = self._probe_cell_pixels() or self._font_cell_pixels()
+        return self._cell_px
+
+    def _font_cell_pixels(self) -> tuple[float, float]:
         ctypes, wintypes = self._ctypes, self._wintypes
 
         class _COORD(ctypes.Structure):
@@ -486,6 +854,46 @@ class _WindowsConsole:
         if not self._k32.GetCurrentConsoleFontEx(self._hout, False, ctypes.byref(info)):
             return (8.0, 16.0)
         return (float(info.dwFontSize.X or 8), float(info.dwFontSize.Y or 16))
+
+    def _probe_cell_pixels(self) -> tuple[float, float] | None:
+        """Ask the terminal how big its text area is, in pixels and in cells.
+
+        ``CSI 14 t`` answers ``CSI 4 ; height ; width t`` and ``CSI 18 t``
+        answers ``CSI 8 ; rows ; cols t``; dividing gives the true cell. Run once
+        at open(), before the event loop starts, so the replies cannot be
+        confused with typing. Anything else that arrives while waiting is kept
+        and handed to the first read_input() rather than swallowed.
+
+        Returns None if the terminal does not answer within the deadline (legacy
+        conhost does not implement XTWINOPS), leaving the console-API fallback.
+        """
+        import time
+
+        self.write("\x1b[14t\x1b[18t")
+        deadline = time.monotonic() + 0.25
+        buffer = ""
+        pixels: tuple[int, int] | None = None
+        cells: tuple[int, int] | None = None
+        while time.monotonic() < deadline and (pixels is None or cells is None):
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            for record in self.read_input(remaining_ms):
+                if record.get("type") == "key" and record.get("char"):
+                    buffer += record["char"]
+                else:
+                    self._deferred.append(record)
+            for match in re.finditer(r"\x1b\[(4|8);(\d+);(\d+)t", buffer):
+                kind, a, b = match.group(1), int(match.group(2)), int(match.group(3))
+                if kind == "4":
+                    pixels = (b, a)   # width, height
+                else:
+                    cells = (b, a)    # cols, rows
+        if not pixels or not cells or not all(pixels) or not all(cells):
+            return None
+        w = pixels[0] / cells[0]
+        h = pixels[1] / cells[1]
+        if not (1.0 <= w <= 200.0 and 1.0 <= h <= 400.0):
+            return None  # implausible answer; trust the fallback instead
+        return (w, h)
 
     # --- output ---
 
@@ -506,6 +914,9 @@ class _WindowsConsole:
     # --- input ---
 
     def read_input(self, timeout_ms: int) -> list[dict]:
+        if self._deferred:
+            held, self._deferred = self._deferred, []
+            return held
         ctypes, wintypes = self._ctypes, self._wintypes
         # WaitForSingleObject gives a real "nothing arrived" answer, unlike
         # curses' timeout()+get_wch(), which cannot distinguish a timeout from a
@@ -522,11 +933,16 @@ class _WindowsConsole:
                         ("wVirtualKeyCode", wintypes.WORD), ("wVirtualScanCode", wintypes.WORD),
                         ("UnicodeChar", wintypes.WCHAR), ("dwControlKeyState", wintypes.DWORD)]
 
+        class _MOUSE_EVENT_RECORD(ctypes.Structure):
+            _fields_ = [("dwMousePosition", _COORD), ("dwButtonState", wintypes.DWORD),
+                        ("dwControlKeyState", wintypes.DWORD), ("dwEventFlags", wintypes.DWORD)]
+
         class _WINDOW_BUFFER_SIZE_RECORD(ctypes.Structure):
             _fields_ = [("dwSize", _COORD)]
 
         class _EVENT_UNION(ctypes.Union):
             _fields_ = [("KeyEvent", _KEY_EVENT_RECORD),
+                        ("MouseEvent", _MOUSE_EVENT_RECORD),
                         ("WindowBufferSizeEvent", _WINDOW_BUFFER_SIZE_RECORD),
                         ("_pad", ctypes.c_byte * 16)]
 
@@ -554,45 +970,100 @@ class _WindowsConsole:
                     "vk": key.wVirtualKeyCode,
                     "control": key.dwControlKeyState,
                 })
+            elif rec.EventType == _MOUSE_EVENT:
+                m = rec.Event.MouseEvent
+                # The record carries BUFFER coordinates. In the alternate screen
+                # the window usually starts at the buffer origin, but not
+                # necessarily, so translate by the window rect rather than assume.
+                ox, oy = self._window_origin()
+                # The wheel delta is the SIGNED high word of dwButtonState —
+                # signed, so a scroll toward the user must not be read as a
+                # button bitmask of 0xFF880000.
+                delta = ctypes.c_short((m.dwButtonState >> 16) & 0xFFFF).value
+                out.append({
+                    "type": "mouse",
+                    "x": m.dwMousePosition.X - ox,
+                    "y": m.dwMousePosition.Y - oy,
+                    "buttons": m.dwButtonState & 0xFFFF,
+                    "flags": m.dwEventFlags,
+                    "wheel": delta,
+                    "control": m.dwControlKeyState,
+                })
             elif rec.EventType == _WINDOW_BUFFER_SIZE_EVENT:
                 out.append({"type": "resize"})
         return out
 
+    def _window_origin(self) -> tuple[int, int]:
+        ctypes, wintypes = self._ctypes, self._wintypes
+
+        class _COORD(ctypes.Structure):
+            _fields_ = [("X", wintypes.SHORT), ("Y", wintypes.SHORT)]
+
+        class _SMALL_RECT(ctypes.Structure):
+            _fields_ = [("Left", wintypes.SHORT), ("Top", wintypes.SHORT),
+                        ("Right", wintypes.SHORT), ("Bottom", wintypes.SHORT)]
+
+        class _CSBI(ctypes.Structure):
+            _fields_ = [("dwSize", _COORD), ("dwCursorPosition", _COORD),
+                        ("wAttributes", wintypes.WORD), ("srWindow", _SMALL_RECT),
+                        ("dwMaximumWindowSize", _COORD)]
+
+        info = _CSBI()
+        if not self._k32.GetConsoleScreenBufferInfo(self._hout, ctypes.byref(info)):
+            return (0, 0)
+        return (info.srWindow.Left, info.srWindow.Top)
+
     # --- clipboard ---
 
     def set_clipboard(self, text: str) -> None:
+        """Copy via Win32. Any failure degrades to doing nothing: this is the
+        fallback path for a clicked hyperlink (a TUI has no ``os_open``, so the
+        Panel copies the URL instead), and a clipboard that is locked by another
+        process must not take the UI down with it."""
         ctypes = self._ctypes
         CF_UNICODETEXT, GMEM_MOVEABLE = 13, 0x0002
-        if not self._u32.OpenClipboard(None):
-            return
         try:
-            self._u32.EmptyClipboard()
-            data = text.encode("utf-16-le") + b"\x00\x00"
-            handle = self._k32.GlobalAlloc(GMEM_MOVEABLE, len(data))
-            if not handle:
+            if not self._u32.OpenClipboard(None):
                 return
-            ptr = self._k32.GlobalLock(handle)
-            ctypes.memmove(ptr, data, len(data))
-            self._k32.GlobalUnlock(handle)
-            self._u32.SetClipboardData(CF_UNICODETEXT, handle)
-        finally:
-            self._u32.CloseClipboard()
+            try:
+                self._u32.EmptyClipboard()
+                data = text.encode("utf-16-le") + b"\x00\x00"
+                handle = self._k32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+                if not handle:
+                    return
+                ptr = self._k32.GlobalLock(handle)
+                if not ptr:
+                    self._k32.GlobalFree(handle)
+                    return
+                ctypes.memmove(ptr, data, len(data))
+                self._k32.GlobalUnlock(handle)
+                # On success the system takes ownership of the handle, so it
+                # must NOT be freed here.
+                if not self._u32.SetClipboardData(CF_UNICODETEXT, handle):
+                    self._k32.GlobalFree(handle)
+            finally:
+                self._u32.CloseClipboard()
+        except OSError:
+            return
 
     def get_clipboard(self) -> str:
         ctypes = self._ctypes
         CF_UNICODETEXT = 13
-        if not self._u32.OpenClipboard(None):
-            return ""
         try:
-            handle = self._u32.GetClipboardData(CF_UNICODETEXT)
-            if not handle:
-                return ""
-            ptr = self._k32.GlobalLock(handle)
-            if not ptr:
+            if not self._u32.OpenClipboard(None):
                 return ""
             try:
-                return ctypes.c_wchar_p(ptr).value or ""
+                handle = self._u32.GetClipboardData(CF_UNICODETEXT)
+                if not handle:
+                    return ""
+                ptr = self._k32.GlobalLock(handle)
+                if not ptr:
+                    return ""
+                try:
+                    return ctypes.c_wchar_p(ptr).value or ""
+                finally:
+                    self._k32.GlobalUnlock(handle)
             finally:
-                self._k32.GlobalUnlock(handle)
-        finally:
-            self._u32.CloseClipboard()
+                self._u32.CloseClipboard()
+        except OSError:
+            return ""

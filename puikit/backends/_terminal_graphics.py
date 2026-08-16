@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import sys
 from typing import Any
 
@@ -116,6 +117,15 @@ def detect_protocol(env: dict[str, str] | None = None) -> str | None:
     # KITTY_WINDOW_ID is set by kitty itself; konsole advertises its version.
     if env.get("KITTY_WINDOW_ID") or env.get("KONSOLE_VERSION"):
         return KITTY
+    # Windows Terminal sets WT_SESSION and has drawn sixel since 1.22. It is the
+    # only signature Windows offers — there is no TERM_PROGRAM and TERM is
+    # whatever the shell happens to set — so it is checked before those. This
+    # only reports what the emulator can decode; whether the escapes actually
+    # reach the screen is the backend's problem, and under curses they do not,
+    # because PDCurses is displaying a different screen buffer than the one the
+    # image is written to (xefm#306).
+    if env.get("WT_SESSION"):
+        return SIXEL
     protocol = _TERM_PROGRAM.get((env.get("TERM_PROGRAM") or "").strip().lower())
     if protocol is not None:
         return protocol
@@ -322,34 +332,60 @@ def _sixel(image: Any, max_colors: int = 256) -> str:
         # Sixel color components are percentages (0-100), not 0-255.
         out.append(f"#{index};2;{r * 100 // 255};{g * 100 // 255};{b * 100 // 255}")
 
+    # One flat read of the whole image, as bytes — a paletted image is one byte
+    # per pixel, so a row is a slice and iterating it yields the palette indexes
+    # directly. Indexing PixelAccess per pixel is a Python-level call each time.
+    raw = quantized.tobytes()
+
     for top in range(0, height, 6):
-        band_colors = set()
-        for y in range(top, min(top + 6, height)):
-            for x in range(width):
-                band_colors.add(pixels[x, y])
-        for position, index in enumerate(sorted(band_colors)):
+        # Build every color's column bits for this band in ONE pass over its
+        # pixels. The obvious shape — walk the band again for each color — costs
+        # (colors x width x 6) pixel reads per band, so a photographic image with
+        # dozens of colors per band pays tens of millions of them for a picture a
+        # few hundred pixels wide. Accumulating into a bytearray per color as the
+        # band is read makes it (width x 6) regardless of how many colors appear,
+        # which is what took the demo's Images page from ~1.5s to interactive.
+        # The emitted bytes are unchanged.
+        band: dict[int, bytearray] = {}
+        for row in range(6):
+            y = top + row
+            if y >= height:
+                break
+            bit = 1 << row
+            for x, index in enumerate(raw[y * width:(y + 1) * width]):
+                column = band.get(index)
+                if column is None:
+                    column = band[index] = bytearray(width)
+                column[x] |= bit
+        last = len(band) - 1
+        for position, index in enumerate(sorted(band)):
             out.append(f"#{index}")
-            run_char, run_len = None, 0
-            for x in range(width):
-                bits = 0
-                for row in range(6):
-                    y = top + row
-                    if y < height and pixels[x, y] == index:
-                        bits |= 1 << row
-                char = chr(63 + bits)
-                if char == run_char:
-                    run_len += 1
-                    continue
-                if run_char is not None:
-                    out.append(_sixel_run(run_char, run_len))
-                run_char, run_len = char, 1
-            if run_char is not None:
-                out.append(_sixel_run(run_char, run_len))
+            # Turn the bit column into sixel characters with a 256-byte
+            # translation table, then let the regex engine find the runs. Doing
+            # both in Python — a chr() per column and a compare against the
+            # previous character — is millions of interpreter steps for one
+            # picture; here each is a single C-level pass over the row.
+            # finditer, not findall: the pattern captures a group for the
+            # backreference, and findall would hand back that single character
+            # instead of the whole run — silently collapsing every run to one
+            # column and truncating the picture.
+            for match in _RUN_RE.finditer(band[index].translate(_SIXEL_BYTES)):
+                run = match.group()
+                out.append(_sixel_run(chr(run[0]), len(run)))
             # "$" returns to column 0 to overlay the next color on this same
             # band; "-" after the last one advances to the next band.
-            out.append("$" if position < len(band_colors) - 1 else "-")
+            out.append("$" if position < last else "-")
     out.append("\x1b\\")
     return "".join(out)
+
+
+#: Bit pattern (0-63) -> the printable byte sixel spells it with. Sized 256 so
+#: it can be handed straight to bytes.translate; entries above 63 never occur.
+_SIXEL_BYTES = bytes((63 + i) if i < 64 else 63 for i in range(256))
+
+#: One run of identical sixel characters. Finding runs with the regex engine
+#: keeps the scan in C rather than comparing character by character in Python.
+_RUN_RE = re.compile(rb"(.)\1*", re.DOTALL)
 
 
 def _sixel_run(char: str, count: int) -> str:
