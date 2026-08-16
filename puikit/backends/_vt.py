@@ -25,6 +25,7 @@ than by correction.
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Iterator
 
 from ..text import display_width, glyph_runs
@@ -58,10 +59,6 @@ class VTGrid:
         self._buf: list[list[Cell]] = []
         self._prev: list[list[Cell]] = []
         self._clip_stack: list[tuple[int, int, int, int]] = []
-        # The pen the terminal is currently holding, carried across runs within a
-        # frame so an unchanged style costs no bytes. Invalidated per frame,
-        # because a frame never knows what ran before it.
-        self._pen: tuple | None = None
         self.reset()
 
     # --- geometry ------------------------------------------------------------
@@ -258,24 +255,29 @@ class VTGrid:
         arise here.
         """
         parts: list[str] = []
-        self._pen = None  # a frame cannot assume what the terminal is holding
+        append = parts.append
+        # One tuple comparison per cell, not three. Splitting the pen into three
+        # locals to avoid the allocation was measurably SLOWER: every change then
+        # rebuilds two tuples to hand to _sgr_delta anyway, and pays three
+        # comparisons instead of one C-level tuple compare.
+        pen = None  # a frame cannot assume what the terminal is already holding
         for y in range(self._h):
             cur, prev = self._buf[y], self._prev[y]
             if cur == prev:
                 continue
             for x0, x1 in self._dirty_spans(cur, prev):
-                parts.append(f"\x1b[{y + 1};{x0 + 1}H")
+                append(f"\x1b[{y + 1};{x0 + 1}H")
                 for x in range(x0, x1):
                     cell = cur[x]
                     if cell is _TRAIL:
                         # The lead already moved the cursor across this column.
                         continue
                     glyph, fg, bg, attr = cell
-                    pen = (fg, bg, attr)
-                    if pen != self._pen:
-                        parts.append(_sgr(fg, bg, attr))
-                        self._pen = pen
-                    parts.append(glyph)
+                    style = (fg, bg, attr)
+                    if style != pen:
+                        append(_sgr_delta(style, pen))
+                        pen = style
+                    append(glyph)
         if parts:
             parts.append("\x1b[0m")
         return "".join(parts)
@@ -322,21 +324,66 @@ _ATTR_CODES: tuple[tuple[int, str], ...] = (
 )
 
 
-def _sgr(fg, bg, attr: int) -> str:
-    """One SGR sequence establishing exactly this pen.
+@lru_cache(maxsize=8192)
+def _color_code(color, layer: int) -> str:
+    """The SGR parameter selecting ``color`` on ``layer`` (38 fg / 48 bg), or the
+    terminal default (39 / 49) for None. Cached because an animated background
+    revisits the same colors constantly and this would otherwise rebuild the
+    same string thousands of times a frame."""
+    if color is None:
+        return "39" if layer == 38 else "49"
+    return f"{layer};2;{color[0]};{color[1]};{color[2]}"
 
-    Built from a reset rather than as a delta against the previous pen: a delta
-    has to model which attributes each terminal clears together, and getting that
-    wrong leaves stray bold or reverse smeared across a row. Colors go out as
-    truecolor, so a theme renders as authored instead of snapped to the nearest
-    of the ~220 palette entries the curses path is limited to.
+
+@lru_cache(maxsize=8192)
+def _sgr(fg, bg, attr: int) -> str:
+    """One SGR sequence establishing exactly this pen, built from a reset.
+
+    Used whenever the previous pen is unknown or its ATTRIBUTES differ: clearing
+    an attribute means modelling which of them each terminal clears together,
+    and getting that wrong leaves stray bold or reverse smeared across a row.
+    A reset is unambiguous everywhere.
     """
     codes = ["0"]
     for flag, code in _ATTR_CODES:
         if attr & flag:
             codes.append(code)
     if fg is not None:
-        codes.append(f"38;2;{fg[0]};{fg[1]};{fg[2]}")
+        codes.append(_color_code(fg, 38))
     if bg is not None:
-        codes.append(f"48;2;{bg[0]};{bg[1]};{bg[2]}")
+        codes.append(_color_code(bg, 48))
     return "\x1b[" + ";".join(codes) + "m"
+
+
+def _sgr_delta(new: tuple, old: tuple | None) -> str:
+    """Only what actually changed between two pens.
+
+    A full reset per cell costs about 37 bytes, which is invisible on ordinary
+    UI — long runs share a pen and emit nothing — and ruinous on a gradient or
+    animated background, where every cell carries a distinct color and there are
+    no runs at all. A 200x50 frame of those was 377KB, enough to stall the app
+    at any animation rate. Emitting just the changed component roughly halves it,
+    and colors go out as truecolor either way, so a theme still renders as
+    authored rather than snapped to the ~220 palette entries curses is limited
+    to.
+
+    Attributes still force the full reset (see _sgr): they are the part a delta
+    cannot express safely.
+    """
+    if old is None:
+        return _sgr(*new)
+    new_fg, new_bg, new_attr = new
+    old_fg, old_bg, old_attr = old
+    if new_attr != old_attr:
+        return _sgr(*new)
+    # Spelled out per case rather than accumulated into a list and joined: this
+    # runs once per changed cell, and on an animated background that is every
+    # cell of every frame, where building and joining a two-element list costs
+    # more than the branch does.
+    if new_fg == old_fg:
+        if new_bg == old_bg:
+            return ""
+        return "\x1b[" + _color_code(new_bg, 48) + "m"
+    if new_bg == old_bg:
+        return "\x1b[" + _color_code(new_fg, 38) + "m"
+    return "\x1b[" + _color_code(new_fg, 38) + ";" + _color_code(new_bg, 48) + "m"

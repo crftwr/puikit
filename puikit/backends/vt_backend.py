@@ -509,17 +509,34 @@ class VTBackend(Backend):
     # --- event loop ----------------------------------------------------------
 
     def request_animation_ticks(self, callback: Any) -> None:
-        self._tick_callbacks.append(callback)
+        """Register a self-driven animation tick.
+
+        Deduplicated, because the Panel registers the SAME bound method from
+        half a dozen places every time an animation starts. Appending blindly
+        meant the list grew for the life of the session and every entry fired on
+        every idle wake, so an animated theme got progressively slower the longer
+        it ran — with no single action to blame it on.
+        """
+        if callback not in self._tick_callbacks:
+            self._tick_callbacks.append(callback)
 
     def _run_ticks(self) -> None:
-        for cb in list(self._tick_callbacks):
-            cb()
+        """Fire each tick once, dropping any that return False.
+
+        The return value is the callback's way of saying it is finished; ignoring
+        it kept every animation that had ever run registered forever.
+        """
+        if self._tick_callbacks:
+            self._tick_callbacks = [cb for cb in self._tick_callbacks if cb()]
 
     def quit(self) -> None:
         self._quit_requested = True
 
     def run_event_loop(self, handler: EventHandler) -> None:
-        while self.run_event_loop_iteration(handler, 16):
+        # 50ms, matching the curses backend. At 16 the loop woke three times as
+        # often and every self-driven animation ran three times as fast as the
+        # same app does under curses — the tick cadence IS the animation clock.
+        while self.run_event_loop_iteration(handler, 50):
             pass
 
     def run_event_loop_iteration(self, handler: EventHandler, timeout_ms: int = 0) -> bool:
