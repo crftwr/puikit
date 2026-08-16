@@ -2520,8 +2520,8 @@ def main() -> None:
     parser.add_argument(
         "--backend",
         default="tui",
-        help="backend name (tui, gui, web, memory; vt = experimental TUI without "
-             "curses — no mouse or inline images yet)",
+        help="backend name: tui (VT on Windows, curses elsewhere), gui, web, "
+             "memory, or a concrete one — curses / vt / macos / windows",
     )
     parser.add_argument(
         "--font-size",
