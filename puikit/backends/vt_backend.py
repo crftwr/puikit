@@ -36,6 +36,7 @@ Not implemented, deliberately, rather than half-built:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import sys
@@ -43,7 +44,7 @@ from typing import Any, Callable
 
 from ..backend import Backend, Color, DEFAULT_STYLE, EventHandler, Style, TextAttribute
 from ..capability import CapabilityProfile, PROFILE_TUI
-from ..event import Event, EventType
+from ..event import Event, EventType, char_key_event
 from ..image import CONTAIN, COVER, contain_box, cover_source
 from ..image import image_size as _natural_size
 from ..text import display_width
@@ -108,9 +109,16 @@ _SHIFT_PRESSED = 0x0010
 # Virtual key codes worth naming.
 _VK_PROCESSKEY = 0xE5  # "the IME is handling this" — never a command key
 
+#: Characters the console delivers for keys that have a contract NAME rather
+#: than a glyph. Mirrors the curses backend's table so both agree.
+_CONTROL_CHARS = {
+    chr(9): "tab", chr(10): "enter", chr(13): "enter",
+    chr(27): "escape", chr(127): "backspace", chr(8): "backspace",
+}
+
 _VK_KEYS = {
     0x08: "backspace", 0x09: "tab", 0x0D: "enter", 0x1B: "escape",
-    0x20: " ", 0x21: "pageup", 0x22: "pagedown", 0x23: "end", 0x24: "home",
+    0x20: "space", 0x21: "pageup", 0x22: "pagedown", 0x23: "end", 0x24: "home",
     0x25: "left", 0x26: "up", 0x27: "right", 0x28: "down",
     0x2D: "insert", 0x2E: "delete",
     0x70: "f1", 0x71: "f2", 0x72: "f3", 0x73: "f4", 0x74: "f5", 0x75: "f6",
@@ -160,6 +168,35 @@ class VTBackend(Backend):
     def close(self) -> None:
         self._console.close()
         self._grid = None
+
+    @contextlib.contextmanager
+    def suspended(self):
+        """Hand the terminal back so a full-screen child (an editor, a shell)
+        can own it, then reclaim it.
+
+        Without this the base class's no-op left the alternate screen up and the
+        console in raw mode while the child ran, so the editor drew over our
+        frame and returning showed the wreckage of both — the garbage characters
+        this fixes.
+
+        Reclaiming needs more than re-entering the alternate screen: that screen
+        comes back BLANK, while the diff still believes every cell it last sent
+        is on display. So the whole grid is invalidated and repainted, and the
+        image placements are dropped from the previous-frame map so they are
+        re-transmitted too — the child wiped those off the screen as surely as
+        it wiped the text.
+        """
+        if self._grid is None:
+            yield
+            return
+        self._console.suspend()
+        try:
+            yield
+        finally:
+            self._console.resume()
+            self._grid.invalidate(0, 0, *self._grid.size)
+            self._prev_images = {}
+            self.present()
 
     @property
     def size(self) -> tuple[int, int]:
@@ -595,21 +632,37 @@ class VTBackend(Backend):
             mods.add("ctrl")
         if state & (_LEFT_ALT_PRESSED | _RIGHT_ALT_PRESSED):
             mods.add("alt")
+        mods = frozenset(mods)
         # An IME commit arrives as a KEY_EVENT carrying the composed character
         # with no usable virtual key (or VK_PROCESSKEY). Filtering on vk — the
         # obvious way to find command keys — silently drops all Japanese input,
         # which is the single worst outcome available to this backend: it would
         # fix the display of CJK while making CJK impossible to type
         # (puikit#98 §8.4). So the character wins whenever there is one.
-        if char and (vk == _VK_PROCESSKEY or vk == 0 or char >= " "):
-            if char == "\r":
-                return Event(EventType.KEY, key="enter", modifiers=frozenset(mods))
-            if char >= " " or char == "\t":
-                return Event(EventType.KEY, key=char, char=char, modifiers=frozenset(mods))
+        if char:
+            name = _CONTROL_CHARS.get(char)
+            if name is not None:
+                return Event(EventType.KEY, key=name, modifiers=mods)
+            # Ctrl+<letter> arrives as the control byte 0x01..0x1A. Deliver it as
+            # a ctrl-modified letter so the shared shortcuts (Ctrl+A/C/X/V) work
+            # here exactly as they do under curses. Letters whose control code is
+            # already a named key (Ctrl+I=tab, Ctrl+M=enter, Ctrl+H=backspace,
+            # Ctrl+[=escape) kept that meaning via _CONTROL_CHARS above.
+            if len(char) == 1 and 0x01 <= ord(char) <= 0x1A:
+                return Event(EventType.KEY, key=chr(ord(char) + 0x60),
+                             modifiers=mods | {"ctrl"})
+            if char.isprintable():
+                # The shared contract helper, not a hand-rolled Event: it is what
+                # makes SPACE the named key "space" (with char=" " kept) rather
+                # than the literal " ", lowercases a shifted letter, and drops
+                # the redundant shift from a shifted symbol. Building the event
+                # by hand here is why space stopped working — the key name never
+                # matched what the app had bound.
+                return char_key_event(char, mods)
         name = _VK_KEYS.get(vk)
         if name is None:
             return None
-        return Event(EventType.KEY, key=name, modifiers=frozenset(mods))
+        return Event(EventType.KEY, key=name, modifiers=mods)
 
     # --- diagnostics ---------------------------------------------------------
 
@@ -687,6 +740,12 @@ class _StreamConsole:
     def close(self) -> None:
         self.write("\x1b[0m\x1b[?25h\x1b[?1049l")
 
+    def suspend(self) -> None:
+        self.write("\x1b[0m\x1b[?25h\x1b[?1049l")
+
+    def resume(self) -> None:
+        self.write("\x1b[?1049h\x1b[?25l")
+
     def size(self) -> tuple[int, int]:
         try:
             cols, rows = os.get_terminal_size()
@@ -761,22 +820,32 @@ class _WindowsConsole:
         ctypes = self._ctypes
         out_mode = ctypes.c_uint32()
         in_mode = ctypes.c_uint32()
-        if self._k32.GetConsoleMode(self._hout, ctypes.byref(out_mode)):
+        # Remember what was there ONLY on the first entry: suspend/resume also
+        # re-applies these, and re-reading then would save our own raw mode as
+        # the thing to restore on exit, leaving the user's shell in it.
+        if self._saved_out is None and self._k32.GetConsoleMode(self._hout, ctypes.byref(out_mode)):
             self._saved_out = out_mode.value
+        if self._saved_in is None and self._k32.GetConsoleMode(self._hin, ctypes.byref(in_mode)):
+            self._saved_in = in_mode.value
+        self._apply_modes()
+        # Alternate screen, so the shell's scrollback survives the session.
+        self.write("\x1b[?1049h\x1b[?25l")
+
+    def _apply_modes(self) -> None:
+        if self._saved_out is not None:
             self._k32.SetConsoleMode(
                 self._hout,
-                out_mode.value
+                self._saved_out
                 | _ENABLE_VIRTUAL_TERMINAL_PROCESSING
                 | _DISABLE_NEWLINE_AUTO_RETURN,
             )
-        if self._k32.GetConsoleMode(self._hin, ctypes.byref(in_mode)):
-            self._saved_in = in_mode.value
+        if self._saved_in is not None:
             # Raw keys: no line assembly, no echo, no Ctrl+C interception. Window
             # input stays on so a resize arrives as a record (there is no
             # SIGWINCH on Windows).
             self._k32.SetConsoleMode(
                 self._hin,
-                (in_mode.value
+                (self._saved_in
                  & ~(_ENABLE_LINE_INPUT | _ENABLE_ECHO_INPUT | _ENABLE_PROCESSED_INPUT
                      # Quick Edit would turn a drag into a console text selection
                      # and never report it; clearing it needs EXTENDED_FLAGS set
@@ -786,15 +855,30 @@ class _WindowsConsole:
                 | _ENABLE_MOUSE_INPUT
                 | _ENABLE_EXTENDED_FLAGS,
             )
-        # Alternate screen, so the shell's scrollback survives the session.
-        self.write("\x1b[?1049h\x1b[?25l")
 
     def close(self) -> None:
         self.write("\x1b[0m\x1b[?25h\x1b[?1049l")
+        self._restore_modes()
+
+    def _restore_modes(self) -> None:
         if self._saved_out is not None:
             self._k32.SetConsoleMode(self._hout, self._saved_out)
         if self._saved_in is not None:
             self._k32.SetConsoleMode(self._hin, self._saved_in)
+
+    def suspend(self) -> None:
+        """Give the terminal back to a child process: leave the alternate
+        screen, show the cursor, and put the console modes back the way they
+        were found — a child expects line input and echo, and would otherwise
+        run with our raw, mouse-reporting mode still in force."""
+        self.write("\x1b[0m\x1b[?25h\x1b[?1049l")
+        self._restore_modes()
+
+    def resume(self) -> None:
+        """Take it back. Re-applying the modes is not enough on its own: the
+        alternate screen returns blank, so the caller repaints."""
+        self._apply_modes()
+        self.write("\x1b[?1049h\x1b[?25l")
 
     # --- geometry ---
 
