@@ -61,7 +61,7 @@ VENV_STAMP := $(VENV)/.installed
 # stamp depends on this so `make venv` / any run target populates the fonts.
 FONTS := puikit/fonts/NotoSans-Regular.ttf
 
-.PHONY: help venv install test fonts hello demo layout bg3d hello-gui demo-gui layout-gui bg3d-gui hello-web demo-web build publish-testpypi tag release-github release-whl release-status clean
+.PHONY: help venv install test fonts hello demo demo-vt layout bg3d hello-gui demo-gui layout-gui bg3d-gui hello-web demo-web build publish-testpypi tag release-github release-whl release-status clean
 
 help:
 	@echo "PuiKit utility commands:"
@@ -70,7 +70,8 @@ help:
 	@echo "  make fonts     - download the bundled default fonts into puikit/fonts/"
 	@echo "  make test      - run the test suite"
 	@echo "  make hello     - run the hello_world example (TUI)"
-	@echo "  make demo      - run the demo_catalog example (TUI)"
+	@echo "  make demo      - run the demo_catalog example (TUI, curses)"
+	@echo "  make demo-vt   - run the demo_catalog example (TUI, VT backend: no curses)"
 	@echo "  make layout    - run the layout demo (TUI)"
 	@echo "  make bg3d      - run the background_3d example (TUI)"
 	@echo "  make hello-gui - run the hello_world example (native GUI: macOS or Windows)"
@@ -116,6 +117,12 @@ hello: $(VENV_STAMP)
 
 demo: $(VENV_STAMP)
 	$(VENV_PYTHON) examples/demo_catalog/main.py
+
+# The VT backend drives the console itself instead of going through curses, so
+# a full-width glyph occupies the two columns it actually displays. Run it
+# beside `make demo` on Windows to compare the CJK pitch (xefm#283).
+demo-vt: $(VENV_STAMP)
+	$(VENV_PYTHON) examples/demo_catalog/main.py --backend vt
 
 hello-gui: $(VENV_STAMP)
 	$(VENV_PYTHON) examples/hello_world/main.py --backend gui $(FONT_SIZE_ARG)
