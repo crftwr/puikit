@@ -20,6 +20,14 @@ The single source of truth is `__version__` in `puikit/__init__.py`
 - "major" → bump X, reset Y and Z
 - An explicit version in the request wins.
 
+**Confirm the number with the user before proceeding.** State the mapping
+explicitly — "current is X.Y.Z, this releases X.Y.Z′" — and wait for a yes
+(AskUserQuestion in interactive sessions) before the step-2 checks, which cost
+minutes, and long before `make tag`, which publishes: a pushed tag, and later a
+PyPI version that can never be re-uploaded. A misread request — a "patch" that
+should have been "minor", an explicit version with a typo — must be caught
+here, not discovered on PyPI.
+
 Do not edit `__version__` yourself — `make tag` bumps, commits, and tags it.
 
 ## 2. Judgment checks before tagging
