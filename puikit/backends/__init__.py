@@ -58,6 +58,10 @@ def create_backend(name: str, **kwargs) -> Backend:
         from .curses_backend import CursesBackend
 
         return CursesBackend(**kwargs)
+    if name == "vt":
+        from .vt_backend import VTBackend
+
+        return VTBackend(**kwargs)
     if name in ("web", "webbrowser", "browser"):
         from .web_backend import WebBackend
 

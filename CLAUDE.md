@@ -296,6 +296,7 @@ puikit/
 │   ├── widgets/          # Shared widget library
 │   └── backends/
 │       ├── curses_backend.py
+│       ├── vt_backend.py       (+ _vt.py)  # TUI without curses; owns the console
 │       ├── macos_backend.py    (+ _macos_menu.py, _metal.py)
 │       ├── windows_backend.py  (+ _win32_native.py, _win32_ime.py,
 │       │                          _win32_dragdrop.py, _win32_menu.py,
