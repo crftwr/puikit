@@ -49,6 +49,19 @@ from ..image import CONTAIN, COVER, contain_box, cover_source
 from ..image import image_size as _natural_size
 from ..text import display_width
 from . import _terminal_graphics
+from ._textgrid import (
+    DIM_BG,
+    HBAR_GLYPH,
+    LOWER_BLOCKS,
+    SCROLLBAR_THUMB,
+    SCROLLBAR_TRACK,
+    SHADOW_BOTTOM_GLYPH,
+    SHADOW_STRENGTH,
+    SUBCELL,
+    blend,
+    to_gray,
+    vbar_cells,
+)
 from ._vt import VTGrid
 
 _IS_WINDOWS = sys.platform == "win32"
@@ -304,21 +317,95 @@ class VTBackend(Backend):
         x, y, h = round(x), round(y), round(h)
         if h <= 0:
             return
-        ratio = min(1.0, max(0.0, ratio))
-        pos = min(1.0, max(0.0, pos))
-        thumb = max(1, round(h * ratio)) if ratio else 1
-        top = round((h - thumb) * pos)
-        if orientation == "vertical":
+        if orientation == "horizontal":
+            # One row, so a lower-half block reads as a thin bar rather than a
+            # filled cell. The bar color rides the glyph's fg; the cell bg is the
+            # client surface, so the glyph's UPPER half blends into the area
+            # behind the bar instead of the terminal default.
+            thumb_len = max(1, round(h * ratio))
+            thumb_off = round((h - thumb_len) * pos)
+            thumb_style = Style(fg=style.fg or SCROLLBAR_THUMB, bg=surface)
+            track_style = Style(fg=style.bg or SCROLLBAR_TRACK, bg=surface)
             for i in range(h):
-                filled = top <= i < top + thumb
-                self.draw_text(x, y + i, "█" if filled else "│", style)
-        else:
-            # A lower-half block, so the row's upper half keeps showing the
-            # client-area background behind the bar.
-            bar_style = Style(fg=style.fg, bg=surface if surface else style.bg, attr=style.attr)
-            for i in range(h):
-                filled = top <= i < top + thumb
-                self.draw_text(x + i, y, "▄" if filled else "▁", bar_style)
+                st = thumb_style if thumb_off <= i < thumb_off + thumb_len else track_style
+                self.draw_text(x + i, y, HBAR_GLYPH, st)
+            return
+        # Vertical: the thumb's BODY is painted as cell background colors rather
+        # than block glyphs. A background fills the whole cell including the
+        # terminal's line spacing, so a stacked body reads as one continuous bar,
+        # whereas a stacked "█" would leave inter-line gaps. Only the two END
+        # CAPS carry a glyph from the lower-block ladder, so the thumb starts and
+        # stops on 1/8-cell boundaries instead of jumping a whole row at a time.
+        thumb = style.fg or SCROLLBAR_THUMB
+        track = style.bg or SCROLLBAR_TRACK
+        thumb_style = Style(bg=thumb)
+        track_style = Style(bg=track)
+        for row, kind, eighths in vbar_cells(h, pos, ratio):
+            if kind == "thumb":
+                self.draw_text(x, y + row, " ", thumb_style)
+            elif kind == "track":
+                self.draw_text(x, y + row, " ", track_style)
+            elif kind == "top":
+                # Thumb in the cell's lower part: a lower block of exactly that
+                # many eighths, thumb-colored, over the track.
+                self.draw_text(x, y + row, LOWER_BLOCKS[eighths],
+                               Style(fg=thumb, bg=track))
+            else:
+                # Thumb in the cell's UPPER part — and Unicode has no matching
+                # upper-block ladder, so the colors invert: a lower block of the
+                # track's remainder, track-colored, over a thumb-colored cell.
+                self.draw_text(x, y + row, LOWER_BLOCKS[SUBCELL - eighths],
+                               Style(fg=track, bg=thumb))
+
+    def shadow_rect(
+        self, x: int, y: int, w: int, h: int, base_bg: Color | None = None
+    ) -> None:
+        """The character-grid stand-in for a drop shadow, for a layer the Panel
+        gave a "shadow" hint.
+
+        A real GUI shadow is a soft blurred overlay; the stepped equivalent here
+        is a thin shadow hugging the layer's right and bottom edges, shifted one
+        cell right and half a cell down (light from the upper-left). The right
+        column is a full darkened cell; the bottom row is a half-cell band, so
+        the shadow does not read as a whole extra row of chrome.
+
+        The band is the page BENEATH in shadow, not a flat gray: it reads the
+        color the page actually painted in each cell, desaturates it, and darkens
+        it — so a band over a blue footer is a dark blue-gray and one over the
+        file list its own darker tone. The curses backend must record every
+        cell's color as it draws to do this, because inch() cannot be trusted for
+        wide or non-ASCII cells; here the grid already IS that record.
+        """
+        x, y, w, h = round(x), round(y), round(w), round(h)
+        if w <= 0 or h <= 0 or self._grid is None:
+            return
+        base = base_bg if base_bg is not None else DIM_BG
+        # "top" = the lower-half band starting the right edge, half a cell down;
+        # "full" = a whole darkened cell down that edge; "bottom" = the upper-half
+        # band along the bottom.
+        cells: list[tuple[int, int, str]] = [(y, x + w, "top")]
+        cells += [(row, x + w, "full") for row in range(y + 1, y + h)]
+        cells += [(y + h, col, "bottom") for col in range(x + 1, x + w + 1)]
+
+        sw, sh = self.size
+        for row, col, kind in cells:
+            if not (0 <= row < sh and 0 <= col < sw):
+                continue
+            cell = self._grid.cell_at(col, row)
+            under_bg = (cell[2] if isinstance(cell, tuple) else None) or base
+            shade = to_gray(blend(under_bg, (0, 0, 0), 1.0 - SHADOW_STRENGTH))
+            if kind == "bottom":
+                # Page content in the lower half (fg), shade in the upper half
+                # (bg), so the band hugs the layer's edge.
+                self.draw_text(col, row, SHADOW_BOTTOM_GLYPH,
+                               Style(fg=under_bg, bg=shade))
+            elif kind == "top":
+                # Same glyph, halves swapped: the top-right start of the right
+                # edge, half a cell down.
+                self.draw_text(col, row, SHADOW_BOTTOM_GLYPH,
+                               Style(fg=shade, bg=under_bg))
+            else:
+                self.draw_text(col, row, " ", Style(bg=shade))
 
     def draw_image(self, x: int, y: int, path: str, hints: dict[str, Any] | None = None) -> None:
         """Record an inline-image placement for this frame.
