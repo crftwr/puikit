@@ -12,10 +12,10 @@ the console directly. Drawing goes into a :class:`~puikit.backends._vt.VTGrid`,
 which knows the column each glyph really occupies, and a frame leaves as one
 batched ``WriteConsoleW``.
 
-Status: a spike, and **not the default** — ``--backend tui`` stays on curses.
-It implements enough of the Backend surface to run the demo catalog
-(``--backend vt``) and deliberately leaves the rest unbuilt rather than
-half-built, so what is finished stays honest.
+This is what ``--backend tui`` resolves to on Windows; everywhere else that
+alias still means curses, which is not broken there (see
+``puikit.backends.create_backend``). ``--backend curses`` remains the escape
+hatch on Windows.
 
 Mouse, wheel and inline images (xefm#306) all work: Windows delivers mouse
 records through ``ReadConsoleInputW`` rather than as escape sequences to parse,
