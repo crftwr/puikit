@@ -165,3 +165,44 @@ def test_suspend_is_safe_before_open():
     be = VTBackend(console=FakeConsole())
     with be.suspended():
         pass  # no grid yet; must not raise
+
+
+# --- animation ticks -------------------------------------------------------
+
+
+def test_repeated_registration_does_not_accumulate(backend):
+    # The Panel registers the SAME bound method from half a dozen places every
+    # time an animation starts. Appending blindly meant the list grew for the
+    # life of the session and every entry fired on every idle wake, so an
+    # animated theme got slower the longer it ran, with no single action to
+    # blame — which is exactly how it was reported.
+    be, _ = backend
+    calls = []
+
+    def tick():
+        calls.append(1)
+        return True
+
+    for _ in range(50):
+        be.request_animation_ticks(tick)
+    assert len(be._tick_callbacks) == 1
+
+    be._run_ticks()
+    assert len(calls) == 1   # once per wake, not fifty times
+
+
+def test_a_finished_tick_unregisters_itself(backend):
+    # Returning False is the callback's way of saying it is done; ignoring it
+    # kept every animation that had ever run registered forever.
+    be, _ = backend
+    be.request_animation_ticks(lambda: False)
+    be._run_ticks()
+    assert be._tick_callbacks == []
+
+
+def test_a_live_tick_stays_registered(backend):
+    be, _ = backend
+    be.request_animation_ticks(lambda: True)
+    for _ in range(3):
+        be._run_ticks()
+    assert len(be._tick_callbacks) == 1
