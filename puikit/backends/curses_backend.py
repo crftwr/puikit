@@ -473,16 +473,27 @@ class CursesBackend(Backend):
         # so that once COLOR_PAIRS is exhausted a new request can fall back to the
         # nearest *already-allocated* pair instead of pair 0 (see _color_pair).
         self._pair_rgb: dict[int, tuple[Color | None, Color | None]] = {}
-        # Previous frame's pair->RGB map (see clear()). Pairs are recycled each
-        # frame, so a pair NUMBER can carry a different color than it did last
-        # frame; when that happens curses' diff refresh would leave cells that
-        # kept the same (glyph, pair#) showing the stale color, so present()
-        # forces a full repaint whenever this differs from _pair_rgb.
-        self._prev_pair_rgb: dict[int, tuple[Color | None, Color | None]] = {}
+        # Reverse of _color_pairs, so evicting a pair can drop its stale key.
+        self._pair_key: dict[int, tuple[int, int]] = {}
+        # Frame number in which each pair was last requested, for LRU eviction.
+        # A pair touched in the CURRENT frame is pinned: re-pointing a number
+        # that is still on screen would recolor the cells carrying it.
+        self._pair_used_frame: dict[int, int] = {}
+        self._frame_no = 0
+        # Set when a pair NUMBER was re-pointed at a different color during this
+        # frame — only possible via eviction, once every pair is spoken for.
+        # curses' diff refresh only resends cells whose (glyph, pair#) changed,
+        # so cells still carrying a recycled number would keep showing its stale
+        # color; present() forces a full repaint when this is set.
+        self._pairs_recolored = False
         # Count of distinct (fg, bg) requests that arrived after COLOR_PAIRS was
         # exhausted (each fell back to a nearest existing pair). Exposed via
         # color_pair_stats() so a caller can show live whether pairs ran out.
         self._pair_overflow = 0
+        # This frame's resolutions of those overflowing requests, so a repeated
+        # (fg, bg) past the ceiling stays O(1). Per-frame, not persistent: the
+        # pair it resolved to may be evicted and recolored later.
+        self._overflow_memo: dict[tuple[int, int], int] = {}
         # Curated palette -> terminal color index, computed once at open() (an
         # empty list until then means "map directly", e.g. in unit tests). Plus
         # a cache of authored RGB -> curated palette index.
@@ -714,29 +725,29 @@ class CursesBackend(Backend):
         # saved reference survives) so present() can diff against them.
         self._prev_images = self._images
         self._images = {}
-        # Recycle color pairs every frame. ``erase()`` discards the whole screen,
-        # so this frame redraws every cell and re-requests exactly the pairs it
-        # needs — nothing from the previous frame is still referenced. Without
-        # this, pairs are allocated for the life of the backend and accumulate:
-        # cycling themes and opening dialogs each mint new (fg, bg) combinations
-        # that are never reused, so the count climbs monotonically until it
-        # crosses the 256-pair ceiling and later colors degrade. Resetting bounds
-        # the count to the DISTINCT colors visible in the current frame (well
-        # under the ceiling for any real screen). For static content draw order is
-        # stable, so a given (fg, bg) lands on the same pair number each frame and
-        # init_pair re-sets it to the same color (a no-op, no flicker, and the
-        # diff refresh resends nothing). When a pair number's color DOES change
-        # (content changed, or draw order shifted), present() detects it and forces
-        # a full repaint so no cell is left on a stale pair color.
-        # _quant_cache is a pure RGB->palette cache and stays. Keep the previous
-        # frame's pair->RGB map (fresh dicts, not .clear(), so the saved
-        # reference is untouched) so present() can tell whether any pair changed
-        # color and must force a full repaint.
-        self._prev_pair_rgb = self._pair_rgb
-        self._color_pairs = {}
-        self._pair_rgb = {}
-        self._next_pair_id = 1
+        # Color pairs persist across frames, keyed on (fg, bg). A given color
+        # combination therefore keeps the same pair number for as long as it
+        # stays in use, so a static screen re-requests exactly the numbers it
+        # already carries and present() can keep curses' cheap diff refresh.
+        #
+        # These allocations used to be recycled here instead, to stop the table
+        # climbing past the 256-pair ceiling as theme changes and dialogs minted
+        # combinations that were never reused. But recycling made a pair NUMBER's
+        # color depend on DRAW ORDER: moving a selection through a list reshuffles
+        # which (fg, bg) is requested first, so numbers landed on different colors
+        # than the frame before and present() had to force a full repaint. Measured
+        # on Windows that fired on 88% of cursor-movement frames and cost ~12ms of
+        # the ~31ms frame, while the pair table never exceeded 14 of its 256 slots.
+        # Eviction is now driven by pressure rather than by the clock: the table
+        # only gives up a pair once it is genuinely full, and only one that no
+        # longer appears on screen (see _color_pair / _evict_lru_pair), which
+        # bounds the count exactly as recycling did without making a still-current
+        # pair number's color depend on the order it was asked for.
+        # _quant_cache is a pure RGB->palette cache and stays.
+        self._frame_no += 1
+        self._pairs_recolored = False
         self._pair_overflow = 0
+        self._overflow_memo = {}
 
     def request_text_input(self, x: int, y: int, hints: dict[str, Any] | None = None) -> None:
         """The focused text widget's caret position (screen base units). In a
@@ -1487,13 +1498,13 @@ class CursesBackend(Backend):
         #    the preedit at the cursor, shifting the rest of the row right and
         #    pushing trailing cells (e.g. the scroll bar) off the grid — and never
         #    restoring them; the diff can't see that damage.
-        #  * Recolored pairs: pairs are recycled each frame (see clear()), so a
+        #  * Recolored pairs: a full pair table evicts (see _color_pair), so a
         #    pair NUMBER may now carry a different color. A cell that kept the same
         #    (glyph, pair#) would be skipped by the diff and keep showing the
         #    pair's stale color (a single out-of-place cell in a gradient). When
-        #    any pair's color changed since last frame, repaint everything so the
-        #    recolored cells are re-sent.
-        repainted = self._input_pos is not None or self._pair_rgb != self._prev_pair_rgb
+        #    an eviction recolored a number this frame, repaint everything so the
+        #    cells still carrying it are re-sent.
+        repainted = self._input_pos is not None or self._pairs_recolored
         if repainted:
             self._stdscr.redrawwin()
         self._stdscr.refresh()
@@ -1558,29 +1569,70 @@ class CursesBackend(Backend):
         bg_idx = self._term_index(bg) if bg else -1
         key = (fg_idx, bg_idx)
         pair = self._color_pairs.get(key)
-        if pair is None:
-            # Out of color pairs: degrade gracefully to the nearest *already
-            # allocated* pair (closest fg+bg in palette RGB) rather than pair 0.
-            # Pair 0 is the terminal's fixed default (typically white-on-black),
-            # which would punch undimmed blocks through a dimmed page on a
-            # pair-heavy screen (e.g. the demo's 400-swatch hue table). The
-            # nearest pair keeps a dimmed cell looking dimmed and a faded cell
-            # faded — an approximate color instead of a jarring default. Memoize
-            # the resolution so repeated cells stay O(1). The ceiling is the
-            # legacy 256-pair limit (see _pair_capacity), NOT the advertised
-            # COLOR_PAIRS — exceeding 256 is exactly what broke colors when a
-            # dialog's dim/fade pushed the pair count past the field width.
-            if self._next_pair_id >= self._pair_capacity():
-                self._pair_overflow += 1
-                pair = self._nearest_pair(fg, bg)
-                self._color_pairs[key] = pair
-                return pair
+        if pair is not None:
+            # Touch it, so eviction can tell a pair that is still on screen from
+            # one left over from an earlier theme or a closed dialog.
+            self._pair_used_frame[pair] = self._frame_no
+            return pair
+        pair = self._overflow_memo.get(key)
+        if pair is not None:
+            return pair
+        if self._next_pair_id < self._pair_capacity():
             pair = self._next_pair_id
             self._next_pair_id += 1
-            curses.init_pair(pair, fg_idx, bg_idx)
-            self._color_pairs[key] = pair
-            self._pair_rgb[pair] = (fg, bg)
+        else:
+            # The table is full. Recycle the pair unused for the longest — but
+            # never one already requested THIS frame, which is still on screen and
+            # whose cells would be recolored under it. The ceiling is the legacy
+            # 256-pair limit (see _pair_capacity), NOT the advertised COLOR_PAIRS
+            # — exceeding 256 is exactly what broke colors when a dialog's
+            # dim/fade pushed the pair count past the field width.
+            pair = self._evict_lru_pair()
+            if pair is None:
+                # Every pair is on screen in this frame: it wants more distinct
+                # colors than the terminal can carry at once. Degrade gracefully
+                # to the nearest *already allocated* pair (closest fg+bg in
+                # palette RGB) rather than pair 0. Pair 0 is the terminal's fixed
+                # default (typically white-on-black), which would punch undimmed
+                # blocks through a dimmed page on a pair-heavy screen (e.g. the
+                # demo's 400-swatch hue table). The nearest pair keeps a dimmed
+                # cell looking dimmed and a faded cell faded — an approximate
+                # color instead of a jarring default. Memoize the resolution so
+                # repeated cells stay O(1); the memo is per-frame, because the
+                # pair it resolved to may be evicted and recolored later.
+                self._pair_overflow += 1
+                fallback = self._nearest_pair(fg, bg)
+                self._overflow_memo[key] = fallback
+                return fallback
+            # A recycled number carries a different color than the cells drawn
+            # with it last frame do, so the diff refresh cannot be trusted.
+            self._pairs_recolored = True
+        curses.init_pair(pair, fg_idx, bg_idx)
+        self._color_pairs[key] = pair
+        self._pair_key[pair] = key
+        self._pair_rgb[pair] = (fg, bg)
+        self._pair_used_frame[pair] = self._frame_no
         return pair
+
+    def _evict_lru_pair(self) -> "int | None":
+        """The allocated pair unused for the longest, or None when every pair has
+        already been requested this frame and none is safe to recycle. The
+        evicted pair's old (fg, bg) key is dropped, so the next request for that
+        combination allocates afresh instead of resolving to a number that no
+        longer displays it."""
+        oldest: "int | None" = None
+        oldest_frame: "int | None" = None
+        for pair, frame in self._pair_used_frame.items():
+            if frame >= self._frame_no:
+                continue  # drawn in this very frame — pinned
+            if oldest_frame is None or frame < oldest_frame:
+                oldest, oldest_frame = pair, frame
+        if oldest is None:
+            return None
+        stale_key = self._pair_key.pop(oldest, None)
+        if stale_key is not None:
+            self._color_pairs.pop(stale_key, None)
+        return oldest
 
     def _nearest_pair(
         self, fg: tuple[int, int, int] | None, bg: tuple[int, int, int] | None

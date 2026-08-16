@@ -186,13 +186,9 @@ def test_pair_capacity_capped_at_legacy_limit_despite_advertised(monkeypatch):
     assert backend.color_pair_stats() == (255, 256, 1)
 
 
-def test_recolored_pair_forces_full_repaint(monkeypatch):
-    # Per-frame pair recycling can give a pair NUMBER a new color between frames.
-    # curses' diff refresh would leave a cell that kept the same (glyph, pair#)
-    # showing the stale color (a lone out-of-place cell in a gradient), so
-    # present() forces a full repaint (redrawwin) whenever any pair's color
-    # changed since the previous frame — and skips it for static content so the
-    # cheap diff path is kept.
+def _repaint_scr():
+    """Minimal stdscr double that records which refresh path present() took."""
+
     class _Scr:
         def __init__(self):
             self.calls = []
@@ -212,30 +208,112 @@ def test_recolored_pair_forces_full_repaint(monkeypatch):
         def move(self, *a):
             pass
 
+    return _Scr()
+
+
+def test_pair_numbers_are_stable_across_frames(monkeypatch):
+    # Regression: pairs used to be recycled every frame, which made a pair
+    # NUMBER's color depend on the order the frame happened to request colors in.
+    # Moving a selection through a list reshuffles that order, so numbers landed
+    # on different colors than the frame before and present() had to force a full
+    # repaint — measured on Windows at 88% of cursor-movement frames, ~12ms of a
+    # ~31ms frame, while the table never used more than 14 of its 256 slots.
+    # Allocations now persist, so an unchanged color keeps its number and a NEW
+    # color takes a fresh one; neither costs a repaint.
     monkeypatch.setattr(curses, "init_pair", lambda *a: None)
     monkeypatch.setattr(curses, "curs_set", lambda *a: None, raising=False)
     backend = CursesBackend()
-    backend._stdscr = _Scr()
+    backend._stdscr = _repaint_scr()
 
-    # Frame 1: first paint (prev map empty) -> repaint, as expected.
     backend.clear()
-    backend._color_pair((10, 20, 30), (40, 50, 60))
+    first = backend._color_pair((10, 20, 30), (40, 50, 60))
     backend.present()
-    assert "redrawwin" in backend._stdscr.calls
 
-    # Frame 2: identical content -> pair #1 keeps its color -> no forced repaint.
+    # Frame 2: same color -> same number, cheap diff refresh kept.
     backend._stdscr.calls.clear()
     backend.clear()
-    backend._color_pair((10, 20, 30), (40, 50, 60))
+    assert backend._color_pair((10, 20, 30), (40, 50, 60)) == first
     backend.present()
     assert "redrawwin" not in backend._stdscr.calls
 
-    # Frame 3: pair #1 is now a different color -> forced repaint.
+    # Frame 3: a different color. Under recycling this landed on pair #1 and
+    # forced a repaint; it now takes its own number and the diff still holds.
     backend._stdscr.calls.clear()
     backend.clear()
-    backend._color_pair((200, 100, 0), (0, 0, 0))
+    second = backend._color_pair((200, 100, 0), (0, 0, 0))
+    assert second != first
     backend.present()
-    assert "redrawwin" in backend._stdscr.calls
+    assert "redrawwin" not in backend._stdscr.calls
+
+    # Frame 4: draw order reversed — the case that used to recolor both numbers.
+    backend._stdscr.calls.clear()
+    backend.clear()
+    assert backend._color_pair((200, 100, 0), (0, 0, 0)) == second
+    assert backend._color_pair((10, 20, 30), (40, 50, 60)) == first
+    backend.present()
+    assert "redrawwin" not in backend._stdscr.calls
+
+
+def test_full_pair_table_evicts_unused_and_forces_repaint(monkeypatch):
+    # Persistence must still bound the table: theme changes and dialogs mint
+    # combinations that are never used again, and they used to be freed by the
+    # per-frame reset. Now a full table evicts the pair unused for the longest —
+    # and because that number's color changes under any cell still carrying it,
+    # that frame (only) forces a full repaint.
+    monkeypatch.setattr(curses, "init_pair", lambda *a: None)
+    monkeypatch.setattr(curses, "COLOR_PAIRS", 4, raising=False)  # pairs 1..3
+    monkeypatch.setattr(curses, "curs_set", lambda *a: None, raising=False)
+    backend = CursesBackend()
+    backend._stdscr = _repaint_scr()
+
+    # Colors chosen to land on distinct terminal palette indexes (the unit-test
+    # backend has no bound palette, so RGB collapses to the 8 basic colors).
+    backend.clear()
+    a = backend._color_pair((0, 0, 0), (0, 0, 255))
+    b = backend._color_pair((255, 255, 255), (255, 0, 0))
+    c = backend._color_pair((0, 255, 0), (255, 255, 0))
+    assert len({a, b, c}) == 3  # table full
+    backend.present()
+
+    # Next frame draws only b and c, so a is the eviction candidate.
+    backend._stdscr.calls.clear()
+    backend.clear()
+    backend._color_pair((255, 255, 255), (255, 0, 0))
+    backend._color_pair((0, 255, 0), (255, 255, 0))
+    recycled = backend._color_pair((255, 0, 255), (0, 255, 255))
+    assert recycled == a  # the one no longer on screen
+    assert backend._next_pair_id == 4  # never grew past the ceiling
+    backend.present()
+    assert "redrawwin" in backend._stdscr.calls  # its cells must be re-sent
+
+    # The number now displays its new color, and the evicted combination's stale
+    # mapping is gone — so asking for it again allocates rather than resolving to
+    # a pair that no longer shows it.
+    assert backend._pair_rgb[recycled] == ((255, 0, 255), (0, 255, 255))
+    stale_key = (backend._term_index((0, 0, 0)), backend._term_index((0, 0, 255)))
+    assert stale_key not in backend._color_pairs
+
+
+def test_pairs_on_screen_this_frame_are_never_evicted(monkeypatch):
+    # A frame wanting more distinct colors than the table holds (the demo's
+    # 400-swatch hue table) must not cannibalise pairs it has already painted
+    # with — that would recolor cells it drew moments ago. It degrades to the
+    # nearest allocated pair instead, exactly as before.
+    monkeypatch.setattr(curses, "init_pair", lambda *a: None)
+    monkeypatch.setattr(curses, "COLOR_PAIRS", 4, raising=False)  # pairs 1..3
+    backend = CursesBackend()
+    backend._stdscr = _repaint_scr()
+
+    backend.clear()
+    a = backend._color_pair((0, 0, 0), (0, 0, 255))
+    backend._color_pair((255, 255, 255), (255, 0, 0))
+    backend._color_pair((0, 255, 0), (255, 255, 0))
+    # A fourth distinct color in the SAME frame: all three are pinned. It is
+    # closest to `a` in authored RGB, so that is what it must degrade to.
+    overflow = backend._color_pair((0, 0, 0), (0, 255, 255))
+    assert overflow == a  # nearest, not a recycled live pair
+    assert overflow != 0
+    assert backend.color_pair_stats()[2] == 1  # counted as overflow
 
 
 def test_xterm256_grayscale_ramp_distinguishes_dark_panes():
