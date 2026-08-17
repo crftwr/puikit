@@ -364,3 +364,26 @@ def test_a_first_placement_is_emitted_at_its_cell(backend, png):
     out = "".join(con.written)
     assert "\x1b7" in out and "\x1b8" in out   # cursor saved/restored around it
     assert "\x1b[3;5H" in out                  # addressed absolutely, 1-based
+
+
+def test_erasing_a_stale_image_also_clears_the_row_below(backend):
+    # A protocol paints pixels, not cells, and its own rounding can put a few of
+    # them just outside the box. Those land in a row whose text did not change,
+    # so the frame diff would never repaint it and the spill stays on screen —
+    # scrolling an image upward leaves a stripe behind on every step.
+    be, con = backend
+    be._term_graphics = "sixel"
+    be.clear()
+    be.draw_text(0, 0, "x" * 20)
+    be.draw_text(0, 5, "row below the image")
+    be._images = {1: (0, 1, 4, 3, "pic.png", None, (0, 1, 4, 3, None))}
+    be.present()
+    be.clear()                       # next frame: the image is gone
+    be.draw_text(0, 0, "x" * 20)
+    be.draw_text(0, 5, "row below the image")
+    con.written.clear()
+    be.present()
+    out = "".join(con.written)
+    # Row 5 (1-based) is one past the footprint's last row (rows 2..4) and must
+    # be re-sent even though its text is unchanged.
+    assert "\x1b[5;1H" in out, out[:200]

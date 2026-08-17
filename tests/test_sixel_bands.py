@@ -52,11 +52,28 @@ def test_vertical_crop_selects_bands(picture):
     assert '"1;1;120;60' in full
 
 
-def test_vertical_bounds_snap_out_to_whole_bands(picture):
-    # A band is the smallest unit sixel can express, so a crop that starts
-    # mid-band is rounded out — up to five pixels, under a fifth of a cell.
+def test_the_top_snaps_down_to_a_band_boundary(picture):
+    # A band is the smallest unit sixel can express, so a crop starting mid-band
+    # begins at the band that contains it — up to five pixels early, under a
+    # fifth of a cell.
     source = tg.prepare_sixel(picture)
-    assert source.encode_rect(0, 12, 120, 60) == source.encode_rect(0, 14, 120, 60)
+    a = source.encode_rect(0, 12, 120, 54)
+    b = source.encode_rect(0, 14, 120, 56)
+    assert a.split("q", 1)[1][:14] == b.split("q", 1)[1][:14]  # same first band
+
+
+@pytest.mark.parametrize("y0,y1", [(0, 60), (4, 60), (10, 48), (7, 37), (1, 7)])
+def test_never_emits_more_rows_than_asked_for(picture, y0, y1):
+    # Rounding the BOTTOM out too would overshoot the cell box the caller
+    # reserved, and those pixels land in the row below it — a row the frame diff
+    # has no reason to re-send, since its text did not change. Scrolling an image
+    # upward then leaves a stripe behind on every step.
+    import re
+
+    source = tg.prepare_sixel(picture)
+    out = source.encode_rect(0, y0, 120, y1)
+    declared = int(re.search(r'"1;1;\d+;(\d+)', out).group(1))
+    assert declared <= y1 - y0, (declared, y1 - y0)
 
 
 def test_repeated_vertical_crops_reuse_the_encoded_bands(picture):

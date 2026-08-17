@@ -386,7 +386,15 @@ class SixelSource:
         x1 = max(x0, min(x1, self.width))
         y0 = max(0, min(y0, self.height))
         y1 = max(y0, min(y1, self.height))
-        first, last = y0 // 6, -(-y1 // 6)  # snap out to whole bands
+        # Snap the top DOWN to a band boundary — a band is the smallest unit
+        # sixel can express — but never emit more bands than the requested
+        # rectangle is tall. Rounding the bottom out as well overshoots the cell
+        # box the caller reserved, and those few pixels land in the row BELOW it:
+        # a row the frame diff has no reason to re-send, since its text did not
+        # change, so the spill is never painted over. Scrolling an image upward
+        # then leaves a stack of them behind — one stripe per step.
+        first = y0 // 6
+        last = min(-(-y1 // 6), first + (y1 - y0) // 6)
         full_width = x0 == 0 and x1 == self.width
         out = ["\x1bP0;1;0q", f'"1;1;{x1 - x0};{(last - first) * 6}', self.palette]
         for index in range(first, min(last, len(self.bands))):
