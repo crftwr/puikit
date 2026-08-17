@@ -541,7 +541,12 @@ class VTBackend(Backend):
             return erase
         for k in stale:
             ix, iy, icols, irows, _path, _src, _full = self._prev_images[k]
-            self._grid.invalidate(ix, iy, icols, irows)
+            # One row and one column beyond the footprint. A protocol paints
+            # pixels, not cells, and its own rounding can put a few of them just
+            # outside the box — which the frame diff would never repaint, since
+            # the text in those cells did not change. Erasing a border costs two
+            # lines of text and removes a whole class of leftover stripe.
+            self._grid.invalidate(ix, iy, icols + 1, irows + 1)
         return ""
 
     def _emit_images(self, overpainted: frozenset[int] = frozenset()) -> str:
