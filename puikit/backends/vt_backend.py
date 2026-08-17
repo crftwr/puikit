@@ -12,12 +12,11 @@ the console directly. Drawing goes into a :class:`~puikit.backends._vt.VTGrid`,
 which knows the column each glyph really occupies, and a frame leaves as one
 batched ``WriteConsoleW``.
 
-This is what ``--backend tui`` resolves to on Windows; everywhere else that
-alias still means curses, which is not broken there (see
-``puikit.backends.create_backend``). ``--backend curses`` remains the escape
-hatch on Windows — and ``--backend vt`` the opt-in elsewhere: the same engine
-runs over a raw POSIX tty (``_vt_posix.PosixConsole``), which is the migration
-path off curses on macOS and Linux.
+This is what ``--backend tui`` resolves to on every platform (see
+``puikit.backends.create_backend``): on Windows over the Win32 console API, on
+macOS and Linux over a raw POSIX tty (``_vt_posix.PosixConsole``).
+``--backend curses`` remains the escape hatch for terminals whose dialect the
+VT console mishandles.
 
 The engine is platform-blind: a console adapter hands it *input records* —
 plain dicts carrying contract key names, chars and modifier sets, and mouse
@@ -36,8 +35,10 @@ Not implemented, deliberately, rather than half-built:
 * **Alpha.** Sixel carries none, so a transparent pixel is composited onto black
   by the encoder. A character grid cannot reproduce what a compositing backend
   shows through it.
-* **The shared-base extraction** (puikit#98 §3), which that section argues should
-  follow a second implementation rather than precede it.
+
+(The shared-base extraction puikit#98 §3 deferred until a second implementation
+existed happened with that second implementation: the POSIX console, which is
+what made the engine/console record contract go platform-neutral.)
 """
 
 from __future__ import annotations

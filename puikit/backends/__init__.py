@@ -48,8 +48,7 @@ def create_backend(name: str, **kwargs) -> Backend:
 
     * "gui" — the native GUI backend for the running platform (MacOSBackend on
       darwin, WindowsBackend on win32).
-    * "tui" — the terminal backend for the running platform: VTBackend on
-      win32, CursesBackend elsewhere.
+    * "tui" — the terminal backend: VTBackend, on every platform.
 
     An app written against an alias runs unmodified on either platform, while
     the concrete names stay available for anyone who wants to pin one.
@@ -62,21 +61,25 @@ def create_backend(name: str, **kwargs) -> Backend:
         name = "macos" if sys.platform == "darwin" else "windows"
     if name == "tui":
         # The terminal counterpart of the "gui" alias: one name per *kind* of
-        # backend, resolved to the one that actually fits the platform.
+        # backend, resolved to the implementation that fits — which is now the
+        # VT backend everywhere.
         #
-        # On Windows that is the VT backend. curses there means PDCurses, whose
-        # cell model gives a full-width glyph one buffer cell while the terminal
+        # On Windows it has to be: curses there means PDCurses, whose cell
+        # model gives a full-width glyph one buffer cell while the terminal
         # advances two columns for it — so Japanese text loses its column pitch
         # and characters are dropped (xefm#283) — and whose private screen
-        # buffer swallows every inline image (xefm#306). Neither is fixable from
-        # outside PDCurses; both simply do not arise when the backend owns the
-        # console. Everywhere else ncurses is not broken, terminfo still earns
-        # its keep across the range of terminals a Unix TUI meets (old xterms
-        # over SSH, tmux, TERM=linux, serial consoles), and curses stays.
+        # buffer swallows every inline image (xefm#306). Neither is fixable
+        # from outside PDCurses; both simply do not arise when the backend owns
+        # the console. On macOS and Linux ncurses is not broken, but the VT
+        # backend's one batched write per frame, native wide-glyph grid and
+        # inline images now outweigh what terminfo indirection buys on the
+        # emulators actually in use — every one of which (tmux and SSH clients
+        # included) speaks the xterm dialect the VT console reads and writes.
         #
-        # Either one is still reachable by its own name, so "curses" remains the
-        # escape hatch on Windows and "vt" the opt-in elsewhere.
-        name = "vt" if sys.platform == "win32" else "curses"
+        # "curses" remains reachable by name as the escape hatch for the
+        # terminals that dialect assumption mishandles (TERM=linux consoles,
+        # serial lines, museum-piece xterms).
+        name = "vt"
     if name == "curses":
         from .curses_backend import CursesBackend
 
