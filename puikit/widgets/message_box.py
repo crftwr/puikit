@@ -91,6 +91,10 @@ class MessageBox:
         # Absolute-to-local button rects (x0, x1, y0, y1) captured during draw,
         # so a click can be routed to the button it landed on.
         self._button_x: list[tuple[float, float, float, float]] = []
+        # The markdown message region (x0, y0, x1, y1), captured during draw, so
+        # a click on the message can be routed to the MarkdownView — the view
+        # owns the link hit-testing that makes a link in the message clickable.
+        self._md_rect: tuple[float, float, float, float] | None = None
 
     # --- drawing -------------------------------------------------------------
 
@@ -196,7 +200,9 @@ class MessageBox:
             elif self._md.style != md_style:
                 self._md.style = md_style
                 self._md.set_source(self.message)
-            ctx.draw_child(self._md, 2, msg_y0, max(1.0, wu - 4.0), max(1.0, by - msg_y0))
+            md_w, md_h = max(1.0, wu - 4.0), max(1.0, by - msg_y0)
+            self._md_rect = (2.0, msg_y0, 2.0 + md_w, msg_y0 + md_h)
+            ctx.draw_child(self._md, 2, msg_y0, md_w, md_h)
         else:
             for i, line in enumerate(self._lines()):
                 # Draw the whole line and let draw_text clip it: it truncates
@@ -242,6 +248,13 @@ class MessageBox:
                 if x0 <= event.x < x1 and y0 <= ey < y1:
                     self._widgets[i].handle_event(event)
                     return True
+            # A click on a markdown message is forwarded to the MarkdownView,
+            # which hit-tests its own link spans — so a link in the message
+            # opens; anywhere else on the message it is a no-op.
+            if self._md is not None and self._md_rect is not None:
+                x0, y0, x1, y1 = self._md_rect
+                if x0 <= event.x < x1 and y0 <= ey < y1:
+                    self._md.handle_event(event.translated(-x0, -y0))
         return True  # modal: swallow everything else
 
 
@@ -267,9 +280,12 @@ def show_message_box(
 
     Pass ``markdown=True`` to render the message as Markdown (via a MarkdownView)
     so a caller can style parts of it — an inline ``code`` span for a filename or
-    path, ``**bold**``, ``*italic*``, ``[links](url)``. Separate visual lines with
-    a blank line (a paragraph break), since consecutive non-blank lines fold into
-    one wrapped paragraph."""
+    path, ``**bold**``, ``*italic*``, ``[links](url)``. A link (or bare URL) is
+    clickable: the box routes message clicks to the view, which opens the URL
+    through the Panel (``os_open`` backends launch the browser; TUI copies it).
+    Separate visual lines with a blank line (a paragraph break) or end a line
+    with a backslash (a hard break), since consecutive non-blank lines otherwise
+    fold into one wrapped paragraph."""
     box = MessageBox(
         message, title=title, buttons=buttons, icon=icon,
         default=default, cancel=cancel, on_result=on_result, markdown=markdown,
@@ -300,10 +316,19 @@ def show_message_box(
         def _sem_prefix_w(sem: Any) -> float:
             return mt(sem.prefix, prop) if sem.prefix else 0.0
 
-        msg_w = max(
-            (_sem_prefix_w(s) + sum(mt(t, st) for t, st, _ in _sem_spans(s)) for s in sems),
-            default=0.0,
-        )
+        def _sem_w(sem: Any) -> float:
+            # The widest hard-break segment, not the whole flow's sum: a literal
+            # "\n" run (a trailing-backslash / two-trailing-space break) starts a
+            # fresh row, so a hard-broken paragraph sizes to its longest line —
+            # summing would box it at all its lines laid end to end.
+            widths = [0.0]
+            for t, st, _ in _sem_spans(sem):
+                first, *rest = t.split("\n")
+                widths[-1] += mt(first, st)
+                widths.extend(mt(part, st) for part in rest)
+            return _sem_prefix_w(sem) + max(widths)
+
+        msg_w = max((_sem_w(s) for s in sems), default=0.0)
     else:
         lines = message.split("\n")
         msg_w = max((mt(line, prop) for line in lines), default=0.0)

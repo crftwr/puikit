@@ -101,3 +101,43 @@ def test_message_box_click_activates_button(backend):
     )
     assert results == ["Right"]
     assert panel._layers == []
+
+
+def test_message_box_markdown_link_click_opens_url(backend):
+    # A click on the message region routes to the MarkdownView, which opens the
+    # link under it — so a URL in a markdown message box is really clickable.
+    panel = Panel(backend)
+    opened = []
+    panel.open_url = opened.append
+    box = show_message_box(
+        panel, "Project home:\n\nhttps://example.com/repo", markdown=True,
+    )
+    panel.render()
+    rect = panel._layers[0].rect
+    # view-local link span captured during draw; aim at its center, translated
+    # out through the view's box-local origin to screen coords.
+    x0, y0, x1, y1, url = box._md._link_hits[0]
+    assert url == "https://example.com/repo"
+    mx0, my0, _mx1, _my1 = box._md_rect
+    panel.dispatch_event(Event(
+        type=EventType.MOUSE_CLICK,
+        x=rect.x + mx0 + (x0 + x1) / 2, y=rect.y + my0 + (y0 + y1) / 2,
+        button="left",
+    ))
+    assert opened == ["https://example.com/repo"]
+    assert len(panel._layers) == 1  # the box stays up; only a button closes it
+
+
+def test_message_box_markdown_hard_break_sizes_to_longest_row():
+    # A hard line break (trailing backslash) starts a fresh row, so the box must
+    # size its width to the paragraph's longest row — the same as the long line
+    # alone — not to all the rows laid end to end.
+    long_line = "The widest row in the message by a comfortable margin"
+    widths = []
+    for message in (f"{long_line}\\\nshort", long_line):
+        backend = MemoryBackend(width=80, height=24, capabilities=PROFILE_TUI)
+        panel = Panel(backend)
+        show_message_box(panel, message, markdown=True)
+        panel.render()
+        widths.append(panel._layers[0].rect.w)
+    assert widths[0] == widths[1]
