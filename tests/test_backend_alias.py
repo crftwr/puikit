@@ -1,5 +1,7 @@
 """The "tui" alias names the kind; the VT backend is now the implementation."""
 
+import sys
+
 import pytest
 
 from puikit.backends import create_backend
@@ -26,8 +28,12 @@ def test_curses_stays_reachable_as_the_escape_hatch(monkeypatch):
     assert isinstance(create_backend("curses"), CursesBackend)
 
 
-def test_gui_alias_is_unchanged(monkeypatch):
+def test_gui_alias_is_unchanged():
+    # Only on real Windows: importing windows_backend loads Win32 DLLs, so no
+    # amount of sys.platform patching lets this run elsewhere — with numpy
+    # absent it died on the import, and with numpy present on ctypes.WinDLL.
+    if sys.platform != "win32":
+        pytest.skip("WindowsBackend needs the real Win32 DLLs")
     from puikit.backends.windows_backend import WindowsBackend
 
-    monkeypatch.setattr("sys.platform", "win32")
     assert isinstance(create_backend("gui"), WindowsBackend)
