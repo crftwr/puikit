@@ -833,6 +833,45 @@ class VTBackend(Backend):
         return self._frames
 
 
+def _strip_csi_replies(records: list[dict], held: list[dict]) -> list[dict]:
+    """Drop a terminal's CSI answers from a batch of input records.
+
+    A question we asked is answered whenever the terminal gets round to it,
+    which under some emulators — VS Code's, notably — is after the size probe
+    has given up waiting. Those bytes then arrive as ordinary key records and are
+    typed into whatever has focus: the answer to ``CSI 18 t`` reads as
+    ``[8;26;136t``, and its leading characters press whatever they happen to be
+    bound to on the way past.
+
+    ``held`` carries a sequence that is still arriving across batches, since a
+    reply can be split across reads. A lone ESC is held only until the next
+    character decides it: followed by ``[`` it is a reply and the whole run is
+    dropped; followed by anything else it was the Escape KEY, and both records
+    are released in order. That is why this is only armed for a moment — a held
+    Escape must not wait on a keystroke that may never come.
+    """
+    out: list[dict] = []
+    for record in records:
+        if record.get("type") != "key":
+            out.append(record)  # a resize is not part of any reply
+            continue
+        char = record.get("char") or ""
+        if held:
+            held.append(record)
+            chars = "".join((r.get("char") or "") for r in held)
+            if len(chars) == 2 and chars[1] != "[":
+                out.extend(held)  # an Escape keypress after all
+                held.clear()
+            elif len(chars) > 2 and "@" <= chars[-1] <= "~":
+                held.clear()  # a complete reply, swallowed
+            continue
+        if char == "\x1b":
+            held.append(record)
+            continue
+        out.append(record)
+    return out
+
+
 def _crop_src(src, fx: float, fy: float, fw: float, fh: float):
     """Narrow a normalized source window to the sub-fraction (fx, fy, fw, fh) of
     itself, so a clipped destination shows the matching part of the picture
@@ -973,6 +1012,11 @@ class _WindowsConsole:
         self._saved_out: int | None = None
         self._saved_in: int | None = None
         self._cell_px: tuple[float, float] | None = None
+        # Until when a CSI reply may still arrive unasked-for, and the part
+        # of one already in flight. Armed only if the size probe gave up
+        # waiting; a terminal that answered in time will not answer again.
+        self._reply_filter_until = 0.0
+        self._held_reply: list[dict] = []
         # Input records read while probing for the cell size that were not part
         # of the reply; handed to the first real read_input() so nothing is lost.
         self._deferred: list[dict] = []
@@ -1135,6 +1179,10 @@ class _WindowsConsole:
                 else:
                     cells = (b, a)    # cols, rows
         if not pixels or not cells or not all(pixels) or not all(cells):
+            # The terminal did not answer in time — but it may still answer.
+            # Swallow that reply for a moment rather than let it be typed
+            # into the app (see _strip_csi_replies).
+            self._reply_filter_until = time.monotonic() + 3.0
             return None
         w = pixels[0] / cells[0]
         h = pixels[1] / cells[1]
@@ -1164,6 +1212,19 @@ class _WindowsConsole:
         if self._deferred:
             held, self._deferred = self._deferred, []
             return held
+        records = self._read_records(timeout_ms)
+        if self._reply_filter_until:
+            import time
+            if time.monotonic() < self._reply_filter_until:
+                return _strip_csi_replies(records, self._held_reply)
+            # Disarmed: release anything still held so no keypress is lost.
+            self._reply_filter_until = 0.0
+            if self._held_reply:
+                records = self._held_reply + records
+                self._held_reply = []
+        return records
+
+    def _read_records(self, timeout_ms: int) -> list[dict]:
         ctypes, wintypes = self._ctypes, self._wintypes
         # WaitForSingleObject gives a real "nothing arrived" answer, unlike
         # curses' timeout()+get_wch(), which cannot distinguish a timeout from a

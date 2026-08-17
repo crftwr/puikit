@@ -206,3 +206,60 @@ def test_a_live_tick_stays_registered(backend):
     for _ in range(3):
         be._run_ticks()
     assert len(be._tick_callbacks) == 1
+
+
+# --- terminal replies ------------------------------------------------------
+
+
+def key_record(char, vk=0):
+    return {"type": "key", "char": char, "vk": vk, "control": 0}
+
+
+def test_a_late_size_reply_is_not_typed_into_the_app():
+    # The bug this guards: the size probe asks the terminal how big its text
+    # area is, and VS Code's terminal answers AFTER the probe has given up
+    # waiting. The reply then arrives as ordinary key records and is typed into
+    # whatever has focus — "[8;26;136t", whose leading characters press whatever
+    # they happen to be bound to on the way past.
+    from puikit.backends.vt_backend import _strip_csi_replies
+
+    held = []
+    reply = [key_record(c) for c in "\x1b[8;26;136t"]
+    assert _strip_csi_replies(reply, held) == []
+    assert held == []
+
+
+def test_a_reply_split_across_reads_is_still_swallowed():
+    from puikit.backends.vt_backend import _strip_csi_replies
+
+    held = []
+    assert _strip_csi_replies([key_record("\x1b"), key_record("[")], held) == []
+    assert held  # still arriving
+    assert _strip_csi_replies([key_record(c) for c in "8;26;136t"], held) == []
+    assert held == []
+
+
+def test_a_real_escape_keypress_is_not_eaten():
+    # The filter must not cost the Escape key. A lone ESC is held only until the
+    # next character decides it: "[" means a reply, anything else means the key.
+    from puikit.backends.vt_backend import _strip_csi_replies
+
+    held = []
+    out = _strip_csi_replies([key_record("\x1b", 0x1B), key_record("a", 0x41)], held)
+    assert [r["char"] for r in out] == ["\x1b", "a"]
+    assert held == []
+
+
+def test_ordinary_typing_is_untouched():
+    from puikit.backends.vt_backend import _strip_csi_replies
+
+    held = []
+    out = _strip_csi_replies([key_record("f"), key_record("j")], held)
+    assert [r["char"] for r in out] == ["f", "j"]
+
+
+def test_a_resize_is_never_part_of_a_reply():
+    from puikit.backends.vt_backend import _strip_csi_replies
+
+    held = []
+    assert _strip_csi_replies([{"type": "resize"}], held) == [{"type": "resize"}]
