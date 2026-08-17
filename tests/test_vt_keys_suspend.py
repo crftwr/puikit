@@ -11,7 +11,7 @@ import io
 
 import pytest
 
-from puikit.backends.vt_backend import VTBackend, _StreamConsole
+from puikit.backends.vt_backend import VTBackend, _StreamConsole, _win_key_record
 from puikit.event import EventType
 
 
@@ -45,7 +45,8 @@ def backend():
 
 
 def key(be, char="", vk=0, control=0):
-    return be._to_event({"type": "key", "char": char, "vk": vk, "control": control})
+    # Through the Windows translation, as the real _read_records feeds it.
+    return be._to_event(_win_key_record(char, vk, control))
 
 
 # --- the keyboard contract -------------------------------------------------
@@ -212,7 +213,7 @@ def test_a_live_tick_stays_registered(backend):
 
 
 def key_record(char, vk=0):
-    return {"type": "key", "char": char, "vk": vk, "control": 0}
+    return _win_key_record(char, vk, 0)
 
 
 def test_a_late_size_reply_is_not_typed_into_the_app():

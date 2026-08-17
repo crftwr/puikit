@@ -2,7 +2,9 @@
 
 Windows reports mouse STATE, not gestures: every record says which buttons are
 down now, so press / release / drag come from comparing against the previous
-record. That is the part worth testing — the translation, not the ctypes.
+record. That is the part worth testing — the translation (_win_mouse_records),
+not the ctypes — so the ``mouse()`` records here are raw MOUSE_EVENTs run
+through it exactly as the real ``_read_records`` does.
 
 Images matter here for a different reason. The curses backend already
 implements them; they never appear on Windows because PDCurses displays a
@@ -16,7 +18,7 @@ import io
 import pytest
 
 from puikit.backends import _terminal_graphics
-from puikit.backends.vt_backend import VTBackend, _StreamConsole
+from puikit.backends.vt_backend import VTBackend, _StreamConsole, _win_mouse_records
 from puikit.event import EventType
 
 
@@ -25,6 +27,7 @@ class FakeConsole(_StreamConsole):
         super().__init__(stream=io.StringIO(), size=(width, height))
         self._fixed = (width, height)
         self.queue: list[list[dict]] = []
+        self._mouse_buttons = 0
 
     def size(self):
         return self._fixed
@@ -32,9 +35,18 @@ class FakeConsole(_StreamConsole):
     def read_input(self, timeout_ms):
         return self.queue.pop(0) if self.queue else []
 
+    def push_mouse(self, *raws):
+        """Queue raw MOUSE_EVENT records, diffed into gestures through the same
+        translation (and the same running button state) as the real console."""
+        out = []
+        for raw in raws:
+            gestures, self._mouse_buttons = _win_mouse_records(raw, self._mouse_buttons)
+            out.extend(gestures)
+        self.queue.append(out)
+
 
 def mouse(x=0, y=0, buttons=0, flags=0, wheel=0, control=0):
-    return {"type": "mouse", "x": x, "y": y, "buttons": buttons,
+    return {"x": x, "y": y, "buttons": buttons,
             "flags": flags, "wheel": wheel, "control": control}
 
 
@@ -75,7 +87,7 @@ def drain(be, con):
 
 def test_press_and_release_become_down_and_up(backend):
     be, con = backend
-    con.queue.append([mouse(x=5, y=3, buttons=0x0001), mouse(x=5, y=3, buttons=0)])
+    con.push_mouse(mouse(x=5, y=3, buttons=0x0001), mouse(x=5, y=3, buttons=0))
     events = drain(be, con)
     assert [e.type for e in events] == [EventType.MOUSE_DOWN, EventType.MOUSE_UP]
     assert all(e.button == "left" for e in events)
@@ -84,8 +96,8 @@ def test_press_and_release_become_down_and_up(backend):
 
 def test_right_and_middle_buttons_are_named(backend):
     be, con = backend
-    con.queue.append([mouse(buttons=0x0002), mouse(buttons=0),
-                      mouse(buttons=0x0004), mouse(buttons=0)])
+    con.push_mouse(mouse(buttons=0x0002), mouse(buttons=0),
+                   mouse(buttons=0x0004), mouse(buttons=0))
     buttons = [e.button for e in drain(be, con)]
     assert buttons == ["right", "right", "middle", "middle"]
 
@@ -93,7 +105,7 @@ def test_right_and_middle_buttons_are_named(backend):
 def test_no_event_when_state_is_unchanged(backend):
     # Windows re-reports the same state freely; only transitions are gestures.
     be, con = backend
-    con.queue.append([mouse(buttons=0x0001), mouse(buttons=0x0001)])
+    con.push_mouse(mouse(buttons=0x0001), mouse(buttons=0x0001))
     assert [e.type for e in drain(be, con)] == [EventType.MOUSE_DOWN]
 
 
@@ -102,8 +114,8 @@ def test_no_event_when_state_is_unchanged(backend):
 
 def test_motion_with_a_button_held_is_a_drag(backend):
     be, con = backend
-    con.queue.append([mouse(x=1, y=1, buttons=0x0001),
-                      mouse(x=4, y=2, buttons=0x0001, flags=0x0001)])
+    con.push_mouse(mouse(x=1, y=1, buttons=0x0001),
+                   mouse(x=4, y=2, buttons=0x0001, flags=0x0001))
     events = drain(be, con)
     assert [e.type for e in events] == [EventType.MOUSE_DOWN, EventType.MOUSE_DRAG]
     assert (events[1].x, events[1].y) == (4.0, 2.0)
@@ -113,15 +125,15 @@ def test_bare_motion_is_dropped(backend):
     # hover is off in the profile: a terminal repaints the whole frame to show a
     # hover cue, and motion arrives for every cell crossed.
     be, con = backend
-    con.queue.append([mouse(x=2, y=2, flags=0x0001)])
+    con.push_mouse(mouse(x=2, y=2, flags=0x0001))
     assert drain(be, con) == []
 
 
 def test_a_drag_burst_collapses_to_its_newest_position(backend):
     be, con = backend
-    con.queue.append(
-        [mouse(x=1, y=1, buttons=0x0001)]
-        + [mouse(x=i, y=1, buttons=0x0001, flags=0x0001) for i in range(2, 9)]
+    con.push_mouse(
+        mouse(x=1, y=1, buttons=0x0001),
+        *[mouse(x=i, y=1, buttons=0x0001, flags=0x0001) for i in range(2, 9)],
     )
     events = drain(be, con)
     drags = [e for e in events if e.type is EventType.MOUSE_DRAG]
@@ -134,7 +146,7 @@ def test_a_drag_burst_collapses_to_its_newest_position(backend):
 
 def test_wheel_forward_scrolls_positive(backend):
     be, con = backend
-    con.queue.append([mouse(x=3, y=3, flags=0x0004, wheel=120)])
+    con.push_mouse(mouse(x=3, y=3, flags=0x0004, wheel=120))
     e = drain(be, con)[0]
     assert e.type is EventType.MOUSE_SCROLL
     assert e.scroll == 1
@@ -144,19 +156,19 @@ def test_wheel_back_scrolls_negative(backend):
     # The delta is the SIGNED high word of dwButtonState; read unsigned this
     # would come back as a huge positive number and scroll the wrong way.
     be, con = backend
-    con.queue.append([mouse(flags=0x0004, wheel=-120)])
+    con.push_mouse(mouse(flags=0x0004, wheel=-120))
     assert drain(be, con)[0].scroll == -1
 
 
 def test_multi_notch_wheel_keeps_its_magnitude(backend):
     be, con = backend
-    con.queue.append([mouse(flags=0x0004, wheel=360)])
+    con.push_mouse(mouse(flags=0x0004, wheel=360))
     assert drain(be, con)[0].scroll == 3
 
 
 def test_a_wheel_burst_sums_into_one_event(backend):
     be, con = backend
-    con.queue.append([mouse(flags=0x0004, wheel=120) for _ in range(5)])
+    con.push_mouse(*[mouse(flags=0x0004, wheel=120) for _ in range(5)])
     events = drain(be, con)
     assert len(events) == 1
     assert events[0].scroll == 5
@@ -164,7 +176,7 @@ def test_a_wheel_burst_sums_into_one_event(backend):
 
 def test_horizontal_wheel_reports_on_the_x_axis(backend):
     be, con = backend
-    con.queue.append([mouse(flags=0x0008, wheel=120)])
+    con.push_mouse(mouse(flags=0x0008, wheel=120))
     e = drain(be, con)[0]
     assert e.type is EventType.MOUSE_SCROLL
     assert e.hints.get("scroll_units_x") == 1.0
@@ -172,7 +184,7 @@ def test_horizontal_wheel_reports_on_the_x_axis(backend):
 
 def test_modifiers_ride_along(backend):
     be, con = backend
-    con.queue.append([mouse(flags=0x0004, wheel=120, control=0x0008)])  # LEFT_CTRL
+    con.push_mouse(mouse(flags=0x0004, wheel=120, control=0x0008))  # LEFT_CTRL
     assert drain(be, con)[0].modifiers == frozenset({"ctrl"})
 
 

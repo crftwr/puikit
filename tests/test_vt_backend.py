@@ -12,8 +12,19 @@ import io
 
 import pytest
 
-from puikit.backends.vt_backend import VTBackend, _StreamConsole, _VK_PROCESSKEY
+from puikit.backends.vt_backend import (
+    VTBackend,
+    _StreamConsole,
+    _VK_PROCESSKEY,
+    _win_key_record,
+)
 from puikit.event import EventType
+
+
+def wkey(char, vk=0, control=0):
+    """A KEY_EVENT as the Windows console would hand it to the engine — through
+    the same translation the real _read_records applies."""
+    return _win_key_record(char, vk, control)
 
 
 class FakeConsole(_StreamConsole):
@@ -63,7 +74,7 @@ def test_ime_commit_with_processkey_is_not_dropped(backend):
     # The failure this guards against: filtering on wVirtualKeyCode discards the
     # composed character and Japanese input stops working entirely.
     be, con = backend
-    con.queue.append([{"type": "key", "char": "あ", "vk": _VK_PROCESSKEY, "control": 0}])
+    con.queue.append([wkey("あ", _VK_PROCESSKEY)])
     events = collect(be, con)
     assert [e.key for e in events] == ["あ"]
     assert events[0].char == "あ"
@@ -71,7 +82,7 @@ def test_ime_commit_with_processkey_is_not_dropped(backend):
 
 def test_ime_commit_with_no_virtual_key_is_not_dropped(backend):
     be, con = backend
-    con.queue.append([{"type": "key", "char": "本", "vk": 0, "control": 0}])
+    con.queue.append([wkey("本")])
     events = collect(be, con)
     assert [e.key for e in events] == ["本"]
 
@@ -80,9 +91,7 @@ def test_full_cjk_filename_arrives_intact(backend):
     # Typing あいうえお.txt into a rename dialog, one commit record per glyph.
     be, con = backend
     text = "あいうえお.txt"
-    con.queue.append([
-        {"type": "key", "char": ch, "vk": _VK_PROCESSKEY, "control": 0} for ch in text
-    ])
+    con.queue.append([wkey(ch, _VK_PROCESSKEY) for ch in text])
     got = ""
     for _ in range(len(text)):
         for e in collect(be, con):
@@ -94,10 +103,7 @@ def test_plain_letters_still_dispatch_as_commands(backend):
     # The other half of the acceptance criterion: f and j must keep working as
     # command keys while a pane has focus.
     be, con = backend
-    con.queue.append([
-        {"type": "key", "char": "f", "vk": 0x46, "control": 0},
-        {"type": "key", "char": "j", "vk": 0x4A, "control": 0},
-    ])
+    con.queue.append([wkey("f", 0x46), wkey("j", 0x4A)])
     keys = [e.key for e in collect(be, con)] + [e.key for e in collect(be, con)]
     assert keys == ["f", "j"]
 
@@ -109,8 +115,7 @@ def test_modifiers_come_from_control_key_state(backend):
     # Native modifier state, rather than the CSI byte sequences a VT stream
     # forces the curses backend to parse for itself.
     be, con = backend
-    con.queue.append([{"type": "key", "char": "", "vk": 0x26,  # up
-                       "control": 0x0010 | 0x0008}])  # SHIFT | LEFT_CTRL
+    con.queue.append([wkey("", 0x26, 0x0010 | 0x0008)])  # up, SHIFT | LEFT_CTRL
     e = collect(be, con)[0]
     assert e.key == "up"
     assert e.modifiers == frozenset({"shift", "ctrl"})
@@ -120,7 +125,7 @@ def test_modifiers_come_from_control_key_state(backend):
                                      (0x25, "left"), (0x70, "f1")])
 def test_special_keys_translate(backend, vk, name):
     be, con = backend
-    con.queue.append([{"type": "key", "char": "", "vk": vk, "control": 0}])
+    con.queue.append([wkey("", vk)])
     assert collect(be, con)[0].key == name
 
 
