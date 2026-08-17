@@ -214,7 +214,8 @@ def test_placement_is_recorded_with_its_cell_box(backend):
     be._term_graphics = "sixel"
     be.clear()
     be.draw_image(3, 2, "pic.png", {"w": 6, "h": 4})
-    assert be._images == {1: (3, 2, 6, 4, "pic.png", (0.0, 0.0, 1.0, 1.0))}
+    assert be._images == {1: (3, 2, 6, 4, "pic.png", (0.0, 0.0, 1.0, 1.0),
+                          (3, 2, 6, 4, (0.0, 0.0, 1.0, 1.0)))}
 
 
 def test_placement_is_clipped_to_the_enclosing_clip(backend):
@@ -226,7 +227,7 @@ def test_placement_is_clipped_to_the_enclosing_clip(backend):
     be.push_clip(0, 0, 5, 3)
     be.draw_image(0, 0, "pic.png", {"w": 10, "h": 8})
     be.pop_clip()
-    x, y, cols, rows, _path, src = be._images[1]
+    x, y, cols, rows, _path, src, _full = be._images[1]
     assert (cols, rows) == (5, 3)
     assert src[2] == pytest.approx(0.5)   # source cropped to the visible half
     assert src[3] == pytest.approx(0.375)
@@ -251,7 +252,7 @@ def test_a_vanished_image_invalidates_only_its_own_cells(backend):
     be.clear()
     be.draw_text(0, 0, "x" * 40)
     be.draw_text(0, 9, "keep me")
-    be._images = {1: (2, 1, 4, 3, "pic.png", None)}
+    be._images = {1: (2, 1, 4, 3, "pic.png", None, (2, 1, 4, 3, None))}
     be.present()
     be.clear()                      # next frame draws no image at all
     be.draw_text(0, 0, "x" * 40)
@@ -267,7 +268,7 @@ def test_a_vanished_image_invalidates_only_its_own_cells(backend):
 def test_unchanged_placement_is_not_retransmitted(backend):
     be, con = backend
     be._term_graphics = "sixel"
-    placement = (0, 0, 2, 2, "pic.png", None)
+    placement = (0, 0, 2, 2, "pic.png", None, (0, 0, 2, 2, None))
     be.clear()
     be._images = {1: placement}
     be.present()
@@ -322,7 +323,7 @@ def test_an_overpainted_image_is_resent_even_though_it_did_not_move(backend, png
     # frame re-sends lands on top of the pixels and erases them.
     be, con = backend
     be._term_graphics = "sixel"
-    placement = (0, 0, 6, 3, png, None)
+    placement = (0, 0, 6, 3, png, None, (0, 0, 6, 3, None))
     be.clear()
     be.draw_text(0, 0, "button")
     be._images = {1: placement}
@@ -340,7 +341,7 @@ def test_an_untouched_image_is_still_not_resent(backend, png):
     # only genuinely overpainted placements pay.
     be, con = backend
     be._term_graphics = "sixel"
-    placement = (0, 0, 4, 2, png, None)
+    placement = (0, 0, 4, 2, png, None, (0, 0, 4, 2, None))
     be.clear()
     be.draw_text(0, 8, "far away")
     be._images = {1: placement}
@@ -357,7 +358,7 @@ def test_a_first_placement_is_emitted_at_its_cell(backend, png):
     be, con = backend
     be._term_graphics = "sixel"
     be.clear()
-    be._images = {1: (4, 2, 3, 2, png, None)}
+    be._images = {1: (4, 2, 3, 2, png, None, (4, 2, 3, 2, None))}
     con.written.clear()
     be.present()
     out = "".join(con.written)

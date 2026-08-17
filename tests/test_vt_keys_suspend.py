@@ -143,7 +143,7 @@ def test_resume_retransmits_images(backend, tmp_path):
 
     be, con = backend
     be._term_graphics = "sixel"
-    placement = (0, 0, 2, 2, str(png), None)
+    placement = (0, 0, 2, 2, str(png), None, (0, 0, 2, 2, None))
     # Two frames, so the placement is genuinely "unchanged" by the second.
     for _ in range(2):
         be.clear()
