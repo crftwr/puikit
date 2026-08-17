@@ -24,6 +24,15 @@ from ..text import is_emoji_glyph as _is_emoji_glyph
 from ..text import truncate_to_width as _truncate_to_width
 from . import _terminal_graphics
 from ..theme import DEFAULT_THEME, THEME_TUI
+# The xterm escape-sequence decoding shared with the VT backend's POSIX
+# console. Re-imported by name here because tests (and possibly hosts) have
+# always reached them via this module.
+from ._vt_input import (
+    _csi_modifiers,
+    _escape_complete,
+    _meta_char_event,
+    _parse_csi_key,
+)
 
 # On Windows the curses module is windows-curses (PDCurses wincon), whose color
 # model differs from ncurses in ways _bind_palette must branch on. Module-level
@@ -236,83 +245,20 @@ _CONTROL_CHARS = {
 
 # --- modified function-key decoding ------------------------------------------
 #
-# Modern terminals report a modified cursor/edit key as an xterm CSI sequence:
-# ``ESC [ 1 ; <mod> <final>`` for arrows / home / end, or ``ESC [ <n> ; <mod> ~``
-# for delete / insert / page keys. ``<mod>`` is ``1 + bitmask`` where the bits
-# are Shift=1, Alt=2, Ctrl=4, Meta=8 (so Ctrl = 5, Alt = 3, Shift+Ctrl = 6).
-# ncurses may instead pre-assemble the same key into an extended keycode whose
-# capability name (``kLFT5`` = Ctrl+Left, ``kDC3`` = Alt+Delete) carries the
-# base and the same trailing modifier digit. Both paths feed _csi_modifiers.
+# Modern terminals report a modified cursor/edit key as an xterm CSI sequence
+# (``ESC [ 1 ; <mod> <final>`` / ``ESC [ <n> ; <mod> ~``); the tables and
+# parsers for those live in ``_vt_input``, shared with the VT backend's POSIX
+# console (imported above). ncurses may instead pre-assemble the same key into
+# an extended keycode whose capability name (``kLFT5`` = Ctrl+Left, ``kDC3`` =
+# Alt+Delete) carries the base and the same trailing xterm modifier digit —
+# that path is ncurses-only and stays here. Both feed _csi_modifiers.
 
-#: CSI final byte (letter form) -> key name — arrows and home/end.
-_CSI_FINAL_KEYS = {
-    "A": "up", "B": "down", "C": "right", "D": "left", "H": "home", "F": "end",
-}
-#: Leading number of a ``CSI <n> ; <mod> ~`` sequence -> key name.
-_CSI_TILDE_KEYS = {
-    "1": "home", "2": "insert", "3": "delete", "4": "end",
-    "5": "pageup", "6": "pagedown", "7": "home", "8": "end",
-}
 #: ncurses extended-capability base name -> key name.
 _EXTENDED_BASE_KEYS = {
     "kLFT": "left", "kRIT": "right", "kUP": "up", "kDN": "down",
     "kHOM": "home", "kEND": "end", "kDC": "delete", "kIC": "insert",
     "kNXT": "pagedown", "kPRV": "pageup",
 }
-#: ESC-prefixed meta char -> key name (readline word-editing: Alt+b / Alt+f
-#: move by word, Alt+d deletes the next word; Alt+Backspace is handled apart).
-_META_WORD_KEYS = {"b": "left", "f": "right", "d": "delete"}
-
-
-def _escape_complete(buf: str) -> bool:
-    """True once ``buf`` (the bytes after an ESC) forms a complete escape
-    sequence: a CSI (``[`` … a final byte 0x40-0x7E), an SS3 (``O`` + one char),
-    or a single meta char. An empty buffer is a bare ESC and never completes."""
-    if not buf:
-        return False
-    if buf[0] == "[":
-        return len(buf) >= 2 and "\x40" <= buf[-1] <= "\x7e"
-    if buf[0] == "O":
-        return len(buf) >= 2
-    return True  # ESC + a single (meta) char
-
-
-def _csi_modifiers(param: int) -> frozenset[str]:
-    """Decode an xterm key-modifier parameter (``1 + bitmask`` of Shift=1,
-    Alt=2, Ctrl=4, Meta=8) into contract modifier names. ``1`` (or ``0``, an
-    absent parameter) means no modifier."""
-    bits = param - 1 if param > 0 else 0
-    names = []
-    if bits & 1:
-        names.append("shift")
-    if bits & 2:
-        names.append("alt")
-    if bits & 4:
-        names.append("ctrl")
-    if bits & 8:
-        names.append("cmd")
-    return frozenset(names)
-
-
-def _parse_csi_key(seq: str) -> "Event | None":
-    """Decode a CSI/SS3 function-key sequence — ESC already stripped, e.g.
-    ``[1;5D`` (Ctrl+Left), ``[3;3~`` (Alt+Delete), ``OC`` (Right) — into a
-    modified KEY event, or None when it is not a key we recognize."""
-    body = seq[1:]
-    if not body:
-        return None
-    final = body[-1]
-    params = body[:-1].split(";") if body[:-1] else []
-    mod = int(params[1]) if len(params) >= 2 and params[1].isdigit() else 1
-    modifiers = _csi_modifiers(mod)
-    name = _CSI_FINAL_KEYS.get(final)
-    if name is not None:
-        return Event(type=EventType.KEY, key=name, modifiers=modifiers)
-    if final == "~" and params and params[0].isdigit():
-        name = _CSI_TILDE_KEYS.get(params[0])
-        if name is not None:
-            return Event(type=EventType.KEY, key=name, modifiers=modifiers)
-    return None
 
 
 def _extended_key_event(name: str) -> "Event | None":
@@ -326,18 +272,6 @@ def _extended_key_event(name: str) -> "Event | None":
     if key is None:
         return None
     return Event(type=EventType.KEY, key=key, modifiers=_csi_modifiers(mod))
-
-
-def _meta_char_event(ch: str) -> "Event | None":
-    """An ESC-prefixed single char is an Alt/Meta chord (readline word editing):
-    Alt+Backspace (ESC DEL/BS) deletes the previous word, Alt+b / Alt+f move by
-    word, Alt+d deletes the next word. Other Alt chords are left unhandled."""
-    if ch in ("\x7f", "\x08"):
-        return Event(type=EventType.KEY, key="backspace", modifiers=frozenset({"alt"}))
-    key = _META_WORD_KEYS.get(ch.lower())
-    if key is not None:
-        return Event(type=EventType.KEY, key=key, modifiers=frozenset({"alt"}))
-    return None
 
 _ATTR_MAP = [
     (TextAttribute.BOLD, curses.A_BOLD),

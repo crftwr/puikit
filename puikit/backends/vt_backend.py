@@ -15,12 +15,18 @@ batched ``WriteConsoleW``.
 This is what ``--backend tui`` resolves to on Windows; everywhere else that
 alias still means curses, which is not broken there (see
 ``puikit.backends.create_backend``). ``--backend curses`` remains the escape
-hatch on Windows.
+hatch on Windows — and ``--backend vt`` the opt-in elsewhere: the same engine
+runs over a raw POSIX tty (``_vt_posix.PosixConsole``), which is the migration
+path off curses on macOS and Linux.
 
-Mouse, wheel and inline images (xefm#306) all work: Windows delivers mouse
-records through ``ReadConsoleInputW`` rather than as escape sequences to parse,
-and an image escape reaches the screen here precisely because nothing else owns
-the output stream.
+The engine is platform-blind: a console adapter hands it *input records* —
+plain dicts carrying contract key names, chars and modifier sets, and mouse
+GESTURES (down / up / drag / wheel) — and takes each frame as one string. The
+Windows console builds those records from ``ReadConsoleInputW`` (which reports
+mouse *state*, diffed into gestures in ``_win_mouse_records``); the POSIX
+console parses the VT byte stream (``_vt_input``). Mouse, wheel and inline
+images (xefm#306) all work: an image escape reaches the screen here precisely
+because nothing else owns the output stream.
 
 Not implemented, deliberately, rather than half-built:
 
@@ -160,7 +166,6 @@ class VTBackend(Backend):
         self._clipboard = ""
         self._input_pos: tuple[int, int] | None = None
         self._frames = 0
-        self._mouse_buttons = 0
         # Inline-image placements for this frame and the last, keyed by draw
         # order, so present() can tell which moved, changed or vanished and
         # re-transmit only those — a payload can be hundreds of KB.
@@ -713,70 +718,39 @@ class VTBackend(Backend):
         return not self._quit_requested
 
     def _mouse_events(self, record: dict) -> list[Event]:
-        """Turn one MOUSE_EVENT record into puikit events.
+        """Turn one mouse GESTURE record into puikit events.
 
-        Windows reports mouse state, not gestures: each record carries which
-        buttons are down *now*. The press/release/drag contract comes from
-        comparing that against the last record — which is also why the previous
-        state has to be tracked here rather than derived per record.
-
-        Unlike the curses path there is no SGR parsing: that backend has to write
-        DECSET itself and decode ``ESC [ < b ; x ; y M`` by hand, because the
-        ncurses that ships on macOS will not decode modes 1002/1003/1006.
+        The consoles hand gestures over, not device state: the Windows console
+        diffs ``ReadConsoleInputW``'s buttons-down-now records into down/up/drag
+        (``_win_mouse_records``), and the POSIX console gets gestures straight
+        off the SGR wire (``_vt_input``) — which is why nothing here needs to
+        remember the previous record.
         """
-        x, y = record["x"], record["y"]
-        flags = record["flags"]
-        buttons = record["buttons"]
-        state = record.get("control", 0)
-        mods = set()
-        if state & _SHIFT_PRESSED:
-            mods.add("shift")
-        if state & (_LEFT_CTRL_PRESSED | _RIGHT_CTRL_PRESSED):
-            mods.add("ctrl")
-        if state & (_LEFT_ALT_PRESSED | _RIGHT_ALT_PRESSED):
-            mods.add("alt")
-        mods = frozenset(mods)
-
-        if flags & (_MOUSE_WHEELED | _MOUSE_HWHEELED):
-            wheel = record.get("wheel", 0)
-            if not wheel:
+        action = record.get("action")
+        x, y = float(record.get("x", 0)), float(record.get("y", 0))
+        mods = frozenset(record.get("mods") or ())
+        if action == "wheel":
+            notches = record.get("wheel", 0)
+            if not notches:
                 return []
-            # One notch is WHEEL_DELTA (120). Positive is away from the user,
-            # which is puikit's positive scroll too.
-            notches = max(1, abs(wheel) // 120)
-            step = 1 if wheel > 0 else -1
             hints = {}
-            if flags & _MOUSE_HWHEELED:
-                # A horizontal wheel reports on the same axis field; hand it to
-                # the Panel as a horizontal sub-unit delta.
-                hints = {"scroll_units_x": float(step * notches)}
-            return [Event(EventType.MOUSE_SCROLL, x=float(x), y=float(y),
-                          scroll=step * notches, modifiers=mods, hints=hints)]
-
-        previous = self._mouse_buttons
-        self._mouse_buttons = buttons
-        pressed = buttons & ~previous
-        released = previous & ~buttons
-        events: list[Event] = []
-        for mask, name in _BUTTON_NAMES:
-            if pressed & mask:
-                events.append(Event(EventType.MOUSE_DOWN, x=float(x), y=float(y),
-                                    button=name, modifiers=mods))
-            if released & mask:
-                events.append(Event(EventType.MOUSE_UP, x=float(x), y=float(y),
-                                    button=name, modifiers=mods))
-        if events:
-            return events
-        if flags & _MOUSE_MOVED:
-            if buttons:
-                name = next((n for m, n in _BUTTON_NAMES if buttons & m), "left")
-                return [Event(EventType.MOUSE_DRAG, x=float(x), y=float(y),
-                              button=name, modifiers=mods)]
-            # Bare motion. The profile leaves ``hover`` off — a terminal app
-            # re-renders the whole frame to show a hover cue, and motion arrives
-            # for every cell crossed — so this is dropped rather than flooding
-            # the loop with repaints nothing is listening for.
-            return []
+            if record.get("axis") == "h":
+                # A horizontal wheel reports on the same scroll field; hand it
+                # to the Panel as a horizontal sub-unit delta as well.
+                hints = {"scroll_units_x": float(notches)}
+            return [Event(EventType.MOUSE_SCROLL, x=x, y=y, scroll=notches,
+                          modifiers=mods, hints=hints)]
+        button = record.get("button") or "left"
+        if action == "down":
+            return [Event(EventType.MOUSE_DOWN, x=x, y=y, button=button, modifiers=mods)]
+        if action == "up":
+            return [Event(EventType.MOUSE_UP, x=x, y=y, button=button, modifiers=mods)]
+        if action == "drag":
+            return [Event(EventType.MOUSE_DRAG, x=x, y=y, button=button, modifiers=mods)]
+        # Bare motion ("move"). The profile leaves ``hover`` off — a terminal
+        # app re-renders the whole frame to show a hover cue, and motion arrives
+        # for every cell crossed — so this is dropped rather than flooding the
+        # loop with repaints nothing is listening for.
         return []
 
     def _to_event(self, record: dict) -> Event | None:
@@ -784,29 +758,22 @@ class VTBackend(Backend):
         if kind == "resize":
             assert self._grid is not None
             w, h = self._console.size()
-            # Windows has no SIGWINCH; the console reports the new size as an
-            # input record instead, so a resize is an ordinary event here.
+            # Both consoles deliver a resize as an ordinary input record —
+            # Windows because the console reports it that way (no SIGWINCH
+            # there), POSIX because its console folds the size change into one.
             self._grid.resize(w, h)
             return Event(EventType.RESIZE)
         if kind != "key":
             return None
         char = record.get("char") or ""
-        vk = record.get("vk", 0)
-        state = record.get("control", 0)
-        mods = set()
-        if state & _SHIFT_PRESSED:
-            mods.add("shift")
-        if state & (_LEFT_CTRL_PRESSED | _RIGHT_CTRL_PRESSED):
-            mods.add("ctrl")
-        if state & (_LEFT_ALT_PRESSED | _RIGHT_ALT_PRESSED):
-            mods.add("alt")
-        mods = frozenset(mods)
-        # An IME commit arrives as a KEY_EVENT carrying the composed character
-        # with no usable virtual key (or VK_PROCESSKEY). Filtering on vk — the
-        # obvious way to find command keys — silently drops all Japanese input,
-        # which is the single worst outcome available to this backend: it would
-        # fix the display of CJK while making CJK impossible to type
-        # (puikit#98 §8.4). So the character wins whenever there is one.
+        mods = frozenset(record.get("mods") or ())
+        # An IME commit arrives carrying the composed character with no key
+        # NAME at all (on Windows: no usable virtual key, or VK_PROCESSKEY).
+        # Filtering on the name — the obvious way to find command keys —
+        # silently drops all Japanese input, which is the single worst outcome
+        # available to this backend: it would fix the display of CJK while
+        # making CJK impossible to type (puikit#98 §8.4). So the character wins
+        # whenever there is one.
         if char:
             name = _CONTROL_CHARS.get(char)
             if name is not None:
@@ -827,7 +794,7 @@ class VTBackend(Backend):
                 # by hand here is why space stopped working — the key name never
                 # matched what the app had bound.
                 return char_key_event(char, mods)
-        name = _VK_KEYS.get(vk)
+        name = record.get("name")
         if name is None:
             return None
         return Event(EventType.KEY, key=name, modifiers=mods)
@@ -924,12 +891,95 @@ def _blend(a: Color, b: Color, t: float) -> Color:
     )
 
 
+# --- Windows record translation ----------------------------------------------
+#
+# Module-level pure functions rather than _WindowsConsole methods so the
+# translation — the part of the console worth testing — is exercisable on any
+# platform; constructing _WindowsConsole itself needs kernel32.
+
+
+def _win_modifiers(state: int) -> frozenset[str]:
+    """ControlKeyState bits -> contract modifier names. The reason modifiers
+    are worth having natively: on a VT stream they only arrive encoded in CSI
+    byte sequences, which the POSIX console has to parse for itself."""
+    mods = set()
+    if state & _SHIFT_PRESSED:
+        mods.add("shift")
+    if state & (_LEFT_CTRL_PRESSED | _RIGHT_CTRL_PRESSED):
+        mods.add("ctrl")
+    if state & (_LEFT_ALT_PRESSED | _RIGHT_ALT_PRESSED):
+        mods.add("alt")
+    return frozenset(mods)
+
+
+def _win_key_record(char: str, vk: int, control: int) -> dict:
+    """One KEY_EVENT into the engine's neutral key record. The virtual key
+    yields the contract NAME (an IME commit has none — the char carries it);
+    the control-key state yields the modifier set."""
+    return {"type": "key", "char": char, "name": _VK_KEYS.get(vk),
+            "mods": _win_modifiers(control)}
+
+
+def _win_mouse_records(record: dict, previous: int) -> tuple[list[dict], int]:
+    """One MOUSE_EVENT into gesture records, plus the new button state.
+
+    Windows reports mouse state, not gestures: each record carries which
+    buttons are down *now*. The down/up/drag contract comes from comparing that
+    against the last record — which is why the caller threads ``previous``
+    through — while SGR (the POSIX console's wire format) names the button in
+    every report and needs no such diffing.
+    """
+    x, y = record["x"], record["y"]
+    flags = record["flags"]
+    buttons = record["buttons"]
+    mods = _win_modifiers(record.get("control", 0))
+
+    if flags & (_MOUSE_WHEELED | _MOUSE_HWHEELED):
+        wheel = record.get("wheel", 0)
+        if not wheel:
+            return [], previous
+        # One notch is WHEEL_DELTA (120). Positive is away from the user,
+        # which is puikit's positive scroll too.
+        notches = max(1, abs(wheel) // 120) * (1 if wheel > 0 else -1)
+        axis = "h" if flags & _MOUSE_HWHEELED else "v"
+        return [{"type": "mouse", "action": "wheel", "x": x, "y": y,
+                 "wheel": notches, "axis": axis, "mods": mods}], previous
+
+    pressed = buttons & ~previous
+    released = previous & ~buttons
+    out: list[dict] = []
+    for mask, name in _BUTTON_NAMES:
+        if pressed & mask:
+            out.append({"type": "mouse", "action": "down", "x": x, "y": y,
+                        "button": name, "mods": mods})
+        if released & mask:
+            out.append({"type": "mouse", "action": "up", "x": x, "y": y,
+                        "button": name, "mods": mods})
+    if out:
+        return out, buttons
+    if flags & _MOUSE_MOVED:
+        if buttons:
+            name = next((n for m, n in _BUTTON_NAMES if buttons & m), "left")
+            return [{"type": "mouse", "action": "drag", "x": x, "y": y,
+                     "button": name, "mods": mods}], buttons
+        return [{"type": "mouse", "action": "move", "x": x, "y": y,
+                 "mods": mods}], buttons
+    return [], buttons
+
+
 def _console_adapter():
-    """The platform half. Windows drives the console API directly; anywhere else
-    (and in tests) the same VT goes to a plain stream, which is what makes the
+    """The platform half. Windows drives the console API directly; a POSIX tty
+    gets termios + select (``_vt_posix``); anything that is not a tty — tests,
+    pipes — falls back to the plain stream adapter, which is what makes the
     engine above testable without a console."""
     if _IS_WINDOWS:
         return _WindowsConsole()
+    try:
+        if sys.__stdin__ is not None and os.isatty(sys.__stdin__.fileno()):
+            from ._vt_posix import PosixConsole
+            return PosixConsole()
+    except (OSError, ValueError):
+        pass
     return _StreamConsole()
 
 
@@ -1017,6 +1067,9 @@ class _WindowsConsole:
         self._saved_out: int | None = None
         self._saved_in: int | None = None
         self._cell_px: tuple[float, float] | None = None
+        # Buttons down as of the last MOUSE_EVENT, diffed into gestures by
+        # _win_mouse_records.
+        self._mouse_buttons = 0
         # Until when a CSI reply may still arrive unasked-for, and the part
         # of one already in flight. Armed only if the size probe gave up
         # waiting; a terminal that answered in time will not answer again.
@@ -1277,12 +1330,9 @@ class _WindowsConsole:
                 key = rec.Event.KeyEvent
                 if not key.bKeyDown:
                     continue
-                out.append({
-                    "type": "key",
-                    "char": key.UnicodeChar or "",
-                    "vk": key.wVirtualKeyCode,
-                    "control": key.dwControlKeyState,
-                })
+                out.append(_win_key_record(
+                    key.UnicodeChar or "", key.wVirtualKeyCode, key.dwControlKeyState,
+                ))
             elif rec.EventType == _MOUSE_EVENT:
                 m = rec.Event.MouseEvent
                 # The record carries BUFFER coordinates. In the alternate screen
@@ -1293,15 +1343,15 @@ class _WindowsConsole:
                 # signed, so a scroll toward the user must not be read as a
                 # button bitmask of 0xFF880000.
                 delta = ctypes.c_short((m.dwButtonState >> 16) & 0xFFFF).value
-                out.append({
-                    "type": "mouse",
+                gestures, self._mouse_buttons = _win_mouse_records({
                     "x": m.dwMousePosition.X - ox,
                     "y": m.dwMousePosition.Y - oy,
                     "buttons": m.dwButtonState & 0xFFFF,
                     "flags": m.dwEventFlags,
                     "wheel": delta,
                     "control": m.dwControlKeyState,
-                })
+                }, self._mouse_buttons)
+                out.extend(gestures)
             elif rec.EventType == _WINDOW_BUFFER_SIZE_EVENT:
                 out.append({"type": "resize"})
         return out
