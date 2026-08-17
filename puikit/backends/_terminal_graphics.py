@@ -163,6 +163,47 @@ def cell_pixels(fd: int | None = None) -> tuple[float, float] | None:
     return (xpixel / cols, ypixel / rows)
 
 
+def source_key(source: Any) -> tuple:
+    """A cache identity for an image source: ``(kind, identity..., revision)``.
+
+    Backends cache expensive per-image work — a decoded, scaled, quantized
+    picture, or a fully encoded payload — and must be able to tell when the
+    pixels behind a source have changed.
+
+    **A path alone is not that identity.** It names a location, and the same
+    location holds different pixels after a rebuild, a thumbnail refresh, or a
+    file replaced mid-copy; a path-keyed cache then serves the old picture until
+    it happens to be evicted. So a file source is identified by its path plus the
+    modification time and size — one ``stat`` per emission, nothing beside the
+    decode it protects.
+
+    That is the same bound every mtime-based invalidation lives with: two writes
+    close enough to land on one filesystem timestamp, producing a file of the
+    same size, are indistinguishable. Content hashing would close it and costs
+    more than the decode it guards, so it is not worth paying here; a source that
+    needs exactness names its own revision instead, below.
+
+    The tuple shape exists so a **raster** source — pixel data handed straight to
+    the backend, as a photo editor would, rather than a file on disk — slots in
+    without any cache having to change. Content hashing is the obvious identity
+    and the wrong one: an editor mutates its buffer between frames, and hashing
+    megabytes per frame costs more than the encode being avoided. Such a source
+    instead names itself, exposing a ``cache_key`` of ``(identity, revision)``
+    whose revision it bumps when written to. Every cache keyed through here then
+    invalidates correctly the moment the pixels change, and not before.
+    """
+    own = getattr(source, "cache_key", None)
+    if own is not None:
+        return ("raster", *tuple(own))
+    try:
+        stat = os.stat(source)
+    except (OSError, TypeError, ValueError):
+        # Unreadable or not a filesystem path: fall back to the bare name. The
+        # picture cannot be loaded either, so nothing is cached against it.
+        return ("path", source, None, None)
+    return ("path", source, stat.st_mtime_ns, stat.st_size)
+
+
 def render(
     path: str,
     px_w: int,
@@ -303,6 +344,98 @@ def _iterm2(png: bytes, cols: int, rows: int, fill: bool = False) -> str:
     return f"\x1b]1337;File={args}:{payload}\a"
 
 
+class SixelSource:
+    """A picture prepared for sixel, from which any sub-rectangle can be encoded.
+
+    Everything here is independent of WHICH part is being shown: the decode, the
+    scale, the palette, and each band's per-color column bits. Only the final
+    run-encoding depends on the rectangle. Splitting the two is what makes
+    scrolling affordable — a partially visible image's crop changes on every
+    step, so under the naive flow every step re-did the whole pipeline.
+
+    A band is six pixel rows spanning the full width, which is why the two axes
+    are not symmetric:
+
+    * **Vertical** movement selects a different SET of bands; each band's content
+      is unchanged, so its encoded string is reused outright.
+    * **Horizontal** movement changes every band, because each is a full-width
+      strip now showing different columns. The prepared bits are still reused —
+      only the run-encoding is redone.
+    """
+
+    __slots__ = ("width", "height", "palette", "bands", "_full_rows")
+
+    def __init__(self, width: int, height: int, palette: str, bands: list) -> None:
+        self.width = width
+        self.height = height
+        self.palette = palette
+        self.bands = bands
+        # Encoded strings for whole-width bands, filled in on first use.
+        self._full_rows: list[str | None] = [None] * len(bands)
+
+    def encode_rect(self, x0: int, y0: int, x1: int, y1: int) -> str:
+        """The sixel for the pixel rectangle ``[x0, x1) x [y0, y1)``.
+
+        The vertical bounds are snapped OUT to band boundaries, because a band is
+        the smallest unit sixel can express — the picture can therefore sit up to
+        five pixels off where it was asked for, which is under a fifth of a cell
+        and not perceptible, and in exchange a scroll step reuses whole bands
+        instead of re-encoding the image.
+        """
+        x0 = max(0, min(x0, self.width))
+        x1 = max(x0, min(x1, self.width))
+        y0 = max(0, min(y0, self.height))
+        y1 = max(y0, min(y1, self.height))
+        first, last = y0 // 6, -(-y1 // 6)  # snap out to whole bands
+        full_width = x0 == 0 and x1 == self.width
+        out = ["\x1bP0;1;0q", f'"1;1;{x1 - x0};{(last - first) * 6}', self.palette]
+        for index in range(first, min(last, len(self.bands))):
+            if full_width:
+                row = self._full_rows[index]
+                if row is None:
+                    row = self._full_rows[index] = _encode_band(self.bands[index])
+                out.append(row)
+            else:
+                out.append(_encode_band(self.bands[index], x0, x1))
+        out.append("\x1b\\")
+        return "".join(out)
+
+
+def _encode_band(band: dict, x0: int = 0, x1: int | None = None) -> str:
+    """One band's color passes. ``$`` returns to column 0 to overlay the next
+    color on the same band; ``-`` after the last one advances to the next."""
+    out = []
+    last = len(band) - 1
+    for position, index in enumerate(sorted(band)):
+        columns = band[index] if x1 is None else band[index][x0:x1]
+        out.append(f"#{index}")
+        for match in _RUN_RE.finditer(columns.translate(_SIXEL_BYTES)):
+            run = match.group()
+            out.append(_sixel_run(chr(run[0]), len(run)))
+        out.append("$" if position < last else "-")
+    return "".join(out)
+
+
+def prepare_sixel(image: Any, max_colors: int = 256) -> SixelSource:
+    """Quantize and decompose ``image`` into per-band column bits, once."""
+    from PIL import Image
+
+    if image.mode == "RGBA":  # sixel has no alpha; composite onto black
+        background = Image.new("RGB", image.size, (0, 0, 0))
+        background.paste(image, mask=image.split()[-1])
+        image = background
+    quantized = image.convert("RGB").quantize(colors=max_colors, method=Image.MEDIANCUT)
+    palette = quantized.getpalette() or []
+    width, height = quantized.size
+    defs = []
+    for index in sorted({i for _, i in (quantized.getcolors(max_colors) or [])}):
+        r, g, b = palette[index * 3:index * 3 + 3] or (0, 0, 0)
+        # Sixel color components are percentages (0-100), not 0-255.
+        defs.append(f"#{index};2;{r * 100 // 255};{g * 100 // 255};{b * 100 // 255}")
+    bands = [band for _top, band in _sixel_bands(quantized.tobytes(), width, height)]
+    return SixelSource(width, height, "".join(defs), bands)
+
+
 def _sixel(image: Any, max_colors: int = 256) -> str:
     """Encode a Pillow image as a sixel string.
 
@@ -337,34 +470,17 @@ def _sixel(image: Any, max_colors: int = 256) -> str:
     # directly. Indexing PixelAccess per pixel is a Python-level call each time.
     raw = quantized.tobytes()
 
-    for top in range(0, height, 6):
-        # Build every color's column bits for this band in ONE pass over its
-        # pixels. The obvious shape — walk the band again for each color — costs
-        # (colors x width x 6) pixel reads per band, so a photographic image with
-        # dozens of colors per band pays tens of millions of them for a picture a
-        # few hundred pixels wide. Accumulating into a bytearray per color as the
-        # band is read makes it (width x 6) regardless of how many colors appear,
-        # which is what took the demo's Images page from ~1.5s to interactive.
-        # The emitted bytes are unchanged.
-        band: dict[int, bytearray] = {}
-        for row in range(6):
-            y = top + row
-            if y >= height:
-                break
-            bit = 1 << row
-            for x, index in enumerate(raw[y * width:(y + 1) * width]):
-                column = band.get(index)
-                if column is None:
-                    column = band[index] = bytearray(width)
-                column[x] |= bit
+    # Each band's per-color column bits; see _sixel_bands for why it is built the
+    # way it is, and why numpy changes the shape of the work rather than just
+    # speeding up the same loop.
+    for _top, band in _sixel_bands(raw, width, height):
         last = len(band) - 1
         for position, index in enumerate(sorted(band)):
             out.append(f"#{index}")
             # Turn the bit column into sixel characters with a 256-byte
-            # translation table, then let the regex engine find the runs. Doing
-            # both in Python — a chr() per column and a compare against the
-            # previous character — is millions of interpreter steps for one
-            # picture; here each is a single C-level pass over the row.
+            # translation table, then let the regex engine find the runs — both
+            # single C-level passes over the row.
+            #
             # finditer, not findall: the pattern captures a group for the
             # backreference, and findall would hand back that single character
             # instead of the whole run — silently collapsing every run to one
@@ -385,7 +501,71 @@ _SIXEL_BYTES = bytes((63 + i) if i < 64 else 63 for i in range(256))
 
 #: One run of identical sixel characters. Finding runs with the regex engine
 #: keeps the scan in C rather than comparing character by character in Python.
+#:
+#: Matching only runs worth compressing (``(.)\1{3,}``) and substituting them in
+#: one pass was tried and is SLOWER: the backreference forces the engine to
+#: attempt and back out of a match at every position a run does not start, which
+#: on photographic content is nearly every position.
 _RUN_RE = re.compile(rb"(.)\1*", re.DOTALL)
+
+
+def _sixel_bands(raw: bytes, width: int, height: int):
+    """Yield ``(top, {palette index: column bits})`` for each six-row band, where
+    each byte of the column bits says which of the band's six rows that color
+    occupies in that column.
+
+    This is where sixel encoding spends its time. The obvious shape — walk the
+    band again for each color — costs (colors x width x 6) reads per band, tens
+    of millions for one photographic image. Accumulating every color in a single
+    pass makes it (width x 6), which is the pure-Python path below.
+
+    That is still a Python loop over every pixel: half a million iterations for a
+    screenshot scaled to a terminal pane, paid again on every scroll step,
+    because a partially visible picture's crop genuinely changes and so its
+    encoding must. numpy removes the loop — one scatter per row into a
+    (256, width) accumulator, then one slice per color present.
+
+    The obvious numpy shape, a masked reduction per (band, color), is SLOWER than
+    the Python loop it replaces: the arrays are small and per-operation overhead
+    dominates at a few hundred colors a band. Scattering instead makes the work
+    per band proportional to its six rows rather than to its color count.
+
+    numpy is a win32-only dependency here, so the pure-Python path remains the
+    contract and the two are verified to produce identical bytes.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        for top in range(0, height, 6):
+            rows = min(6, height - top)
+            band: dict[int, bytearray] = {}
+            for row in range(rows):
+                bit = 1 << row
+                y = top + row
+                for x, index in enumerate(raw[y * width:(y + 1) * width]):
+                    column = band.get(index)
+                    if column is None:
+                        column = band[index] = bytearray(width)
+                    column[x] |= bit
+            yield top, band
+        return
+    columns = np.arange(width)
+    # One accumulator reused across bands: a row per possible palette entry, and
+    # only the entries a band actually uses are cleared and read back.
+    acc = np.zeros((256, width), dtype=np.uint8)
+    for top in range(0, height, 6):
+        rows = min(6, height - top)
+        block = np.frombuffer(raw, dtype=np.uint8, count=rows * width,
+                              offset=top * width).reshape(rows, width)
+        present = np.unique(block)
+        acc[present] = 0
+        for row in range(rows):
+            # Within one row each column appears exactly once, so this scatter
+            # has no duplicate indices and the |= is well defined.
+            acc[block[row], columns] |= np.uint8(1 << row)
+        blob = acc[present].tobytes()
+        yield top, {int(c): blob[i * width:(i + 1) * width]
+                    for i, c in enumerate(present)}
 
 
 def _sixel_run(char: str, count: int) -> str:
