@@ -28,7 +28,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Iterator
 
-from ..text import display_width, glyph_runs
+from ..text import display_width, glyph_runs, is_emoji_glyph
 
 # The second cell of a wide glyph. It is owned by the lead cell to its left and
 # is never drawn: the terminal advances two columns for the lead by itself.
@@ -267,17 +267,42 @@ class VTGrid:
                 continue
             for x0, x1 in self._dirty_spans(cur, prev):
                 append(f"\x1b[{y + 1};{x0 + 1}H")
+                reanchor = False
                 for x in range(x0, x1):
                     cell = cur[x]
                     if cell is _TRAIL:
                         # The lead already moved the cursor across this column.
                         continue
                     glyph, fg, bg, attr = cell
+                    if reanchor:
+                        # Put the cursor back where WE believe it is, because the
+                        # glyph just emitted is one whose width the terminal may
+                        # not agree about (see below). Without this the
+                        # disagreement propagates: every glyph after it lands a
+                        # column off, and a later partial repaint — which does
+                        # address absolutely — then overwrites a neighbour,
+                        # doubling a character.
+                        append(f"\x1b[{y + 1};{x + 1}H")
+                        reanchor = False
                     style = (fg, bg, attr)
                     if style != pen:
                         append(_sgr_delta(style, pen))
                         pen = style
                     append(glyph)
+                    # Emoji are the glyphs terminals disagree about. A base in
+                    # the emoji planes is drawn two columns wide everywhere, but
+                    # a legacy symbol promoted by a variation selector (U+2328
+                    # KEYBOARD + U+FE0F) is two columns to this width model and
+                    # one to several terminals, VS Code's among them. Rather than
+                    # try to predict which table a terminal carries — the guess
+                    # that cannot be won — the cursor is simply re-stated
+                    # afterwards, so a wrong guess costs that one cell and
+                    # nothing downstream. CJK is deliberately not re-anchored:
+                    # every terminal counts it as two columns, so it cannot
+                    # drift, and the escape would be pure overhead on the text
+                    # that needs it least.
+                    if is_emoji_glyph(glyph):
+                        reanchor = True
         if parts:
             parts.append("\x1b[0m")
         return "".join(parts)
