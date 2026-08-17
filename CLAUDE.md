@@ -257,7 +257,8 @@ class Panel:
 
 | Backend | Status | Notes |
 |---|---|---|
-| `CursesBackend` | Shipping | TUI, all platforms. Pure Python. |
+| `VTBackend` | Shipping | TUI, all platforms — what `"tui"` resolves to. Owns the console/tty directly (no curses): wide-glyph grid, one write per frame, inline images. |
+| `CursesBackend` | Shipping | TUI escape hatch (`"curses"`) for terminals off the xterm dialect. Pure Python. |
 | `MacOSBackend` | Shipping | macOS native GUI (PyObjC; AppKit, CoreGraphics, CoreText, Metal). |
 | `WindowsBackend` | Shipping | Windows native GUI, raw `ctypes` — no `pywin32`/`comtypes`. See [`docs/windows_backend.md`](docs/windows_backend.md). |
 | `WebBackend` | Shipping | Browser `<canvas>` over a local HTTP + WebSocket server, no dependencies. See [`docs/web_backend.md`](docs/web_backend.md). |
