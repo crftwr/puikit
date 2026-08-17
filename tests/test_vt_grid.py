@@ -225,3 +225,52 @@ def test_degenerate_text_is_harmless(text):
     g = VTGrid(5, 1)
     g.draw_text(0, 0, text)
     g.render()
+
+
+# --- glyphs the terminal may measure differently ---------------------------
+
+
+def test_cursor_is_restated_after_an_emoji():
+    # Terminals disagree about emoji width. A base in the emoji planes is two
+    # columns everywhere, but a legacy symbol promoted by a variation selector
+    # (U+2328 KEYBOARD + U+FE0F) is two to this width model and ONE to several
+    # terminals, VS Code's among them. Left alone the disagreement propagates:
+    # every glyph after it lands a column off, and a later partial repaint —
+    # which does address absolutely — overwrites a neighbour and doubles a
+    # character. Re-stating the cursor confines a wrong guess to one cell.
+    g = VTGrid(30, 1)
+    g.draw_text(0, 0, "⌨️ Keys")
+    positions = cup_positions(g.render())
+    assert (1, 3) in positions, positions   # re-anchored where the space belongs
+
+
+def test_cjk_is_not_re_anchored():
+    # Every terminal counts East Asian Wide as two columns, so it cannot drift
+    # and the extra escape would be pure overhead on the text needing it least.
+    g = VTGrid(30, 1)
+    g.draw_text(0, 0, "日本語 text")
+    assert cup_positions(g.render()) == [(1, 1)]
+
+
+def test_plain_text_is_not_re_anchored():
+    g = VTGrid(30, 1)
+    g.draw_text(0, 0, "plain ascii")
+    assert cup_positions(g.render()) == [(1, 1)]
+
+
+def test_re_anchoring_does_not_change_what_is_drawn():
+    # The escape moves the cursor; it must not alter the glyphs or their columns.
+    g = VTGrid(20, 1)
+    g.draw_text(0, 0, "✂️ cut")
+    assert g.cell_at(0, 0)[0] == "✂️"
+    assert g.cell_at(1, 0) is _TRAIL
+    assert g.cell_at(2, 0)[0] == " "
+    assert g.cell_at(3, 0)[0] == "c"
+    assert "cut" in visible(g.render())
+
+
+def test_several_emoji_each_re_anchor():
+    g = VTGrid(30, 1)
+    g.draw_text(0, 0, "⌨️a✂️b")
+    # One CUP to open the span, then one after each emoji.
+    assert len(cup_positions(g.render())) == 3
