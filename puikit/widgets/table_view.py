@@ -33,6 +33,7 @@ from ..font import Font
 from ..panel import DrawContext
 from ..text import display_width, truncate_to_width
 from ..theme import lift
+from ._scroll import search_scroll_offset
 from .base import Widget
 
 #: Cells are drawn fixed-advance so a column maps to one base unit — the header
@@ -594,12 +595,20 @@ class TableView(Widget):
 
     def _select_match(self) -> None:
         """Move the current cell onto the matched row *and* the matching column,
-        then scroll it in on both axes (the drag selection is dropped so the
-        current cell reads as the cursor)."""
+        then scroll it in (the drag selection is dropped so the current cell
+        reads as the cursor). Vertically the search jump keeps ~3 rows of
+        context — no scroll inside that band, centered outside it (the shared
+        rule, see widgets/_scroll.py); horizontally, and for plain cursor
+        movement, the minimal :meth:`_ensure_cell_visible` still applies."""
         row = self._matches[self._search_pos]
         self._cur_row = row
         self._cur_col = self._match_col(row)
         self._sel_anchor = self._sel_cursor = None
+        body_h = self._viewport_rows * self._row_h
+        self.offset = search_scroll_offset(
+            self.offset, body_h, row * self._row_h, self._row_h,
+            margin=3 * self._row_h, snap=self._row_h)
+        self._clamp(len(self._body_lines), body_h, self._text_w)
         self._ensure_cell_visible(self._text_w)
 
     def _match_col(self, row: int) -> int:

@@ -181,6 +181,23 @@ def test_search_matches_navigate_and_status(backend):
     assert view.search_status()[0] == 2
 
 
+def test_search_jump_centers_offscreen_row(backend):
+    # 30 rows in a 6-row body viewport. A match outside the comfort band is
+    # centered — row 20 lands with int((6 - 1) / 2) = 2 rows above — while a
+    # match near the document start keeps offset 0 (centering clamps there;
+    # the shared search-jump rule, widgets/_scroll.py).
+    view = TableView(["id", "name"],
+                     [[str(i), f"row{i:02d}"] for i in range(30)])
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=24, h=8)
+    panel.render()
+    view.search_begin()
+    assert view.search_set("row02") == 1
+    assert view._cur_row == 2 and view.offset == 0.0
+    assert view.search_set("row20") == 1
+    assert view._cur_row == 20 and view.offset == 18.0
+
+
 def test_search_moves_current_cell_and_commits_on_accept(backend):
     # Like the main file manager's i-search: the current cell follows the match
     # and Enter (search_accept) leaves it on the matched row.

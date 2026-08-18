@@ -119,6 +119,22 @@ def test_search_navigate_wraps(backend):
     assert view.search_status() == (1, 2)
 
 
+def test_search_jump_centers_offscreen_match(backend):
+    # 30 top-level rows in a 14-row viewport. A match outside the comfort band
+    # is centered — row 20 lands with int((14 - 1) / 2) = 6 rows above — while
+    # a match already comfortably visible (row 4) leaves the scroll alone
+    # (the shared search-jump rule, widgets/_scroll.py).
+    view = JsonView({f"k{i:02d}": i for i in range(30)})
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    panel.render()
+    view.search_begin()
+    assert view.search_set("k04") == 1
+    assert view.selected == 4 and view.offset == 0.0
+    assert view.search_set("k20") == 1
+    assert view.selected == 20 and view.offset == 14.0
+
+
 def test_search_moves_selection_and_commits_on_accept(backend):
     # Like the main file manager's i-search: the selection follows the match and
     # Enter (search_accept) leaves it on the matched node.

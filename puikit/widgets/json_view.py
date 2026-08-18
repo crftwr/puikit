@@ -28,6 +28,7 @@ from ..font import Font
 from ..panel import DrawContext
 from ..text import display_width, truncate_to_width
 from ._input import MultiClickTracker, is_activate
+from ._scroll import search_scroll_offset
 from .base import Widget, draw_list_row, selected_row_style
 
 _INDENT = 2  # columns per depth level
@@ -547,9 +548,14 @@ class JsonView(Widget):
         self.clear_search()
 
     def _select_match(self) -> None:
-        """Move the selection cursor onto the current match and scroll it in."""
+        """Move the selection cursor onto the current match and scroll it in —
+        no scroll while it already has ~3 rows of context inside the viewport,
+        else centered (the shared search-jump rule, see widgets/_scroll.py);
+        plain cursor movement keeps the minimal :meth:`_ensure_visible`."""
         self.selected = self._matches[self._search_pos][0]
-        self._ensure_visible()
+        self.offset = search_scroll_offset(
+            self.offset, self._view_h, self.selected * self._row_h,
+            self._row_h, margin=3 * self._row_h, snap=self._row_h)
         self._clamp_offset(len(self._visible()), self._view_h)
 
     def _restore_origin(self) -> None:
