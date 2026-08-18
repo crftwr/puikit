@@ -70,6 +70,7 @@ from ..panel import DrawContext
 from ..text import glyph_runs, word_bounds
 from ..theme import DEFAULT_THEME, Theme, lift
 from ._input import EdgeAutoScroll, MultiClickTracker
+from ._scroll import search_scroll_offset
 from .base import Widget
 
 # Syntax highlighting is optional: if Pygments is installed a fenced code block
@@ -2351,9 +2352,15 @@ class MarkdownView(Widget):
                 self._search_pos = -1
 
     def _scroll_to_search_row(self, row_index: int) -> None:
-        """Scroll so display row ``row_index`` sits at the top of the viewport."""
+        """Bring display row ``row_index`` into view: no scroll while it already
+        has ~3 lines of context inside the viewport, else center it vertically
+        (the shared search-jump rule, see widgets/_scroll.py)."""
         if 0 <= row_index < len(self._row_tops) - 1:
-            self.offset = self._row_tops[row_index]
+            row_top = self._row_tops[row_index]
+            row_h = self._row_tops[row_index + 1] - row_top
+            self.offset = search_scroll_offset(
+                self.offset, self._view_h, row_top, row_h,
+                margin=3 * self._line_pitch, snap=self._line_pitch)
             self._clamp(self._content_h())
 
     def search_begin(self) -> None:

@@ -957,9 +957,12 @@ def test_anchor_link_scrolls_to_heading():
 # --- incremental search -------------------------------------------------------
 #
 # A host viewer (XeFM's file viewer) drives these; the widget owns match finding,
-# scroll-to-match and highlighting over its own wrapped layout. On the plain grid
-# backend every row is one unit tall, so a match at display row i sits at
-# offset i, which the offset assertions below rely on.
+# scroll-to-match and highlighting over its own wrapped layout. Every row is one
+# base unit tall here, so display row i sits at content offset i. A jump outside
+# the viewport's comfort band centers the match (see widgets/_scroll.py): with
+# the 8-unit viewport used below the centering shift is int((8 - 1) / 2) = 3,
+# so a far match at row i lands at offset i - 3 — the offset assertions below
+# rely on both facts.
 
 
 def _paras(*texts: str) -> str:
@@ -989,8 +992,8 @@ def test_search_is_case_insensitive(backend):
 
 
 def test_search_scrolls_to_nearest_and_navigates(backend):
-    # 20 paragraphs; 'needle' in #0, #5, #8 -> display rows 0, 10, 16 (all within
-    # the scroll range, so offset lands exactly on the row top).
+    # 20 paragraphs; 'needle' in #0, #5, #8 -> display rows 0, 10, 16. A far
+    # jump centers the match: offset = row - 3 (clamped to 0 at the top).
     parts = [f"line{i} needle" if i in (0, 5, 8) else f"line{i}" for i in range(20)]
     view = MarkdownView(_paras(*parts))
     panel = Panel(backend)
@@ -1000,13 +1003,29 @@ def test_search_scrolls_to_nearest_and_navigates(backend):
     assert view._search_rows == [0, 10, 16]
     assert view._search_pos == 0 and view.offset == 0.0
     view.search_navigate(1)
-    assert view._search_pos == 1 and view.offset == 10.0
+    assert view._search_pos == 1 and view.offset == 7.0
     view.search_navigate(1)
-    assert view._search_pos == 2 and view.offset == 16.0
+    assert view._search_pos == 2 and view.offset == 13.0
     view.search_navigate(1)                          # wraps to first
     assert view._search_pos == 0 and view.offset == 0.0
     view.search_navigate(-1)                         # wraps back to last
-    assert view._search_pos == 2 and view.offset == 16.0
+    assert view._search_pos == 2 and view.offset == 13.0
+
+
+def test_search_navigate_within_view_does_not_scroll(backend):
+    # Both matches sit inside the viewport's comfort band, so walking between
+    # them leaves the scroll alone (no jump for a match already in view).
+    view = MarkdownView(_paras("needle", "x", "needle", "y"))
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=24, h=8)
+    panel.render()
+    assert view.search_set("needle") == 2
+    assert view._search_rows == [0, 4]
+    assert view.offset == 0.0
+    view.search_navigate(1)
+    assert view._search_pos == 1 and view.offset == 0.0
+    view.search_navigate(-1)
+    assert view._search_pos == 0 and view.offset == 0.0
 
 
 def test_search_nearest_match_at_or_after_offset(backend):
@@ -1018,7 +1037,7 @@ def test_search_nearest_match_at_or_after_offset(backend):
     view.scroll_by(6.0)                              # viewport top at row 6
     assert view.offset == 6.0
     view.search_set("needle")                        # nearest at/after row 6 -> row 16
-    assert view._search_pos == 1 and view.offset == 16.0
+    assert view._search_pos == 1 and view.offset == 13.0  # centered: 16 - 3
 
 
 def test_search_no_match_restores_origin(backend):
@@ -1030,7 +1049,7 @@ def test_search_no_match_restores_origin(backend):
     view.scroll_by(5.0)
     view.search_begin()                              # origin = 5.0 (current top)
     assert view.search_set("hit") == 1               # scrolls away to row 18
-    assert view.offset == 18.0
+    assert view.offset == 15.0                       # centered: 18 - 3
     assert view.search_set("hit-nope") == 0          # extend to a dead pattern
     assert view.search_status() == (0, 0)
     assert view.offset == 5.0                        # back to the search origin
@@ -1045,16 +1064,16 @@ def test_search_accept_keeps_scroll_cancel_restores(backend):
 
     view.search_begin()                              # origin = 0
     view.search_set("needle")
-    assert view.offset == 12.0                        # row 12 (paragraph #6)
+    assert view.offset == 9.0                         # row 12, centered: 12 - 3
     view.search_accept()                              # keep scroll, drop chrome
-    assert view.offset == 12.0
+    assert view.offset == 9.0
     assert view._search_pattern == "" and view._search_rows == []
 
-    view.search_begin()                              # new origin = 12
+    view.search_begin()                              # new origin = 9
     view.search_set("line0")
     assert view.offset == 0.0
     view.search_cancel()                             # restore origin
-    assert view.offset == 12.0
+    assert view.offset == 9.0
     assert view._search_pattern == "" and view._search_rows == []
 
 
