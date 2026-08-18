@@ -550,6 +550,39 @@ def test_textedit_cmd_left_right_jump_to_line_ends(backend):
     assert field.cursor == 0
 
 
+def test_textedit_cmd_backspace_deletes_to_line_start(backend):
+    # Cmd+Backspace (macOS) deletes from the caret back to the beginning of the
+    # line, consuming the chord instead of dying as an unknown Cmd command.
+    edits = []
+    panel = Panel(backend)
+    field = TextEdit("foo bar baz", on_change=edits.append)
+    panel.add(field, x=0, y=0, w=16, h=1)
+    panel.dispatch_event(_key("end"))
+    for _ in range(4):
+        panel.dispatch_event(_key("left"))
+    panel.dispatch_event(_key("backspace", modifiers=frozenset({"cmd"})))
+    assert field.text == " baz" and field.cursor == 0
+    assert edits[-1] == " baz"
+    # At the start there is nothing to remove; the chord is still consumed.
+    assert panel.dispatch_event(_key("backspace", modifiers=frozenset({"cmd"})))
+    assert field.text == " baz" and edits[-1] == " baz"
+
+
+def test_textedit_cmd_backspace_takes_selection_and_everything_before(backend):
+    panel = Panel(backend)
+    field = TextEdit("foo bar baz", width=16)
+    panel.add(field, x=0, y=0, w=16, h=1)
+    panel.dispatch_event(_key("home"))
+    for _ in range(4):
+        panel.dispatch_event(_key("right"))
+    for _ in range(3):
+        panel.dispatch_event(_key("right", modifiers=frozenset({"shift"})))
+    assert field.selection_text == "bar"
+    panel.dispatch_event(_key("backspace", modifiers=frozenset({"cmd"})))
+    assert field.text == " baz" and field.cursor == 0
+    assert field.selection_text == ""
+
+
 def test_textedit_cmd_shift_left_right_extend_to_line_ends(backend):
     panel = Panel(backend)
     field = TextEdit("foo bar baz", width=16)

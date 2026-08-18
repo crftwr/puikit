@@ -28,7 +28,7 @@ One implementation each, running unchanged on every backend.
 | `RadioGroup` | `radio.py` | Mutually exclusive choice |
 | `DropDown` | `dropdown.py` | Read-only selection; list opens as a `push_layer` popup |
 | `ComboBox` | `combo_box.py` | Editable drop-down: type-to-filter list + free text |
-| `TextEdit` | `text_edit.py` | Single-line editable text; full IME/composition, mouse + keyboard selection, word-wise caret move/delete (Ctrl / Alt-Option), clipboard copy/cut/paste. `mask="•"` makes it a password field (glyphs shown masked; copy/cut disabled) |
+| `TextEdit` | `text_edit.py` | Single-line editable text; full IME/composition, mouse + keyboard selection, word-wise caret move/delete (Ctrl / Alt-Option), Cmd-Left/Right to the line ends and Cmd-Backspace deleting back to the start, clipboard copy/cut/paste. `mask="•"` makes it a password field (glyphs shown masked; copy/cut disabled) |
 | `ProgressBar` | `progress_bar.py` | Read-only determinate ratio bar |
 | `BusyIndicator` | `busy_indicator.py` | Indeterminate activity spinner (`animation` fallback) |
 | `Splitter` | `splitter.py` | Two panes with a draggable divider (drag to resize) |
