@@ -461,6 +461,12 @@ class TextEdit(Widget):
             return self._move("home" if event.key == "left" else "end",
                               "shift" in event.modifiers)
 
+        # Cmd+Backspace (macOS) deletes back to the beginning of the line; a
+        # selection goes with everything before it. Ctrl+Backspace never lands
+        # here — the word branch above already consumed it as a word delete.
+        if "cmd" in event.modifiers and event.key == "backspace":
+            return self._delete_to_start()
+
         # Command shortcuts (Cmd/Ctrl) are consumed before text insertion, so a
         # chord like Cmd+A never types its letter into the field.
         if event.modifiers & {"ctrl", "cmd"}:
@@ -619,6 +625,19 @@ class TextEdit(Widget):
         elif self.cursor > 0:
             self.text = self.text[: self.cursor - 1] + self.text[self.cursor :]
             self.cursor -= 1
+            self._changed()
+        return True
+
+    def _delete_to_start(self) -> bool:
+        """Delete from the start of the text to the caret (Cmd+Backspace). With
+        a selection, the selection and everything before it go together, per the
+        macOS convention. Always consumes the key, even with nothing to remove."""
+        sel = self._selection()
+        hi = sel[1] if sel is not None else self.cursor
+        self._anchor = None
+        if hi > 0:
+            self.text = self.text[hi:]
+            self.cursor = 0
             self._changed()
         return True
 
