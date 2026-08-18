@@ -8,8 +8,16 @@ bool-null) — or a ``{n}`` / ``[n]`` summary of a container's size. It behaves
 like ``TreeView`` for navigation (arrow keys move / expand / collapse, page /
 home / end, a wheel scrolls, a click toggles the expander) and adds two things a
 plain tree lacks: **per-type coloring** and the **incremental-search protocol**
-(``search_*``) a host file viewer drives from its search bar. ``Cmd/Ctrl+C``
-copies the selected node's value as compact JSON.
+(``search_*``) a host file viewer drives from its search bar.
+
+Mouse selection is **structural**, not textual: a click or drag always selects a
+meaningful JSON fragment — a key (``"name"``), a scalar value (``"str"`` /
+``123``), a whole member (``"name": ...``), or a container sub-document
+(``{...}`` / ``[...]``) — never an arbitrary text span. A click snaps to the
+unit under the pointer; a drag widens to the smallest unit covering both ends
+(one row's key + value → its member, two rows → their nearest common ancestor).
+``Cmd/Ctrl+C`` copies the fragment as JSON text, or — with no fragment — the
+selected row's value as compact JSON.
 
 Rows use a fixed-advance (monospace) face so a search highlight lands on the same
 columns it does on a terminal. A long value is reachable two ways: unwrapped
@@ -26,7 +34,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..backend import DEFAULT_STYLE, Style
+from ..backend import DEFAULT_STYLE, Style, TextAttribute
 from ..event import Event, EventType
 from ..font import Font
 from ..panel import DrawContext
@@ -144,6 +152,45 @@ def _slice_segs(segs: list[tuple[str, Any]], cs: int, ce: int) -> list[tuple[str
     return out
 
 
+def _char_at_col(text: str, col: float) -> int:
+    """Character index within ``text`` at display column ``col`` (0 at the
+    text's first glyph; a column inside a wide glyph maps to that glyph's
+    start, past-the-end columns map to ``len(text)``)."""
+    if col <= 0:
+        return 0
+    if len(text) == display_width(text):        # all-narrow fast path
+        return min(int(col), len(text))
+    w = 0.0
+    idx = 0
+    for g in glyph_runs(text):
+        gw = display_width(g)
+        if w + gw > col:
+            return idx
+        w += gw
+        idx += len(g)
+    return len(text)
+
+
+def _row_of(rows: list[tuple[_Node, int]], node: _Node) -> int | None:
+    """The visible row index of ``node`` (by identity), or None when hidden."""
+    for i, (n, _d) in enumerate(rows):
+        if n is node:
+            return i
+    return None
+
+
+def _ancestors(rows: list[tuple[_Node, int]], idx: int) -> list[int]:
+    """Row indices from ``idx`` up through its ancestors to its root, found by
+    scanning upward for strictly decreasing depth (like ``_select_parent``)."""
+    out = [idx]
+    depth = rows[idx][1]
+    for i in range(idx - 1, -1, -1):
+        if rows[i][1] < depth:
+            out.append(i)
+            depth = rows[i][1]
+    return out
+
+
 def _window_text(text: str, origin: float, lo: float, hi: float) -> tuple[float, str]:
     """The part of ``text`` — a flow whose first display column is ``origin`` —
     visible in the column window [lo, hi), and the window-relative x where it
@@ -176,8 +223,10 @@ class JsonView(Widget):
     def __init__(self, value: Any, *, style: Style = DEFAULT_STYLE):
         self.style = style
         # A top-level container shows its entries at depth 0 (no synthetic root
-        # row); a bare scalar document shows a single leaf.
-        root = _build(value, None)
+        # row); a bare scalar document shows a single leaf. The synthetic root is
+        # kept: a drag spanning two top-level entries selects the whole document.
+        self._root = _build(value, None)
+        root = self._root
         self.roots: list[_Node] = root.children if root.kind in ("object", "array") else [root]
 
         self.selected = 0
@@ -220,6 +269,18 @@ class JsonView(Widget):
         # Click / double-click tracking (a click toggles the expander or selects
         # a row; kept for parity with the other selectable views).
         self._clicks: MultiClickTracker[int] = MultiClickTracker()
+
+        # Structural mouse selection ("fragment"): always a meaningful JSON
+        # unit — a key, a value, a member, or a container sub-document — never
+        # an arbitrary text span. ``_frag`` is (node, part) with part in
+        # ("key", "value", "member"); ``_frag_anchor`` is the unit under the
+        # press a drag widens from; ``_frag_dragged`` keeps the click event
+        # that trails a drag from narrowing the widened result; ``_frag_draw``
+        # is the per-row highlight span map computed each draw.
+        self._frag: tuple[_Node, str] | None = None
+        self._frag_anchor: tuple[_Node, str] | None = None
+        self._frag_dragged = False
+        self._frag_draw: dict[int, tuple[int, int]] = {}
 
     # --- flattening -----------------------------------------------------------
 
@@ -392,6 +453,7 @@ class JsonView(Widget):
         base_fg = self.style.fg or (theme.text if theme is not None else (212, 212, 212))
         bg = self.style.bg
         left = int(self.left)
+        self._frag_draw = self._frag_spans(rows)
 
         index = int(self.offset / row_h)
         while index < total:
@@ -493,6 +555,9 @@ class JsonView(Widget):
         if self._pattern:
             self._draw_matches(ctx, top, row, node, cs, ce, text_x, lo, hi,
                                base_fg, bg)
+        if self._frag_draw:
+            self._draw_frag(ctx, top, row, node, cs, ce, text_x, lo, hi,
+                            base_fg, bg, theme)
 
     def _draw_matches(self, ctx, top, row, node, cs, ce, text_x, lo, hi,
                       base_fg, bg) -> None:
@@ -569,6 +634,13 @@ class JsonView(Widget):
                 self._clamp_left()
             self._clamp_offset(self._total_lines(rows), self._view_h)
             return True
+        if event.type is EventType.MOUSE_DOWN:
+            return self._handle_press(event)
+        if event.type is EventType.MOUSE_DRAG:
+            return self._handle_drag(event)
+        if event.type is EventType.MOUSE_UP:
+            self._frag_anchor = None
+            return True
         if event.type is EventType.MOUSE_CLICK:
             return self._handle_click(event)
         if event.type is EventType.KEY:
@@ -596,6 +668,9 @@ class JsonView(Widget):
         rows = self._visible()
         if not rows:
             return False
+        if key in ("up", "down", "pageup", "pagedown", "home", "end",
+                   "left", "right"):
+            self._frag = None       # keyboard navigation drops the fragment
         node, _depth = rows[self.selected]
         if key == "up":
             self.selected -= 1
@@ -651,6 +726,8 @@ class JsonView(Widget):
         self._ensure_layout(rows, self._text_w)
         line = int((self.offset + event.y) / self._row_h)
         if not (0 <= line < self._total_lines(rows)):
+            self._frag = None           # a click on empty space drops the fragment
+            self._frag_dragged = False
             return False
         if self.wrap:
             row, cs, _ce = self._lines[line]
@@ -660,12 +737,19 @@ class JsonView(Widget):
         self._clicks.press(row)
         node, depth = rows[row]
         # A click on the expander column (on the row's first display line, pan
-        # applied) toggles a branch; otherwise the click just selects the row.
+        # applied) toggles a branch; otherwise the click selects the row and
+        # snaps the fragment to the unit under the pointer — unless a drag
+        # just widened it (a grid backend sends click-only, so this is also
+        # how the TUI selects a fragment at all).
         marker_col = depth * _INDENT - (0 if self.wrap else int(self.left))
         on_marker = (cs == 0 and event.x is not None
                      and marker_col <= event.x < marker_col + _INDENT)
         if node.is_branch and on_marker:
             self._toggle(node)
+        elif not self._frag_dragged:
+            hit = self._hit(event, rows)
+            self._frag = (hit[1], hit[2]) if hit is not None else None
+        self._frag_dragged = False
         self._finish_move()
         return True
 
@@ -675,11 +759,199 @@ class JsonView(Widget):
             self._gen += 1
             self._finish_move()
 
-    def _copy_selection(self) -> None:
-        """Copy the selected node's value as compact JSON (a scalar copies its own
-        JSON literal, a container its full sub-document)."""
+    # --- structural mouse selection (fragment) --------------------------------
+
+    def _hit(self, event: Event, rows: list[tuple[_Node, int]],
+             clamp: bool = False) -> tuple[int, _Node, str] | None:
+        """The (row, node, part) unit under the pointer, or None off the
+        content (or, unclamped, on a first line's indent / expander zone).
+        ``clamp`` — for drags — pins a pointer past the edges to the nearest
+        row instead."""
+        if event.x is None or event.y is None or not rows:
+            return None
+        self._ensure_layout(rows, self._text_w)
+        total = self._total_lines(rows)
+        line = int((self.offset + event.y) / self._row_h)
+        if clamp:
+            line = max(0, min(line, total - 1))
+        elif not (0 <= line < total):
+            return None
+        if self.wrap:
+            row, cs, ce = self._lines[line]
+        else:
+            row, cs, ce = line, 0, None
+        node, depth = rows[row]
+        label = self._label_text(node)
+        end = len(label) if ce is None else ce
+        col = event.x + (0 if self.wrap else int(self.left)) - (depth * _INDENT + _MARK_SLOT)
+        if col < 0:
+            if not clamp and cs == 0:
+                return None                     # indent / expander zone
+            char = cs                           # wrap continuation padding
+        else:
+            char = min(cs + _char_at_col(label[cs:end], col), len(label))
+        return (row, node, self._unit_part(node, char))
+
+    def _unit_part(self, node: _Node, char: int) -> str:
+        """The unit under character ``char`` of the row label: the key text →
+        the key, the value text → the value, the ``: `` separator or past the
+        label's end → the whole member. Nodes without a string key (array
+        elements, a root entry) only offer their value — an index is not JSON
+        text."""
+        if not isinstance(node.key, str):
+            return "value"
+        if char >= len(self._label_text(node)):
+            return "member"
+        klen = len(node.key)
+        if char < klen:
+            return "key"
+        if char < klen + 2:
+            return "member"
+        return "value"
+
+    def _norm_part(self, node: _Node, part: str) -> str:
+        """Clamp ``part`` to what ``node`` can offer as JSON text (no key /
+        member without a string key)."""
+        if part != "value" and not isinstance(node.key, str):
+            return "value"
+        return part
+
+    def _widen(self, rows: list[tuple[_Node, int]], a_node: _Node, a_part: str,
+               b_node: _Node, b_part: str) -> tuple[_Node, str]:
+        """The smallest meaningful unit covering both drag endpoints: one node
+        keeps its part (different parts grow to the member), two nodes grow to
+        their nearest common ancestor — its member when the drag started on the
+        ancestor's own row, its ``{...}`` / ``[...]`` value when both ends are
+        strictly inside it, and the whole document when the ends sit under
+        different top-level entries."""
+        if a_node is b_node:
+            part = a_part if a_part == b_part else "member"
+            return (a_node, self._norm_part(a_node, part))
+        ai, bi = _row_of(rows, a_node), _row_of(rows, b_node)
+        if ai is None or bi is None:
+            return (a_node, self._norm_part(a_node, a_part))
+        aset = set(_ancestors(rows, ai))
+        lca = next((i for i in _ancestors(rows, bi) if i in aset), None)
+        if lca is None:
+            return (self._root, "value")        # spans top-level entries
+        lnode = rows[lca][0]
+        part = "member" if (lnode is a_node or lnode is b_node) else "value"
+        return (lnode, self._norm_part(lnode, part))
+
+    def _handle_press(self, event: Event) -> bool:
+        """Mouse down: anchor the fragment on the unit under the pointer (and
+        move the row cursor there); a press on empty space or the expander
+        zone drops any fragment instead."""
         rows = self._visible()
-        if not rows or self._panel is None:
+        self._frag_dragged = False
+        hit = self._hit(event, rows)
+        if hit is None:
+            self._frag = None
+            self._frag_anchor = None
+            return True
+        row, node, part = hit
+        self._frag_anchor = (node, part)
+        self._frag = (node, part)
+        self.selected = row
+        self._finish_move()
+        return True
+
+    def _handle_drag(self, event: Event) -> bool:
+        """Mouse drag: widen the fragment to the smallest unit covering the
+        anchor and the pointer."""
+        if self._frag_anchor is None:
+            return False
+        rows = self._visible()
+        hit = self._hit(event, rows, clamp=True)
+        if hit is not None:
+            a_node, a_part = self._frag_anchor
+            self._frag = self._widen(rows, a_node, a_part, hit[1], hit[2])
+            self._frag_dragged = True
+        return True
+
+    def fragment_text(self) -> str | None:
+        """The mouse-selected fragment as JSON text, or None with no fragment:
+        a key (``"name"``), a value (``"str"`` / ``123`` / a ``{...}`` /
+        ``[...]`` sub-document), or a member (``"name": ...``)."""
+        if self._frag is None:
+            return None
+        node, part = self._frag
+        if part == "key":
+            return json.dumps(node.key, ensure_ascii=False)
+        try:
+            value = json.dumps(node.value, ensure_ascii=False)
+        except (TypeError, ValueError):
+            value = str(node.value)
+        if part == "member":
+            return f"{json.dumps(node.key, ensure_ascii=False)}: {value}"
+        return value
+
+    def _frag_spans(self, rows: list[tuple[_Node, int]]) -> dict[int, tuple[int, int]]:
+        """Per-row label character spans the fragment highlight covers: the key
+        span, the value span, or the whole label — plus every visible
+        descendant row of a selected container (and every row for the whole
+        document)."""
+        if self._frag is None:
+            return {}
+        node, part = self._frag
+        if node is self._root:
+            return {i: (0, len(self._label_text(n))) for i, (n, _d) in enumerate(rows)}
+        idx = _row_of(rows, node)
+        if idx is None:
+            return {}
+        label = self._label_text(node)
+        vstart = len(str(node.key)) + 2 if node.key is not None else 0
+        if part == "key":
+            spans = {idx: (0, len(node.key))}
+        elif part == "member":
+            spans = {idx: (0, len(label))}
+        else:
+            spans = {idx: (vstart, len(label))}
+        if part != "key" and node.expanded and node.children:
+            depth = rows[idx][1]
+            j = idx + 1
+            while j < len(rows) and rows[j][1] > depth:
+                spans[j] = (0, len(self._label_text(rows[j][0])))
+                j += 1
+        return spans
+
+    def _draw_frag(self, ctx, top, row, node, cs, ce, text_x, lo, hi,
+                   base_fg, bg, theme) -> None:
+        """Repaint the fragment's part of this display line over the text-
+        selection background (the same tokens the log / text widgets use),
+        clipped to the chunk [cs, ce) and the pan window like everything
+        else."""
+        span = self._frag_draw.get(row)
+        if span is None:
+            return
+        label = self._label_text(node)
+        end = len(label) if ce is None else ce
+        a, b = max(span[0], cs), min(span[1], end)
+        if b <= a:
+            return
+        if theme is not None:
+            sel_bg = (theme.text_selection_bg if ctx.focused
+                      else theme.text_selection_inactive_bg)
+            style = Style(fg=base_fg, bg=sel_bg, font=_MONO)
+        else:
+            style = Style(fg=base_fg, bg=bg, attr=TextAttribute.REVERSE, font=_MONO)
+        x, piece = _window_text(label[a:b],
+                                text_x + display_width(label[cs:a]), lo, hi)
+        if piece:
+            ctx.draw_text(x, top, piece, style)
+
+    def _copy_selection(self) -> None:
+        """Copy the mouse-selected fragment as JSON text when there is one;
+        otherwise the selected node's value as compact JSON (a scalar copies
+        its own JSON literal, a container its full sub-document)."""
+        if self._panel is None:
+            return
+        frag = self.fragment_text()
+        if frag is not None:
+            self._panel.set_clipboard(frag)
+            return
+        rows = self._visible()
+        if not rows:
             return
         node = rows[self.selected][0]
         try:

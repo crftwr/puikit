@@ -304,6 +304,151 @@ def test_search_highlight_survives_a_wrap_boundary(backend):
     assert "nee" in text and "dle" in text                # split across lines
 
 
+# --- structural mouse selection (fragment) -----------------------------------
+#
+# Row geometry at the defaults: depth-0 labels start at column 2 (indent 0 +
+# the 2-column marker slot), depth-1 at column 4. Row 0 is '  name: "xefm"' —
+# key chars at columns 2-5, the ': ' at 6-7, the value at 8-13.
+
+
+def _mouse(kind, x, y):
+    return Event(type=kind, x=x, y=y, button="left")
+
+
+def test_click_selects_key_value_or_member(backend):
+    view = JsonView(_data())
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    panel.render()
+    panel.dispatch_event(_mouse(EventType.MOUSE_CLICK, 3, 0))   # on the key text
+    assert view.fragment_text() == '"name"'
+    panel.dispatch_event(_mouse(EventType.MOUSE_CLICK, 9, 0))   # on the value text
+    assert view.fragment_text() == '"xefm"'
+    panel.dispatch_event(_mouse(EventType.MOUSE_CLICK, 6, 0))   # on the ': '
+    assert view.fragment_text() == '"name": "xefm"'
+    panel.dispatch_event(_mouse(EventType.MOUSE_CLICK, 30, 0))  # past the label
+    assert view.fragment_text() == '"name": "xefm"'
+
+
+def test_click_on_branch_summary_selects_subdocument(backend):
+    view = JsonView(_data())
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    panel.render()
+    panel.dispatch_event(_mouse(EventType.MOUSE_CLICK, 11, 2))  # the '{3}' summary
+    assert view.fragment_text() == '{"ok": true, "count": 42, "z": null}'
+
+
+def test_drag_key_to_value_widens_to_member(backend):
+    view = JsonView(_data())
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    panel.render()
+    panel.dispatch_event(_mouse(EventType.MOUSE_DOWN, 3, 0))
+    panel.dispatch_event(_mouse(EventType.MOUSE_DRAG, 9, 0))
+    panel.dispatch_event(_mouse(EventType.MOUSE_UP, 9, 0))
+    assert view.fragment_text() == '"name": "xefm"'
+
+
+def test_drag_across_siblings_selects_their_container(backend):
+    view = JsonView(_data())
+    view.roots[2].expanded = True          # rows: name, tags, nested, ok, count, z
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    panel.render()
+    panel.dispatch_event(_mouse(EventType.MOUSE_DOWN, 5, 3))    # on "ok"
+    panel.dispatch_event(_mouse(EventType.MOUSE_DRAG, 5, 4))    # onto "count"
+    panel.dispatch_event(_mouse(EventType.MOUSE_UP, 5, 4))
+    assert view.fragment_text() == '{"ok": true, "count": 42, "z": null}'
+
+
+def test_drag_from_branch_row_into_child_selects_member(backend):
+    view = JsonView(_data())
+    view.roots[2].expanded = True
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    panel.render()
+    panel.dispatch_event(_mouse(EventType.MOUSE_DOWN, 3, 2))    # on "nested"
+    panel.dispatch_event(_mouse(EventType.MOUSE_DRAG, 5, 3))    # into "ok"
+    panel.dispatch_event(_mouse(EventType.MOUSE_UP, 5, 3))
+    assert view.fragment_text() == '"nested": {"ok": true, "count": 42, "z": null}'
+
+
+def test_drag_across_top_level_entries_selects_document(backend):
+    import json
+    view = JsonView(_data())
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    panel.render()
+    panel.dispatch_event(_mouse(EventType.MOUSE_DOWN, 3, 0))    # "name"
+    panel.dispatch_event(_mouse(EventType.MOUSE_DRAG, 3, 1))    # onto "tags"
+    panel.dispatch_event(_mouse(EventType.MOUSE_UP, 3, 1))
+    assert view.fragment_text() == json.dumps(_data(), ensure_ascii=False)
+
+
+def test_array_element_offers_only_its_value(backend):
+    # An index is not JSON text: clicking it (or the value) selects the value.
+    view = JsonView(_data())
+    view.roots[1].expanded = True          # rows: name, tags, 0: "tui", 1: ...
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    panel.render()
+    panel.dispatch_event(_mouse(EventType.MOUSE_CLICK, 4, 2))   # on the index
+    assert view.fragment_text() == '"tui"'
+    panel.dispatch_event(_mouse(EventType.MOUSE_CLICK, 9, 2))   # on the value
+    assert view.fragment_text() == '"tui"'
+
+
+def test_ctrl_c_copies_the_fragment_then_falls_back(backend):
+    view = JsonView(_data())
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    panel.render()
+    panel.dispatch_event(_mouse(EventType.MOUSE_CLICK, 3, 0))   # key fragment
+    panel.dispatch_event(_key("c", frozenset({"ctrl"})))
+    assert backend.get_clipboard() == '"name"'
+    panel.dispatch_event(_key("down"))                          # nav clears it
+    assert view.fragment_text() is None
+    panel.dispatch_event(_key("c", frozenset({"ctrl"})))        # old behavior
+    assert backend.get_clipboard() == '["tui", "files"]'
+
+
+def test_click_on_empty_space_clears_fragment(backend):
+    view = JsonView(_data())
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    panel.render()
+    panel.dispatch_event(_mouse(EventType.MOUSE_CLICK, 3, 0))
+    assert view.fragment_text() == '"name"'
+    panel.dispatch_event(_mouse(EventType.MOUSE_CLICK, 5, 12))  # below the rows
+    assert view.fragment_text() is None
+
+
+def test_fragment_click_works_on_wrapped_continuation(backend):
+    # With wrap on, a click on a continuation line of a long string selects
+    # the whole string value.
+    view = JsonView({"msg": "a" * 60})
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    view.toggle_wrap()
+    panel.render()
+    panel.dispatch_event(_mouse(EventType.MOUSE_CLICK, 5, 1))
+    assert view.fragment_text() == '"' + "a" * 60 + '"'
+
+
+def test_fragment_highlight_uses_selection_background(backend):
+    view = JsonView(_data())
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    panel.render()
+    panel.dispatch_event(_mouse(EventType.MOUSE_CLICK, 9, 1))   # tags summary
+    panel.render()
+    theme = panel.theme
+    sel = (theme.text_selection_bg, theme.text_selection_inactive_bg)
+    assert backend.style_at(9, 1).bg in sel     # the '[2]' summary is painted
+    assert backend.style_at(3, 1).bg not in sel # the key isn't (value fragment)
+
+
 def test_ctrl_c_copies_selected_value(backend):
     view = JsonView(_data())
     panel = Panel(backend)
