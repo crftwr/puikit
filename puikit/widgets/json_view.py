@@ -12,8 +12,12 @@ plain tree lacks: **per-type coloring** and the **incremental-search protocol**
 copies the selected node's value as compact JSON.
 
 Rows use a fixed-advance (monospace) face so a search highlight lands on the same
-columns it does on a terminal; long rows truncate with an ellipsis (there is no
-horizontal scroll — a value that overflows is elided, like a file tree).
+columns it does on a terminal. A long value is reachable two ways: unwrapped
+(the default) the view pans horizontally — a horizontal wheel / trackpad swipe or
+``Shift+←/→``, with a horizontal scrollbar while a row overflows — and
+:meth:`JsonView.toggle_wrap` folds every row into the width instead, a long
+value continuing on extra display lines aligned under where its label starts
+(a host file viewer binds its line-wrap key to it, like the search protocol).
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ from ..backend import DEFAULT_STYLE, Style
 from ..event import Event, EventType
 from ..font import Font
 from ..panel import DrawContext
-from ..text import display_width, truncate_to_width
+from ..text import display_width, glyph_runs, truncate_to_width, wrap_text
 from ._input import MultiClickTracker, is_activate
 from ._scroll import search_scroll_offset
 from .base import Widget, draw_list_row, selected_row_style
@@ -44,6 +48,9 @@ _LEAF = "  "
 # also keeps the colored segments on integer columns, off the sub-cell grid).
 _MARK_W = 1.1
 _MARK_SLOT = 2
+
+#: Columns one Shift+←/→ press pans an unwrapped view (the text viewer's step).
+_PAN_STEP = 4
 
 #: Content is drawn in a fixed-advance face so a column maps to one base unit —
 #: search highlights and the depth indent line up on the GUI as on the TUI.
@@ -103,6 +110,7 @@ class _Node:
     value: Any
     children: list["_Node"] = field(default_factory=list)
     expanded: bool = False
+    label: str | None = None  # cached key + value text (values never change)
 
     @property
     def is_branch(self) -> bool:
@@ -122,6 +130,46 @@ def _build(value: Any, key: Any) -> _Node:
     return node
 
 
+def _slice_segs(segs: list[tuple[str, Any]], cs: int, ce: int) -> list[tuple[str, Any]]:
+    """The sub-run [cs, ce) — character indices over the segments' concatenation
+    — of colored ``(text, color)`` segments, for one wrapped chunk of a row."""
+    out: list[tuple[str, Any]] = []
+    pos = 0
+    for text, color in segs:
+        end = pos + len(text)
+        a, b = max(pos, cs), min(end, ce)
+        if b > a:
+            out.append((text[a - pos:b - pos], color))
+        pos = end
+    return out
+
+
+def _window_text(text: str, origin: float, lo: float, hi: float) -> tuple[float, str]:
+    """The part of ``text`` — a flow whose first display column is ``origin`` —
+    visible in the column window [lo, hi), and the window-relative x where it
+    starts (column ``c`` lands at ``c - lo``). A wide glyph straddling either
+    edge is dropped, its cells left blank, like the text viewer's pan."""
+    if origin < lo:
+        skip = lo - origin
+        if len(text) == display_width(text):        # all-narrow fast path
+            n = int(skip)
+            text, origin = text[n:], origin + n
+        else:
+            w = 0.0
+            runs = glyph_runs(text)
+            i = 0
+            while i < len(runs) and w < skip:
+                w += display_width(runs[i])
+                i += 1
+            text, origin = "".join(runs[i:]), origin + w
+    avail = hi - origin
+    if avail <= 0 or not text:
+        return (max(0.0, origin - lo), "")
+    if display_width(text) > avail:
+        text = truncate_to_width(text, int(avail))
+    return (origin - lo, text)
+
+
 class JsonView(Widget):
     focusable = True
 
@@ -133,11 +181,29 @@ class JsonView(Widget):
         self.roots: list[_Node] = root.children if root.kind in ("object", "array") else [root]
 
         self.selected = 0
-        self.offset: float = 0.0          # first visible row, base units
+        self.offset: float = 0.0          # first visible display line, base units
         self._row_h: float = 1.0
         self._viewport_h = 1
         self._view_h: float = 1.0
         self._panel: Any = None
+
+        # Long values: ``wrap`` folds each row into the content width over
+        # several display lines; unwrapped, ``left`` pans the view horizontally
+        # (columns; float for smooth trackpad accumulation, whole columns drawn).
+        self.wrap = False
+        self.left: float = 0.0
+        # Display-line layout, rebuilt lazily (see _ensure_layout): with wrap on,
+        # ``_lines`` maps each display line to its (row, char start, char end)
+        # chunk of the row's label and ``_row_line`` holds each row's first
+        # display line; with wrap off, ``_max_w`` is the widest row in columns
+        # (for the pan clamp + horizontal bar). ``_gen`` is bumped by every
+        # expand / collapse so the cache key notices a structure change.
+        self._lines: list[tuple[int, int, int]] = []
+        self._row_line: list[int] = []
+        self._max_w = 0
+        self._gen = 0
+        self._layout_key: tuple | None = None
+        self._text_w = 80                 # content columns, from the last draw
 
         # Incremental search (a host viewer drives it through the ``search_*``
         # methods). ``_matches`` is the ordered ``(row_index, node)`` set after
@@ -169,6 +235,53 @@ class JsonView(Widget):
 
         walk(self.roots, 0)
         return out
+
+    # --- display-line layout --------------------------------------------------
+
+    def _ensure_layout(self, rows: list[tuple[_Node, int]], text_w: int) -> None:
+        """(Re)build the display-line layout lazily: with wrap on, each row's
+        wrapped chunk spans at ``text_w`` columns; with wrap off, the widest row
+        for the pan clamp + horizontal bar. Keyed on the wrap state, the width
+        (which only matters while wrapping), and the expansion generation, so
+        expanding / collapsing / resizing rebuilds and everything else reuses
+        the cache."""
+        key = (self.wrap, text_w if self.wrap else 0, self._gen)
+        if key == self._layout_key:
+            return
+        self._layout_key = key
+        self._lines = []
+        self._row_line = []
+        self._max_w = 0
+        if not self.wrap:
+            for node, depth in rows:
+                w = depth * _INDENT + _MARK_SLOT + display_width(self._label_text(node))
+                if w > self._max_w:
+                    self._max_w = w
+            return
+        for i, (node, depth) in enumerate(rows):
+            self._row_line.append(len(self._lines))
+            avail = max(1, text_w - depth * _INDENT - _MARK_SLOT)
+            start = 0
+            # word=False: the hard character cut the raw text viewer wraps with.
+            for seg in wrap_text(self._label_text(node), avail, display_width,
+                                 word=False):
+                self._lines.append((i, start, start + len(seg)))
+                start += len(seg)
+
+    def _total_lines(self, rows: list[tuple[_Node, int]]) -> int:
+        """Display lines in the current layout (``_ensure_layout`` first)."""
+        return len(self._lines) if self.wrap else len(rows)
+
+    def _line_span(self, row: int) -> tuple[int, int]:
+        """(first display line, line count) of visible row ``row``."""
+        if not self.wrap:
+            return (row, 1)
+        if not (0 <= row < len(self._row_line)):
+            return (0, 1)
+        first = self._row_line[row]
+        nxt = (self._row_line[row + 1] if row + 1 < len(self._row_line)
+               else len(self._lines))
+        return (first, max(1, nxt - first))
 
     # --- row content ----------------------------------------------------------
 
@@ -213,9 +326,11 @@ class JsonView(Widget):
 
     def _label_text(self, node: _Node) -> str:
         """The searchable key + value text of a node (no indent / marker), used
-        by :meth:`_recompute` where the display depth is not known."""
-        segs = self._value_segs(node, _DEFAULT_PALETTE, None)
-        return "".join(t for t, _ in segs)
+        by search and layout. Cached on the node — values never change."""
+        if node.label is None:
+            segs = self._value_segs(node, _DEFAULT_PALETTE, None)
+            node.label = "".join(t for t, _ in segs)
+        return node.label
 
     def _palette(self, theme) -> dict:
         p = dict(_DEFAULT_PALETTE)
@@ -237,148 +352,237 @@ class JsonView(Widget):
         self._panel = ctx.panel
         theme = ctx.theme
         view_h = ctx.size_units[1]
-        self._view_h = view_h
         row_h = self._row_h = ctx.line_height(Style(font=_MONO))
-        self._viewport_h = max(1, int(view_h / row_h))
 
         rows = self._visible()
         self.selected = max(0, min(self.selected, len(rows) - 1)) if rows else 0
-        self._clamp_offset(len(rows), view_h)
 
-        content_h = len(rows) * row_h
-        show_bar = content_h > view_h
-        text_w = ctx.width - (1 if show_bar else 0)
+        # Reserve the scroll bars. Wrap must know the content width before the
+        # line count exists, so it always reserves the vertical bar's column
+        # (like the host text viewer); unwrapped keeps the on-overflow
+        # reservation and may add a horizontal bar row for overrunning rows.
+        if self.wrap:
+            self.left = 0.0
+            text_w = max(1, ctx.width - 1)
+            self._ensure_layout(rows, text_w)
+            show_hbar = False
+            body_h = view_h
+        else:
+            self._ensure_layout(rows, 0)
+            show_vbar = len(rows) * row_h > view_h
+            text_w = max(1, ctx.width - (1 if show_vbar else 0))
+            show_hbar = self._max_w > text_w
+            body_h = view_h - (row_h if show_hbar else 0.0)
+            if not show_vbar and len(rows) * row_h > body_h:
+                # the horizontal bar's row pushed the content into overflow
+                text_w = max(1, ctx.width - 1)
+        self._text_w = text_w
+        self._view_h = body_h
+        self._viewport_h = max(1, int(body_h / row_h))
+
+        total = self._total_lines(rows)
+        self._clamp_offset(total, body_h)
+        self._clamp_left()
+
+        content_h = total * row_h
+        show_bar = content_h > body_h
         fill_w = ctx.size_units[0] - (1 if show_bar else 0)
 
         palette = self._palette(theme)
         base_fg = self.style.fg or (theme.text if theme is not None else (212, 212, 212))
         bg = self.style.bg
+        left = int(self.left)
 
         index = int(self.offset / row_h)
-        while index < len(rows):
+        while index < total:
             top = index * row_h - self.offset
-            if top >= view_h:
+            if top >= body_h:
                 break
             if index >= 0 and top + row_h > 0:
-                node, depth = rows[index]
-                self._draw_row(ctx, top, index, node, depth, text_w, fill_w,
-                               row_h, palette, base_fg, bg, theme)
+                if self.wrap:
+                    row, cs, ce = self._lines[index]
+                else:
+                    row, cs, ce = index, 0, None
+                node, depth = rows[row]
+                self._draw_line(ctx, top, row, node, depth, cs, ce, text_w,
+                                fill_w, row_h, palette, base_fg, bg, theme, left)
             index += 1
 
         if show_bar:
-            ratio = view_h / content_h
-            denom = content_h - view_h
+            ratio = body_h / content_h
+            denom = content_h - body_h
             pos = self.offset / denom if denom > 0 else 0.0
-            ctx.draw_scrollbar(ctx.size_units[0] - 1, 0, view_h,
+            ctx.draw_scrollbar(ctx.size_units[0] - 1, 0, body_h,
                                max(0.0, min(1.0, pos)), ratio, self.style)
+        if show_hbar:
+            ratio = min(1.0, text_w / self._max_w) if self._max_w else 1.0
+            denom = self._max_w - text_w
+            pos = self.left / denom if denom > 0 else 0.0
+            ctx.draw_scrollbar(0, view_h - row_h, text_w,
+                               max(0.0, min(1.0, pos)), ratio, self.style,
+                               orientation="horizontal")
 
-    def _draw_row(self, ctx, top, index, node, depth, text_w, fill_w, row_h,
-                  palette, base_fg, bg, theme) -> None:
+    def _draw_flow(self, ctx, top, segs, origin, lo, hi, bg) -> None:
+        """Draw colored ``(text, color)`` segments as one left-to-right flow
+        whose first display column is ``origin``, showing only the pan window
+        [lo, hi) (column ``c`` lands at screen x ``c - lo``)."""
+        col = float(origin)
+        for text, color in segs:
+            w = display_width(text)
+            if col >= hi:
+                break
+            if col + w > lo:
+                x, piece = _window_text(text, col, lo, hi)
+                if piece:
+                    ctx.draw_text(x, top, piece, Style(fg=color, bg=bg, font=_MONO),
+                                  ink=color is None or _is_light(bg))
+            col += w
+
+    def _draw_line(self, ctx, top, row, node, depth, cs, ce, text_w, fill_w,
+                   row_h, palette, base_fg, bg, theme, left) -> None:
+        """Draw one display line: the whole row when unwrapped (``cs`` 0, ``ce``
+        None), or the wrapped chunk [cs, ce) of its label. The first line
+        carries the indent + expander mark — an inline ▸/▾ glyph on a grid, a
+        stroked chevron in a reserved ``_MARK_SLOT``-wide slot on a vector
+        backend, so the label starts at the same column on both — and a
+        continuation line aligns under the label. ``left`` pans the whole flow
+        (unwrapped only; wrap folds into the width instead)."""
         indent = depth * _INDENT
-        # A vector backend strokes the disclosure mark as a crisp chevron in a
-        # reserved slot (like TreeView), with the label after it; a grid keeps the
-        # ▸/▾ glyph inline. Either way the key/value text starts at ``text_x``.
+        text_x = indent + _MARK_SLOT
+        first = cs == 0
         vector = ctx.vector_shapes
-        if vector:
-            text_x = float(indent + _MARK_SLOT)
-            prefix = ""
-        else:
-            text_x = 0.0
-            prefix = " " * indent + self._marker(node)
-        value_segs = self._value_segs(node, palette, base_fg)
+        lo, hi = float(left), float(left + text_w)
+        label_segs = self._value_segs(node, palette, base_fg)
+        if ce is not None:
+            label_segs = _slice_segs(label_segs, cs, ce)
 
-        if index == self.selected:
+        if row == self.selected:
             # The selected row flattens to one legible color over the selection
             # fill (per-type coloring would fight the accent). draw_list_row
             # carries the tested reverse-video grid path.
             style = selected_row_style(Style(fg=base_fg, bg=bg), theme,
                                        ctx.focused, ctx.vector_shapes)
-            plain = prefix + "".join(t for t, _ in value_segs)
-            clipped = truncate_to_width(plain, max(0, text_w - int(text_x)))
-            draw_list_row(ctx, top, clipped, text_w, Style(style.fg, style.bg,
-                          style.attr, font=_MONO), text_x, fill_w, row_h)
+            row_style = Style(style.fg, style.bg, style.attr, font=_MONO)
+            chunk = "".join(t for t, _ in label_segs)
+            if vector:
+                x, piece = _window_text(chunk, text_x, lo, hi)
+                draw_list_row(ctx, top, piece, text_w, row_style, x, fill_w, row_h)
+            else:
+                prefix = " " * indent + self._marker(node) if first else " " * text_x
+                x, piece = _window_text(prefix + chunk, 0.0, lo, hi)
+                # The reverse-video grid path keeps x at zero; the column a
+                # straddled wide glyph left behind becomes leading pad.
+                draw_list_row(ctx, top, " " * int(x) + piece, text_w, row_style,
+                              0.0, fill_w, row_h)
             chevron_fg = style.fg or base_fg
         else:
-            # Marker (grid only) then each colored value segment, truncating at the
-            # content edge (no horizontal scroll — a long value is elided).
-            col = text_x
-            for text, color in ([(prefix, palette["muted"])] if prefix else []) + value_segs:
-                if col >= text_w:
-                    break
-                piece = text if display_width(text) <= text_w - col \
-                    else truncate_to_width(text, int(text_w - col))
-                ctx.draw_text(col, top, piece, Style(fg=color, bg=bg, font=_MONO),
-                              ink=color is None or _is_light(bg))
-                col += display_width(piece)
+            if vector:
+                self._draw_flow(ctx, top, label_segs, text_x, lo, hi, bg)
+            else:
+                prefix = " " * indent + self._marker(node) if first else " " * text_x
+                self._draw_flow(ctx, top, [(prefix, palette["muted"])] + label_segs,
+                                0, lo, hi, bg)
             chevron_fg = palette["muted"]
 
         # The vector disclosure chevron for a branch (a no-op on a grid backend,
         # which drew the glyph inline above). Muted at rest, the row color when
         # selected so it reads over the selection fill.
-        if vector and node.is_branch:
-            ctx.draw_chevron(indent, top, _MARK_W, row_h,
+        if vector and first and node.is_branch and indent >= left:
+            ctx.draw_chevron(indent - left, top, _MARK_W, row_h,
                              expanded=node.expanded, style=Style(fg=chevron_fg))
         if self._pattern:
-            self._draw_matches(ctx, top, index, node, text_w, base_fg, bg,
-                               prefix, text_x)
+            self._draw_matches(ctx, top, row, node, cs, ce, text_x, lo, hi,
+                               base_fg, bg)
 
-    def _draw_matches(self, ctx, top, index, node, text_w, base_fg, bg,
-                      prefix, text_x) -> None:
-        """Repaint every occurrence of the pattern in this row over a highlight
-        background (firmer for the current match), like the text viewer. Positions
-        are relative to ``text_x`` — where the key/value text is drawn — so the
-        highlight lands on the label whether the marker is inline (grid) or a
-        vector chevron in the reserved slot."""
+    def _draw_matches(self, ctx, top, row, node, cs, ce, text_x, lo, hi,
+                      base_fg, bg) -> None:
+        """Repaint every occurrence of the pattern in this display line over a
+        highlight background (firmer for the current match), like the text
+        viewer. Occurrences are found in the row's label (what ``_recompute``
+        matched); on a wrapped line only the part inside the chunk [cs, ce) is
+        repainted, and the pan window [lo, hi) clips like the base text."""
         if id(node) not in self._match_ids:
             return
-        row_plain = prefix + "".join(
-            t for t, _ in self._value_segs(node, _DEFAULT_PALETTE, None))
-        low = row_plain.lower()
+        label = self._label_text(node)
+        end = len(label) if ce is None else ce
+        low = label.lower()
         pat = self._pattern.lower()
         current = (self._search_pos >= 0 and self._matches
-                   and self._matches[self._search_pos][0] == index)
+                   and self._matches[self._search_pos][0] == row)
         hl_bg = _match_bg(bg, current)
         start = 0
         while True:
             hit = low.find(pat, start)
             if hit < 0:
                 break
-            end = hit + len(pat)
-            start = end
-            x = text_x + hit
-            if x >= text_w:
+            start = hit + len(pat)
+            a, b = max(hit, cs), min(hit + len(pat), end)
+            if b <= a:
                 continue
-            sub = truncate_to_width(row_plain[hit:end], int(text_w - x))
-            if sub:
-                ctx.draw_text(x, top, sub, Style(fg=base_fg, bg=hl_bg, font=_MONO))
+            x, piece = _window_text(label[a:b],
+                                    text_x + display_width(label[cs:a]), lo, hi)
+            if piece:
+                ctx.draw_text(x, top, piece, Style(fg=base_fg, bg=hl_bg, font=_MONO))
 
     # --- scroll helpers ------------------------------------------------------
 
     def _clamp_offset(self, count: int, view_h: float) -> None:
         self.offset = max(0.0, min(self.offset, max(0.0, count * self._row_h - view_h)))
 
+    def _clamp_left(self) -> None:
+        self.left = max(0.0, min(self.left, float(max(0, self._max_w - self._text_w))))
+
     def _ensure_visible(self) -> None:
-        top = self.selected * self._row_h
-        if top < self.offset:
+        """Scroll the selected row into view — all of its display lines when
+        they fit the viewport, else its first (``_ensure_layout`` first)."""
+        first, count = self._line_span(self.selected)
+        top = first * self._row_h
+        bottom = (first + count) * self._row_h
+        if bottom - top >= self._view_h or top < self.offset:
             self.offset = top
-        elif top + self._row_h > self.offset + self._view_h:
-            self.offset = top + self._row_h - self._view_h
+        elif bottom > self.offset + self._view_h:
+            self.offset = bottom - self._view_h
+
+    def toggle_wrap(self) -> bool:
+        """Toggle line wrap and return the new state (a host viewer binds its
+        line-wrap key to this, like the ``search_*`` protocol): wrapped, a long
+        value continues on extra display lines; unwrapped, rows keep one line
+        each and the view pans horizontally instead."""
+        self.wrap = not self.wrap
+        self.left = 0.0
+        self._finish_move()
+        return self.wrap
 
     # --- events --------------------------------------------------------------
 
     def handle_event(self, event: Event) -> bool:
         if event.type is EventType.MOUSE_SCROLL:
+            rows = self._visible()
+            self._ensure_layout(rows, self._text_w)
             amount = event.hints.get("scroll_units")
             if amount is None:
                 amount = float(event.scroll)
             self.offset -= amount
-            self._clamp_offset(len(self._visible()), self._view_h)
+            ux = event.hints.get("scroll_units_x")  # precise horizontal swipe
+            if ux is not None and not self.wrap:
+                self.left -= float(ux)
+                self._clamp_left()
+            self._clamp_offset(self._total_lines(rows), self._view_h)
             return True
         if event.type is EventType.MOUSE_CLICK:
             return self._handle_click(event)
         if event.type is EventType.KEY:
             if event.modifiers & {"ctrl", "cmd"} and event.key == "c":
                 self._copy_selection()
+                return True
+            if "shift" in event.modifiers and event.key in ("left", "right"):
+                # Shift+←/→ pans an unwrapped view (plain ←/→ stay tree
+                # navigation); swallowed while wrapping, where there is
+                # nothing to pan to.
+                if not self.wrap:
+                    self._ensure_layout(self._visible(), self._text_w)
+                    self.left += _PAN_STEP if event.key == "right" else -_PAN_STEP
+                    self._clamp_left()
                 return True
             if is_activate(event):
                 rows = self._visible()
@@ -408,6 +612,7 @@ class JsonView(Widget):
         elif key == "right":
             if node.is_branch and not node.expanded:
                 node.expanded = True
+                self._gen += 1
             elif node.is_branch and node.expanded:
                 self.selected += 1  # step into the first child
             self._finish_move()
@@ -415,6 +620,7 @@ class JsonView(Widget):
         elif key == "left":
             if node.is_branch and node.expanded:
                 node.expanded = False
+                self._gen += 1
             else:
                 self._select_parent(rows)
             self._finish_move()
@@ -434,23 +640,30 @@ class JsonView(Widget):
     def _finish_move(self) -> None:
         rows = self._visible()
         self.selected = max(0, min(self.selected, max(0, len(rows) - 1)))
+        self._ensure_layout(rows, self._text_w)
         self._ensure_visible()
-        self._clamp_offset(len(rows), self._view_h)
+        self._clamp_offset(self._total_lines(rows), self._view_h)
 
     def _handle_click(self, event: Event) -> bool:
         rows = self._visible()
         if event.y is None:
             return False
-        index = int((self.offset + event.y) / self._row_h)
-        if not (0 <= index < len(rows)):
+        self._ensure_layout(rows, self._text_w)
+        line = int((self.offset + event.y) / self._row_h)
+        if not (0 <= line < self._total_lines(rows)):
             return False
-        self.selected = index
-        self._clicks.press(index)
-        node, depth = rows[index]
-        # A click on the expander column (or a double-click anywhere on a branch)
-        # toggles it; otherwise the click just selects the row.
-        marker_col = depth * _INDENT
-        on_marker = event.x is not None and marker_col <= event.x < marker_col + _INDENT
+        if self.wrap:
+            row, cs, _ce = self._lines[line]
+        else:
+            row, cs = line, 0
+        self.selected = row
+        self._clicks.press(row)
+        node, depth = rows[row]
+        # A click on the expander column (on the row's first display line, pan
+        # applied) toggles a branch; otherwise the click just selects the row.
+        marker_col = depth * _INDENT - (0 if self.wrap else int(self.left))
+        on_marker = (cs == 0 and event.x is not None
+                     and marker_col <= event.x < marker_col + _INDENT)
         if node.is_branch and on_marker:
             self._toggle(node)
         self._finish_move()
@@ -459,6 +672,7 @@ class JsonView(Widget):
     def _toggle(self, node: _Node) -> None:
         if node.is_branch:
             node.expanded = not node.expanded
+            self._gen += 1
             self._finish_move()
 
     def _copy_selection(self) -> None:
@@ -491,7 +705,9 @@ class JsonView(Widget):
                 if pat in self._label_text(node).lower():
                     self._match_ids.add(id(node))
                     for a in ancestors:
-                        a.expanded = True
+                        if not a.expanded:
+                            a.expanded = True
+                            self._gen += 1
                 walk(node.children, ancestors + [node])
 
         walk(self.roots, [])
@@ -553,21 +769,26 @@ class JsonView(Widget):
         else centered (the shared search-jump rule, see widgets/_scroll.py);
         plain cursor movement keeps the minimal :meth:`_ensure_visible`."""
         self.selected = self._matches[self._search_pos][0]
+        rows = self._visible()
+        self._ensure_layout(rows, self._text_w)
+        line = self._line_span(self.selected)[0]
         self.offset = search_scroll_offset(
-            self.offset, self._view_h, self.selected * self._row_h,
+            self.offset, self._view_h, line * self._row_h,
             self._row_h, margin=3 * self._row_h, snap=self._row_h)
-        self._clamp_offset(len(self._visible()), self._view_h)
+        self._clamp_offset(self._total_lines(rows), self._view_h)
 
     def _restore_origin(self) -> None:
         """Restore the pre-search selection (found by node identity — an expansion
         may have shifted its row index) and the pre-search scroll."""
+        rows = self._visible()
         if self._origin_node is not None:
-            for i, (node, _d) in enumerate(self._visible()):
+            for i, (node, _d) in enumerate(rows):
                 if node is self._origin_node:
                     self.selected = i
                     break
         self.offset = self._origin
-        self._clamp_offset(len(self._visible()), self._view_h)
+        self._ensure_layout(rows, self._text_w)
+        self._clamp_offset(self._total_lines(rows), self._view_h)
 
     def clear_search(self) -> None:
         """Drop the search pattern, highlights, and match set."""

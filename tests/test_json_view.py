@@ -175,6 +175,135 @@ def test_search_cancel_restores_scroll(backend):
     assert view.offset == 6.0              # restored
 
 
+def test_unwrapped_long_value_is_cut_at_the_edge(backend):
+    # Default (no wrap, no pan): the overflow is simply cut at the width — one
+    # display line per row, the tail reachable by panning or wrapping.
+    panel = Panel(backend)
+    panel.add(JsonView({"msg": "a" * 60}), x=0, y=0, w=40, h=14)
+    panel.render()
+    snap = backend.snapshot()
+    assert snap[0] == '  msg: "' + "a" * 32
+    assert snap[1].strip() == ""
+
+
+def test_shift_right_pans_and_shift_left_returns(backend):
+    view = JsonView({"msg": "a" * 60})
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    panel.render()
+    panel.dispatch_event(_key("right", frozenset({"shift"})))
+    panel.render()
+    assert view.left == 4.0
+    assert backend.snapshot()[0] == 'g: "' + "a" * 36   # window starts at col 4
+    panel.dispatch_event(_key("left", frozenset({"shift"})))
+    panel.render()
+    assert view.left == 0.0
+    assert backend.snapshot()[0].startswith('  msg: "')
+    # Plain arrows keep their tree meaning: no pan, still expand/collapse.
+    panel.dispatch_event(_key("right"))
+    assert view.left == 0.0
+
+
+def test_pan_clamps_to_the_widest_row(backend):
+    # Content is 43 columns in a 40-column view: the pan stops at 3, with the
+    # very tail of the value (the closing quote) at the right edge.
+    view = JsonView({"msg": "a" * 30 + "TAIL"})
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    panel.render()
+    for _ in range(3):
+        panel.dispatch_event(_key("right", frozenset({"shift"})))
+    assert view.left == 3.0
+    panel.render()
+    assert backend.snapshot()[0] == 'sg: "' + "a" * 30 + 'TAIL"'
+
+
+def test_toggle_wrap_folds_long_value(backend):
+    # Wrap on: the 60-char value continues on a second display line aligned
+    # under the label; wrap off restores one line per row.
+    view = JsonView({"msg": "a" * 60})
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    panel.render()
+    assert view.toggle_wrap() is True
+    panel.render()
+    snap = backend.snapshot()
+    assert snap[0].startswith('  msg: "' + "a" * 31)   # wrapped at 39 - indent
+    assert snap[1].startswith("  " + "a" * 29 + '"')   # continuation, full tail
+    assert view.toggle_wrap() is False
+    panel.render()
+    assert backend.snapshot()[1].strip() == ""
+
+
+def test_wrap_cuts_wide_chars_by_display_columns(backend):
+    # A CJK value overflows twice as fast as its character count; wrapping must
+    # cut by columns so every glyph lands somewhere (cf. text viewer issue #315).
+    view = JsonView({"k": "あ" * 30})
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    panel.render()
+    assert "".join(backend.snapshot()).count("あ") < 30   # unwrapped: cut
+    view.toggle_wrap()
+    panel.render()
+    assert "".join(backend.snapshot()).count("あ") == 30  # wrapped: all visible
+
+
+def test_wrap_scrolls_by_display_lines(backend):
+    # 10 rows of 2 display lines each = 20 lines in a 14-line viewport; End
+    # keeps the last row's *bottom* line in view.
+    view = JsonView({f"k{i}": "a" * 60 for i in range(10)})
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    panel.render()
+    view.toggle_wrap()
+    panel.render()
+    assert len(view._lines) == 20
+    panel.dispatch_event(_key("end"))
+    assert view.selected == 9
+    assert view.offset == 6.0                             # 20 lines - 14 visible
+
+
+def test_click_on_wrapped_continuation_selects_its_row(backend):
+    view = JsonView({"a": "a" * 60, "b": 1})
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    view.toggle_wrap()
+    panel.render()
+    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=5, y=1, button="left"))
+    assert view.selected == 0                             # continuation of "a"
+    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=5, y=2, button="left"))
+    assert view.selected == 1                             # "b", below the wrap
+
+
+def test_wrap_draws_vector_chevron_on_first_line_only():
+    # A wrapped branch row still gets exactly one chevron, on its first display
+    # line; continuation lines draw none.
+    view = JsonView({"nested": {"msg": "a" * 60}})
+    view.roots[0].expanded = True
+    be = _VectorBackend(width=40, height=14, capabilities=PROFILE_GUI_DESKTOP)
+    panel = Panel(be)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    view.toggle_wrap()
+    panel.render()
+    assert len(be.chevron_calls) == 1          # "nested" only; "msg" is a leaf
+    assert "a" * 20 in "\n".join(be.snapshot())  # the wrapped value renders
+
+
+def test_search_highlight_survives_a_wrap_boundary(backend):
+    # The match straddles two wrapped chunks; both fragments render and the
+    # highlight pass draws without error.
+    view = JsonView({"msg": "x" * 28 + "needle" + "y" * 20})
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=40, h=14)
+    view.toggle_wrap()
+    panel.render()
+    view.search_begin()
+    assert view.search_set("needle") == 1
+    panel.render()
+    text = "".join(backend.snapshot())
+    assert "nee" in text and "dle" in text                # split across lines
+
+
 def test_ctrl_c_copies_selected_value(backend):
     view = JsonView(_data())
     panel = Panel(backend)
