@@ -25,7 +25,7 @@ with the selection moving to the matching cell.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Callable
 
 from ..backend import DEFAULT_STYLE, Style, TextAttribute
 from ..event import Event, EventType
@@ -140,6 +140,12 @@ class TableView(Widget):
         self._search_pos = -1
         self._origin: float = 0.0
         self._origin_cur: tuple[int, int] = (0, 0)  # pre-search current cell
+        #: Optional extra search matcher a host plugs in on top of the built-in
+        #: literal matching: ``(pattern, row_text) -> [(start, end), ...]`` hit
+        #: spans, or ``None`` for "no opinion, literal only" (e.g. Migemo makes
+        #: romaji match Japanese). A row matches when either test hits; the
+        #: highlight here is row-level, so the spans are only truth-tested.
+        self.search_matcher: Callable[[str, str], list[tuple[int, int]] | None] | None = None
 
     # --- layout / build -------------------------------------------------------
 
@@ -544,8 +550,12 @@ class TableView(Widget):
 
     def _recompute(self) -> None:
         pat = self._pattern.lower()
-        self._matches = [i for i, line in enumerate(self._body_lines)
-                         if pat in line.lower()] if pat else []
+        matcher = self.search_matcher
+        self._matches = [
+            i for i, line in enumerate(self._body_lines)
+            if pat in line.lower()
+            or (matcher is not None and matcher(self._pattern, line))
+        ] if pat else []
 
     def search_begin(self) -> None:
         self._origin = self.offset

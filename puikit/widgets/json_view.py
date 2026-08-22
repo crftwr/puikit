@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from ..backend import DEFAULT_STYLE, Style, TextAttribute
 from ..event import Event, EventType
@@ -265,6 +265,12 @@ class JsonView(Widget):
         self._search_pos = -1
         self._origin: float = 0.0
         self._origin_node: _Node | None = None  # pre-search selection (by identity)
+        #: Optional extra search matcher a host plugs in on top of the built-in
+        #: literal matching: ``(pattern, row_text) -> [(start, end), ...]`` hit
+        #: spans, or ``None`` for "no opinion, literal only" (e.g. Migemo makes
+        #: romaji match Japanese). A row matches when either test hits; the
+        #: highlight here is row-level, so the spans are only truth-tested.
+        self.search_matcher: Callable[[str, str], list[tuple[int, int]] | None] | None = None
 
         # Click / double-click tracking (a click toggles the expander or selects
         # a row; kept for parity with the other selectable views).
@@ -963,18 +969,27 @@ class JsonView(Widget):
     # --- search protocol (driven by a host viewer's search bar) --------------
 
     def _recompute(self) -> None:
-        """Rebuild the match set for the current pattern, expanding the ancestors
-        of every hit so it is reachable, then record the matches in display
-        order with their (post-expansion) row indices."""
+        """Rebuild the match set for the current pattern (case-insensitive
+        *contains* on the row label, or a hit from the host's
+        ``search_matcher``), expanding the ancestors of every hit so it is
+        reachable, then record the matches in display order with their
+        (post-expansion) row indices."""
         self._matches = []
         self._match_ids = set()
         pat = self._pattern.lower()
         if not pat:
             return
+        matcher = self.search_matcher
+
+        def hit(node: _Node) -> bool:
+            text = self._label_text(node)
+            if pat in text.lower():
+                return True
+            return bool(matcher(self._pattern, text)) if matcher else False
 
         def walk(nodes: list[_Node], ancestors: list[_Node]) -> None:
             for node in nodes:
-                if pat in self._label_text(node).lower():
+                if hit(node):
                     self._match_ids.add(id(node))
                     for a in ancestors:
                         if not a.expanded:
