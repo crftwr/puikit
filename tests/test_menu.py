@@ -29,8 +29,8 @@ def backend(request):
     return MemoryBackend(width=40, height=16, capabilities=request.param)
 
 
-def _key(name, char=None):
-    return Event(type=EventType.KEY, key=name, char=char)
+def _key(name, char=None, mods=()):
+    return Event(type=EventType.KEY, key=name, char=char, modifiers=frozenset(mods))
 
 
 def _click(x, y):
@@ -297,6 +297,83 @@ def test_context_menu_arrows_keep_their_meaning(backend):
     panel.dispatch_event(_key("left"))   # closes the root
     assert panel._layers == []
     assert fired == ["cut"]
+
+
+def test_popup_letter_mnemonic_activates_unique_match(backend):
+    # A plain letter with one enabled first-letter match fires the row.
+    panel = Panel(backend)
+    fired = []
+    panel.popup_menu(_ctx_menu(fired), 2, 2)
+    panel.render()
+    panel.dispatch_event(_key("c"))
+    assert fired == ["cut"]
+    assert panel._layers == []
+
+
+def test_popup_letter_mnemonic_skips_disabled_and_opens_submenu(backend):
+    panel = Panel(backend)
+    fired = []
+    panel.popup_menu(_ctx_menu(fired), 2, 2)
+    panel.render()
+    panel.dispatch_event(_key("p"))  # only match "Paste" is disabled: inert
+    assert fired == [] and len(panel._layers) == 1
+    panel.dispatch_event(_key("m"))  # "More" is a submenu parent: opens it
+    assert len(panel._layers) == 2
+
+
+def test_popup_letter_mnemonic_cycles_ambiguous_matches(backend):
+    # Several matches only move the cursor (wrapping), so enter commits the
+    # one the user means — the Windows convention.
+    menu = Menu(
+        MenuItem("Copy", on_select=lambda: fired.append("copy")),
+        MenuItem("Cut", on_select=lambda: fired.append("cut")),
+        MenuItem("Close", on_select=lambda: fired.append("close")),
+    )
+    fired = []
+    panel = Panel(backend)
+    panel.popup_menu(menu, 2, 2)
+    popup = panel._layers[-1].widget
+    panel.render()
+    panel.dispatch_event(_key("c"))
+    assert popup.cursor == 1 and fired == []
+    panel.dispatch_event(_key("c"))
+    assert popup.cursor == 2
+    panel.dispatch_event(_key("c"))
+    assert popup.cursor == 0  # wrapped
+    panel.dispatch_event(_key("enter"))
+    assert fired == ["copy"]
+
+
+def test_menu_bar_alt_letter_opens_matching_menu(backend):
+    # The Alt+F accelerator: the title's first letter is its mnemonic.
+    panel = Panel(backend)
+    bar = MenuBar(_bar_menu([]))
+    panel.add(bar, x=0, y=0, w=40, h=1)
+    panel.render()
+    assert bar.open_menu_mnemonic("z") is False
+    assert panel._layers == []
+    assert bar.open_menu_mnemonic("e") is True  # Edit
+    assert bar._index == 1 and len(panel._layers) == 1
+    panel.render()
+    assert panel._layers[-1].widget.menu.items[0].label == "Copy"
+
+
+def test_alt_letter_switches_the_open_pulldown(backend):
+    # Alt+letter with a pulldown already open jumps to that bar entry, and an
+    # unmatched letter leaves the open menu alone.
+    panel = Panel(backend)
+    bar = MenuBar(_bar_menu([]))
+    panel.add(bar, x=0, y=0, w=40, h=1)
+    panel.render()
+    bar.open_menu()  # File
+    panel.render()
+    panel.dispatch_event(_key("z", mods=("alt",)))
+    assert bar._index == 0 and len(panel._layers) == 1
+    panel.dispatch_event(_key("e", mods=("alt",)))
+    assert bar._index == 1 and bar._open is True
+    assert len(panel._layers) == 1
+    panel.render()
+    assert panel._layers[-1].widget.menu.items[0].label == "Copy"
 
 
 def test_menu_bar_collapses_to_zero_height_when_native():

@@ -918,9 +918,20 @@ def _win_modifiers(state: int) -> frozenset[str]:
 def _win_key_record(char: str, vk: int, control: int) -> dict:
     """One KEY_EVENT into the engine's neutral key record. The virtual key
     yields the contract NAME (an IME commit has none — the char carries it);
-    the control-key state yields the modifier set."""
-    return {"type": "key", "char": char, "name": _VK_KEYS.get(vk),
-            "mods": _win_modifiers(control)}
+    the control-key state yields the modifier set.
+
+    Alt+letter needs its own fallback: the console may suppress the produced
+    character for an Alt chord, leaving a record with no char and a letter VK
+    that _VK_KEYS (named keys only) cannot resolve — which would silently drop
+    the menu accelerators (Alt+F). The VK *is* the letter, so name it. Not
+    under Ctrl too (AltGr), where a suppressed char means the chord really
+    produced nothing."""
+    mods = _win_modifiers(control)
+    name = _VK_KEYS.get(vk)
+    if (name is None and not char and 0x41 <= vk <= 0x5A
+            and "alt" in mods and "ctrl" not in mods):
+        name = chr(vk + 0x20)
+    return {"type": "key", "char": char, "name": name, "mods": mods}
 
 
 def _win_mouse_records(record: dict, previous: int) -> tuple[list[dict], int]:

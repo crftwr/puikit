@@ -167,6 +167,34 @@ def test_alt_record_becomes_the_named_key(backend):
     assert event.key == "alt"
 
 
+# --- Alt+letter accelerators (Windows console) -------------------------------
+
+
+def test_alt_letter_with_suppressed_char_recovers_the_letter(backend):
+    # The console may leave UnicodeChar empty for an Alt chord; the letter VK
+    # still names the key, so Alt+F reaches the app as ("f", {"alt"}).
+    be, _ = backend
+    event = key(be, "", 0x46, _ALT_DOWN_STATE)  # VK 'F', no char
+    assert event.key == "f"
+    assert event.modifiers == frozenset({"alt"})
+
+
+def test_alt_letter_with_produced_char_keeps_the_modifier(backend):
+    # And when the console does produce the character, the char path already
+    # carries alt — either way the app sees the same event.
+    be, _ = backend
+    event = key(be, "f", 0x46, _ALT_DOWN_STATE)
+    assert event.key == "f"
+    assert event.modifiers == frozenset({"alt"})
+
+
+def test_ctrl_alt_with_suppressed_char_stays_dropped(backend):
+    # AltGr reports Ctrl+Alt; a suppressed char there means the chord really
+    # produced nothing, so no letter is fabricated.
+    be, _ = backend
+    assert key(be, "", 0x46, _ALT_DOWN_STATE | _CTRL_STATE) is None
+
+
 # --- suspend / resume ------------------------------------------------------
 
 

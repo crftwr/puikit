@@ -76,10 +76,13 @@ class MenuPopup(Widget):
     submenu) backs out one level, and an outside click cancels. Submenus open
     as nested popups to the right of their row.
 
-    A pulldown hanging off a ``MenuBar`` carries ``on_navigate``: there ←/→
-    with no submenu to enter hop to the adjacent bar entry's pulldown — the
-    desktop menu convention (xefm#304). A context menu has no bar to walk, so
-    without the hook ← keeps closing and → keeps firing like enter."""
+    A pulldown hanging off a ``MenuBar`` carries ``bar``: there ←/→ with no
+    submenu to enter hop to the adjacent bar entry's pulldown, and Alt+letter
+    jumps straight to the bar entry with that mnemonic — the desktop menu
+    convention (xefm#304). A plain letter is an item mnemonic in any menu:
+    a unique first-letter match on an enabled row activates it, several
+    matches cycle the cursor. A context menu has no bar to walk, so without
+    it ← keeps closing and → keeps firing like enter."""
 
     def __init__(
         self,
@@ -87,7 +90,7 @@ class MenuPopup(Widget):
         row_h: float = 1.0,
         parent: "MenuPopup | None" = None,
         on_close: Callable[[], None] | None = None,
-        on_navigate: Callable[[int], None] | None = None,
+        bar: "MenuBar | None" = None,
     ):
         self.menu = menu
         self._row_h = row_h
@@ -95,9 +98,9 @@ class MenuPopup(Widget):
         # Root popup only: called once the whole chain is torn down (e.g. the
         # Panel's on_done for a context menu).
         self.on_close = on_close
-        # Root popup only, set for a MenuBar pulldown: called with ±1 after the
-        # chain dismissed itself, to open the neighboring bar entry's pulldown.
-        self.on_navigate = on_navigate
+        # Root popup only, set when this is a MenuBar pulldown: the bar to walk
+        # with ←/→ and Alt+letter once this chain has dismissed itself.
+        self.bar = bar
         self._panel = None
         self._width = 0.0
         self._abs: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
@@ -242,18 +245,53 @@ class MenuPopup(Widget):
             d, p = d + 1, p.parent
         return d
 
-    def _navigate_bar(self, direction: int) -> bool:
-        """When this chain hangs off a MenuBar, close the whole chain and ask
-        the bar to open the adjacent pulldown. False when there is no bar."""
+    def _bar(self) -> "MenuBar | None":
         root = self
         while root.parent is not None:
             root = root.parent
-        nav = root.on_navigate
-        if nav is None:
+        return root.bar
+
+    def _navigate_bar(self, direction: int) -> bool:
+        """When this chain hangs off a MenuBar, close the whole chain and ask
+        the bar to open the adjacent pulldown. False when there is no bar."""
+        bar = self._bar()
+        if bar is None:
             return False
         self._dismiss()
-        nav(direction)
+        bar._navigate(direction)
         return True
+
+    def _jump_bar_mnemonic(self, letter: str) -> bool:
+        """Alt+letter while open: close the chain and open the bar entry with
+        that mnemonic. False (nothing closed) when no bar entry matches."""
+        bar = self._bar()
+        index = bar.mnemonic_index(letter) if bar is not None else None
+        if index is None:
+            return False
+        self._dismiss()
+        bar._do_open(index)
+        return True
+
+    # --- item mnemonics -------------------------------------------------------
+
+    def _jump_mnemonic(self, letter: str) -> None:
+        """A plain letter is an item mnemonic, resolved the way Windows menus
+        do: a unique first-letter match among the enabled rows activates it
+        outright (a submenu parent opens); several matches only cycle the
+        cursor through them, so enter commits the one the user means."""
+        matches = [
+            i for i in range(len(self.menu.items))
+            if self._selectable(i)
+            and self.menu.items[i].label.lstrip()[:1].lower() == letter
+        ]
+        if not matches:
+            return
+        if len(matches) == 1:
+            self.cursor = matches[0]
+            self._activate(matches[0])
+            return
+        after = [i for i in matches if i > self.cursor]
+        self.cursor = after[0] if after else matches[0]
 
     # --- events --------------------------------------------------------------
 
@@ -302,6 +340,12 @@ class MenuPopup(Widget):
                 # The menu-activation key toggles: pressed with the menu
                 # already open, it closes the whole chain (as on Windows).
                 self._dismiss()
+            elif isinstance(key, str) and len(key) == 1 and key.isalpha():
+                mods = frozenset(event.modifiers or ())
+                if mods == frozenset({"alt"}):
+                    self._jump_bar_mnemonic(key)
+                elif not mods & {"ctrl", "cmd", "alt"}:
+                    self._jump_mnemonic(key)
             return True
         if event.type is EventType.MOUSE_CLICK:
             row = int(event.y / self._row_h) if event.y is not None else -1
@@ -327,8 +371,10 @@ class MenuBar(Widget):
     so the outside click that dismissed it could never move focus back). The
     open entry's title is highlighted from the pulldown's open state instead.
     Keyboard access is the app binding its menu-activation key (F10, a bare
-    Alt tap) to :meth:`open_menu`; once a pulldown is open, ←/→ walk the bar
-    (``MenuPopup.on_navigate``)."""
+    Alt tap) to :meth:`open_menu`, and Alt+letter to :meth:`open_menu_mnemonic`
+    (Alt+F → File, by title first letter); once a pulldown is open, ←/→ and
+    Alt+letter walk the bar and plain letters pick items (``MenuPopup``,
+    which receives this bar as its ``bar``)."""
 
     def __init__(self, menu: Menu, style: Style = DEFAULT_STYLE):
         # A Menu whose items each carry a submenu (their labels are the bar
@@ -420,6 +466,30 @@ class MenuBar(Widget):
         self._do_open(index % len(entries))
         return True
 
+    def mnemonic_index(self, letter: str) -> int | None:
+        """The enabled bar entry whose title starts with ``letter``
+        (case-insensitive), or None. The auto-mnemonic is the title's first
+        letter — File is Alt+F without any markup in the label."""
+        letter = letter.lower()
+        for i, item in enumerate(self._entries()):
+            if item.label.lstrip()[:1].lower() == letter and item.is_enabled():
+                return i
+        return None
+
+    def open_menu_mnemonic(self, letter: str) -> bool:
+        """Open the pulldown whose title starts with ``letter`` — what the
+        app's Alt+letter accelerator calls (Alt+F → File). Same refusals as
+        :meth:`open_menu`, plus False when no enabled title matches. With a
+        pulldown already open, Alt+letter reaches the modal popup instead,
+        which jumps between bar entries itself."""
+        if self._installed_native or self._panel is None or self._open:
+            return False
+        index = self.mnemonic_index(letter)
+        if index is None:
+            return False
+        self._do_open(index)
+        return True
+
     def _do_open(self, index: int) -> None:
         entries = self._entries()
         if self._panel is None or not (0 <= index < len(entries)):
@@ -434,7 +504,7 @@ class MenuBar(Widget):
         self._open = True
         self._panel.popup_menu(
             menu, rx + x0, ry + rh,
-            on_done=self._pulldown_closed, on_navigate=self._navigate,
+            on_done=self._pulldown_closed, bar=self,
         )
 
     def _pulldown_closed(self) -> None:

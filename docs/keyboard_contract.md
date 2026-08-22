@@ -67,6 +67,15 @@ should treat such bindings as GUI-conditional rather than expecting parity acros
 backends. The **cursor / editing** keys of §5a are the deliberate exception:
 their modified forms are decoded on every backend.
 
+> The **Windows console** (VT backend) is a second exception for `Alt+letter`:
+> its input records carry real modifier state, and when the console suppresses
+> the produced character for an Alt chord the letter is recovered from the
+> virtual key — so `key="f", modifiers={"alt"}` arrives reliably there (the
+> menu accelerators, xefm#304). On POSIX terminals Alt+letter stays
+> unreliable: the ESC-prefix meta encoding is decoded only for the §5a word
+> chords (Alt+b / Alt+f / Alt+d / Alt+Backspace); any other ESC-prefixed
+> letter falls back to the Escape key, agreeing with curses.
+
 ## 5a. Modified cursor & editing keys — word granularity
 
 The named cursor/edit keys `left`, `right`, `backspace`, `delete` carry a word
