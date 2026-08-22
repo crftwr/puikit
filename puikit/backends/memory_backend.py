@@ -13,7 +13,7 @@ from typing import Any
 
 from ..backend import (
     Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, WindowHandle,
-    WindowStyle, is_transparent,
+    WindowStyle, _run_tick_callbacks, is_transparent,
 )
 from contextlib import contextmanager
 from ..capability import PROFILE_TUI, CapabilityProfile
@@ -559,10 +559,11 @@ class MemoryBackend(Backend):
             self.tick_callbacks.append(callback)
 
     def run_animation_ticks(self) -> None:
-        """Test helper: run one tick round, dropping finished callbacks, then fire
+        """Test helper: run one tick round, dropping finished callbacks
+        (fault-isolated, mirroring the real backends' dispatch), then fire
         any backend-driven transitions' completion hooks (a composited slide-out
         end), mirroring the real backend's timer."""
-        self.tick_callbacks = [cb for cb in self.tick_callbacks if cb()]
+        self.tick_callbacks = _run_tick_callbacks(self.tick_callbacks)
         pending, self._pending_completes = self._pending_completes, []
         for on_complete in pending:
             on_complete()

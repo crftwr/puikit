@@ -1608,6 +1608,21 @@ class Panel:
             return None
         return self._layers.pop().widget
 
+    def remove_layer(self, widget: Any) -> bool:
+        """Remove the layer holding ``widget``, wherever it sits in the stack;
+        return whether one was removed.
+
+        ``pop_layer`` removes whatever is topmost — right for a caller that
+        knows it is on top, wrong for one that may have been covered since it
+        was pushed. A dialog closing *itself* should use this: a progress
+        dialog torn down while its own confirm box was still open above it
+        used to skip the pop and stay on screen forever (xefm#333)."""
+        for i, slot in enumerate(self._layers):
+            if slot.widget is widget:
+                del self._layers[i]
+                return True
+        return False
+
     def _top_interactive_slot(self) -> "_Slot | None":
         """The top-most layer that participates in the modal event/focus stack —
         the active modal. A non-interactive overlay (e.g. a completion popup) sits

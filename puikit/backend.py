@@ -8,6 +8,7 @@ based on the backend's CapabilityProfile.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -177,6 +178,39 @@ class WindowHandle:
         """Drawable size in base units (the window's analogue of
         Backend.size_units)."""
         return (0.0, 0.0)
+
+
+_logger = logging.getLogger(__name__)
+
+
+def _run_tick_callbacks(callbacks: list) -> list:
+    """Run one frame of animation-tick callbacks, fault-isolated; return the
+    survivors (callbacks that returned True).
+
+    Every backend's tick dispatch routes through here instead of a bare
+    ``[cb for cb in callbacks if cb()]``: with the bare comprehension, one
+    raising callback aborted the whole frame — the survivor list was never
+    assigned (so nothing unregistered, the raiser included), every callback
+    after the raiser was skipped, and on timer-driven backends the swallowed
+    exception then repeated every frame forever (xefm#333). Here a raising
+    callback is logged and dropped, and the rest of the frame still runs.
+
+    Iterates ``callbacks`` itself (not a copy), preserving the comprehension's
+    semantics for a callback registered *mid-frame* by another callback (e.g. a
+    spinner whose draw registers its own tick during a render): appended to the
+    live list, it is reached by this same pass. Callers that deliberately
+    snapshot first (the web backend, for thread-safety) keep doing so.
+    """
+    survivors = []
+    for cb in callbacks:
+        try:
+            if cb():
+                survivors.append(cb)
+        except Exception:
+            _logger.exception(
+                "animation tick callback %r raised; unregistering it", cb
+            )
+    return survivors
 
 
 class Backend(ABC):

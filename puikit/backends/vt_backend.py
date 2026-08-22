@@ -49,7 +49,7 @@ import re
 import sys
 from typing import Any, Callable
 
-from ..backend import Backend, Color, DEFAULT_STYLE, EventHandler, Style, TextAttribute
+from ..backend import Backend, Color, DEFAULT_STYLE, EventHandler, Style, TextAttribute, _run_tick_callbacks
 from ..capability import CapabilityProfile, PROFILE_TUI
 from ..event import Event, EventType, char_key_event
 from ..image import CONTAIN, COVER, contain_box, cover_source
@@ -678,13 +678,14 @@ class VTBackend(Backend):
             self._tick_callbacks.append(callback)
 
     def _run_ticks(self) -> None:
-        """Fire each tick once, dropping any that return False.
+        """Fire each tick once, dropping any that return False or raise
+        (fault-isolated — see _run_tick_callbacks).
 
         The return value is the callback's way of saying it is finished; ignoring
         it kept every animation that had ever run registered forever.
         """
         if self._tick_callbacks:
-            self._tick_callbacks = [cb for cb in self._tick_callbacks if cb()]
+            self._tick_callbacks = _run_tick_callbacks(self._tick_callbacks)
 
     def quit(self) -> None:
         self._quit_requested = True

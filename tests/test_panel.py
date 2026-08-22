@@ -945,3 +945,18 @@ def test_panel_main_thread_dispatch_is_noop_without_capability():
     panel = Panel(backend)
     assert panel.dispatches_to_main_thread is False
     assert panel.call_on_main_thread(lambda: None) is False
+
+
+def test_remove_layer_removes_by_identity_wherever_it_sits():
+    backend = MemoryBackend(width=20, height=8)
+    panel = Panel(backend)
+    below, above = Label("below"), Label("above")
+    panel.push_layer(below, z=10, hints={"w": 8, "h": 2})
+    panel.push_layer(above, z=20, hints={"w": 8, "h": 2})
+    # The covered layer is removed in place; the one above it is untouched.
+    assert panel.remove_layer(below) is True
+    assert [slot.widget for slot in panel._layers] == [above]
+    # A widget with no layer is a no-op, not an error.
+    assert panel.remove_layer(below) is False
+    assert panel.remove_layer(above) is True
+    assert panel._layers == []
