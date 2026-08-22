@@ -71,9 +71,15 @@ class MenuPopup(Widget):
     """A floating menu list pushed as a modal Panel layer.
 
     Modal: it owns events while open. Up/down move the cursor (skipping
-    separators and disabled rows), enter/right open a submenu or fire the item
-    and dismiss the whole chain, left/escape back out one level, and an outside
-    click cancels. Submenus open as nested popups to the right of their row."""
+    separators and disabled rows), enter fires the item and dismisses the whole
+    chain, right enters the cursor row's submenu, escape (and left, inside a
+    submenu) backs out one level, and an outside click cancels. Submenus open
+    as nested popups to the right of their row.
+
+    A pulldown hanging off a ``MenuBar`` carries ``on_navigate``: there ←/→
+    with no submenu to enter hop to the adjacent bar entry's pulldown — the
+    desktop menu convention (xefm#304). A context menu has no bar to walk, so
+    without the hook ← keeps closing and → keeps firing like enter."""
 
     def __init__(
         self,
@@ -81,6 +87,7 @@ class MenuPopup(Widget):
         row_h: float = 1.0,
         parent: "MenuPopup | None" = None,
         on_close: Callable[[], None] | None = None,
+        on_navigate: Callable[[int], None] | None = None,
     ):
         self.menu = menu
         self._row_h = row_h
@@ -88,6 +95,9 @@ class MenuPopup(Widget):
         # Root popup only: called once the whole chain is torn down (e.g. the
         # Panel's on_done for a context menu).
         self.on_close = on_close
+        # Root popup only, set for a MenuBar pulldown: called with ±1 after the
+        # chain dismissed itself, to open the neighboring bar entry's pulldown.
+        self.on_navigate = on_navigate
         self._panel = None
         self._width = 0.0
         self._abs: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
@@ -232,6 +242,19 @@ class MenuPopup(Widget):
             d, p = d + 1, p.parent
         return d
 
+    def _navigate_bar(self, direction: int) -> bool:
+        """When this chain hangs off a MenuBar, close the whole chain and ask
+        the bar to open the adjacent pulldown. False when there is no bar."""
+        root = self
+        while root.parent is not None:
+            root = root.parent
+        nav = root.on_navigate
+        if nav is None:
+            return False
+        self._dismiss()
+        nav(direction)
+        return True
+
     # --- events --------------------------------------------------------------
 
     def _activate(self, index: int) -> None:
@@ -251,15 +274,34 @@ class MenuPopup(Widget):
     def handle_event(self, event: Event) -> bool:
         if event.type is EventType.KEY:
             key = event.key
+            in_range = 0 <= self.cursor < len(self.menu.items)
             if key == "up":
                 self._step_cursor(-1)
             elif key == "down":
                 self._step_cursor(1)
-            elif key in ("enter", "right") or event.char == " ":
-                if 0 <= self.cursor < len(self.menu.items):
+            elif key == "enter" or event.char == " ":
+                if in_range:
                     self._activate(self.cursor)
-            elif key in ("escape", "left"):
+            elif key == "right":
+                # → enters the cursor row's submenu; with none to enter, a bar
+                # pulldown hops to the next menu, a context menu fires the row.
+                entry = self.menu.items[self.cursor] if in_range else None
+                if (isinstance(entry, MenuItem) and entry.is_enabled()
+                        and entry.submenu is not None):
+                    self._open_submenu(self.cursor)
+                elif not self._navigate_bar(1) and in_range:
+                    self._activate(self.cursor)
+            elif key == "left":
+                # ← backs out of a submenu; at the root of a bar pulldown it
+                # hops to the previous menu instead of closing outright.
+                if self.parent is not None or not self._navigate_bar(-1):
+                    self._back()
+            elif key == "escape":
                 self._back()
+            elif key in ("f10", "alt"):
+                # The menu-activation key toggles: pressed with the menu
+                # already open, it closes the whole chain (as on Windows).
+                self._dismiss()
             return True
         if event.type is EventType.MOUSE_CLICK:
             row = int(event.y / self._row_h) if event.y is not None else -1
@@ -277,20 +319,28 @@ class MenuBar(Widget):
     """A top-level menu bar. Placed once in the app's layout (a content-sized
     row). On a ``native_menus`` backend it registers ``menu`` as the OS menu
     bar and claims no in-window space; otherwise it renders an in-window strip
-    of the top-level titles, each opening a ``MenuPopup`` below it."""
+    of the top-level titles, each opening a ``MenuPopup`` below it.
 
-    focusable = True
+    Deliberately NOT a focus stop: no desktop puts the menu bar in the Tab
+    order, and taking focus on click is exactly how a bar entry stayed
+    highlighted after its pulldown closed (xefm#304 — the pulldown is modal,
+    so the outside click that dismissed it could never move focus back). The
+    open entry's title is highlighted from the pulldown's open state instead.
+    Keyboard access is the app binding its menu-activation key (F10, a bare
+    Alt tap) to :meth:`open_menu`; once a pulldown is open, ←/→ walk the bar
+    (``MenuPopup.on_navigate``)."""
 
     def __init__(self, menu: Menu, style: Style = DEFAULT_STYLE):
         # A Menu whose items each carry a submenu (their labels are the bar
         # entries). Plain items without a submenu still work (they fire on click).
         self.menu = menu
         self.style = style
-        self.highlight = 0
         self._panel = None
         self._installed_native = False
         self._abs: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
         self._entry_x: list[tuple[int, int, MenuItem]] = []  # (x0, x1, item) per render
+        self._index = 0      # entry of the open (or last-open) pulldown
+        self._open = False   # whether that pulldown is up right now
 
     # --- geometry -------------------------------------------------------------
 
@@ -322,8 +372,6 @@ class MenuBar(Widget):
         ty = (hu - 1.0) / 2.0
         ctx.fill_rect(0, 0, wu, hu, Style(bg=theme.popup_bg))
         entries = self._entries()
-        if entries:
-            self.highlight = max(0, min(self.highlight, len(entries) - 1))
         self._entry_x = []
         x = float(_PAD)
         for i, item in enumerate(entries):
@@ -332,11 +380,13 @@ class MenuBar(Widget):
             # is the padding plus the measured label.
             w = ctx.measure_text(item.label)
             span = _TITLE_PAD + w + _TITLE_PAD
-            focused_here = ctx.focused and i == self.highlight
-            if focused_here:
+            # The title reads as selected exactly while its pulldown is open —
+            # never from focus, which the bar does not take (xefm#304).
+            open_here = self._open and i == self._index
+            if open_here:
                 ctx.fill_rect(x, 0, span, hu, Style(bg=theme.selection_bg))
             fg = theme.text if item.is_enabled() else theme.muted_text
-            bg = theme.selection_bg if focused_here else theme.popup_bg
+            bg = theme.selection_bg if open_here else theme.popup_bg
             ctx.draw_text(x + _TITLE_PAD, ty, item.label, Style(fg=fg, bg=bg))
             self._entry_x.append((x, x + span, item))
             x += span
@@ -354,36 +404,55 @@ class MenuBar(Widget):
 
     # --- opening --------------------------------------------------------------
 
-    def _open(self, item: MenuItem, x0: int) -> None:
-        if self._panel is None:
+    def open_menu(self, index: int = 0) -> bool:
+        """Open the pulldown of bar entry ``index`` — what the app's
+        menu-activation key (F10, a bare Alt tap) calls. Once open, ←/→ walk
+        the bar and escape closes. Returns False without opening on a
+        ``native_menus`` backend (the OS bar owns activation there), before
+        the first draw, and while a pulldown is already up (the open pulldown
+        is modal, so the activation key reaching the *bar* again means a
+        programmatic double call, not the user)."""
+        if self._installed_native or self._panel is None or self._open:
+            return False
+        entries = self._entries()
+        if not entries:
+            return False
+        self._do_open(index % len(entries))
+        return True
+
+    def _do_open(self, index: int) -> None:
+        entries = self._entries()
+        if self._panel is None or not (0 <= index < len(entries)):
             return
+        item = entries[index]
         menu = item.submenu if item.submenu is not None else Menu(item)
+        # The entry's left edge from the last render; a pre-render open (no
+        # spans yet) falls back to the bar's own left edge.
+        x0 = self._entry_x[index][0] if index < len(self._entry_x) else float(_PAD)
         rx, ry, _rw, rh = self._abs
-        self._panel.popup_menu(menu, rx + x0, ry + rh)
+        self._index = index
+        self._open = True
+        self._panel.popup_menu(
+            menu, rx + x0, ry + rh,
+            on_done=self._pulldown_closed, on_navigate=self._navigate,
+        )
+
+    def _pulldown_closed(self) -> None:
+        self._open = False
+
+    def _navigate(self, direction: int) -> None:
+        """←/→ handed up from the open pulldown, which has already dismissed
+        itself: open the neighboring entry's pulldown, wrapping at the ends."""
+        entries = self._entries()
+        if entries:
+            self._do_open((self._index + direction) % len(entries))
 
     # --- events --------------------------------------------------------------
 
     def handle_event(self, event: Event) -> bool:
-        entries = self._entries()
-        if not entries:
-            return False
-        if event.type is EventType.KEY:
-            if event.key == "left":
-                self.highlight = (self.highlight - 1) % len(entries)
-                return True
-            if event.key == "right":
-                self.highlight = (self.highlight + 1) % len(entries)
-                return True
-            if event.key in ("enter", "down") or event.char == " ":
-                item = entries[self.highlight]
-                x0 = self._entry_x[self.highlight][0] if self.highlight < len(self._entry_x) else _PAD
-                self._open(item, x0)
-                return True
-            return False
         if event.type is EventType.MOUSE_CLICK and event.x is not None:
-            for i, (x0, x1, item) in enumerate(self._entry_x):
+            for i, (x0, x1, _item) in enumerate(self._entry_x):
                 if x0 <= event.x < x1:
-                    self.highlight = i
-                    self._open(item, x0)
+                    self._do_open(i)
                     return True
         return False

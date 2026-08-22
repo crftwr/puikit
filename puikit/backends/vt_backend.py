@@ -133,6 +133,7 @@ _SHIFT_PRESSED = 0x0010
 
 # Virtual key codes worth naming.
 _VK_PROCESSKEY = 0xE5  # "the IME is handling this" — never a command key
+_VK_MENU = 0x12  # the Alt key itself (either side)
 
 #: Characters the console delivers for keys that have a contract NAME rather
 #: than a glyph. Mirrors the curses backend's table so both agree.
@@ -969,6 +970,41 @@ def _win_mouse_records(record: dict, previous: int) -> tuple[list[dict], int]:
     return [], buttons
 
 
+class _AltTapTracker:
+    """Bare-Alt detection for the Windows console, the way the OS itself
+    activates a menu bar: Alt DOWN arms, any other key or a mouse press in
+    between disarms, and the Alt UP of a still-armed tap is the activation
+    (delivered as the named key "alt"). Fired on the release, not the press,
+    so an Alt+X chord never opens the menu on its way to X. AltGr never arms:
+    on layouts where it reports as Ctrl+Alt, arming would turn every AltGr
+    glyph into a menu activation.
+
+    Windows-console only, because it needs real key transitions (downs AND
+    ups): a POSIX terminal sends no event at all for a modifier by itself, so
+    there the app's F10 binding is the keyboard path to the menu."""
+
+    def __init__(self) -> None:
+        self._armed = False
+
+    def feed_key(self, vk: int, keydown: bool, control: int) -> bool:
+        """One KEY_EVENT. True when a completed bare-Alt tap should deliver."""
+        if keydown:
+            # A held Alt auto-repeats VK_MENU downs, which re-arm harmlessly;
+            # any other key down (a chord, an IME toggle) disarms the tap.
+            self._armed = vk == _VK_MENU and not (
+                control & (_LEFT_CTRL_PRESSED | _RIGHT_CTRL_PRESSED)
+            )
+            return False
+        fired = self._armed and vk == _VK_MENU
+        if vk == _VK_MENU:
+            self._armed = False
+        return fired
+
+    def disarm(self) -> None:
+        """A mouse press/release/wheel between Alt down and up: not a tap."""
+        self._armed = False
+
+
 def _console_adapter():
     """The platform half. Windows drives the console API directly; a POSIX tty
     gets termios + select (``_vt_posix``); anything that is not a tty — tests,
@@ -1072,6 +1108,8 @@ class _WindowsConsole:
         # Buttons down as of the last MOUSE_EVENT, diffed into gestures by
         # _win_mouse_records.
         self._mouse_buttons = 0
+        # Bare-Alt (menu activation) detection across key transitions.
+        self._alt_tap = _AltTapTracker()
         # Until when a CSI reply may still arrive unasked-for, and the part
         # of one already in flight. Armed only if the size probe gave up
         # waiting; a terminal that answered in time will not answer again.
@@ -1330,6 +1368,14 @@ class _WindowsConsole:
             rec = records[i]
             if rec.EventType == _KEY_EVENT:
                 key = rec.Event.KeyEvent
+                if self._alt_tap.feed_key(
+                    key.wVirtualKeyCode, bool(key.bKeyDown), key.dwControlKeyState,
+                ):
+                    # Alt pressed and released with nothing in between — the
+                    # menu-activation gesture. Delivered as the named key
+                    # "alt"; what it opens is the app's decision.
+                    out.append({"type": "key", "char": "", "name": "alt",
+                                "mods": frozenset()})
                 if not key.bKeyDown:
                     continue
                 out.append(_win_key_record(
@@ -1353,9 +1399,18 @@ class _WindowsConsole:
                     "wheel": delta,
                     "control": m.dwControlKeyState,
                 }, self._mouse_buttons)
+                # A click/wheel mid-Alt-hold makes it a chord, not a tap
+                # (plain movement doesn't — Windows ignores it too).
+                if any(g.get("action") in ("down", "up", "wheel") for g in gestures):
+                    self._alt_tap.disarm()
                 out.extend(gestures)
             elif rec.EventType == _WINDOW_BUFFER_SIZE_EVENT:
                 out.append({"type": "resize"})
+            else:
+                # A FOCUS/MENU record (console focus changed, e.g. Alt+Tab):
+                # whatever Alt state we tracked is stale — the release may
+                # arrive after refocus and must not read as a tap.
+                self._alt_tap.disarm()
         return out
 
     def _window_origin(self) -> tuple[int, int]:

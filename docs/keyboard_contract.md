@@ -30,6 +30,14 @@ home, end, pageup, pagedown, f1…f12`; `char` is `None`; `modifiers` as detecte
 > `Shift-SPACE` is distinguishable from `SPACE` — the same way `Shift-A` differs
 > from `a` under §2.
 
+> **ALT tap** — the Windows console (VT backend) additionally delivers
+> `key="alt"` for a *bare Alt tap*: Alt pressed and released with no other key
+> or mouse press in between — the OS's own menu-activation gesture, intended
+> for `MenuBar.open_menu`. It fires on the release, so Alt+X chords never
+> produce it. No other backend can see a modifier by itself (a POSIX terminal
+> sends nothing at all), so apps must bind a portable activation key (F10)
+> alongside it, per §5.
+
 ## 2. Letters `a`–`z`
 
 `key` is **always the lowercase letter**; `char` is the literal typed glyph
