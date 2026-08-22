@@ -30,6 +30,14 @@ home, end, pageup, pagedown, f1…f12`; `char` is `None`; `modifiers` as detecte
 > `Shift-SPACE` is distinguishable from `SPACE` — the same way `Shift-A` differs
 > from `a` under §2.
 
+> **ALT tap** — the Windows console (VT backend) additionally delivers
+> `key="alt"` for a *bare Alt tap*: Alt pressed and released with no other key
+> or mouse press in between — the OS's own menu-activation gesture, intended
+> for `MenuBar.open_menu`. It fires on the release, so Alt+X chords never
+> produce it. No other backend can see a modifier by itself (a POSIX terminal
+> sends nothing at all), so apps must bind a portable activation key (F10)
+> alongside it, per §5.
+
 ## 2. Letters `a`–`z`
 
 `key` is **always the lowercase letter**; `char` is the literal typed glyph
@@ -58,6 +66,15 @@ therefore **GUI-only** and simply never fires on the curses backend. Application
 should treat such bindings as GUI-conditional rather than expecting parity across
 backends. The **cursor / editing** keys of §5a are the deliberate exception:
 their modified forms are decoded on every backend.
+
+> The **Windows console** (VT backend) is a second exception for `Alt+letter`:
+> its input records carry real modifier state, and when the console suppresses
+> the produced character for an Alt chord the letter is recovered from the
+> virtual key — so `key="f", modifiers={"alt"}` arrives reliably there (the
+> menu accelerators, xefm#304). On POSIX terminals Alt+letter stays
+> unreliable: the ESC-prefix meta encoding is decoded only for the §5a word
+> chords (Alt+b / Alt+f / Alt+d / Alt+Backspace); any other ESC-prefixed
+> letter falls back to the Escape key, agreeing with curses.
 
 ## 5a. Modified cursor & editing keys — word granularity
 

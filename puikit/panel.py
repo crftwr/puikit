@@ -2596,12 +2596,17 @@ class Panel:
             self.backend.set_menu_bar(menu)
 
     def popup_menu(
-        self, menu: Any, x: float, y: float, on_done: Any | None = None
+        self, menu: Any, x: float, y: float, on_done: Any | None = None,
+        bar: Any | None = None,
     ) -> None:
         """Open ``menu`` as a context menu with its top-left near base-unit
         (x, y). Native backends hand it to the OS; others push a widget-rendered
         popup layer. One intent, resolved per backend — the caller (a widget's
-        right-click handler) never branches."""
+        right-click handler) never branches.
+
+        ``bar`` is set only when this popup is a MenuBar pulldown: the popup
+        walks that bar on ←/→ and Alt+letter. A bar pulldown only ever takes
+        the widget path, so the native branch ignores it."""
         if self.backend.capabilities.supports("native_menus"):
             self.backend.popup_menu(menu, x, y, on_done)
             return
@@ -2609,7 +2614,7 @@ class Panel:
 
         vector = self.backend.capabilities.supports("vector_shapes")
         w, h, row_h = popup_geometry(menu, self.backend.measure_text, vector)
-        popup = MenuPopup(menu, row_h=row_h)
+        popup = MenuPopup(menu, row_h=row_h, bar=bar)
 
         def close() -> None:
             # Pop only if our popup is still the top layer (a submenu it opened

@@ -104,6 +104,97 @@ def test_ime_commit_is_still_not_dropped(backend):
     assert key(be, "あ", 0xE5).key == "あ"
 
 
+# --- bare-Alt tap (Windows console menu activation) -------------------------
+#
+# The tracker is a module-level pure class precisely so this is testable off
+# Windows: it is fed (vk, keydown, control) exactly as _read_records does.
+
+_VK_ALT = 0x12
+_ALT_DOWN_STATE = 0x0002  # LEFT_ALT_PRESSED
+_CTRL_STATE = 0x0008      # LEFT_CTRL_PRESSED
+
+
+def _tracker():
+    from puikit.backends.vt_backend import _AltTapTracker
+
+    return _AltTapTracker()
+
+
+def test_alt_tap_fires_on_the_bare_release():
+    t = _tracker()
+    assert t.feed_key(_VK_ALT, True, _ALT_DOWN_STATE) is False  # down only arms
+    assert t.feed_key(_VK_ALT, False, 0) is True                # up: the tap
+
+
+def test_alt_tap_survives_autorepeat():
+    t = _tracker()
+    for _ in range(3):  # a held Alt repeats its own down
+        assert t.feed_key(_VK_ALT, True, _ALT_DOWN_STATE) is False
+    assert t.feed_key(_VK_ALT, False, 0) is True
+
+
+def test_alt_chord_never_fires():
+    # Alt+X on its way to X must not open the menu (the whole reason the tap
+    # fires on the release, as Windows itself does).
+    t = _tracker()
+    t.feed_key(_VK_ALT, True, _ALT_DOWN_STATE)
+    t.feed_key(0x58, True, _ALT_DOWN_STATE)   # X down while Alt held
+    t.feed_key(0x58, False, _ALT_DOWN_STATE)
+    assert t.feed_key(_VK_ALT, False, 0) is False
+
+
+def test_altgr_never_arms():
+    # On layouts where AltGr reports as Ctrl+Alt, arming would turn every
+    # AltGr glyph into a menu activation.
+    t = _tracker()
+    t.feed_key(_VK_ALT, True, _ALT_DOWN_STATE | _CTRL_STATE)
+    assert t.feed_key(_VK_ALT, False, 0) is False
+
+
+def test_mouse_press_disarms_the_tap():
+    t = _tracker()
+    t.feed_key(_VK_ALT, True, _ALT_DOWN_STATE)
+    t.disarm()  # what _read_records does on a click/wheel gesture
+    assert t.feed_key(_VK_ALT, False, 0) is False
+
+
+def test_alt_record_becomes_the_named_key(backend):
+    # The synthesized record travels the same _to_event path as everything else.
+    be, _ = backend
+    event = be._to_event({"type": "key", "char": "", "name": "alt",
+                          "mods": frozenset()})
+    assert event.type is EventType.KEY
+    assert event.key == "alt"
+
+
+# --- Alt+letter accelerators (Windows console) -------------------------------
+
+
+def test_alt_letter_with_suppressed_char_recovers_the_letter(backend):
+    # The console may leave UnicodeChar empty for an Alt chord; the letter VK
+    # still names the key, so Alt+F reaches the app as ("f", {"alt"}).
+    be, _ = backend
+    event = key(be, "", 0x46, _ALT_DOWN_STATE)  # VK 'F', no char
+    assert event.key == "f"
+    assert event.modifiers == frozenset({"alt"})
+
+
+def test_alt_letter_with_produced_char_keeps_the_modifier(backend):
+    # And when the console does produce the character, the char path already
+    # carries alt — either way the app sees the same event.
+    be, _ = backend
+    event = key(be, "f", 0x46, _ALT_DOWN_STATE)
+    assert event.key == "f"
+    assert event.modifiers == frozenset({"alt"})
+
+
+def test_ctrl_alt_with_suppressed_char_stays_dropped(backend):
+    # AltGr reports Ctrl+Alt; a suppressed char there means the chord really
+    # produced nothing, so no letter is fabricated.
+    be, _ = backend
+    assert key(be, "", 0x46, _ALT_DOWN_STATE | _CTRL_STATE) is None
+
+
 # --- suspend / resume ------------------------------------------------------
 
 

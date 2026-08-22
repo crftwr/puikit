@@ -29,8 +29,8 @@ def backend(request):
     return MemoryBackend(width=40, height=16, capabilities=request.param)
 
 
-def _key(name, char=None):
-    return Event(type=EventType.KEY, key=name, char=char)
+def _key(name, char=None, mods=()):
+    return Event(type=EventType.KEY, key=name, char=char, modifiers=frozenset(mods))
 
 
 def _click(x, y):
@@ -177,6 +177,205 @@ def test_menu_bar_renders_titles_and_opens_popup(backend):
     assert fired == ["new"]
 
 
+def test_menu_bar_is_not_a_focus_stop(backend):
+    # No desktop puts the menu bar in the Tab order, and click-focus is how
+    # xefm#304's stuck highlight happened: the bar took focus on the opening
+    # click, the pulldown was modal, and the outside click that dismissed it
+    # could never move focus back. The bar must not take part in focus at all.
+    panel = Panel(backend)
+    bar = MenuBar(_bar_menu([]))
+    panel.add(bar, x=0, y=0, w=40, h=1)
+    assert panel.get_focused() is None  # never auto-picked as first focusable
+    panel.render()
+    x0 = bar._entry_x[0][0]
+    panel.dispatch_event(_click(x0 + 1, 0))
+    assert len(panel._layers) == 1
+    assert panel.get_focused() is None  # the opening click moved no focus
+
+
+def test_menu_bar_highlight_clears_when_pulldown_dismissed(backend):
+    # xefm#304: open [File] with the mouse, click elsewhere — the pulldown
+    # closes and the title must stop reading as selected.
+    panel = Panel(backend)
+    bar = MenuBar(_bar_menu([]))
+    panel.add(bar, x=0, y=0, w=40, h=1)
+    panel.render()
+    x0 = bar._entry_x[0][0]
+    panel.dispatch_event(_click(x0 + 1, 0))
+    panel.render()
+    assert bar._open is True
+    assert backend.style_at(int(x0) + 1, 0).bg == panel.theme.selection_bg
+    panel.dispatch_event(_click(38, 15))  # outside click dismisses
+    panel.render()
+    assert panel._layers == []
+    assert bar._open is False
+    assert backend.style_at(int(x0) + 1, 0).bg == panel.theme.popup_bg
+
+
+def test_menu_bar_left_right_walk_the_bar(backend):
+    # With a pulldown open, ←/→ hop between the bar's menus (the desktop
+    # convention), wrapping at the ends — xefm#304's third complaint.
+    panel = Panel(backend)
+    bar = MenuBar(_bar_menu([]))
+    panel.add(bar, x=0, y=0, w=40, h=1)
+    panel.render()
+    panel.dispatch_event(_click(bar._entry_x[0][0] + 1, 0))  # open File
+    panel.render()
+    panel.dispatch_event(_key("right"))  # hop to Edit
+    assert bar._index == 1 and bar._open is True
+    assert len(panel._layers) == 1
+    panel.render()
+    assert panel._layers[-1].widget.menu.items[0].label == "Copy"
+    panel.dispatch_event(_key("left"))   # back to File
+    assert bar._index == 0
+    panel.render()
+    assert panel._layers[-1].widget.menu.items[0].label == "New"
+    panel.dispatch_event(_key("left"))   # wraps to Edit
+    assert bar._index == 1
+
+
+def test_menu_bar_right_enters_submenu_before_walking(backend):
+    # → on a row with a submenu opens the submenu; → inside that submenu (on a
+    # plain row) walks to the next bar menu, tearing the whole chain down.
+    deep = Menu(
+        MenuItem("File", submenu=Menu(
+            MenuItem("More", submenu=Menu(MenuItem("Child"))),
+        )),
+        MenuItem("Edit", submenu=Menu(MenuItem("Copy"))),
+    )
+    panel = Panel(backend)
+    bar = MenuBar(deep)
+    panel.add(bar, x=0, y=0, w=40, h=1)
+    panel.render()
+    panel.dispatch_event(_click(bar._entry_x[0][0] + 1, 0))  # open File
+    panel.render()
+    panel.dispatch_event(_key("right"))  # cursor on "More": enter its submenu
+    assert len(panel._layers) == 2
+    assert bar._index == 0
+    panel.render()
+    panel.dispatch_event(_key("right"))  # "Child" has no submenu: walk to Edit
+    assert bar._index == 1
+    assert len(panel._layers) == 1
+    panel.render()
+    assert panel._layers[-1].widget.menu.items[0].label == "Copy"
+
+
+def test_menu_bar_open_menu_and_toggle_key(backend):
+    # open_menu() is the keyboard activation (the app binds F10 / bare Alt to
+    # it); the same key with the menu open closes the whole chain.
+    panel = Panel(backend)
+    fired = []
+    bar = MenuBar(_bar_menu(fired))
+    assert bar.open_menu() is False  # before the first draw: nowhere to open
+    panel.add(bar, x=0, y=0, w=40, h=1)
+    panel.render()
+    assert bar.open_menu() is True
+    assert len(panel._layers) == 1 and bar._open is True
+    panel.render()
+    panel.dispatch_event(_key("f10"))  # activation key again: toggle closed
+    assert panel._layers == [] and bar._open is False
+    assert bar.open_menu(1) is True   # explicit entry index
+    assert bar._index == 1
+    panel.render()
+    panel.dispatch_event(_key("enter"))  # commit "Copy"
+    assert fired == ["copy"]
+    assert bar._open is False
+
+
+def test_context_menu_arrows_keep_their_meaning(backend):
+    # Without a bar to walk, a context menu's ← still closes and → still fires
+    # the row (there is no neighbor to hop to).
+    panel = Panel(backend)
+    fired = []
+    panel.popup_menu(_ctx_menu(fired), 2, 2)
+    panel.render()
+    panel.dispatch_event(_key("right"))  # cursor on "Cut": fires like enter
+    assert fired == ["cut"]
+    assert panel._layers == []
+    panel.popup_menu(_ctx_menu(fired), 2, 2)
+    panel.render()
+    panel.dispatch_event(_key("left"))   # closes the root
+    assert panel._layers == []
+    assert fired == ["cut"]
+
+
+def test_popup_letter_mnemonic_activates_unique_match(backend):
+    # A plain letter with one enabled first-letter match fires the row.
+    panel = Panel(backend)
+    fired = []
+    panel.popup_menu(_ctx_menu(fired), 2, 2)
+    panel.render()
+    panel.dispatch_event(_key("c"))
+    assert fired == ["cut"]
+    assert panel._layers == []
+
+
+def test_popup_letter_mnemonic_skips_disabled_and_opens_submenu(backend):
+    panel = Panel(backend)
+    fired = []
+    panel.popup_menu(_ctx_menu(fired), 2, 2)
+    panel.render()
+    panel.dispatch_event(_key("p"))  # only match "Paste" is disabled: inert
+    assert fired == [] and len(panel._layers) == 1
+    panel.dispatch_event(_key("m"))  # "More" is a submenu parent: opens it
+    assert len(panel._layers) == 2
+
+
+def test_popup_letter_mnemonic_cycles_ambiguous_matches(backend):
+    # Several matches only move the cursor (wrapping), so enter commits the
+    # one the user means — the Windows convention.
+    menu = Menu(
+        MenuItem("Copy", on_select=lambda: fired.append("copy")),
+        MenuItem("Cut", on_select=lambda: fired.append("cut")),
+        MenuItem("Close", on_select=lambda: fired.append("close")),
+    )
+    fired = []
+    panel = Panel(backend)
+    panel.popup_menu(menu, 2, 2)
+    popup = panel._layers[-1].widget
+    panel.render()
+    panel.dispatch_event(_key("c"))
+    assert popup.cursor == 1 and fired == []
+    panel.dispatch_event(_key("c"))
+    assert popup.cursor == 2
+    panel.dispatch_event(_key("c"))
+    assert popup.cursor == 0  # wrapped
+    panel.dispatch_event(_key("enter"))
+    assert fired == ["copy"]
+
+
+def test_menu_bar_alt_letter_opens_matching_menu(backend):
+    # The Alt+F accelerator: the title's first letter is its mnemonic.
+    panel = Panel(backend)
+    bar = MenuBar(_bar_menu([]))
+    panel.add(bar, x=0, y=0, w=40, h=1)
+    panel.render()
+    assert bar.open_menu_mnemonic("z") is False
+    assert panel._layers == []
+    assert bar.open_menu_mnemonic("e") is True  # Edit
+    assert bar._index == 1 and len(panel._layers) == 1
+    panel.render()
+    assert panel._layers[-1].widget.menu.items[0].label == "Copy"
+
+
+def test_alt_letter_switches_the_open_pulldown(backend):
+    # Alt+letter with a pulldown already open jumps to that bar entry, and an
+    # unmatched letter leaves the open menu alone.
+    panel = Panel(backend)
+    bar = MenuBar(_bar_menu([]))
+    panel.add(bar, x=0, y=0, w=40, h=1)
+    panel.render()
+    bar.open_menu()  # File
+    panel.render()
+    panel.dispatch_event(_key("z", mods=("alt",)))
+    assert bar._index == 0 and len(panel._layers) == 1
+    panel.dispatch_event(_key("e", mods=("alt",)))
+    assert bar._index == 1 and bar._open is True
+    assert len(panel._layers) == 1
+    panel.render()
+    assert panel._layers[-1].widget.menu.items[0].label == "Copy"
+
+
 def test_menu_bar_collapses_to_zero_height_when_native():
     bar = MenuBar(Menu(MenuItem("File", submenu=Menu(MenuItem("New")))))
     native = LayoutContext(1, 1, snap=True, native_menus=True)
@@ -223,6 +422,10 @@ def test_native_backend_receives_menu_bar_and_popup():
     panel.add(bar, x=0, y=0, w=40, h=1)
     panel.render()
     assert backend.menu_bar_calls == [menu]
+    # Keyboard activation is the OS bar's own job here — open_menu declines
+    # rather than popping a widget context menu over a native bar.
+    assert bar.open_menu() is False
+    assert backend.popup_calls == []
 
     done = []
     panel.popup_menu(menu, 3, 4, on_done=lambda: done.append(True))
