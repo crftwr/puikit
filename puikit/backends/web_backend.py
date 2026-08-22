@@ -44,6 +44,7 @@ from ..backend import (
     EventHandler,
     Style,
     TextAttribute,
+    _run_tick_callbacks,
     is_transparent,
 )
 from ..capability import PROFILE_GUI_WEB, CapabilityProfile
@@ -948,7 +949,9 @@ class WebBackend(Backend):
     def _run_ticks(self) -> None:
         with self._tick_lock:
             callbacks = list(self._tick_callbacks)
-        survivors = [cb for cb in callbacks if cb()]
+        # Fault-isolated: a raising callback is logged and dropped rather than
+        # aborting the frame with everything after it skipped.
+        survivors = _run_tick_callbacks(callbacks)
         with self._tick_lock:
             # Keep only callbacks that survived and were not removed meanwhile.
             self._tick_callbacks = [cb for cb in self._tick_callbacks if cb in survivors]

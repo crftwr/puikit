@@ -223,8 +223,11 @@ class MessageBox:
     # --- events --------------------------------------------------------------
 
     def _close(self, index: int) -> None:
+        # Remove this box's own layer, not whatever is topmost: another layer
+        # may have been pushed above it since (and a second activation must not
+        # pop an unrelated layer).
         if self._panel is not None:
-            self._panel.pop_layer()
+            self._panel.remove_layer(self)
         if self.on_result is not None and 0 <= index < len(self.buttons):
             self.on_result(self.buttons[index])
 

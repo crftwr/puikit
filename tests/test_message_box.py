@@ -3,7 +3,7 @@
 import pytest
 
 from puikit import Event, EventType, Panel, PROFILE_GUI_DESKTOP, PROFILE_TUI
-from puikit.widgets import show_message_box
+from puikit.widgets import Label, show_message_box
 from puikit.backends.memory_backend import MemoryBackend
 
 
@@ -141,3 +141,17 @@ def test_message_box_markdown_hard_break_sizes_to_longest_row():
         panel.render()
         widths.append(panel._layers[0].rect.w)
     assert widths[0] == widths[1]
+
+
+def test_message_box_close_removes_itself_not_the_topmost_layer(backend):
+    # A layer pushed above the box after it opened must survive the box
+    # closing: the box removes its own layer by identity rather than popping
+    # whatever happens to be on top (xefm#333's bug family).
+    results = []
+    panel = Panel(backend)
+    box = show_message_box(panel, "Sure?", buttons=("OK",), on_result=results.append)
+    cover = Label("busy")
+    panel.push_layer(cover, z=99, hints={"w": 10, "h": 2})
+    box._close(0)
+    assert results == ["OK"]
+    assert [slot.widget for slot in panel._layers] == [cover]

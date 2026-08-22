@@ -45,7 +45,7 @@ from ._d3d_shader import HAVE_D3D_SHADER, D3DShaderBackground
 from ..background import Shader, Wallpaper
 from ..backend import (
     Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, WindowHandle,
-    WindowStyle, is_transparent,
+    WindowStyle, _run_tick_callbacks, is_transparent,
 )
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..easing import resolve as _resolve_easing
@@ -1703,7 +1703,9 @@ class WindowsBackend(Backend):
         now = time.monotonic()
         finished = [a for a in self._animations.values() if a.done(now)]
         self._animations = {k: a for k, a in self._animations.items() if not a.done(now)}
-        self._tick_callbacks = [cb for cb in self._tick_callbacks if cb()]
+        # Fault-isolated: a raising callback is logged and dropped rather than
+        # aborting the frame and re-raising forever from the WM_TIMER handler.
+        self._tick_callbacks = _run_tick_callbacks(self._tick_callbacks)
         # Fire each finished transition's completion hook (a drawer slide-out pops
         # its layer) before the redraw, so the hook's re-render rebuilds the
         # display list without the popped layer — no one-frame flash back at rest.

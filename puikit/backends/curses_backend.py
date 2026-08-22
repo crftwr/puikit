@@ -13,7 +13,7 @@ import sys
 import time
 from typing import Any
 
-from ..backend import Backend, Color, DEFAULT_STYLE, EventHandler, Style, TextAttribute
+from ..backend import Backend, Color, DEFAULT_STYLE, EventHandler, Style, TextAttribute, _run_tick_callbacks
 from ..capability import CapabilityProfile, PROFILE_TUI
 from ..event import Event, EventType, char_key_event
 from ..image import CONTAIN, COVER, contain_box, cover_source
@@ -1819,10 +1819,11 @@ class CursesBackend(Backend):
 
     def _run_ticks(self) -> None:
         """Fire each registered animation tick once, dropping any that return
-        False. Called on every idle wake of the event loop (~the timeout
-        cadence), so a self-driven widget advances even with no input."""
+        False or raise (fault-isolated — see _run_tick_callbacks). Called on
+        every idle wake of the event loop (~the timeout cadence), so a
+        self-driven widget advances even with no input."""
         if self._tick_callbacks:
-            self._tick_callbacks = [cb for cb in self._tick_callbacks if cb()]
+            self._tick_callbacks = _run_tick_callbacks(self._tick_callbacks)
 
     def run_event_loop(self, handler: EventHandler) -> None:
         self._quit_requested = False

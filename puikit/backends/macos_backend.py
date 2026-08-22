@@ -124,7 +124,7 @@ try:
 except ImportError:  # pragma: no cover - older/partial PyObjC
     CAMetalLayer = None
     CATransaction = None
-from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, WindowHandle, WindowStyle, is_transparent
+from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, WindowHandle, WindowStyle, _run_tick_callbacks, is_transparent
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..easing import resolve as _resolve_easing
 from ..event import Event, EventType, char_key_event
@@ -2385,8 +2385,12 @@ class MacOSBackend(Backend):
             key: anim for key, anim in self._animations.items() if not anim.done(now)
         }
         # Layout-level animations (Panel "size" transitions) re-render the
-        # display list themselves; a callback returning False is done.
-        self._tick_callbacks = [cb for cb in self._tick_callbacks if cb()]
+        # display list themselves; a callback returning False is done. Dispatch
+        # is fault-isolated (_run_tick_callbacks): this runs as an NSTimer
+        # selector, where an escaping exception is swallowed by PyObjC — a bare
+        # comprehension left a raising callback registered to raise again every
+        # frame, with everything after it skipped (xefm#333).
+        self._tick_callbacks = _run_tick_callbacks(self._tick_callbacks)
         # Fire each finished transition's completion hook (a drawer slide-out pops
         # its layer here) BEFORE the redraw below, so the hook's re-render rebuilds
         # the display list without the popped layer — otherwise the now-untransformed
