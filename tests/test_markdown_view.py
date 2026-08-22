@@ -1412,3 +1412,34 @@ def test_selection_drag_release_stops_the_edge_scroll(backend, clock):
         backend.run_animation_ticks()
     assert (view.offset, view.selection_text()) == settled
     assert backend.tick_callbacks == []
+
+
+def test_search_matcher_unions_extra_rows(backend):
+    # A host-plugged matcher (e.g. Migemo) adds rows the literal test misses;
+    # its spans are drawn by the same highlight pass. (pattern, text) -> spans
+    # or None for "no opinion".
+    view = MarkdownView(_paras("聖杯の話", "the grail row", "plain"))
+
+    def matcher(pattern, text):
+        if pattern != "grail":
+            return None
+        i = text.find("聖杯")
+        return [(i, i + 2)] if i >= 0 else []
+
+    view.search_matcher = matcher
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=24, h=8)
+    panel.render()
+    assert view.search_set("grail") == 2           # literal row + matcher row
+    assert view._search_rows == [0, 2]
+    panel.render()                                  # draws the matcher spans
+
+
+def test_search_matcher_none_result_stays_literal(backend):
+    view = MarkdownView(_paras("聖杯の話", "the grail row"))
+    view.search_matcher = lambda pattern, text: None
+    panel = Panel(backend)
+    panel.add(view, x=0, y=0, w=24, h=8)
+    panel.render()
+    assert view.search_set("grail") == 1
+    assert view._search_rows == [2]

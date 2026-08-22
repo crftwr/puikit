@@ -459,3 +459,18 @@ def test_ctrl_c_copies_selected_value(backend):
     panel.dispatch_event(_key("down"))                     # select "tags"
     panel.dispatch_event(_key("c", frozenset({"cmd"})))
     assert backend.get_clipboard() == '["tui", "files"]'
+
+
+def test_search_matcher_unions_extra_nodes():
+    # A host-plugged matcher (e.g. Migemo) adds nodes the literal test misses;
+    # the row-level highlight only truth-tests its spans.
+    view = JsonView({"名前": "太郎", "note": "grail here", "other": 1})
+
+    def matcher(pattern, text):
+        if pattern != "grail":
+            return None
+        i = text.find("太郎")
+        return [(i, i + 2)] if i >= 0 else []
+
+    view.search_matcher = matcher
+    assert view.search_set("grail") == 2           # literal node + matcher node

@@ -60,6 +60,7 @@ import os
 import re
 from dataclasses import dataclass, field, replace
 from html import escape as _html_escape
+from typing import Callable
 
 from .. import _remote_image
 from ..backend import DEFAULT_STYLE, Color, Style, TextAttribute
@@ -1032,6 +1033,12 @@ class MarkdownView(Widget):
         self._search_pos: int = -1         # index into _search_rows (current match)
         self._search_token: tuple[str, float] = ("", -1.0)
         self._search_origin: float = 0.0
+        #: Optional extra search matcher a host plugs in on top of the built-in
+        #: literal matching: ``(pattern, row_text) -> [(start, end), ...]`` hit
+        #: spans, or ``None`` for "no opinion, literal only" (e.g. Migemo makes
+        #: romaji match Japanese). A row matches when either test hits, and the
+        #: extra spans are highlighted alongside the literal ones.
+        self.search_matcher: Callable[[str, str], list[tuple[int, int]] | None] | None = None
 
         # Read-only text selection (opt-in; a host file viewer sets it). Modeled
         # over the laid-out ``_rows`` as ``(row, cell, line, glyph)`` positions —
@@ -1738,8 +1745,18 @@ class MarkdownView(Widget):
         plain = self._row_plain(row)
         low = plain.lower()
         pat = self._search_pattern.lower()
+        # Literal occurrences, then the host matcher's extra spans (overlaps
+        # just repaint the same glyphs with the same tint).
+        hits: list[tuple[int, int]] = []
         idx = low.find(pat)
-        if idx < 0:
+        while idx >= 0:
+            hits.append((idx, idx + len(pat)))
+            idx = low.find(pat, idx + len(pat))
+        if self.search_matcher is not None:
+            extra = self.search_matcher(self._search_pattern, plain)
+            if extra:
+                hits.extend(extra)
+        if not hits:
             return
         surface = self.style.bg or theme.surface_bg("content")
         hl = _search_bg(surface, current)
@@ -1752,10 +1769,9 @@ class MarkdownView(Widget):
             segs.append((pos, text, style, x))
             x += ctx.measure_text(text, style)
             pos += len(text)
-        while idx >= 0:
-            end = idx + len(pat)
+        for start, end in hits:
             for c0, text, style, sx in segs:
-                s = max(idx, c0)
+                s = max(start, c0)
                 e = min(end, c0 + len(text))
                 if e <= s:
                     continue
@@ -1766,7 +1782,6 @@ class MarkdownView(Widget):
                 # transparent glyph over the fill, keeps the tint via bg=hl too).
                 ctx.fill_rect(hx, y, ctx.measure_text(seg, style), row.height, Style(bg=hl))
                 ctx.draw_text(hx, y, seg, replace(style, bg=hl))
-            idx = low.find(pat, end)
 
     # --- selection ------------------------------------------------------------
     #
@@ -2329,13 +2344,19 @@ class MarkdownView(Widget):
 
     def _recompute_search_rows(self) -> None:
         """Rebuild the navigable match set (display rows whose plain text contains
-        the pattern, case-insensitive) from the current layout."""
+        the pattern, case-insensitive — or that the host's ``search_matcher``
+        hits) from the current layout."""
         rows = self._rows or []
         pat = self._search_pattern.lower()
-        self._search_rows = (
-            [i for i, r in enumerate(rows) if pat in self._row_plain(r).lower()]
-            if pat else []
-        )
+        matcher = self.search_matcher
+
+        def hit(row: _Row) -> bool:
+            text = self._row_plain(row)
+            if pat in text.lower():
+                return True
+            return bool(matcher(self._search_pattern, text)) if matcher else False
+
+        self._search_rows = [i for i, r in enumerate(rows) if hit(r)] if pat else []
         self._search_token = (self._search_pattern, self._wrap_width)
 
     def _sync_search(self) -> None:

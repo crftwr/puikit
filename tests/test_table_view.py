@@ -302,3 +302,18 @@ def test_page_fill_kept_when_the_view_is_its_own_surface():
               x=0, y=0, w=24, h=8, hints={"surface": "content"})
     panel.render()
     assert len(_page_fills(backend, own)) == 1
+
+
+def test_search_matcher_unions_extra_rows():
+    # A host-plugged matcher (e.g. Migemo) adds body rows the literal test
+    # misses; the row-level highlight only truth-tests its spans.
+    view = TableView(["id", "name"], [["1", "聖杯"], ["2", "grail"], ["3", "x"]])
+
+    def matcher(pattern, text):
+        if pattern != "grail":
+            return None
+        i = text.find("聖杯")
+        return [(i, i + 2)] if i >= 0 else []
+
+    view.search_matcher = matcher
+    assert view.search_set("grail") == 2           # literal row + matcher row
