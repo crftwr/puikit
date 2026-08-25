@@ -1270,6 +1270,25 @@ class _PuiKitSecondaryWindowDelegate(NSObject):
             self.handle._on_did_resize()
 
 
+def _apply_overlay_style(nswindow, ws: WindowStyle) -> None:
+    """The two WindowStyle fields an NSWindow carries rather than a style mask.
+
+    Shared by the main window and create_window's secondary ones, so the pair
+    cannot drift - the same reason _window_style_flags exists on Windows.
+
+    A transparent window also drops its shadow. macOS derives the shadow from
+    the window's alpha channel, so a window that paints nothing has a shadow
+    that has to be invalidated by hand every time its content moves; an
+    overlay that animates would trail the previous frame's outline.
+    """
+    if ws.click_through:
+        nswindow.setIgnoresMouseEvents_(True)
+    if ws.transparent:
+        nswindow.setOpaque_(False)
+        nswindow.setBackgroundColor_(NSColor.clearColor())
+        nswindow.setHasShadow_(False)
+
+
 class MacWindowHandle(WindowHandle):
     """A real secondary NSWindow (capability "multi_window")."""
 
@@ -1635,6 +1654,7 @@ class MacOSBackend(Backend):
         self._window.setTitle_(self._title)
         if ws.topmost:
             self._window.setLevel_(NSFloatingWindowLevel)
+        _apply_overlay_style(self._window, ws)
 
         self._view = _PuiKitView.alloc().initWithFrame_(NSMakeRect(0, 0, w_px, h_px))
         self._view.backend = self
@@ -1775,6 +1795,7 @@ class MacOSBackend(Backend):
         nswindow.setTitle_(title)
         if ws.topmost:
             nswindow.setLevel_(NSFloatingWindowLevel)
+        _apply_overlay_style(nswindow, ws)
         # AppKit's default releases a closed window while the Python handle
         # still references it; lifetime stays with the handle instead.
         nswindow.setReleasedWhenClosed_(False)
@@ -2475,6 +2496,12 @@ class MacOSBackend(Backend):
 
     # --- pixel rendering (called from the view's drawRect) --------------------
 
+    def _window_is_transparent(self) -> bool:
+        """Whether the window currently being drawn paints no background."""
+        ws = (self._active_win.window_style if self._active_win is not None
+              else self._window_style)
+        return bool(ws is not None and ws.transparent)
+
     def _render_into_view(self) -> None:
         frame_start = time.perf_counter() if _BG_PROFILE else 0.0
         # Clear the frame. When the background names a backdrop, the opacity-dissolved
@@ -2489,7 +2516,19 @@ class MacOSBackend(Backend):
         bg = None if self._active_win is not None else self._background
         if bg is not None and getattr(bg, "backdrop", None) is not None:
             clear = bg.backdrop
-        if isinstance(bg, Shader) and self._metal_layer is not None:
+        if self._window_is_transparent():
+            # Nothing of our own behind the UI: clear the whole surface to
+            # transparent so the desktop shows through wherever a widget does
+            # not paint. Copy rather than the default source-over for the same
+            # reason the shader path below uses it - filling with alpha 0 over
+            # the previous frame composites to the previous frame.
+            NSGraphicsContext.currentContext().setCompositingOperation_(
+                NSCompositingOperationCopy)
+            NSColor.clearColor().setFill()
+            NSRectFill(self._target_view().bounds())
+            NSGraphicsContext.currentContext().setCompositingOperation_(
+                NSCompositingOperationSourceOver)
+        elif isinstance(bg, Shader) and self._metal_layer is not None:
             # A shader paints the GPU layer *behind* this view, so the view must
             # not lay down an opaque backdrop over it. Clear to transparent with
             # Copy (not the default source-over, which would leave the previous

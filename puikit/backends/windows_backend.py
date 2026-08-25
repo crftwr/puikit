@@ -394,6 +394,14 @@ def _window_style_flags(ws: WindowStyle) -> tuple[int, int]:
         ex_style |= native.WS_EX_NOACTIVATE
     if ws.tool:
         ex_style |= native.WS_EX_TOOLWINDOW
+    if ws.click_through:
+        ex_style |= native.WS_EX_TRANSPARENT
+    # ws.transparent has no Win32 counterpart here yet: a see-through window
+    # needs WS_EX_LAYERED with per-pixel alpha, which means UpdateLayeredWindow
+    # against a premultiplied DIB or a DirectComposition swapchain - a change
+    # to how this backend presents every frame, not a style flag. Accepted and
+    # ignored until then, which is the base recipe for a request a backend
+    # cannot honour.
     return ex_style, style
 
 
@@ -900,20 +908,10 @@ class WindowsBackend(Backend):
         # be read (per-monitor aware), then derive the base unit and correct the
         # frame to the requested base-unit size. Layouts re-resolve from the
         # live size each render, so the provisional size is never shown.
-        ws = self._window_style
-        if ws.frameless:
-            win_style = native.WS_POPUP
-        else:
-            win_style = native.WS_OVERLAPPEDWINDOW
-            if not ws.resizable:
-                win_style &= ~(native.WS_THICKFRAME | native.WS_MAXIMIZEBOX)
-        ex_style = 0
-        if ws.topmost:
-            ex_style |= native.WS_EX_TOPMOST
-        if not ws.activates:
-            ex_style |= native.WS_EX_NOACTIVATE
-        if ws.tool:
-            ex_style |= native.WS_EX_TOOLWINDOW
+        # Through the shared helper, which this used to duplicate line for
+        # line - the drift its docstring promises could not happen was already
+        # here, and a flag added to one would have missed the other.
+        ex_style, win_style = _window_style_flags(self._window_style)
         self._hwnd = native.user32.CreateWindowExW(
             ex_style,
             _CLASS_NAME,

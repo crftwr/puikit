@@ -107,6 +107,21 @@ class WindowStyle:
     - ``resizable``: user-resizable frame (ignored when ``frameless``).
     - ``tool``: keep the window out of the taskbar / Alt-Tab list
       (WS_EX_TOOLWINDOW). Windows-only today; no-op on macOS.
+    - ``click_through``: the window is not hit-tested, so clicks, scrolls and
+      hovers reach whatever is behind it (``ignoresMouseEvents`` /
+      WS_EX_TRANSPARENT). For an overlay that is *shown at* something rather
+      than *used* — a highlight, a measurement guide, a drop indicator —
+      which would otherwise swallow the click aimed at what it points to.
+      It receives no input at all, which is the whole request: pair it with
+      ``activates=False``.
+    - ``transparent``: the window paints no background of its own, so the
+      desktop and the windows below show through wherever the UI leaves the
+      surface bare (``setOpaque_(False)`` + a clear background). Without it an
+      overlay can only *cover* what it marks; with it, it can outline it.
+      **macOS only today** - on Windows a see-through window needs
+      WS_EX_LAYERED with per-pixel alpha, which is a change to how the backend
+      presents every frame rather than a style flag, so the field is accepted
+      and ignored there.
 
     Backends without the ``window_styles`` capability accept the parameter
     and ignore it (the base recipe: unknown requests degrade, not raise)."""
@@ -116,6 +131,8 @@ class WindowStyle:
     activates: bool = True
     resizable: bool = True
     tool: bool = False
+    click_through: bool = False
+    transparent: bool = False
 
 
 EventHandler = Callable[[Event], None]

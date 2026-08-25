@@ -19,6 +19,8 @@ class TestWindowStyleDataclass:
         assert ws.activates is True
         assert ws.resizable is True
         assert ws.tool is False
+        assert ws.click_through is False
+        assert ws.transparent is False
 
     def test_positional_arity_binds(self):
         # Compat checklist: old positional construction must keep binding as
@@ -26,6 +28,9 @@ class TestWindowStyleDataclass:
         ws = WindowStyle(True, True, False, False, True)
         assert (ws.frameless, ws.topmost, ws.activates, ws.resizable, ws.tool) == (
             True, True, False, False, True)
+        # ... and the fields appended after it stay at their defaults, which is
+        # what makes the append invisible to a caller written before them.
+        assert (ws.click_through, ws.transparent) == (False, False)
 
     def test_round_trips(self):
         old = WindowStyle(frameless=True, topmost=True)
@@ -34,6 +39,35 @@ class TestWindowStyleDataclass:
 
     def test_capability_declared(self):
         assert PROFILE_GUI_DESKTOP.supports("window_styles")
+
+    def test_overlay_fields_round_trip(self):
+        overlay = WindowStyle(frameless=True, topmost=True, activates=False,
+                              click_through=True, transparent=True)
+        assert WindowStyle(**dataclasses.asdict(overlay)) == overlay
+        assert dataclasses.replace(overlay, transparent=False).click_through is True
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Win32 flag mapping")
+class TestWindowsFlagMapping:
+    """The (ex_style, style) pair, which the main window and every secondary
+    one now share - they did not, and a flag added to the helper would have
+    missed the main window entirely."""
+
+    def test_click_through_sets_ws_ex_transparent(self):
+        from puikit.backends import _win32_native as native
+        from puikit.backends.windows_backend import _window_style_flags
+
+        plain, _ = _window_style_flags(WindowStyle())
+        through, _ = _window_style_flags(WindowStyle(click_through=True))
+        assert not plain & native.WS_EX_TRANSPARENT
+        assert through & native.WS_EX_TRANSPARENT
+
+    def test_transparent_is_accepted_and_ignored(self):
+        """No Win32 counterpart yet; it must degrade, not raise."""
+        from puikit.backends.windows_backend import _window_style_flags
+
+        assert _window_style_flags(WindowStyle(transparent=True)) == \
+            _window_style_flags(WindowStyle())
 
 
 class TestMemoryBackendParity:

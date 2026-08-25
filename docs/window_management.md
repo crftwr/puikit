@@ -26,6 +26,8 @@ backend = create_backend(
 | `activates` | `True` | `False`: `orderFrontRegardless()` — shown without key status or app activation | `False`: `WS_EX_NOACTIVATE` + `SW_SHOWNA` |
 | `resizable` | `True` | drops `NSWindowStyleMaskResizable` | drops `WS_THICKFRAME \| WS_MAXIMIZEBOX` |
 | `tool` | `False` | no-op today | `WS_EX_TOOLWINDOW` (out of taskbar / Alt-Tab) |
+| `click_through` | `False` | `setIgnoresMouseEvents_(True)` | `WS_EX_TRANSPARENT` |
+| `transparent` | `False` | `setOpaque_(False)` + clear background, no shadow | accepted and ignored — see below |
 
 - `style=None` (the default) ≡ `WindowStyle()` ≡ the classic window.
 - Backends without the `window_styles` capability (curses, web, memory)
@@ -36,6 +38,40 @@ backend = create_backend(
   (a command-palette / chooser) is a separate future feature — on macOS that
   is an `NSPanel` with `nonactivatingPanel`, which this deliberately does not
   attempt yet.
+
+### Overlays that point at something
+
+`click_through` and `transparent` are for a window shown *at* something rather
+than used: a highlight, a measurement guide, a drop indicator. They go
+together with `activates=False`, and each fixes half of the same problem.
+
+Without `click_through` the overlay is hit-tested, so it swallows the very
+click aimed at what it is pointing to. Without `transparent` it can only
+*cover* what it marks — the window paints its own background, so an outline
+is not expressible and the thing you wanted to look at is hidden behind the
+thing telling you to look at it.
+
+With both, the window is a pane of glass: `round_rect` with `style.fg` and a
+`line_width` hint draws the outline, and everything it does not paint shows
+what is underneath.
+
+```python
+flash = backend.create_window(cols, rows, style=WindowStyle(
+    frameless=True, topmost=True, activates=False, resizable=False,
+    tool=True, click_through=True, transparent=True))
+flash.move_to_px(x, y)          # positions in pixels; sizes are base units
+```
+
+**`transparent` is macOS-only today.** A see-through window on Windows needs
+`WS_EX_LAYERED` with per-pixel alpha, which means `UpdateLayeredWindow`
+against a premultiplied DIB or a DirectComposition swapchain — a change to how
+the backend presents every frame, not a style flag. The field is accepted and
+ignored there, the same way any request a backend cannot honour degrades.
+
+A transparent window drops its shadow. macOS derives the shadow from the
+window's alpha channel, so a window that paints nothing carries a shadow that
+must be invalidated by hand on every content change; an animating overlay
+would trail the previous frame's outline.
 
 ## Activation policy (macOS agent apps)
 
