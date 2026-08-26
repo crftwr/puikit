@@ -845,6 +845,15 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
     def acceptsFirstResponder(self):
         return True
 
+    def acceptsFirstMouse_(self, ns_event):
+        # A window that never activates has no activation click to spend, so
+        # the macOS convention of swallowing the first click into an inactive
+        # window would swallow *every* click it ever gets. An overlay is
+        # clicked to act on it, not to bring it forward.
+        handle = getattr(self, "pk_window", None)
+        style = getattr(handle, "window_style", None)
+        return style is not None and not style.activates
+
     def drawRect_(self, rect):
         if self.backend is None:
             return

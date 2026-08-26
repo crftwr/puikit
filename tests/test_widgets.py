@@ -408,3 +408,82 @@ def test_scrollbar_horizontal_orientation(backend):
     assert row.count(_SCROLLBAR_THUMB) == 3  # 30% of 10 columns
     # The glyph's upper half shows the client surface, not the terminal default.
     assert all(backend.style_at(col, 0).bg == surface for col in range(10))
+
+
+class TestListViewNoSelection:
+    """`allow_no_selection` lets a list show *no* highlight at all, not the
+    muted unfocused one — what a two-pane picker wants while its text field
+    owns the focus and the list is only a preview of what matches."""
+
+    def _list(self, backend, **kwargs):
+        from puikit.widgets.list import ListView
+        return ListView(["alpha", "beta", "gamma"], **kwargs)
+
+    def test_off_by_default(self, backend):
+        assert self._list(backend).selected == 0
+
+    def test_starts_with_nothing_selected(self, backend):
+        assert self._list(backend, allow_no_selection=True).selected == -1
+
+    def test_negative_clamps_to_zero_without_the_flag(self, backend):
+        lst = self._list(backend)
+        lst.selected = -1
+        assert lst.selected == 0
+
+    def test_can_be_cleared_and_set_again(self, backend):
+        lst = self._list(backend, allow_no_selection=True)
+        lst.selected = 2
+        assert lst.selected == 2
+        lst.selected = -1
+        assert lst.selected == -1
+
+    def test_down_from_nothing_lands_on_the_first_row(self, backend):
+        from puikit.event import Event, EventType
+        lst = self._list(backend, allow_no_selection=True)
+        assert lst.handle_event(Event(type=EventType.KEY, key="down"))
+        assert lst.selected == 0
+
+    def test_up_from_nothing_lands_on_the_last_row(self, backend):
+        from puikit.event import Event, EventType
+        lst = self._list(backend, allow_no_selection=True)
+        assert lst.handle_event(Event(type=EventType.KEY, key="up"))
+        assert lst.selected == 2
+
+    def test_activating_nothing_selects_nothing(self, backend):
+        from puikit.event import Event, EventType
+        chosen = []
+        lst = self._list(backend, allow_no_selection=True,
+                         on_select=lambda i, v: chosen.append(v))
+        lst.handle_event(Event(type=EventType.KEY, key="enter"))
+        assert chosen == []
+
+    def test_replacing_the_items_keeps_nothing_selected(self, backend):
+        lst = self._list(backend, allow_no_selection=True)
+        lst.set_items(["one", "two"])
+        assert lst.selected == -1
+
+    def test_replacing_the_items_keeps_a_real_selection_in_range(self, backend):
+        lst = self._list(backend, allow_no_selection=True)
+        lst.selected = 2
+        lst.set_items(["one", "two"])
+        assert lst.selected == 1
+
+    def test_emptying_the_list_selects_nothing(self, backend):
+        lst = self._list(backend, allow_no_selection=True)
+        lst.selected = 1
+        lst.set_items([])
+        assert lst.selected == -1
+
+    def test_no_row_is_drawn_selected(self, backend):
+        from puikit import Panel
+        lst = self._list(backend, allow_no_selection=True)
+        panel = Panel(backend)
+        panel.add(lst, 0, 0, 20, 5)
+        panel.render()
+        plain = [backend.style_at(0, row) for row in range(3)]
+        lst.selected = 0
+        panel.render()
+        assert backend.style_at(0, 0) != plain[0], "row 0 should now be selected"
+        lst.selected = -1
+        panel.render()
+        assert [backend.style_at(0, row) for row in range(3)] == plain
