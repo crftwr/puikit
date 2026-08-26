@@ -822,6 +822,11 @@ class Animation:
         return self.progress(now) >= 1.0
 
 
+#: "the pointer is not inside any window we own". A distinct object because
+#: None is a real key in _pointer_cursors: the main window.
+_NO_CURSOR_WINDOW = object()
+
+
 class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
     """Renders the backend's display list; forwards input to the backend.
 
@@ -1106,21 +1111,28 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
         objc.super(_PuiKitView, self).updateTrackingAreas()
 
     def mouseMoved_(self, ns_event):
+        self.backend._cursor_window = getattr(self, "pk_window", None)
         x, y = self._mouse_unit(ns_event)
         self._pk_dispatch(Event(type=EventType.MOUSE_MOVE, x=x, y=y))
 
     def cursorUpdate_(self, ns_event):
         # AppKit's chance to set the pointer as it enters/moves over the view.
-        # Re-assert the shape the Panel last requested (set_pointer_shape) so it
-        # is not reset to the default arrow between renders; None falls through
-        # to the default.
-        cursor = self.backend._pointer_cursor
+        # Re-assert the shape *this view's window* last requested
+        # (set_pointer_shape) so it is not reset to the default arrow between
+        # renders; None falls through to the default. Reading the shape per
+        # window is what keeps a second window's render from reaching up and
+        # changing the pointer over this one.
+        handle = getattr(self, "pk_window", None)
+        self.backend._cursor_window = handle
+        cursor = self.backend._pointer_cursors.get(handle, (None, None))[1]
         if cursor is not None:
             cursor.set()
         else:
             objc.super(_PuiKitView, self).cursorUpdate_(ns_event)
 
     def mouseExited_(self, ns_event):
+        if self.backend._cursor_window is getattr(self, "pk_window", None):
+            self.backend._cursor_window = _NO_CURSOR_WINDOW
         # Move the pointer off-canvas so nothing reads as hovered.
         self._pk_dispatch(Event(type=EventType.MOUSE_MOVE, x=-1.0, y=-1.0))
 
@@ -1506,8 +1518,16 @@ class MacOSBackend(Backend):
         # Pointer shape requested by the Panel (set_pointer_shape): the resolved
         # NSCursor (None = default arrow) and the name it was resolved from, so a
         # repeat request is a no-op. The view's cursorUpdate_ re-asserts it.
-        self._pointer_cursor: Any | None = None
-        self._pointer_shape: str | None = None
+        # Per window (the handle; None is the main window), because each
+        # window's Panel pushes its own shape once per frame and they would
+        # otherwise overwrite each other in one slot: with a chooser popup
+        # open over the console, the popup's I-beam and the console's arrow
+        # alternated at render frequency and the pointer visibly flickered.
+        self._pointer_cursors: dict[Any, tuple[str | None, Any]] = {}
+        #: The window the pointer is inside, so a *background* window's render
+        #: cannot reach up and change the pointer. _NO_CURSOR_WINDOW until a
+        #: view reports one (None is a real key: the main window).
+        self._cursor_window: Any = _NO_CURSOR_WINDOW
         # Active post-processing effect (set_post_effect); re-applied to the view
         # on open() and kept across resizes because it lives on the layer.
         self._post_effect: Any | None = None
@@ -3525,15 +3545,27 @@ class MacOSBackend(Backend):
         name) resets to the default arrow. The resolved cursor is applied now
         and re-asserted from the view's ``cursorUpdate_`` so AppKit's own cursor
         passes keep it. The Panel gates this on the ``pointer_shape``
-        capability."""
-        if shape == self._pointer_shape:
+        capability.
+
+        Recorded **against the window being rendered**, and applied now only
+        when the pointer is actually inside that window. Each window's Panel
+        pushes a shape once per frame from its own hover state, so one shared
+        slot meant the frontmost popup's I-beam and a background window's
+        arrow overwrote each other every frame - a visibly flickering
+        pointer. A background window still records its shape; it takes effect
+        when the pointer arrives, via ``cursorUpdate_``."""
+        window = self._active_win
+        current, _cursor = self._pointer_cursors.get(window, (None, None))
+        if shape == current:
             return
-        self._pointer_shape = shape
         selector = self._CURSORS.get(shape) if shape else None
-        self._pointer_cursor = getattr(NSCursor, selector)() if selector else None
+        resolved = getattr(NSCursor, selector)() if selector else None
+        self._pointer_cursors[window] = (shape, resolved)
+        if window is not self._cursor_window:
+            return
         # The named cursors are only available once NSApplication is up; guard
         # so a missing one resets to the arrow (or no-ops) rather than raising.
-        cursor = self._pointer_cursor or NSCursor.arrowCursor()
+        cursor = resolved or NSCursor.arrowCursor()
         if cursor is not None:
             cursor.set()
 

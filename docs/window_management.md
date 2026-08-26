@@ -52,6 +52,12 @@ backend = create_backend(
   frameless window. `hidesOnDeactivate` is turned off, or a utility panel would
   hide itself whenever the owning application is not active, which for this
   window is always.
+- The **pointer shape is per window**. Each window's `Panel` pushes a shape
+  once per frame from its own hover state, so one shared slot let two open
+  windows overwrite each other every frame — a popup's I-beam against a
+  background window's arrow, seen as a flickering pointer. A shape is applied
+  immediately only for the window the pointer is inside; a background window's
+  request is recorded and takes effect when the pointer arrives.
 - A window with `activates=False` also tracks the mouse **always** rather than
   only while key — it is never key, and under `NSTrackingActiveInKeyWindow` it
   would get no `mouseMoved` (no hover) and no `cursorUpdate`, leaving the

@@ -989,3 +989,63 @@ class TestNonactivatingPanelWindow:
         areas = win.view.trackingAreas()
         assert areas, "a window that is never key still needs cursor updates"
         assert all(a.options() & NSTrackingActiveAlways for a in areas)
+
+
+class TestPointerShapeIsPerWindow:
+    """Each window's Panel pushes a pointer shape once per frame from its own
+    hover state. One shared slot meant two open windows overwrote each other
+    every frame — a chooser popup's I-beam against the console's arrow — and
+    the pointer visibly flickered."""
+
+    @pytest.fixture
+    def backend(self):
+        from puikit.backend import WindowStyle
+        b = MacOSBackend(activation_policy="accessory")
+        b.open()
+        b.hide_main_window()
+        yield b, WindowStyle
+        b.close()
+
+    def test_each_window_keeps_its_own_shape(self, backend):
+        b, WindowStyle = backend
+        win = b.create_window(20, 4, style=WindowStyle(activates=False))
+        with b._window_scope(None):
+            b.set_pointer_shape("text")
+        with b._window_scope(win):
+            b.set_pointer_shape("pointer")
+        assert b._pointer_cursors[None][0] == "text"
+        assert b._pointer_cursors[win][0] == "pointer"
+
+    def test_a_background_window_does_not_move_the_pointer(self, backend):
+        from AppKit import NSCursor
+        b, WindowStyle = backend
+        win = b.create_window(20, 4, style=WindowStyle(activates=False))
+        with b._window_scope(None):                 # the console wants an I-beam
+            b.set_pointer_shape("text")
+        b._cursor_window = win                      # pointer is over the popup
+        with b._window_scope(win):
+            b.set_pointer_shape("pointer")
+        before = NSCursor.currentCursor()
+        with b._window_scope(None):                 # ...the console renders again
+            b.set_pointer_shape(None)
+        assert NSCursor.currentCursor() == before, \
+            "a render in another window changed the pointer under this one"
+        # ...and the console's own request is still remembered for later.
+        assert b._pointer_cursors[None][0] is None
+
+    def test_the_window_under_the_pointer_applies_immediately(self, backend):
+        from AppKit import NSCursor
+        b, WindowStyle = backend
+        win = b.create_window(20, 4, style=WindowStyle(activates=False))
+        b._cursor_window = win
+        with b._window_scope(win):
+            b.set_pointer_shape("text")
+        assert NSCursor.currentCursor() == NSCursor.IBeamCursor()
+
+    def test_leaving_a_window_stops_it_owning_the_pointer(self, backend):
+        from puikit.backends.macos_backend import _NO_CURSOR_WINDOW
+        b, WindowStyle = backend
+        win = b.create_window(20, 4, style=WindowStyle(activates=False))
+        b._cursor_window = win
+        win.view.mouseExited_(None)
+        assert b._cursor_window is _NO_CURSOR_WINDOW
