@@ -26,16 +26,30 @@ backend = create_backend(
 | `activates` | `True` | `False`: `orderFrontRegardless()` — shown without key status or app activation | `False`: `WS_EX_NOACTIVATE` + `SW_SHOWNA` |
 | `resizable` | `True` | drops `NSWindowStyleMaskResizable` | drops `WS_THICKFRAME \| WS_MAXIMIZEBOX` |
 | `tool` | `False` | no-op today | `WS_EX_TOOLWINDOW` (out of taskbar / Alt-Tab) |
+| `nonactivating_panel` | `False` | with `activates=False`: `NSPanel` + `NSWindowStyleMaskNonactivatingPanel \| Titled \| UtilityWindow` — becomes key, app is never activated | no equivalent; ignored |
 
 - `style=None` (the default) ≡ `WindowStyle()` ≡ the classic window.
 - Backends without the `window_styles` capability (curses, web, memory)
   accept the parameter and ignore it; `MemoryBackend` records it
   (`backend.window_style`) for tests.
-- `activates=False` is for **display-only** overlays (a balloon, a toast).
-  A popup that *takes keyboard input without deactivating the target app*
-  (a command-palette / chooser) is a separate future feature — on macOS that
-  is an `NSPanel` with `nonactivatingPanel`, which this deliberately does not
-  attempt yet.
+- `activates=False` **on its own** is for display-only overlays (a balloon, a
+  toast): no keyboard focus, and on macOS a *click* still activates the
+  application even though a borderless window cannot become key.
+- `activates=False, nonactivating_panel=True` is the **command palette /
+  chooser** shape: the window takes keyboard focus without activating the
+  application, which is what Spotlight and the launcher apps do. Because it
+  becomes key, `NSTextInputClient` serves it — so an input method composes in
+  it, which a merely non-activating window can never do — and clicks reach it
+  without bringing the app forward.
+
+  It is macOS-only in effect. Windows couples keyboard focus to activation and
+  `WS_EX_NOACTIVATE` refuses focus by design, so the flag degrades there to
+  plain `activates=False`; a Windows app that needs to be typed into has to
+  activate. The mask needs a *titled* panel (a borderless panel cannot become
+  key either), so the window carries a utility title bar — the slimmest macOS
+  offers. `hidesOnDeactivate` is turned off with it, or a utility panel would
+  hide itself whenever the owning application is not active, which for this
+  window is always.
 
 ## Activation policy (macOS agent apps)
 
@@ -97,6 +111,7 @@ exist.
 | `topmost` | window level / `WS_EX_TOPMOST` | best-effort (`window.focus` on show; browsers do not expose true always-on-top) | a higher layer `z` |
 | `frameless` | borderless window | browser-chrome-limited (popup features) | no frame box around the layer |
 | `activates=False` | no focus stealing | open without `focus()` | non-interactive layer; keys keep flowing below |
+| `nonactivating_panel` | key without app activation | — | — (macOS-only in effect) |
 | position/size | screen coordinates | `window.open` features (best-effort; browser-gated) | a rect on the terminal surface |
 | z-order between windows | OS compositor | browser window manager | layer `z`; topmost *interactive* layer is modal |
 | screen geometry | `screen_frames()` | `window.screen` (per browser window) | the terminal size — one "screen" |

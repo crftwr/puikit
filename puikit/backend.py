@@ -101,9 +101,21 @@ class WindowStyle:
       WS_EX_TOPMOST).
     - ``activates``: when False, showing the window does not steal focus
       from the active application (ordered front without activation /
-      WS_EX_NOACTIVATE + SW_SHOWNA). Keyboard-taking non-activating panels
-      are a separate future feature; ``activates=False`` is for display-only
-      overlays.
+      WS_EX_NOACTIVATE + SW_SHOWNA). On its own this is for **display-only**
+      overlays: the window takes no keyboard focus, and on macOS a *click* on
+      it still activates the application even though a borderless window
+      cannot become key. Pair it with ``nonactivating_panel`` for a window
+      that is typed into.
+    - ``nonactivating_panel``: with ``activates=False``, the window takes
+      keyboard focus *without* activating the application — the Spotlight /
+      launcher behavior. macOS NSPanel with
+      ``NSWindowStyleMaskNonactivatingPanel``, whose documented purpose is
+      exactly this; clicks reach the window and do not bring the app forward,
+      and because the window becomes key, ``NSTextInputClient`` serves it, so
+      an input method works in it. Ignored where there is no equivalent —
+      Windows couples focus to activation, and ``WS_EX_NOACTIVATE`` refuses
+      keyboard focus by design, so the flag degrades to plain
+      ``activates=False`` there. Ignored entirely when ``activates`` is True.
     - ``resizable``: user-resizable frame (ignored when ``frameless``).
     - ``tool``: keep the window out of the taskbar / Alt-Tab list
       (WS_EX_TOOLWINDOW). Windows-only today; no-op on macOS.
@@ -116,6 +128,7 @@ class WindowStyle:
     activates: bool = True
     resizable: bool = True
     tool: bool = False
+    nonactivating_panel: bool = False
 
 
 EventHandler = Callable[[Event], None]

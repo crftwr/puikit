@@ -94,11 +94,14 @@ from AppKit import (
     NSWorkspace,
     NSFloatingWindowLevel,
     NSWindow,
+    NSPanel,
     NSWindowStyleMaskBorderless,
     NSWindowStyleMaskClosable,
     NSWindowStyleMaskMiniaturizable,
+    NSWindowStyleMaskNonactivatingPanel,
     NSWindowStyleMaskResizable,
     NSWindowStyleMaskTitled,
+    NSWindowStyleMaskUtilityWindow,
 )
 from Foundation import (
     NSAffineTransform,
@@ -1769,9 +1772,31 @@ class MacOSBackend(Backend):
                     | NSWindowStyleMaskMiniaturizable)
             if ws.resizable:
                 mask |= NSWindowStyleMaskResizable
-        nswindow = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(160, 160, w_px, h_px), mask, NSBackingStoreBuffered, False
-        )
+        # A keyboard-taking non-activating window has to be an NSPanel: the
+        # style mask that gives "key without activating the app" is defined
+        # only for panels, and a borderless NSWindow cannot become key at all.
+        # Utility+Titled goes with it because a *borderless* panel still
+        # cannot become key - the mask needs a titled panel to work, and a
+        # utility panel's slim title bar is the closest thing to none.
+        panel = ws.nonactivating_panel and not ws.activates
+        if panel:
+            mask = (NSWindowStyleMaskTitled
+                    | NSWindowStyleMaskUtilityWindow
+                    | NSWindowStyleMaskNonactivatingPanel)
+            if ws.resizable:
+                mask |= NSWindowStyleMaskResizable
+            nswindow = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+                NSMakeRect(160, 160, w_px, h_px), mask, NSBackingStoreBuffered,
+                False
+            )
+            # Without this a utility panel hides itself whenever the owning
+            # application is not active - which, for this window, is always.
+            nswindow.setHidesOnDeactivate_(False)
+        else:
+            nswindow = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+                NSMakeRect(160, 160, w_px, h_px), mask, NSBackingStoreBuffered,
+                False
+            )
         nswindow.setTitle_(title)
         if ws.topmost:
             nswindow.setLevel_(NSFloatingWindowLevel)
@@ -1796,6 +1821,10 @@ class MacOSBackend(Backend):
         nswindow.setDelegate_(delegate)
 
         if ws.activates:
+            nswindow.makeKeyAndOrderFront_(None)
+        elif panel:
+            # Key, but the application is never activated: the style mask is
+            # what makes those two separable.
             nswindow.makeKeyAndOrderFront_(None)
         else:
             nswindow.orderFrontRegardless()

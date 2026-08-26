@@ -19,6 +19,7 @@ class TestWindowStyleDataclass:
         assert ws.activates is True
         assert ws.resizable is True
         assert ws.tool is False
+        assert ws.nonactivating_panel is False
 
     def test_positional_arity_binds(self):
         # Compat checklist: old positional construction must keep binding as
@@ -34,6 +35,35 @@ class TestWindowStyleDataclass:
 
     def test_capability_declared(self):
         assert PROFILE_GUI_DESKTOP.supports("window_styles")
+
+
+class TestNonactivatingPanel:
+    """A window that takes keyboard focus without activating the app - the
+    Spotlight behavior. macOS NSPanel with
+    NSWindowStyleMaskNonactivatingPanel; degrades where there is no
+    equivalent, which is everywhere else (Windows couples focus to
+    activation, and WS_EX_NOACTIVATE refuses keyboard focus by design)."""
+
+    def test_off_by_default_so_existing_overlays_are_unchanged(self):
+        assert WindowStyle(activates=False).nonactivating_panel is False
+
+    def test_only_meaningful_with_activates_false(self):
+        # Not enforced by the dataclass - it is the backends that ignore the
+        # flag on an activating window - but stated here so the pairing is
+        # part of the contract and not folklore.
+        ws = WindowStyle(activates=True, nonactivating_panel=True)
+        assert ws.activates is True
+
+    def test_round_trips_with_the_other_fields(self):
+        ws = WindowStyle(topmost=True, resizable=False, activates=False,
+                         nonactivating_panel=True)
+        assert WindowStyle(**dataclasses.asdict(ws)) == ws
+
+    def test_backend_without_the_capability_accepts_and_ignores_it(self):
+        # The base recipe: an unknown request degrades, it does not raise.
+        ws = WindowStyle(activates=False, nonactivating_panel=True)
+        backend = MemoryBackend(style=ws)
+        assert backend.window_style is ws
 
 
 class TestMemoryBackendParity:
