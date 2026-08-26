@@ -80,6 +80,7 @@ from AppKit import (
     NSRectFillUsingOperation,
     NSShadow,
     NSTextInputContext,
+    NSTrackingActiveAlways,
     NSTrackingActiveInKeyWindow,
     NSTrackingArea,
     NSTrackingCursorUpdate,
@@ -97,11 +98,13 @@ from AppKit import (
     NSPanel,
     NSWindowStyleMaskBorderless,
     NSWindowStyleMaskClosable,
+    NSWindowStyleMaskFullSizeContentView,
     NSWindowStyleMaskMiniaturizable,
     NSWindowStyleMaskNonactivatingPanel,
     NSWindowStyleMaskResizable,
     NSWindowStyleMaskTitled,
     NSWindowStyleMaskUtilityWindow,
+    NSWindowTitleHidden,
 )
 from Foundation import (
     NSAffineTransform,
@@ -1078,10 +1081,19 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
     def updateTrackingAreas(self):
         for area in list(self.trackingAreas()):
             self.removeTrackingArea_(area)
+        window_handle = getattr(self, "pk_window", None)
+        style = getattr(window_handle, "window_style", None)
+        # A window that never becomes key gets no tracking at all under
+        # ActiveInKeyWindow - so it never sees mouseMoved (no hover) and never
+        # gets cursorUpdate, which is what leaves the pointer shape being
+        # fought over between this window and the application underneath.
+        # Such a window has to track always.
+        never_key = style is not None and not style.activates
         options = (
             NSTrackingMouseMoved
             | NSTrackingMouseEnteredAndExited
-            | NSTrackingActiveInKeyWindow
+            | (NSTrackingActiveAlways if never_key
+               else NSTrackingActiveInKeyWindow)
             | NSTrackingInVisibleRect
             # Let AppKit ask us (cursorUpdate_) what pointer to show over the
             # view, so our per-region shape survives AppKit's own cursor passes.
@@ -1785,6 +1797,14 @@ class MacOSBackend(Backend):
                     | NSWindowStyleMaskNonactivatingPanel)
             if ws.resizable:
                 mask |= NSWindowStyleMaskResizable
+            if ws.frameless:
+                # The titled mask is forced by the panel, not asked for, so
+                # `frameless` still has to mean "no chrome": full-size content
+                # puts the content view under the title bar, and the two
+                # settings below make that title bar invisible. It also puts
+                # the content rect back to the frame rect, so the window
+                # measures the same as a plain frameless one.
+                mask |= NSWindowStyleMaskFullSizeContentView
             nswindow = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
                 NSMakeRect(160, 160, w_px, h_px), mask, NSBackingStoreBuffered,
                 False
@@ -1792,6 +1812,9 @@ class MacOSBackend(Backend):
             # Without this a utility panel hides itself whenever the owning
             # application is not active - which, for this window, is always.
             nswindow.setHidesOnDeactivate_(False)
+            if ws.frameless:
+                nswindow.setTitlebarAppearsTransparent_(True)
+                nswindow.setTitleVisibility_(NSWindowTitleHidden)
             if ws.becomes_key_on_demand:
                 # Clicks reach the panel without it taking key status, so the
                 # window the user was working in keeps its focus, its caret

@@ -921,3 +921,71 @@ def test_menu_fire_without_forwarder_always_activates(monkeypatch):
     monkeypatch.setattr(_macos_menu, "_current_key_event", lambda: chord)
     responder.fire_(ns_item)
     assert activated == [True]
+
+
+class TestNonactivatingPanelWindow:
+    """The real NSPanel, built through create_window (no event loop needed).
+
+    Behaviour verified against a live session and asserted here as the
+    properties AppKit ends up holding, so a refactor cannot quietly drop one.
+    """
+
+    @pytest.fixture
+    def backend(self):
+        from puikit.backend import WindowStyle
+        b = MacOSBackend(activation_policy="accessory")
+        b.open()
+        b.hide_main_window()
+        yield b, WindowStyle
+        b.close()
+
+    def test_plain_non_activating_window_is_not_a_panel(self, backend):
+        from AppKit import NSPanel
+        b, WindowStyle = backend
+        win = b.create_window(20, 4, style=WindowStyle(activates=False))
+        assert not isinstance(win.nswindow, NSPanel)
+
+    def test_panel_can_become_key_without_activating(self, backend):
+        from AppKit import NSPanel
+        b, WindowStyle = backend
+        win = b.create_window(20, 4, style=WindowStyle(
+            activates=False, nonactivating_panel=True))
+        assert isinstance(win.nswindow, NSPanel)
+        # The mask needs a titled panel: a borderless one cannot become key.
+        assert win.nswindow.canBecomeKeyWindow()
+        assert win.nswindow.becomesKeyOnlyIfNeeded() is False
+        # Or a utility panel hides itself whenever the app is not active,
+        # which for this window is always.
+        assert win.nswindow.hidesOnDeactivate() is False
+
+    def test_on_demand_leaves_the_keyboard_alone(self, backend):
+        b, WindowStyle = backend
+        win = b.create_window(20, 4, style=WindowStyle(
+            activates=False, nonactivating_panel=True,
+            becomes_key_on_demand=True))
+        assert win.nswindow.becomesKeyOnlyIfNeeded() is True
+        assert not win.nswindow.isKeyWindow()
+
+    def test_frameless_panel_hides_the_forced_title_bar(self, backend):
+        from AppKit import NSWindowTitleHidden
+        b, WindowStyle = backend
+        win = b.create_window(20, 4, style=WindowStyle(
+            frameless=True, activates=False, nonactivating_panel=True))
+        ns = win.nswindow
+        assert ns.titlebarAppearsTransparent()
+        assert ns.titleVisibility() == NSWindowTitleHidden
+        # Full-size content also puts the content rect back to the frame
+        # rect, so a frameless panel measures like a frameless window.
+        assert (ns.contentView().frame().size.height
+                == ns.frame().size.height)
+
+    def test_a_never_key_window_tracks_always(self, backend):
+        from AppKit import NSTrackingActiveAlways
+        b, WindowStyle = backend
+        win = b.create_window(20, 4, style=WindowStyle(
+            activates=False, nonactivating_panel=True,
+            becomes_key_on_demand=True))
+        win.view.updateTrackingAreas()
+        areas = win.view.trackingAreas()
+        assert areas, "a window that is never key still needs cursor updates"
+        assert all(a.options() & NSTrackingActiveAlways for a in areas)

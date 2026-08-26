@@ -46,10 +46,16 @@ backend = create_backend(
   `WS_EX_NOACTIVATE` refuses focus by design, so the flag degrades there to
   plain `activates=False`; a Windows app that needs to be typed into has to
   activate. The mask needs a *titled* panel (a borderless panel cannot become
-  key either), so the window carries a utility title bar — the slimmest macOS
-  offers. `hidesOnDeactivate` is turned off with it, or a utility panel would
+  key either), so the window carries a title bar — add `frameless=True` to hide
+  it (full-size content view + transparent titlebar + hidden title), which also
+  puts the content rect back to the frame rect so it measures like any other
+  frameless window. `hidesOnDeactivate` is turned off, or a utility panel would
   hide itself whenever the owning application is not active, which for this
   window is always.
+- A window with `activates=False` also tracks the mouse **always** rather than
+  only while key — it is never key, and under `NSTrackingActiveInKeyWindow` it
+  would get no `mouseMoved` (no hover) and no `cursorUpdate`, leaving the
+  pointer shape to be fought over between it and the application underneath.
 
 ## Activation policy (macOS agent apps)
 
