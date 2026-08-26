@@ -1792,6 +1792,11 @@ class MacOSBackend(Backend):
             # Without this a utility panel hides itself whenever the owning
             # application is not active - which, for this window, is always.
             nswindow.setHidesOnDeactivate_(False)
+            if ws.becomes_key_on_demand:
+                # Clicks reach the panel without it taking key status, so the
+                # window the user was working in keeps its focus, its caret
+                # and its selection.
+                nswindow.setBecomesKeyOnlyIfNeeded_(True)
         else:
             nswindow = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
                 NSMakeRect(160, 160, w_px, h_px), mask, NSBackingStoreBuffered,
@@ -1822,7 +1827,7 @@ class MacOSBackend(Backend):
 
         if ws.activates:
             nswindow.makeKeyAndOrderFront_(None)
-        elif panel:
+        elif panel and not ws.becomes_key_on_demand:
             # Key, but the application is never activated: the style mask is
             # what makes those two separable.
             nswindow.makeKeyAndOrderFront_(None)

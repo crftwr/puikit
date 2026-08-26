@@ -20,6 +20,7 @@ class TestWindowStyleDataclass:
         assert ws.resizable is True
         assert ws.tool is False
         assert ws.nonactivating_panel is False
+        assert ws.becomes_key_on_demand is False
 
     def test_positional_arity_binds(self):
         # Compat checklist: old positional construction must keep binding as
@@ -56,8 +57,20 @@ class TestNonactivatingPanel:
 
     def test_round_trips_with_the_other_fields(self):
         ws = WindowStyle(topmost=True, resizable=False, activates=False,
-                         nonactivating_panel=True)
+                         nonactivating_panel=True, becomes_key_on_demand=True)
         assert WindowStyle(**dataclasses.asdict(ws)) == ws
+
+    def test_on_demand_is_the_clicks_without_the_keyboard_shape(self):
+        """Two shapes, one primitive. Without becomes_key_on_demand the panel
+        is key (an input method composes in it, and whatever was focused
+        underneath is not); with it, clicks reach the panel and the target
+        window keeps its focus, caret and selection. Both verified against a
+        real macOS session; the dataclass only has to carry them apart."""
+        keyboard = WindowStyle(activates=False, nonactivating_panel=True)
+        clicks = dataclasses.replace(keyboard, becomes_key_on_demand=True)
+        assert keyboard.becomes_key_on_demand is False
+        assert clicks.nonactivating_panel is True
+        assert keyboard != clicks
 
     def test_backend_without_the_capability_accepts_and_ignores_it(self):
         # The base recipe: an unknown request degrades, it does not raise.

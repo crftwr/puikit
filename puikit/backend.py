@@ -116,6 +116,14 @@ class WindowStyle:
       Windows couples focus to activation, and ``WS_EX_NOACTIVATE`` refuses
       keyboard focus by design, so the flag degrades to plain
       ``activates=False`` there. Ignored entirely when ``activates`` is True.
+    - ``becomes_key_on_demand``: with ``nonactivating_panel``, the panel takes
+      key status only when something clicked in it needs text input, instead
+      of on any click (macOS ``becomesKeyOnlyIfNeeded``). This is the shape
+      for an overlay that wants **clicks without taking the keyboard at all**
+      — a picker driven from elsewhere (a global hotkey, an input hook) whose
+      target window must keep its focus and its selection while the user
+      clicks a row. Without it, a click makes the panel key and whatever was
+      focused underneath stops being.
     - ``resizable``: user-resizable frame (ignored when ``frameless``).
     - ``tool``: keep the window out of the taskbar / Alt-Tab list
       (WS_EX_TOOLWINDOW). Windows-only today; no-op on macOS.
@@ -129,6 +137,7 @@ class WindowStyle:
     resizable: bool = True
     tool: bool = False
     nonactivating_panel: bool = False
+    becomes_key_on_demand: bool = False
 
 
 EventHandler = Callable[[Event], None]
