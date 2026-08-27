@@ -101,9 +101,32 @@ class WindowStyle:
       WS_EX_TOPMOST).
     - ``activates``: when False, showing the window does not steal focus
       from the active application (ordered front without activation /
-      WS_EX_NOACTIVATE + SW_SHOWNA). Keyboard-taking non-activating panels
-      are a separate future feature; ``activates=False`` is for display-only
-      overlays.
+      WS_EX_NOACTIVATE + SW_SHOWNA). On its own this is for **display-only**
+      overlays: the window takes no keyboard focus, and on macOS a *click* on
+      it still activates the application even though a borderless window
+      cannot become key. ``overlay_input`` is how an overlay becomes usable.
+    - ``overlay_input``: what input reaches the window while its application
+      is **not** active — the axis ``activates=False`` leaves open. Ignored
+      when ``activates`` is True.
+
+      - ``"none"`` (default): display-only. A balloon, a toast.
+      - ``"mouse"``: clicks reach the window and the keyboard does not move —
+        the application underneath keeps its focus, its caret and its
+        selection. The shape for a picker driven from *elsewhere* (a global
+        hotkey, an input hook) that must not disturb what it is acting on.
+      - ``"keyboard"``: the window takes keyboard focus without activating
+        the application — the Spotlight / command-palette behavior. Because
+        it becomes the key window, the text input system serves it, so an
+        input method composes in it, which no other value can offer.
+
+      The three are a ladder: ``"keyboard"`` includes clicks, ``"mouse"``
+      includes display. macOS realizes them as an ``NSPanel`` with
+      ``NSWindowStyleMaskNonactivatingPanel`` (plus ``becomesKeyOnlyIfNeeded``
+      for ``"mouse"``); the mask needs a titled panel, so pair it with
+      ``frameless`` to hide the title bar it forces. Windows couples keyboard
+      focus to activation and ``WS_EX_NOACTIVATE`` refuses focus by design, so
+      both values degrade there to plain ``activates=False``. An unrecognized
+      value degrades the same way.
     - ``resizable``: user-resizable frame (ignored when ``frameless``).
     - ``tool``: keep the window out of the taskbar / Alt-Tab list
       (WS_EX_TOOLWINDOW). Windows-only today; no-op on macOS.
@@ -116,6 +139,7 @@ class WindowStyle:
     activates: bool = True
     resizable: bool = True
     tool: bool = False
+    overlay_input: str = "none"
 
 
 EventHandler = Callable[[Event], None]

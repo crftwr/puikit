@@ -921,3 +921,143 @@ def test_menu_fire_without_forwarder_always_activates(monkeypatch):
     monkeypatch.setattr(_macos_menu, "_current_key_event", lambda: chord)
     responder.fire_(ns_item)
     assert activated == [True]
+
+
+class TestOverlayInputWindow:
+    """The real NSPanel, built through create_window (no event loop needed).
+
+    Behaviour verified against a live session and asserted here as the
+    properties AppKit ends up holding, so a refactor cannot quietly drop one.
+    """
+
+    @pytest.fixture
+    def backend(self):
+        from puikit.backend import WindowStyle
+        b = MacOSBackend(activation_policy="accessory")
+        b.open()
+        b.hide_main_window()
+        yield b, WindowStyle
+        b.close()
+
+    def test_display_only_is_not_a_panel(self, backend):
+        from AppKit import NSPanel
+        b, WindowStyle = backend
+        win = b.create_window(20, 4, style=WindowStyle(activates=False))
+        assert not isinstance(win.nswindow, NSPanel)
+
+    def test_an_unrecognized_value_degrades_to_display_only(self, backend):
+        from AppKit import NSPanel
+        b, WindowStyle = backend
+        win = b.create_window(20, 4, style=WindowStyle(
+            activates=False, overlay_input="telepathy"))
+        assert not isinstance(win.nswindow, NSPanel)
+
+    def test_it_is_ignored_on_an_activating_window(self, backend):
+        from AppKit import NSPanel
+        b, WindowStyle = backend
+        win = b.create_window(20, 4, style=WindowStyle(
+            activates=True, overlay_input="keyboard"))
+        assert not isinstance(win.nswindow, NSPanel)
+
+    def test_panel_can_become_key_without_activating(self, backend):
+        from AppKit import NSPanel
+        b, WindowStyle = backend
+        win = b.create_window(20, 4, style=WindowStyle(
+            activates=False, overlay_input="keyboard"))
+        assert isinstance(win.nswindow, NSPanel)
+        # The mask needs a titled panel: a borderless one cannot become key.
+        assert win.nswindow.canBecomeKeyWindow()
+        assert win.nswindow.becomesKeyOnlyIfNeeded() is False
+        # Or a utility panel hides itself whenever the app is not active,
+        # which for this window is always.
+        assert win.nswindow.hidesOnDeactivate() is False
+
+    def test_on_demand_leaves_the_keyboard_alone(self, backend):
+        b, WindowStyle = backend
+        win = b.create_window(20, 4, style=WindowStyle(
+            activates=False, overlay_input="mouse"))
+        assert win.nswindow.becomesKeyOnlyIfNeeded() is True
+        assert not win.nswindow.isKeyWindow()
+
+    def test_frameless_panel_hides_the_forced_title_bar(self, backend):
+        from AppKit import NSWindowTitleHidden
+        b, WindowStyle = backend
+        win = b.create_window(20, 4, style=WindowStyle(
+            frameless=True, activates=False, overlay_input="keyboard"))
+        ns = win.nswindow
+        assert ns.titlebarAppearsTransparent()
+        assert ns.titleVisibility() == NSWindowTitleHidden
+        # Full-size content also puts the content rect back to the frame
+        # rect, so a frameless panel measures like a frameless window.
+        assert (ns.contentView().frame().size.height
+                == ns.frame().size.height)
+
+    def test_a_never_key_window_tracks_always(self, backend):
+        from AppKit import NSTrackingActiveAlways
+        b, WindowStyle = backend
+        win = b.create_window(20, 4, style=WindowStyle(
+            activates=False, overlay_input="mouse"))
+        win.view.updateTrackingAreas()
+        areas = win.view.trackingAreas()
+        assert areas, "a window that is never key still needs cursor updates"
+        assert all(a.options() & NSTrackingActiveAlways for a in areas)
+
+
+class TestPointerShapeIsPerWindow:
+    """Each window's Panel pushes a pointer shape once per frame from its own
+    hover state. One shared slot meant two open windows overwrote each other
+    every frame — a chooser popup's I-beam against the console's arrow — and
+    the pointer visibly flickered."""
+
+    @pytest.fixture
+    def backend(self):
+        from puikit.backend import WindowStyle
+        b = MacOSBackend(activation_policy="accessory")
+        b.open()
+        b.hide_main_window()
+        yield b, WindowStyle
+        b.close()
+
+    def test_each_window_keeps_its_own_shape(self, backend):
+        b, WindowStyle = backend
+        win = b.create_window(20, 4, style=WindowStyle(activates=False))
+        with b._window_scope(None):
+            b.set_pointer_shape("text")
+        with b._window_scope(win):
+            b.set_pointer_shape("pointer")
+        assert b._pointer_cursors[None][0] == "text"
+        assert b._pointer_cursors[win][0] == "pointer"
+
+    def test_a_background_window_does_not_move_the_pointer(self, backend):
+        from AppKit import NSCursor
+        b, WindowStyle = backend
+        win = b.create_window(20, 4, style=WindowStyle(activates=False))
+        with b._window_scope(None):                 # the console wants an I-beam
+            b.set_pointer_shape("text")
+        b._cursor_window = win                      # pointer is over the popup
+        with b._window_scope(win):
+            b.set_pointer_shape("pointer")
+        before = NSCursor.currentCursor()
+        with b._window_scope(None):                 # ...the console renders again
+            b.set_pointer_shape(None)
+        assert NSCursor.currentCursor() == before, \
+            "a render in another window changed the pointer under this one"
+        # ...and the console's own request is still remembered for later.
+        assert b._pointer_cursors[None][0] is None
+
+    def test_the_window_under_the_pointer_applies_immediately(self, backend):
+        from AppKit import NSCursor
+        b, WindowStyle = backend
+        win = b.create_window(20, 4, style=WindowStyle(activates=False))
+        b._cursor_window = win
+        with b._window_scope(win):
+            b.set_pointer_shape("text")
+        assert NSCursor.currentCursor() == NSCursor.IBeamCursor()
+
+    def test_leaving_a_window_stops_it_owning_the_pointer(self, backend):
+        from puikit.backends.macos_backend import _NO_CURSOR_WINDOW
+        b, WindowStyle = backend
+        win = b.create_window(20, 4, style=WindowStyle(activates=False))
+        b._cursor_window = win
+        win.view.mouseExited_(None)
+        assert b._cursor_window is _NO_CURSOR_WINDOW

@@ -36,6 +36,7 @@ class ListView(Widget):
         row_height: float = 1,
         ellipsis: str = "",
         elide_where: str = "end",
+        allow_no_selection: bool = False,
     ):
         # When row_factory is None, items are strings drawn one per row. With a
         # row_factory, items may be any value; row_factory(item) -> Widget gives
@@ -48,7 +49,13 @@ class ListView(Widget):
         self._ellipsis = ellipsis
         self._elide_where = elide_where
         self.style = style
-        self._selected = 0  # backing store; the `selected` property scrolls
+        # Opt-in "nothing is selected" (``selected == -1``): a two-pane picker
+        # whose text field owns the focus wants the list to show no highlight
+        # at all, not the muted unfocused one. Off by default, so the clamp
+        # every existing caller relies on is untouched.
+        self.allow_no_selection = allow_no_selection
+        self._selected = -1 if allow_no_selection else 0
+        # backing store; the `selected` property scrolls
         # First visible item, measured in base units (== rows when each row is
         # one unit tall). Whole on whole-unit backends; fractional on backends
         # whose scroll events carry sub-unit deltas, which yields pixel-granular
@@ -87,16 +94,27 @@ class ListView(Widget):
         no-op that never touches the viewport: a redraw that re-asserts the
         selection must not yank back a viewport the user has deliberately
         wheel-scrolled away.
+
+        ``-1`` means *nothing selected*, and is only accepted with
+        ``allow_no_selection``; otherwise it clamps to 0 like any other
+        out-of-range index.
         """
         return self._selected
 
     @selected.setter
     def selected(self, index: int) -> None:
-        index = max(0, min(int(index), len(self.items) - 1)) if self.items else 0
+        index = int(index)
+        if self.allow_no_selection and index < 0:
+            index = -1                      # nothing selected, drawn unhighlighted
+        elif self.items:
+            index = max(0, min(index, len(self.items) - 1))
+        else:
+            index = -1 if self.allow_no_selection else 0
         if index == self._selected:
             return
         self._selected = index
-        self._ensure_selected_visible()
+        if index >= 0:
+            self._ensure_selected_visible()
 
     # --- item management -----------------------------------------------------
 
@@ -107,7 +125,12 @@ class ListView(Widget):
         self.items = list(items)
         self._rows = [None] * len(self.items)
         self._measured_row_h = None  # re-measure the (possibly new) row widget
-        self.selected = max(0, min(self.selected, len(self.items) - 1)) if self.items else 0
+        if self.selected < 0:
+            pass                     # nothing was selected; nothing becomes selected
+        elif self.items:
+            self.selected = max(0, min(self.selected, len(self.items) - 1))
+        else:
+            self.selected = -1 if self.allow_no_selection else 0
         self.offset = 0
 
     def row_widget(self, index: int) -> Widget:
@@ -149,10 +172,12 @@ class ListView(Widget):
         view_h = ctx.size_units[1]
         self._view_h = view_h
         self._viewport_h = max(1, int(view_h / self._row_h))
-        if self.items:
+        if self.selected < 0:
+            pass                     # nothing selected; drawing must not pick one
+        elif self.items:
             self.selected = max(0, min(self.selected, len(self.items) - 1))
         else:
-            self.selected = 0
+            self.selected = -1 if self.allow_no_selection else 0
         self._clamp_offset(view_h)
 
         content_h = len(self.items) * self._row_h
@@ -265,8 +290,10 @@ class ListView(Widget):
         # Writes _selected directly: the property setter calls this, so going
         # through the property here would recurse.
         if not self.items:
-            self._selected = 0
+            self._selected = -1 if self.allow_no_selection else 0
             self.offset = 0
+            return
+        if self._selected < 0:
             return
         self._selected = max(0, min(self._selected, len(self.items) - 1))
         top = self._selected * self._row_h
@@ -290,7 +317,8 @@ class ListView(Widget):
     def handle_event(self, event: Event) -> bool:
         before = self.selected
         consumed = self._handle(event)
-        if consumed and self.selected != before and self.on_change is not None:
+        if (consumed and self.selected != before and self.selected >= 0
+                and self.on_change is not None):
             self.on_change(self.selected, self.items[self.selected])
         return consumed
 
@@ -315,7 +343,7 @@ class ListView(Widget):
             return True
         # Any other event (e.g. IME composition) goes to the selected row's
         # widget, so an editable cell can keep composing.
-        if self.row_factory is not None and self.items:
+        if self.row_factory is not None and self.items and self.selected >= 0:
             return bool(self.row_widget(self.selected).handle_event(event))
         return False
 
@@ -335,6 +363,17 @@ class ListView(Widget):
     def _handle_key(self, key: str | None) -> bool:
         if not self.items:
             return False
+        # From "nothing selected", any forward move lands on the first row and
+        # any backward move on the last, rather than counting from -1.
+        if self.selected < 0:
+            if key in ("down", "pagedown", "home"):
+                self.selected = 0
+            elif key in ("up", "pageup", "end"):
+                self.selected = len(self.items) - 1
+            else:
+                return False
+            self._ensure_selected_visible()
+            return True
         if key == "up":
             self.selected -= 1
         elif key == "down":
@@ -354,11 +393,14 @@ class ListView(Widget):
 
     def _activate(self, event: Event) -> None:
         # Activation routes into the selected row's widget first (space toggles
-        # its checkbox), then fires the list's own on_select.
+        # its checkbox), then fires the list's own on_select. With nothing
+        # selected there is nothing to activate.
+        if self.selected < 0:
+            return
         if self.row_factory is not None and self.items:
             self.row_widget(self.selected).handle_event(event)
         self._select()
 
     def _select(self) -> None:
-        if self.on_select is not None and self.items:
+        if self.on_select is not None and self.items and self.selected >= 0:
             self.on_select(self.selected, self.items[self.selected])

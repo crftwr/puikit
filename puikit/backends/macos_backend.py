@@ -80,6 +80,7 @@ from AppKit import (
     NSRectFillUsingOperation,
     NSShadow,
     NSTextInputContext,
+    NSTrackingActiveAlways,
     NSTrackingActiveInKeyWindow,
     NSTrackingArea,
     NSTrackingCursorUpdate,
@@ -94,11 +95,16 @@ from AppKit import (
     NSWorkspace,
     NSFloatingWindowLevel,
     NSWindow,
+    NSPanel,
     NSWindowStyleMaskBorderless,
     NSWindowStyleMaskClosable,
+    NSWindowStyleMaskFullSizeContentView,
     NSWindowStyleMaskMiniaturizable,
+    NSWindowStyleMaskNonactivatingPanel,
     NSWindowStyleMaskResizable,
     NSWindowStyleMaskTitled,
+    NSWindowStyleMaskUtilityWindow,
+    NSWindowTitleHidden,
 )
 from Foundation import (
     NSAffineTransform,
@@ -816,6 +822,11 @@ class Animation:
         return self.progress(now) >= 1.0
 
 
+#: "the pointer is not inside any window we own". A distinct object because
+#: None is a real key in _pointer_cursors: the main window.
+_NO_CURSOR_WINDOW = object()
+
+
 class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
     """Renders the backend's display list; forwards input to the backend.
 
@@ -833,6 +844,15 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
 
     def acceptsFirstResponder(self):
         return True
+
+    def acceptsFirstMouse_(self, ns_event):
+        # A window that never activates has no activation click to spend, so
+        # the macOS convention of swallowing the first click into an inactive
+        # window would swallow *every* click it ever gets. An overlay is
+        # clicked to act on it, not to bring it forward.
+        handle = getattr(self, "pk_window", None)
+        style = getattr(handle, "window_style", None)
+        return style is not None and not style.activates
 
     def drawRect_(self, rect):
         if self.backend is None:
@@ -1075,10 +1095,19 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
     def updateTrackingAreas(self):
         for area in list(self.trackingAreas()):
             self.removeTrackingArea_(area)
+        window_handle = getattr(self, "pk_window", None)
+        style = getattr(window_handle, "window_style", None)
+        # A window that never becomes key gets no tracking at all under
+        # ActiveInKeyWindow - so it never sees mouseMoved (no hover) and never
+        # gets cursorUpdate, which is what leaves the pointer shape being
+        # fought over between this window and the application underneath.
+        # Such a window has to track always.
+        never_key = style is not None and not style.activates
         options = (
             NSTrackingMouseMoved
             | NSTrackingMouseEnteredAndExited
-            | NSTrackingActiveInKeyWindow
+            | (NSTrackingActiveAlways if never_key
+               else NSTrackingActiveInKeyWindow)
             | NSTrackingInVisibleRect
             # Let AppKit ask us (cursorUpdate_) what pointer to show over the
             # view, so our per-region shape survives AppKit's own cursor passes.
@@ -1091,21 +1120,28 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
         objc.super(_PuiKitView, self).updateTrackingAreas()
 
     def mouseMoved_(self, ns_event):
+        self.backend._cursor_window = getattr(self, "pk_window", None)
         x, y = self._mouse_unit(ns_event)
         self._pk_dispatch(Event(type=EventType.MOUSE_MOVE, x=x, y=y))
 
     def cursorUpdate_(self, ns_event):
         # AppKit's chance to set the pointer as it enters/moves over the view.
-        # Re-assert the shape the Panel last requested (set_pointer_shape) so it
-        # is not reset to the default arrow between renders; None falls through
-        # to the default.
-        cursor = self.backend._pointer_cursor
+        # Re-assert the shape *this view's window* last requested
+        # (set_pointer_shape) so it is not reset to the default arrow between
+        # renders; None falls through to the default. Reading the shape per
+        # window is what keeps a second window's render from reaching up and
+        # changing the pointer over this one.
+        handle = getattr(self, "pk_window", None)
+        self.backend._cursor_window = handle
+        cursor = self.backend._pointer_cursors.get(handle, (None, None))[1]
         if cursor is not None:
             cursor.set()
         else:
             objc.super(_PuiKitView, self).cursorUpdate_(ns_event)
 
     def mouseExited_(self, ns_event):
+        if self.backend._cursor_window is getattr(self, "pk_window", None):
+            self.backend._cursor_window = _NO_CURSOR_WINDOW
         # Move the pointer off-canvas so nothing reads as hovered.
         self._pk_dispatch(Event(type=EventType.MOUSE_MOVE, x=-1.0, y=-1.0))
 
@@ -1491,8 +1527,16 @@ class MacOSBackend(Backend):
         # Pointer shape requested by the Panel (set_pointer_shape): the resolved
         # NSCursor (None = default arrow) and the name it was resolved from, so a
         # repeat request is a no-op. The view's cursorUpdate_ re-asserts it.
-        self._pointer_cursor: Any | None = None
-        self._pointer_shape: str | None = None
+        # Per window (the handle; None is the main window), because each
+        # window's Panel pushes its own shape once per frame and they would
+        # otherwise overwrite each other in one slot: with a chooser popup
+        # open over the console, the popup's I-beam and the console's arrow
+        # alternated at render frequency and the pointer visibly flickered.
+        self._pointer_cursors: dict[Any, tuple[str | None, Any]] = {}
+        #: The window the pointer is inside, so a *background* window's render
+        #: cannot reach up and change the pointer. _NO_CURSOR_WINDOW until a
+        #: view reports one (None is a real key: the main window).
+        self._cursor_window: Any = _NO_CURSOR_WINDOW
         # Active post-processing effect (set_post_effect); re-applied to the view
         # on open() and kept across resizes because it lives on the layer.
         self._post_effect: Any | None = None
@@ -1769,9 +1813,51 @@ class MacOSBackend(Backend):
                     | NSWindowStyleMaskMiniaturizable)
             if ws.resizable:
                 mask |= NSWindowStyleMaskResizable
-        nswindow = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(160, 160, w_px, h_px), mask, NSBackingStoreBuffered, False
-        )
+        # A keyboard-taking non-activating window has to be an NSPanel: the
+        # style mask that gives "key without activating the app" is defined
+        # only for panels, and a borderless NSWindow cannot become key at all.
+        # Utility+Titled goes with it because a *borderless* panel still
+        # cannot become key - the mask needs a titled panel to work, and a
+        # utility panel's slim title bar is the closest thing to none.
+        # "keyboard" takes key status; "mouse" only lets clicks through.
+        # Both are the same NSPanel; anything else (including an unrecognized
+        # value) is the plain non-activating window.
+        overlay = ws.overlay_input if not ws.activates else "none"
+        panel = overlay in ("mouse", "keyboard")
+        if panel:
+            mask = (NSWindowStyleMaskTitled
+                    | NSWindowStyleMaskUtilityWindow
+                    | NSWindowStyleMaskNonactivatingPanel)
+            if ws.resizable:
+                mask |= NSWindowStyleMaskResizable
+            if ws.frameless:
+                # The titled mask is forced by the panel, not asked for, so
+                # `frameless` still has to mean "no chrome": full-size content
+                # puts the content view under the title bar, and the two
+                # settings below make that title bar invisible. It also puts
+                # the content rect back to the frame rect, so the window
+                # measures the same as a plain frameless one.
+                mask |= NSWindowStyleMaskFullSizeContentView
+            nswindow = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+                NSMakeRect(160, 160, w_px, h_px), mask, NSBackingStoreBuffered,
+                False
+            )
+            # Without this a utility panel hides itself whenever the owning
+            # application is not active - which, for this window, is always.
+            nswindow.setHidesOnDeactivate_(False)
+            if ws.frameless:
+                nswindow.setTitlebarAppearsTransparent_(True)
+                nswindow.setTitleVisibility_(NSWindowTitleHidden)
+            if overlay == "mouse":
+                # Clicks reach the panel without it taking key status, so the
+                # window the user was working in keeps its focus, its caret
+                # and its selection.
+                nswindow.setBecomesKeyOnlyIfNeeded_(True)
+        else:
+            nswindow = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+                NSMakeRect(160, 160, w_px, h_px), mask, NSBackingStoreBuffered,
+                False
+            )
         nswindow.setTitle_(title)
         if ws.topmost:
             nswindow.setLevel_(NSFloatingWindowLevel)
@@ -1796,6 +1882,10 @@ class MacOSBackend(Backend):
         nswindow.setDelegate_(delegate)
 
         if ws.activates:
+            nswindow.makeKeyAndOrderFront_(None)
+        elif overlay == "keyboard":
+            # Key, but the application is never activated: the style mask is
+            # what makes those two separable.
             nswindow.makeKeyAndOrderFront_(None)
         else:
             nswindow.orderFrontRegardless()
@@ -3468,15 +3558,27 @@ class MacOSBackend(Backend):
         name) resets to the default arrow. The resolved cursor is applied now
         and re-asserted from the view's ``cursorUpdate_`` so AppKit's own cursor
         passes keep it. The Panel gates this on the ``pointer_shape``
-        capability."""
-        if shape == self._pointer_shape:
+        capability.
+
+        Recorded **against the window being rendered**, and applied now only
+        when the pointer is actually inside that window. Each window's Panel
+        pushes a shape once per frame from its own hover state, so one shared
+        slot meant the frontmost popup's I-beam and a background window's
+        arrow overwrote each other every frame - a visibly flickering
+        pointer. A background window still records its shape; it takes effect
+        when the pointer arrives, via ``cursorUpdate_``."""
+        window = self._active_win
+        current, _cursor = self._pointer_cursors.get(window, (None, None))
+        if shape == current:
             return
-        self._pointer_shape = shape
         selector = self._CURSORS.get(shape) if shape else None
-        self._pointer_cursor = getattr(NSCursor, selector)() if selector else None
+        resolved = getattr(NSCursor, selector)() if selector else None
+        self._pointer_cursors[window] = (shape, resolved)
+        if window is not self._cursor_window:
+            return
         # The named cursors are only available once NSApplication is up; guard
         # so a missing one resets to the arrow (or no-ops) rather than raising.
-        cursor = self._pointer_cursor or NSCursor.arrowCursor()
+        cursor = resolved or NSCursor.arrowCursor()
         if cursor is not None:
             cursor.set()
 
