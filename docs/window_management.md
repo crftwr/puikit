@@ -26,7 +26,7 @@ backend = create_backend(
 | `activates` | `True` | `False`: `orderFrontRegardless()` — shown without key status or app activation | `False`: `WS_EX_NOACTIVATE` + `SW_SHOWNA` |
 | `resizable` | `True` | drops `NSWindowStyleMaskResizable` | drops `WS_THICKFRAME \| WS_MAXIMIZEBOX` |
 | `tool` | `False` | no-op today | `WS_EX_TOOLWINDOW` (out of taskbar / Alt-Tab) |
-| `nonactivating_panel` | `False` | with `activates=False`: `NSPanel` + `NSWindowStyleMaskNonactivatingPanel \| Titled \| UtilityWindow` — becomes key, app is never activated | no equivalent; ignored |
+| `overlay_input` | `"none"` | with `activates=False`: `"mouse"` / `"keyboard"` build an `NSPanel` + `NSWindowStyleMaskNonactivatingPanel \| Titled \| UtilityWindow`; `"mouse"` adds `becomesKeyOnlyIfNeeded` | no equivalent; ignored |
 
 - `style=None` (the default) ≡ `WindowStyle()` ≡ the classic window.
 - Backends without the `window_styles` capability (curses, web, memory)
@@ -35,19 +35,31 @@ backend = create_backend(
 - `activates=False` **on its own** is for display-only overlays (a balloon, a
   toast): no keyboard focus, and on macOS a *click* still activates the
   application even though a borderless window cannot become key.
-- `activates=False, nonactivating_panel=True` is the **command palette /
-  chooser** shape: the window takes keyboard focus without activating the
-  application, which is what Spotlight and the launcher apps do. Because it
-  becomes key, `NSTextInputClient` serves it — so an input method composes in
-  it, which a merely non-activating window can never do — and clicks reach it
-  without bringing the app forward.
+- `overlay_input` opens the axis `activates=False` leaves closed: **what input
+  reaches the window while its application is not active.** One field rather
+  than a flag per mechanism, because the values are a ladder and no
+  combination of them would be meaningful.
 
-  It is macOS-only in effect. Windows couples keyboard focus to activation and
-  `WS_EX_NOACTIVATE` refuses focus by design, so the flag degrades there to
+  | value | reaches the window | the target window |
+  |---|---|---|
+  | `"none"` (default) | nothing | untouched |
+  | `"mouse"` | clicks | keeps its focus, caret and selection |
+  | `"keyboard"` | clicks and keys | loses key status |
+
+  `"keyboard"` is the **command palette** shape — Spotlight and the launcher
+  apps. Because the window becomes key, `NSTextInputClient` serves it, so an
+  input method composes in it, which no other value can offer. `"mouse"` is
+  the shape for a picker driven from *elsewhere* — a global hotkey, an input
+  hook — which must not disturb what it is acting on.
+
+  macOS-only in effect. Windows couples keyboard focus to activation and
+  `WS_EX_NOACTIVATE` refuses focus by design, so both values degrade there to
   plain `activates=False`; a Windows app that needs to be typed into has to
-  activate. The mask needs a *titled* panel (a borderless panel cannot become
-  key either), so the window carries a title bar — add `frameless=True` to hide
-  it (full-size content view + transparent titlebar + hidden title), which also
+  activate. An unrecognized value degrades the same way.
+
+  The mask needs a *titled* panel (a borderless panel cannot become key
+  either), so the window carries a title bar — add `frameless=True` to hide it
+  (full-size content view + transparent titlebar + hidden title), which also
   puts the content rect back to the frame rect so it measures like any other
   frameless window. `hidesOnDeactivate` is turned off, or a utility panel would
   hide itself whenever the owning application is not active, which for this
@@ -123,7 +135,7 @@ exist.
 | `topmost` | window level / `WS_EX_TOPMOST` | best-effort (`window.focus` on show; browsers do not expose true always-on-top) | a higher layer `z` |
 | `frameless` | borderless window | browser-chrome-limited (popup features) | no frame box around the layer |
 | `activates=False` | no focus stealing | open without `focus()` | non-interactive layer; keys keep flowing below |
-| `nonactivating_panel` | key without app activation | — | — (macOS-only in effect) |
+| `overlay_input` | clicks, or keys, without app activation | — | — (macOS-only in effect) |
 | position/size | screen coordinates | `window.open` features (best-effort; browser-gated) | a rect on the terminal surface |
 | z-order between windows | OS compositor | browser window manager | layer `z`; topmost *interactive* layer is modal |
 | screen geometry | `screen_frames()` | `window.screen` (per browser window) | the terminal size — one "screen" |

@@ -923,7 +923,7 @@ def test_menu_fire_without_forwarder_always_activates(monkeypatch):
     assert activated == [True]
 
 
-class TestNonactivatingPanelWindow:
+class TestOverlayInputWindow:
     """The real NSPanel, built through create_window (no event loop needed).
 
     Behaviour verified against a live session and asserted here as the
@@ -939,17 +939,31 @@ class TestNonactivatingPanelWindow:
         yield b, WindowStyle
         b.close()
 
-    def test_plain_non_activating_window_is_not_a_panel(self, backend):
+    def test_display_only_is_not_a_panel(self, backend):
         from AppKit import NSPanel
         b, WindowStyle = backend
         win = b.create_window(20, 4, style=WindowStyle(activates=False))
+        assert not isinstance(win.nswindow, NSPanel)
+
+    def test_an_unrecognized_value_degrades_to_display_only(self, backend):
+        from AppKit import NSPanel
+        b, WindowStyle = backend
+        win = b.create_window(20, 4, style=WindowStyle(
+            activates=False, overlay_input="telepathy"))
+        assert not isinstance(win.nswindow, NSPanel)
+
+    def test_it_is_ignored_on_an_activating_window(self, backend):
+        from AppKit import NSPanel
+        b, WindowStyle = backend
+        win = b.create_window(20, 4, style=WindowStyle(
+            activates=True, overlay_input="keyboard"))
         assert not isinstance(win.nswindow, NSPanel)
 
     def test_panel_can_become_key_without_activating(self, backend):
         from AppKit import NSPanel
         b, WindowStyle = backend
         win = b.create_window(20, 4, style=WindowStyle(
-            activates=False, nonactivating_panel=True))
+            activates=False, overlay_input="keyboard"))
         assert isinstance(win.nswindow, NSPanel)
         # The mask needs a titled panel: a borderless one cannot become key.
         assert win.nswindow.canBecomeKeyWindow()
@@ -961,8 +975,7 @@ class TestNonactivatingPanelWindow:
     def test_on_demand_leaves_the_keyboard_alone(self, backend):
         b, WindowStyle = backend
         win = b.create_window(20, 4, style=WindowStyle(
-            activates=False, nonactivating_panel=True,
-            becomes_key_on_demand=True))
+            activates=False, overlay_input="mouse"))
         assert win.nswindow.becomesKeyOnlyIfNeeded() is True
         assert not win.nswindow.isKeyWindow()
 
@@ -970,7 +983,7 @@ class TestNonactivatingPanelWindow:
         from AppKit import NSWindowTitleHidden
         b, WindowStyle = backend
         win = b.create_window(20, 4, style=WindowStyle(
-            frameless=True, activates=False, nonactivating_panel=True))
+            frameless=True, activates=False, overlay_input="keyboard"))
         ns = win.nswindow
         assert ns.titlebarAppearsTransparent()
         assert ns.titleVisibility() == NSWindowTitleHidden
@@ -983,8 +996,7 @@ class TestNonactivatingPanelWindow:
         from AppKit import NSTrackingActiveAlways
         b, WindowStyle = backend
         win = b.create_window(20, 4, style=WindowStyle(
-            activates=False, nonactivating_panel=True,
-            becomes_key_on_demand=True))
+            activates=False, overlay_input="mouse"))
         win.view.updateTrackingAreas()
         areas = win.view.trackingAreas()
         assert areas, "a window that is never key still needs cursor updates"

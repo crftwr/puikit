@@ -104,26 +104,29 @@ class WindowStyle:
       WS_EX_NOACTIVATE + SW_SHOWNA). On its own this is for **display-only**
       overlays: the window takes no keyboard focus, and on macOS a *click* on
       it still activates the application even though a borderless window
-      cannot become key. Pair it with ``nonactivating_panel`` for a window
-      that is typed into.
-    - ``nonactivating_panel``: with ``activates=False``, the window takes
-      keyboard focus *without* activating the application — the Spotlight /
-      launcher behavior. macOS NSPanel with
-      ``NSWindowStyleMaskNonactivatingPanel``, whose documented purpose is
-      exactly this; clicks reach the window and do not bring the app forward,
-      and because the window becomes key, ``NSTextInputClient`` serves it, so
-      an input method works in it. Ignored where there is no equivalent —
-      Windows couples focus to activation, and ``WS_EX_NOACTIVATE`` refuses
-      keyboard focus by design, so the flag degrades to plain
-      ``activates=False`` there. Ignored entirely when ``activates`` is True.
-    - ``becomes_key_on_demand``: with ``nonactivating_panel``, the panel takes
-      key status only when something clicked in it needs text input, instead
-      of on any click (macOS ``becomesKeyOnlyIfNeeded``). This is the shape
-      for an overlay that wants **clicks without taking the keyboard at all**
-      — a picker driven from elsewhere (a global hotkey, an input hook) whose
-      target window must keep its focus and its selection while the user
-      clicks a row. Without it, a click makes the panel key and whatever was
-      focused underneath stops being.
+      cannot become key. ``overlay_input`` is how an overlay becomes usable.
+    - ``overlay_input``: what input reaches the window while its application
+      is **not** active — the axis ``activates=False`` leaves open. Ignored
+      when ``activates`` is True.
+
+      - ``"none"`` (default): display-only. A balloon, a toast.
+      - ``"mouse"``: clicks reach the window and the keyboard does not move —
+        the application underneath keeps its focus, its caret and its
+        selection. The shape for a picker driven from *elsewhere* (a global
+        hotkey, an input hook) that must not disturb what it is acting on.
+      - ``"keyboard"``: the window takes keyboard focus without activating
+        the application — the Spotlight / command-palette behavior. Because
+        it becomes the key window, the text input system serves it, so an
+        input method composes in it, which no other value can offer.
+
+      The three are a ladder: ``"keyboard"`` includes clicks, ``"mouse"``
+      includes display. macOS realizes them as an ``NSPanel`` with
+      ``NSWindowStyleMaskNonactivatingPanel`` (plus ``becomesKeyOnlyIfNeeded``
+      for ``"mouse"``); the mask needs a titled panel, so pair it with
+      ``frameless`` to hide the title bar it forces. Windows couples keyboard
+      focus to activation and ``WS_EX_NOACTIVATE`` refuses focus by design, so
+      both values degrade there to plain ``activates=False``. An unrecognized
+      value degrades the same way.
     - ``resizable``: user-resizable frame (ignored when ``frameless``).
     - ``tool``: keep the window out of the taskbar / Alt-Tab list
       (WS_EX_TOOLWINDOW). Windows-only today; no-op on macOS.
@@ -136,8 +139,7 @@ class WindowStyle:
     activates: bool = True
     resizable: bool = True
     tool: bool = False
-    nonactivating_panel: bool = False
-    becomes_key_on_demand: bool = False
+    overlay_input: str = "none"
 
 
 EventHandler = Callable[[Event], None]

@@ -19,8 +19,7 @@ class TestWindowStyleDataclass:
         assert ws.activates is True
         assert ws.resizable is True
         assert ws.tool is False
-        assert ws.nonactivating_panel is False
-        assert ws.becomes_key_on_demand is False
+        assert ws.overlay_input == "none"
 
     def test_positional_arity_binds(self):
         # Compat checklist: old positional construction must keep binding as
@@ -38,43 +37,39 @@ class TestWindowStyleDataclass:
         assert PROFILE_GUI_DESKTOP.supports("window_styles")
 
 
-class TestNonactivatingPanel:
-    """A window that takes keyboard focus without activating the app - the
-    Spotlight behavior. macOS NSPanel with
-    NSWindowStyleMaskNonactivatingPanel; degrades where there is no
-    equivalent, which is everywhere else (Windows couples focus to
-    activation, and WS_EX_NOACTIVATE refuses keyboard focus by design)."""
+class TestOverlayInput:
+    """What input reaches a window while its application is not active - the
+    axis `activates=False` leaves open. One field rather than a flag per
+    mechanism: the values are a ladder (keyboard includes clicks, mouse
+    includes display), so no combination of them is meaningless."""
 
-    def test_off_by_default_so_existing_overlays_are_unchanged(self):
-        assert WindowStyle(activates=False).nonactivating_panel is False
+    def test_display_only_by_default_so_existing_overlays_are_unchanged(self):
+        assert WindowStyle(activates=False).overlay_input == "none"
 
     def test_only_meaningful_with_activates_false(self):
-        # Not enforced by the dataclass - it is the backends that ignore the
-        # flag on an activating window - but stated here so the pairing is
-        # part of the contract and not folklore.
-        ws = WindowStyle(activates=True, nonactivating_panel=True)
+        # Not enforced by the dataclass - the backends ignore it on an
+        # activating window - but stated here so the pairing is part of the
+        # contract and not folklore.
+        ws = WindowStyle(activates=True, overlay_input="keyboard")
         assert ws.activates is True
 
     def test_round_trips_with_the_other_fields(self):
         ws = WindowStyle(topmost=True, resizable=False, activates=False,
-                         nonactivating_panel=True, becomes_key_on_demand=True)
+                         overlay_input="mouse")
         assert WindowStyle(**dataclasses.asdict(ws)) == ws
 
-    def test_on_demand_is_the_clicks_without_the_keyboard_shape(self):
-        """Two shapes, one primitive. Without becomes_key_on_demand the panel
-        is key (an input method composes in it, and whatever was focused
-        underneath is not); with it, clicks reach the panel and the target
-        window keeps its focus, caret and selection. Both verified against a
+    def test_the_two_usable_shapes_are_distinct(self):
+        """"keyboard" is key (an input method composes in it, and whatever
+        was focused underneath is not); "mouse" lets clicks through while the
+        target keeps its focus, caret and selection. Both verified against a
         real macOS session; the dataclass only has to carry them apart."""
-        keyboard = WindowStyle(activates=False, nonactivating_panel=True)
-        clicks = dataclasses.replace(keyboard, becomes_key_on_demand=True)
-        assert keyboard.becomes_key_on_demand is False
-        assert clicks.nonactivating_panel is True
+        keyboard = WindowStyle(activates=False, overlay_input="keyboard")
+        clicks = dataclasses.replace(keyboard, overlay_input="mouse")
         assert keyboard != clicks
 
     def test_backend_without_the_capability_accepts_and_ignores_it(self):
         # The base recipe: an unknown request degrades, it does not raise.
-        ws = WindowStyle(activates=False, nonactivating_panel=True)
+        ws = WindowStyle(activates=False, overlay_input="keyboard")
         backend = MemoryBackend(style=ws)
         assert backend.window_style is ws
 

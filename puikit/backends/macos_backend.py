@@ -1819,7 +1819,11 @@ class MacOSBackend(Backend):
         # Utility+Titled goes with it because a *borderless* panel still
         # cannot become key - the mask needs a titled panel to work, and a
         # utility panel's slim title bar is the closest thing to none.
-        panel = ws.nonactivating_panel and not ws.activates
+        # "keyboard" takes key status; "mouse" only lets clicks through.
+        # Both are the same NSPanel; anything else (including an unrecognized
+        # value) is the plain non-activating window.
+        overlay = ws.overlay_input if not ws.activates else "none"
+        panel = overlay in ("mouse", "keyboard")
         if panel:
             mask = (NSWindowStyleMaskTitled
                     | NSWindowStyleMaskUtilityWindow
@@ -1844,7 +1848,7 @@ class MacOSBackend(Backend):
             if ws.frameless:
                 nswindow.setTitlebarAppearsTransparent_(True)
                 nswindow.setTitleVisibility_(NSWindowTitleHidden)
-            if ws.becomes_key_on_demand:
+            if overlay == "mouse":
                 # Clicks reach the panel without it taking key status, so the
                 # window the user was working in keeps its focus, its caret
                 # and its selection.
@@ -1879,7 +1883,7 @@ class MacOSBackend(Backend):
 
         if ws.activates:
             nswindow.makeKeyAndOrderFront_(None)
-        elif panel and not ws.becomes_key_on_demand:
+        elif overlay == "keyboard":
             # Key, but the application is never activated: the style mask is
             # what makes those two separable.
             nswindow.makeKeyAndOrderFront_(None)
