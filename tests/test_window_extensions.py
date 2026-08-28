@@ -388,3 +388,35 @@ class TestWindowPositioning:
         assert portable_y == 780.0
         # and back again (move_to_px inverts frame_px)
         assert flip_h - portable_y - window_h == appkit_y
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Win32 flag mapping")
+class TestWindowsFlagMapping:
+    """The (ex_style, style) pair the main window and every secondary one
+    share. They did not: `_window_style_flags`' docstring promised a drift
+    that could not happen, and the main window had duplicated the mapping
+    line for line, so a flag added to the helper would have missed it."""
+
+    def _flags(self, **kwargs):
+        from puikit.backends.windows_backend import _window_style_flags
+        return _window_style_flags(WindowStyle(**kwargs))
+
+    def test_the_helper_maps_every_field_it_claims(self):
+        from puikit.backends import _win32_native as native
+        plain_ex, plain = self._flags()
+        assert not plain_ex & native.WS_EX_TOPMOST
+        assert self._flags(topmost=True)[0] & native.WS_EX_TOPMOST
+        assert self._flags(activates=False)[0] & native.WS_EX_NOACTIVATE
+        assert self._flags(tool=True)[0] & native.WS_EX_TOOLWINDOW
+        assert self._flags(frameless=True)[1] & native.WS_POPUP
+        assert not self._flags(resizable=False)[1] & native.WS_THICKFRAME
+
+    def test_the_main_window_asks_the_helper(self):
+        """Reading the source, because building a real main window here would
+        need a message loop: what matters is that the mapping exists once."""
+        import inspect
+        from puikit.backends import windows_backend
+
+        source = inspect.getsource(windows_backend.WindowsBackend.open)
+        assert "_window_style_flags" in source
+        assert "WS_EX_TOOLWINDOW" not in source, "the mapping is duplicated again"
