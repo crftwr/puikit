@@ -1486,6 +1486,10 @@ class MacScreenMarker(ScreenMarker):
         """lazydocs: ignore"""
         if self._closed:
             return
+        # A width is a width whenever it arrives: text wrapped to the one the
+        # mark was built with has to re-wrap to a new one, or a mark resized
+        # narrower keeps lines that no longer fit inside it.
+        self._backend._rewrap(self._spec, w)
         width, height = self._backend._mark_size(self._spec, w, h)
         flip = _flip_height()
         if flip is None:
@@ -1960,15 +1964,12 @@ class MacOSBackend(Backend):
         }
         measure = lambda t: float(_attr_string(t, attrs).size().width)
         limit = explicit_width if explicit_width is not None else max_width
-        lines = []
-        for paragraph in (text.split("\n") if text else []):
-            if limit is not None:
-                inner = max(1.0, float(limit) - 2 * _MARK_PADDING)
-                lines.extend(wrap_text(paragraph, inner, measure) or [""])
-            else:
-                lines.append(paragraph)
+        lines = self._mark_lines(text, measure, limit)
         line_height = float(_attr_string("Ag", attrs).size().height) if lines else 0.0
         return {
+            "text": text,
+            "max_width": max_width,
+            "wrapped_to": limit,
             "lines": lines,
             "attrs": attrs,
             "measure": measure,
@@ -1979,6 +1980,25 @@ class MacOSBackend(Backend):
             "fg": _ns_color(style.fg) if style.fg is not None else None,
             "bg": _ns_color(style.bg) if style.bg is not None else None,
         }
+
+    def _rewrap(self, spec, width) -> None:
+        """Re-flow the text to `width`, when that is a different width."""
+        limit = width if width is not None else spec["max_width"]
+        if limit == spec["wrapped_to"]:
+            return
+        spec["wrapped_to"] = limit
+        spec["lines"] = self._mark_lines(spec["text"], spec["measure"], limit)
+
+    @staticmethod
+    def _mark_lines(text, measure, limit):
+        lines = []
+        for paragraph in (text.split("\n") if text else []):
+            if limit is not None:
+                inner = max(1.0, float(limit) - 2 * _MARK_PADDING)
+                lines.extend(wrap_text(paragraph, inner, measure) or [""])
+            else:
+                lines.append(paragraph)
+        return lines
 
     def _mark_size(self, spec, w, h):
         """The mark's size: what was asked for, or what the text needs."""
@@ -2091,6 +2111,11 @@ class MacOSBackend(Backend):
         return handle
 
     def close(self) -> None:
+        # Marks before windows: they are floating windows of their own, and a
+        # backend that stopped without closing them would leave rectangles
+        # painted over the user's screen with nothing left to remove them.
+        for marker in list(self._markers):
+            marker.close()
         for handle in list(self._secondary_windows):
             handle.close()
         if self._anim_timer is not None:

@@ -222,7 +222,10 @@ anyone, which a published window flag could not be.
 | `max_width` | **opts into wrapping** when sizing to content |
 | `timeout` | close after N seconds |
 
-`ScreenMarker.set_rect()` moves and resizes; **animating a mark is that in a
+`ScreenMarker.set_rect()` moves and resizes — and re-wraps, because a width is
+a width whenever it arrives: a mark made narrower otherwise keeps lines that no
+longer fit inside it. It re-flows only when the width actually changed, since
+this is what an animation calls every frame. **Animating a mark is that in a
 loop**, driven by `request_animation_ticks` like any other frame. Nothing
 fades — opacity over time is exactly what a backend without per-pixel alpha
 cannot do, so putting it in the vocabulary would undo the portability the
@@ -236,4 +239,7 @@ a caller needs no branch and an unsupported request costs nothing.
 shadow — macOS derives the shadow from the alpha channel, so a window painting
 nothing has one that must be invalidated by hand on every content change and a
 mark being moved would trail the previous frame. It joins all Spaces, because
-what it points at is on the screen in front of the user.
+what it points at is on the screen in front of the user. Closing the backend
+closes every mark: they are floating windows of their own, and stopping
+without them would leave rectangles painted over the screen with nothing left
+to remove them.

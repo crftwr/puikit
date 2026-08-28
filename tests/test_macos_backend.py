@@ -1158,6 +1158,39 @@ class TestScreenMarkers:
         assert mark._cancel_timeout is not None
         mark.close()
 
+    def test_resizing_re_wraps_the_text(self, backend):
+        """A width is a width whenever it arrives. Without this a mark
+        resized narrower keeps lines that no longer fit inside it."""
+        text = ("A tooltip long enough that it has to wrap somewhere sensible "
+                "rather than run off the edge of the screen.")
+        mark = backend.mark_screen(300, 300, text=text, max_width=400)
+        wide = len(mark._spec["lines"])
+        mark.set_rect(300, 300, 200, None)
+        assert len(mark._spec["lines"]) > wide
+        assert mark._window.frame().size.width == 200
+        mark.close()
+
+    def test_re_wrapping_is_skipped_when_the_width_has_not_changed(self,
+                                                                  backend):
+        """set_rect is what an animation calls every frame."""
+        mark = backend.mark_screen(300, 300, text="one two three",
+                                   max_width=200)
+        before = mark._spec["lines"]
+        mark.set_rect(400, 300)
+        assert mark._spec["lines"] is before
+        mark.close()
+
+    def test_closing_the_backend_takes_the_marks_off_the_screen(self):
+        """They are floating windows of their own: a backend that stopped
+        without closing them would leave rectangles painted over the user's
+        screen with nothing left to remove them."""
+        b = MacOSBackend(activation_policy="accessory")
+        b.open()
+        b.hide_main_window()
+        mark = b.mark_screen(300, 300, 200, 100)
+        b.close()
+        assert mark.closed
+
     def test_the_backend_knows_what_is_on_screen(self, backend):
         mark = backend.mark_screen(300, 300, 200, 100)
         assert mark in backend._markers
