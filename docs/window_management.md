@@ -203,14 +203,16 @@ clickable.
 
 **Why an intent and not a window.** The obvious shape is a transparent,
 click-through window an app fills with widgets, and it was built that way
-first. It makes the feature macOS-only: a see-through window on Windows needs
-`WS_EX_LAYERED` with per-pixel alpha, which is a change to how the backend
-presents every frame rather than a style flag. "Outline this rectangle" has an
-implementation on both — Windows can stroke with thin opaque windows and fill
-with one — so the request is the intent and the mechanism is the backend's.
-The cost is generality: a mark is a rectangle, some text and nothing else. No
-consumer wanted more, and one that does can be answered without breaking
-anyone, which a published window flag could not be.
+first. As a *published* shape it cannot be portable: a see-through window on
+Windows is `WS_EX_LAYERED` with per-pixel alpha, and a layered window cannot
+present a DXGI swap chain — so it is not a flag one could set on an ordinary
+puikit window, it is a different way of putting pixels on the screen.
+"Outline this rectangle" has an implementation on both, so the request is the
+intent and the mechanism is the backend's — and because the mechanism is
+private, Windows is free to use exactly that layered window *here*, where
+nothing else draws through it. The cost is generality: a mark is a rectangle,
+some text and nothing else. No consumer wanted more, and one that does can be
+answered without breaking anyone, which a published window flag could not be.
 
 | | |
 |---|---|
@@ -253,3 +255,16 @@ what it points at is on the screen in front of the user. Closing the backend
 closes every mark: they are floating windows of their own, and stopping
 without them would leave rectangles painted over the screen with nothing left
 to remove them.
+
+**Windows** draws one layered, click-through popup per mark:
+`WS_EX_LAYERED` for the per-pixel alpha, `WS_EX_TRANSPARENT` so clicks reach
+what the mark points at, `WS_EX_NOACTIVATE` and `WS_EX_TOOLWINDOW` so it
+neither takes the foreground nor appears in Alt-Tab. Its pixels are handed to
+the compositor whole by `UpdateLayeredWindow`, from a 32-bit top-down DIB
+section that Direct2D renders into through an `ID2D1DCRenderTarget` — a
+layered window gets no `WM_PAINT` and presents no swap chain, so that one call
+*is* the paint. The DC render target needs no D3D device, so a mark is
+untouched by a device-loss recreate; text draws with grayscale antialiasing,
+since subpixel AA would need to know the pixels behind the glyph and behind a
+mark is another application. Closing the backend closes every mark, as on
+macOS.

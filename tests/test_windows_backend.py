@@ -1613,3 +1613,189 @@ def test_wm_timer_still_ticks_for_native_modal_loops(monkeypatch):
         assert len(ticks) == 1                # same frame: gated, not run twice
     finally:
         be.close()
+
+
+# --- screen marks: a layered, click-through window per mark -------------------
+
+
+# Declared here rather than in the backend: nothing in puikit calls either,
+# and every prototype is explicit on 64-bit (a default c_int restype would
+# truncate the HWND GetForegroundWindow returns).
+native.user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+native.user32.GetWindowLongW.restype = wintypes.LONG
+native.user32.GetForegroundWindow.argtypes = []
+native.user32.GetForegroundWindow.restype = wintypes.HWND
+
+_GWL_EXSTYLE = -20
+
+
+def _mark_pixels(marker):
+    """The mark's own DIB read back as (a, r, g, b) per pixel, row-major.
+
+    The only way to check what a mark actually painted: it presents no swap
+    chain and gets no WM_PAINT, so its pixels live in the DIB section
+    UpdateLayeredWindow was handed."""
+    hdc, hbitmap, _previous = marker._surface
+    w, h = marker._surface_size
+    buffer = (ctypes.c_uint32 * (w * h))()
+    info = native.BITMAPINFO()
+    info.bmiHeader.biSize = ctypes.sizeof(native.BITMAPINFOHEADER)
+    info.bmiHeader.biWidth = w
+    info.bmiHeader.biHeight = -h  # top-down, like the surface itself
+    info.bmiHeader.biPlanes = 1
+    info.bmiHeader.biBitCount = 32
+    info.bmiHeader.biCompression = native.BI_RGB
+    native.gdi32.GetDIBits.argtypes = [
+        wintypes.HDC, wintypes.HBITMAP, ctypes.c_uint, ctypes.c_uint,
+        ctypes.c_void_p, ctypes.POINTER(native.BITMAPINFO), ctypes.c_uint]
+    native.gdi32.GetDIBits(hdc, hbitmap, 0, h, buffer, ctypes.byref(info),
+                           native.DIB_RGB_COLORS)
+
+    def at(x, y):
+        v = buffer[y * w + x]
+        return ((v >> 24) & 255, (v >> 16) & 255, (v >> 8) & 255, v & 255)
+
+    return at
+
+
+@pytest.fixture
+def marking_backend():
+    backend = WindowsBackend(width=30, height=8, title="puikit-mark-test")
+    backend.open()
+    yield backend
+    backend.close()
+
+
+class TestScreenMarks:
+    """A rectangle drawn over other applications (capability
+    ``screen_markers``). Windows draws one as a layered window whose pixels,
+    alpha included, are handed over by UpdateLayeredWindow."""
+
+    def test_a_mark_is_click_through_and_never_activates(self, marking_backend):
+        """The properties that make it a mark rather than a window: clicks
+        reach what it points at, it carries its own per-pixel alpha, it takes
+        no activation and it stays out of Alt-Tab."""
+        mark = marking_backend.mark_screen(300, 300, 200, 100)
+        ex = native.user32.GetWindowLongW(mark._hwnd, _GWL_EXSTYLE) & 0xFFFFFFFF
+        assert ex & native.WS_EX_TRANSPARENT
+        assert ex & native.WS_EX_LAYERED
+        assert ex & native.WS_EX_NOACTIVATE
+        assert ex & native.WS_EX_TOOLWINDOW
+        assert ex & native.WS_EX_TOPMOST
+        mark.close()
+
+    def test_showing_a_mark_does_not_move_the_foreground(self, marking_backend):
+        before = native.user32.GetForegroundWindow()
+        mark = marking_backend.mark_screen(300, 300, 200, 100)
+        assert native.user32.GetForegroundWindow() == before
+        mark.close()
+
+    def test_a_size_given_is_the_size_used(self, marking_backend):
+        mark = marking_backend.mark_screen(300, 300, 240, 120)
+        rect = wintypes.RECT()
+        native.user32.GetWindowRect(mark._hwnd, ctypes.byref(rect))
+        assert (rect.right - rect.left, rect.bottom - rect.top) == (240, 120)
+        assert (rect.left, rect.top) == (300, 300)
+        mark.close()
+
+    def test_without_a_size_it_fits_its_text(self, marking_backend):
+        short = marking_backend.mark_screen(300, 300, text="A")
+        long = marking_backend.mark_screen(300, 400, text="A much longer label")
+        assert long._rect[2] > short._rect[2] > 0
+        short.close()
+        long.close()
+
+    def test_max_width_is_what_opts_into_wrapping(self, marking_backend):
+        """Without a width there is nothing to wrap to, so the only line
+        breaks are the ones in the text."""
+        text = ("A tooltip long enough that it has to wrap somewhere sensible "
+                "rather than run off the edge of the screen.")
+        unwrapped = marking_backend.mark_screen(300, 300, text=text)
+        wrapped = marking_backend.mark_screen(300, 400, text=text, max_width=220)
+        assert wrapped._rect[2] <= 220
+        assert unwrapped._rect[2] > 220
+        assert wrapped._rect[3] > unwrapped._rect[3], "it should grow down"
+        unwrapped.close()
+        wrapped.close()
+
+    def test_a_newline_breaks_a_line_without_any_width(self, marking_backend):
+        one = marking_backend.mark_screen(300, 300, text="one")
+        two = marking_backend.mark_screen(300, 400, text="one\ntwo")
+        assert two._rect[3] > one._rect[3]
+        one.close()
+        two.close()
+
+    def test_it_can_be_moved_and_re_wraps_to_its_new_width(self, marking_backend):
+        """Animating a mark is this in a loop. A width is a width whenever it
+        arrives, so a mark made narrower re-flows instead of keeping lines
+        that no longer fit inside it."""
+        text = "A label with enough words in it to wrap more than once."
+        mark = marking_backend.mark_screen(300, 300, text=text, max_width=400)
+        wide = len(mark._spec["lines"])
+        mark.set_rect(500, 320, 200, None)
+        rect = wintypes.RECT()
+        native.user32.GetWindowRect(mark._hwnd, ctypes.byref(rect))
+        assert (rect.left, rect.top) == (500, 320)
+        assert rect.right - rect.left == 200
+        assert len(mark._spec["lines"]) > wide
+        mark.close()
+
+    def test_the_inside_of_an_outline_stays_see_through(self, marking_backend):
+        """What a mark is for: the outline is painted, everything else is left
+        transparent, so the application underneath shows through the middle."""
+        mark = marking_backend.mark_screen(
+            300, 300, 200, 100, style=Style(fg=(255, 90, 90)), line_width=4.0)
+        at = _mark_pixels(mark)
+        assert at(100, 50) == (0, 0, 0, 0), "the interior must paint nothing"
+        alpha, red, _g, _b = at(100, 1)
+        assert alpha == 255 and red > 200, "the outline must be opaque"
+        mark.close()
+
+    def test_a_filled_mark_paints_its_background(self, marking_backend):
+        mark = marking_backend.mark_screen(
+            300, 300, 200, 100, fill=True,
+            style=Style(fg=(0, 0, 0), bg=(250, 240, 170)))
+        alpha, r, g, b = _mark_pixels(mark)(100, 50)
+        assert (alpha, r, g, b) == (255, 250, 240, 170)
+        mark.close()
+
+    def test_a_resized_mark_gets_a_surface_that_fits(self, marking_backend):
+        """A DIB section is a fixed size, so the surface is rebuilt while the
+        window it feeds survives."""
+        mark = marking_backend.mark_screen(300, 300, 200, 100)
+        hwnd = mark._hwnd
+        mark.set_rect(300, 300, 320, 140)
+        assert mark._surface_size == (320, 140)
+        assert mark._hwnd == hwnd
+        mark.close()
+
+    def test_closing_is_idempotent(self, marking_backend):
+        mark = marking_backend.mark_screen(300, 300, 200, 100)
+        mark.close()
+        assert mark.closed
+        mark.close()
+        assert mark.closed
+
+    def test_a_timeout_closes_it(self, marking_backend):
+        mark = marking_backend.mark_screen(300, 300, 200, 100, timeout=0.01)
+        assert not mark.closed
+        assert mark._cancel_timeout is not None
+        mark.close()
+
+    def test_closing_the_backend_takes_every_mark_off_the_screen(self):
+        """A backend that stopped without closing them would leave rectangles
+        painted over the user's screen with nothing left to remove them."""
+        backend = WindowsBackend(width=30, height=8, title="puikit-mark-test")
+        backend.open()
+        mark = backend.mark_screen(300, 300, 200, 100)
+        backend.close()
+        assert mark.closed
+        assert not backend._markers
+        assert backend._mark_rt is None
+
+    def test_before_open_a_mark_is_closed_rather_than_an_error(self):
+        """The base contract: a mark the backend cannot make costs the caller
+        nothing and needs no branch."""
+        backend = WindowsBackend(width=30, height=8)
+        mark = backend.mark_screen(300, 300, 200, 100)
+        assert mark.closed

@@ -124,6 +124,7 @@ import objc
 from PyObjCTools import AppHelper
 
 from ..background import Shader, Wallpaper
+from . import _screen_mark
 from ._metal import HAVE_METAL as _HAS_METAL, MetalBackground, PIXEL_FORMAT as _METAL_PIXEL_FORMAT
 
 try:
@@ -136,7 +137,7 @@ from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..easing import resolve as _resolve_easing
 from ..event import Event, EventType, char_key_event
 from ..font import Font, FontMetrics, FontWeight
-from ..text import cjk_segments, display_width, glyph_runs as _glyph_runs, wrap_text
+from ..text import cjk_segments, display_width, glyph_runs as _glyph_runs
 
 try:
     from Quartz import (
@@ -1427,16 +1428,12 @@ def _load_tray_image(path: str):
 
 
 
-#: Padding inside a text mark, in device pixels, so the text is not flush
-#: against the outline.
-_MARK_PADDING = 6.0
-
-#: How long a mark's arrival flash takes, matching the Panel's own default
-#: transition (``duration_ms`` 200).
-_MARK_FLASH_SECONDS = 0.2
-
-#: How far toward white the flash starts.
-_MARK_FLASH_LIFT = 0.65
+#: A mark's padding, flash length and flash lift live with the wrapping and
+#: sizing they belong to, in _screen_mark.py, so both backends round their
+#: text boxes and time their flashes the same way.
+_MARK_PADDING = _screen_mark.PADDING
+_MARK_FLASH_SECONDS = _screen_mark.FLASH_SECONDS
+_MARK_FLASH_LIFT = _screen_mark.FLASH_LIFT
 
 
 def _lighten_ns(colour):
@@ -2043,33 +2040,15 @@ class MacOSBackend(Backend):
 
     def _rewrap(self, spec, width) -> None:
         """Re-flow the text to `width`, when that is a different width."""
-        limit = width if width is not None else spec["max_width"]
-        if limit == spec["wrapped_to"]:
-            return
-        spec["wrapped_to"] = limit
-        spec["lines"] = self._mark_lines(spec["text"], spec["measure"], limit)
+        _screen_mark.rewrap(spec, width)
 
     @staticmethod
     def _mark_lines(text, measure, limit):
-        lines = []
-        for paragraph in (text.split("\n") if text else []):
-            if limit is not None:
-                inner = max(1.0, float(limit) - 2 * _MARK_PADDING)
-                lines.extend(wrap_text(paragraph, inner, measure) or [""])
-            else:
-                lines.append(paragraph)
-        return lines
+        return _screen_mark.lines(text, measure, limit)
 
     def _mark_size(self, spec, w, h):
         """The mark's size: what was asked for, or what the text needs."""
-        if w is not None and h is not None:
-            return float(w), float(h)
-        text_w = max((spec["measure"](line) for line in spec["lines"]),
-                     default=0.0)
-        text_h = spec["line_height"] * len(spec["lines"])
-        pad = 2 * _MARK_PADDING
-        return (float(w) if w is not None else text_w + pad,
-                float(h) if h is not None else text_h + pad)
+        return _screen_mark.size(spec, w, h)
 
     def create_window(self, width: int, height: int, title: str = "",
                       style: WindowStyle | None = None) -> MacWindowHandle:
