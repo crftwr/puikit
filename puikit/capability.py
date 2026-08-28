@@ -117,6 +117,10 @@ PROFILE_GUI_DESKTOP = CapabilityProfile(
         # ignore it; so does any single request the platform has no answer for
         # (overlay_input on Windows, tool on macOS) - unknown requests degrade,
         # they do not raise, so an app never branches on the backend.
+        # Rectangles drawn on the screen over other applications, for
+        # marking something rather than being used - see ScreenMarker. The
+        # backend chooses how; the request is the intent.
+        "screen_markers": True,
         "window_styles": True,
         # create_window(): real secondary OS windows. Declared for the
         # GUI-Desktop class; each backend flips it on as its implementation

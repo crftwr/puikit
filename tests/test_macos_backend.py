@@ -1061,3 +1061,105 @@ class TestPointerShapeIsPerWindow:
         b._cursor_window = win
         win.view.mouseExited_(None)
         assert b._cursor_window is _NO_CURSOR_WINDOW
+
+
+class TestScreenMarkers:
+    """Rectangles drawn on the screen over other applications. An intent, not
+    a window: asking instead for a *transparent window* would have made this
+    macOS-only, because per-pixel alpha on Windows is a change to how the
+    backend presents every frame rather than a style flag."""
+
+    @pytest.fixture
+    def backend(self):
+        b = MacOSBackend(activation_policy="accessory")
+        b.open()
+        b.hide_main_window()
+        yield b
+        b.close()
+
+    def test_a_mark_is_not_hit_tested_and_paints_no_background(self, backend):
+        """The three properties that make it a mark rather than a window: a
+        click reaches what it points at, the screen shows through, and there
+        is no shadow - macOS derives that from the alpha channel, so a window
+        painting nothing has one that trails the previous frame when moved."""
+        mark = backend.mark_screen(300, 300, 200, 100)
+        window = mark._window
+        assert window.ignoresMouseEvents()
+        assert not window.isOpaque()
+        assert not window.hasShadow()
+        mark.close()
+
+    def test_it_follows_the_user_between_desktops(self, backend):
+        """What it points at is on the screen in front of them, not on the
+        desktop the mark happened to be made on."""
+        from AppKit import NSWindowCollectionBehaviorCanJoinAllSpaces
+        mark = backend.mark_screen(300, 300, 200, 100)
+        assert (mark._window.collectionBehavior()
+                & NSWindowCollectionBehaviorCanJoinAllSpaces)
+        mark.close()
+
+    def test_a_size_given_is_the_size_used(self, backend):
+        mark = backend.mark_screen(300, 300, 240, 120)
+        frame = mark._window.frame()
+        assert (frame.size.width, frame.size.height) == (240, 120)
+        mark.close()
+
+    def test_without_a_size_it_fits_its_text(self, backend):
+        from puikit import Style
+        short = backend.mark_screen(300, 300, text="A",
+                                    style=Style(fg=(255, 255, 255)))
+        long = backend.mark_screen(300, 400, text="A much longer label",
+                                   style=Style(fg=(255, 255, 255)))
+        assert long._window.frame().size.width > short._window.frame().size.width
+        assert short._window.frame().size.width > 0
+        short.close()
+        long.close()
+
+    def test_max_width_is_what_opts_into_wrapping(self, backend):
+        """Without a width there is nothing to wrap to, so the only line
+        breaks are the ones in the text."""
+        text = ("A tooltip long enough that it has to wrap somewhere sensible "
+                "rather than run off the edge of the screen.")
+        unwrapped = backend.mark_screen(300, 300, text=text)
+        wrapped = backend.mark_screen(300, 400, text=text, max_width=220)
+        assert wrapped._window.frame().size.width <= 220
+        assert unwrapped._window.frame().size.width > 220
+        assert (wrapped._window.frame().size.height
+                > unwrapped._window.frame().size.height), "it should grow down"
+        unwrapped.close()
+        wrapped.close()
+
+    def test_a_newline_breaks_a_line_without_any_width(self, backend):
+        one = backend.mark_screen(300, 300, text="one")
+        two = backend.mark_screen(300, 400, text="one\ntwo")
+        assert (two._window.frame().size.height
+                > one._window.frame().size.height)
+        one.close()
+        two.close()
+
+    def test_it_can_be_moved(self, backend):
+        """Animating a mark is this in a loop; nothing fades, because opacity
+        over time is what a backend without per-pixel alpha cannot do."""
+        mark = backend.mark_screen(300, 300, 200, 100)
+        mark.set_rect(500, 300, 200, 100)
+        assert mark._window.frame().origin.x == 500
+        mark.close()
+
+    def test_closing_is_idempotent(self, backend):
+        mark = backend.mark_screen(300, 300, 200, 100)
+        mark.close()
+        assert mark.closed
+        mark.close()
+        assert mark.closed
+
+    def test_a_timeout_closes_it(self, backend):
+        mark = backend.mark_screen(300, 300, 200, 100, timeout=0.01)
+        assert not mark.closed
+        assert mark._cancel_timeout is not None
+        mark.close()
+
+    def test_the_backend_knows_what_is_on_screen(self, backend):
+        mark = backend.mark_screen(300, 300, 200, 100)
+        assert mark in backend._markers
+        mark.close()
+        assert mark not in backend._markers

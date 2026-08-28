@@ -181,3 +181,59 @@ One-shot timer on the UI thread; returns a zero-argument cancel function
   backends. From a worker thread, hand the schedule over:
   `panel.call_on_main_thread(lambda: panel.call_later(1.0, fn))`. (The guard
   arms in `open()`; before it, headless construction stays unrestricted.)
+
+
+## Screen marks (capability `screen_markers`)
+
+```python
+outline = backend.mark_screen(x, y, w, h, style=Style(fg=(255, 90, 90)),
+                              line_width=3.0, radius=8.0)
+label = backend.mark_screen(x, y, text="A", fill=True,
+                            style=Style(fg=(255, 255, 255), bg=(30, 90, 200)))
+tip = backend.mark_screen(x, y, text=long_text, max_width=220, fill=True,
+                          timeout=3.0, style=Style(bg=(250, 240, 170)))
+```
+
+A rectangle drawn **on the screen**, over whatever is already there, for
+*marking* something rather than being used — an outline around the control
+something is pointing at, a label over each of them, a tooltip beside the
+caret. Never interactive: clicks, scrolls and hovers pass through to the
+application underneath, which is the point of a mark that points at something
+clickable.
+
+**Why an intent and not a window.** The obvious shape is a transparent,
+click-through window an app fills with widgets, and it was built that way
+first. It makes the feature macOS-only: a see-through window on Windows needs
+`WS_EX_LAYERED` with per-pixel alpha, which is a change to how the backend
+presents every frame rather than a style flag. "Outline this rectangle" has an
+implementation on both — Windows can stroke with thin opaque windows and fill
+with one — so the request is the intent and the mechanism is the backend's.
+The cost is generality: a mark is a rectangle, some text and nothing else. No
+consumer wanted more, and one that does can be answered without breaking
+anyone, which a published window flag could not be.
+
+| | |
+|---|---|
+| `x`, `y` | top-left, in the coordinates `screen_frames()` reports |
+| `w`, `h` | the size, or `None` to fit `text` |
+| `text` | `\n` separates lines; a mark with none is an outline or a wash |
+| `style` | `fg` strokes and draws text, `bg` fills — as in `draw_round_rect` |
+| `radius`, `fill`, `line_width` | the same vocabulary again |
+| `max_width` | **opts into wrapping** when sizing to content |
+| `timeout` | close after N seconds |
+
+`ScreenMarker.set_rect()` moves and resizes; **animating a mark is that in a
+loop**, driven by `request_animation_ticks` like any other frame. Nothing
+fades — opacity over time is exactly what a backend without per-pixel alpha
+cannot do, so putting it in the vocabulary would undo the portability the
+shape exists for.
+
+A backend without the capability returns a mark that is **already closed**, so
+a caller needs no branch and an unsupported request costs nothing.
+
+**macOS** draws one borderless floating window per mark:
+`ignoresMouseEvents`, `setOpaque_(False)` with a clear background, and no
+shadow — macOS derives the shadow from the alpha channel, so a window painting
+nothing has one that must be invalidated by hand on every content change and a
+mark being moved would trail the previous frame. It joins all Spaces, because
+what it points at is on the screen in front of the user.

@@ -420,3 +420,27 @@ class TestWindowsFlagMapping:
         source = inspect.getsource(windows_backend.WindowsBackend.open)
         assert "_window_style_flags" in source
         assert "WS_EX_TOOLWINDOW" not in source, "the mapping is duplicated again"
+
+
+class TestScreenMarkerBase:
+    """The base's answer for a backend that cannot mark the screen."""
+
+    def test_the_base_hands_back_a_closed_mark(self):
+        """So a caller needs no branch: it can close it, and closing does
+        nothing, which is what "there is no mark" should cost."""
+        from puikit.backend import Backend, ScreenMarker
+        mark = Backend.mark_screen(object(), 0, 0)
+        assert isinstance(mark, ScreenMarker)
+        assert mark.closed
+        mark.close()
+        mark.set_rect(10, 10)
+
+    def test_only_a_desktop_backend_claims_it(self):
+        from puikit.capability import PROFILE_GUI_DESKTOP, PROFILE_TUI
+        assert PROFILE_GUI_DESKTOP.supports("screen_markers")
+        assert not PROFILE_TUI.supports("screen_markers")
+
+    def test_a_backend_without_it_still_accepts_the_call(self):
+        """The base recipe: an unknown request degrades, it does not raise."""
+        backend = MemoryBackend(20, 5)
+        assert backend.mark_screen(0, 0, 10, 10).closed

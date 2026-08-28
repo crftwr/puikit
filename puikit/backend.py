@@ -149,6 +149,47 @@ class CapabilityNotSupported(Exception):
     """Raised when an extended primitive is called on a backend without it."""
 
 
+class ScreenMarker:
+    """A rectangle drawn *on the screen*, over whatever is already there
+    (capability ``screen_markers``).
+
+    For marking something rather than being used: an outline around the
+    control an assistive tool is pointing at, a label placed over each of
+    them, a tooltip beside the caret. It is never interactive - clicks,
+    scrolls and hovers pass through it to the application underneath, which
+    is the whole point of a mark that points at something clickable.
+
+    **An intent, not a window.** How it is drawn is the backend's business:
+    macOS uses one transparent click-through window, Windows can outline with
+    thin opaque windows and fill with one. Asking for a *transparent window*
+    instead would have made this macOS-only, because per-pixel alpha there is
+    a change to how a backend presents every frame rather than a style flag -
+    while "outline this rectangle" has an implementation on both.
+
+    Positions and sizes are in the portable top-left screen coordinates
+    ``Backend.screen_frames()`` and ``WindowHandle.frame_px()`` report.
+    """
+
+    def set_rect(self, x: float, y: float,
+                 w: float | None = None, h: float | None = None) -> None:
+        """Move and resize. ``w``/``h`` of None size to the text again.
+
+        Animating a mark is this in a loop: ``request_animation_ticks`` is
+        already the way a caller drives a frame, and an outline that morphs
+        between two rectangles is a caller moving it. Nothing here fades -
+        opacity over time is exactly what a backend without per-pixel alpha
+        cannot do, so putting it in the vocabulary would undo the portability
+        this shape exists for.
+        """
+
+    def close(self) -> None:
+        """Take it off the screen. Idempotent."""
+
+    @property
+    def closed(self) -> bool:
+        return True
+
+
 class WindowHandle:
     """A secondary window created by Backend.create_window() (capability
     ``multi_window``).
@@ -874,6 +915,50 @@ class Backend(ABC):
         when opened with start_hidden=True). Base returns True, matching
         backends that cannot hide their surface."""
         return True
+
+    def mark_screen(
+        self,
+        x: float,
+        y: float,
+        w: float | None = None,
+        h: float | None = None,
+        *,
+        text: str = "",
+        style: Style = DEFAULT_STYLE,
+        radius: float | None = None,
+        fill: bool = False,
+        line_width: float = 1.0,
+        max_width: float | None = None,
+        timeout: float | None = None,
+    ) -> ScreenMarker:
+        """Draw a rectangle on the screen and return a handle to it
+        (capability ``screen_markers``).
+
+        Args:
+            x, y: Top-left corner, in the portable screen coordinates
+                ``screen_frames()`` reports.
+            w, h: Size, or None to size to ``text``.
+            text: What to draw inside, ``\n`` separating lines. A mark with
+                no text is an outline or a wash of colour.
+            style: ``fg`` strokes the outline and draws the text, ``bg``
+                fills. The same two roles they have in ``draw_round_rect``.
+            radius: Corner radius in device pixels; None for square corners.
+                Dropped by a backend that outlines with separate edges.
+            fill: Paint the interior with ``style.bg``.
+            line_width: Outline thickness in device pixels.
+            max_width: Wrap ``text`` at this width when sizing to content.
+                **This is what opts into wrapping**: without it the only line
+                breaks are the ones in the text. With an explicit ``w`` the
+                text wraps to that instead, since there is a width to wrap to.
+            timeout: Close it after this many seconds. What a tooltip wants,
+                and portable in a way a fade is not.
+
+        Returns:
+            A :class:`ScreenMarker`. The base returns one that is already
+            closed, so a backend without the capability costs the caller
+            nothing and needs no branch.
+        """
+        return ScreenMarker()
 
     def create_window(self, width: int, height: int, title: str = "",
                       style: "WindowStyle | None" = None) -> WindowHandle:

@@ -60,6 +60,7 @@ from AppKit import (
     NSBoldFontMask,
     NSFont,
     NSFontAttributeName,
+    NSWindowCollectionBehaviorCanJoinAllSpaces,
     NSFontManager,
     NSFontWeightBold,
     NSFontWeightRegular,
@@ -130,12 +131,12 @@ try:
 except ImportError:  # pragma: no cover - older/partial PyObjC
     CAMetalLayer = None
     CATransaction = None
-from ..backend import Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, WindowHandle, WindowStyle, _run_tick_callbacks, is_transparent
+from ..backend import Backend, DEFAULT_STYLE, EventHandler, ScreenMarker, Style, TextAttribute, WindowHandle, WindowStyle, _run_tick_callbacks, is_transparent
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..easing import resolve as _resolve_easing
 from ..event import Event, EventType, char_key_event
 from ..font import Font, FontMetrics, FontWeight
-from ..text import cjk_segments, display_width, glyph_runs as _glyph_runs
+from ..text import cjk_segments, display_width, glyph_runs as _glyph_runs, wrap_text
 
 try:
     from Quartz import (
@@ -1425,6 +1426,91 @@ def _load_tray_image(path: str):
     return image
 
 
+
+#: Padding inside a text mark, in device pixels, so the text is not flush
+#: against the outline.
+_MARK_PADDING = 6.0
+
+
+class _MarkerView(NSView):
+    """Draws one screen mark: a fill, an outline, and its text.
+
+    A plain NSView rather than a Panel: a mark is a rectangle and some words,
+    and hosting the widget machinery would mean exposing the transparent
+    click-through window it lives in, which is the surface this exists to
+    avoid publishing.
+    """
+
+    def isFlipped(self):
+        return True
+
+    def drawRect_(self, rect):
+        spec = getattr(self, "spec", None)
+        if spec is None:
+            return
+        bounds = self.bounds()
+        inset = spec["line_width"] / 2.0
+        body = NSMakeRect(inset, inset,
+                          max(0.0, bounds.size.width - spec["line_width"]),
+                          max(0.0, bounds.size.height - spec["line_width"]))
+        radius = spec["radius"]
+        path = (NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                    body, radius, radius) if radius
+                else NSBezierPath.bezierPathWithRect_(body))
+        if spec["fill"] and spec["bg"] is not None:
+            spec["bg"].setFill()
+            path.fill()
+        if spec["fg"] is not None and spec["line_width"] > 0:
+            spec["fg"].setStroke()
+            path.setLineWidth_(spec["line_width"])
+            path.stroke()
+        y = _MARK_PADDING
+        for line in spec["lines"]:
+            attributed = _attr_string(line, spec["attrs"])
+            attributed.drawAtPoint_((_MARK_PADDING, y))
+            y += spec["line_height"]
+
+
+class MacScreenMarker(ScreenMarker):
+    """A screen mark as one transparent, click-through NSWindow."""
+
+    def __init__(self, backend, nswindow, view, spec):
+        self._backend = backend
+        self._window = nswindow
+        self._view = view
+        self._spec = spec
+        self._cancel_timeout = None
+        self._closed = False
+
+    def set_rect(self, x, y, w=None, h=None) -> None:
+        """lazydocs: ignore"""
+        if self._closed:
+            return
+        width, height = self._backend._mark_size(self._spec, w, h)
+        flip = _flip_height()
+        if flip is None:
+            return
+        self._window.setFrame_display_(
+            NSMakeRect(x, flip - y - height, width, height), True)
+        self._view.setNeedsDisplay_(True)
+
+    def close(self) -> None:
+        """lazydocs: ignore"""
+        if self._closed:
+            return
+        self._closed = True
+        if self._cancel_timeout is not None:
+            self._cancel_timeout()
+            self._cancel_timeout = None
+        self._window.orderOut_(None)
+        self._window.close()
+        self._backend._markers.discard(self)
+
+    @property
+    def closed(self) -> bool:
+        """lazydocs: ignore"""
+        return self._closed
+
 class MacOSBackend(Backend):
     """macOS GUI backend (PyObjC). Coordinates stay base unit-based; this backend
     owns the base unit size and converts to pixels at render time."""
@@ -1482,6 +1568,9 @@ class MacOSBackend(Backend):
         # before the _front/_back property assignments below.
         self._active_win: MacWindowHandle | None = None
         self._secondary_windows: list[MacWindowHandle] = []
+        #: Live screen marks, so close() can find them and a backend
+        #: shutdown can take them off the screen.
+        self._markers: set = set()
         # How the window is framed/layered (capability "window_styles"); None
         # is equivalent to WindowStyle() and reproduces the classic app window.
         self._window_style = style if style is not None else WindowStyle()
@@ -1793,6 +1882,114 @@ class MacOSBackend(Backend):
 
         return [(_flip(screen.frame()), _flip(screen.visibleFrame()))
                 for screen in NSScreen.screens()]
+
+    # --- screen marks -------------------------------------------------------
+
+    def mark_screen(self, x, y, w=None, h=None, *, text="",
+                    style=DEFAULT_STYLE, radius=None, fill=False,
+                    line_width=1.0, max_width=None, timeout=None):
+        """Draw a rectangle on the screen (Backend API).
+
+        One borderless, floating, non-activating window that paints no
+        background and is not hit-tested, so the desktop shows through
+        wherever the mark does not paint and clicks reach whatever it points
+        at.  The shadow goes too: macOS derives it from the alpha channel, so
+        a window painting nothing has a shadow that needs invalidating by
+        hand on every content change, and a mark being moved would trail the
+        previous frame's outline.
+
+        lazydocs: ignore
+        """
+        self._assert_ui_thread("mark_screen")
+        flip = _flip_height()
+        if flip is None:
+            return ScreenMarker()
+
+        spec = self._mark_spec(text, style, radius, fill, line_width,
+                               max_width, w)
+        width, height = self._mark_size(spec, w, h)
+
+        window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(x, flip - y - height, width, height),
+            NSWindowStyleMaskBorderless, NSBackingStoreBuffered, False)
+        window.setLevel_(NSFloatingWindowLevel)
+        window.setReleasedWhenClosed_(False)
+        window.setIgnoresMouseEvents_(True)
+        window.setOpaque_(False)
+        window.setBackgroundColor_(NSColor.clearColor())
+        window.setHasShadow_(False)
+        # Follow the user rather than pinning the mark to the desktop it was
+        # created on: what it points at is on the screen in front of them.
+        window.setCollectionBehavior_(NSWindowCollectionBehaviorCanJoinAllSpaces)
+
+        view = _MarkerView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, width, height))
+        view.spec = spec
+        window.setContentView_(view)
+        window.orderFrontRegardless()
+
+        marker = MacScreenMarker(self, window, view, spec)
+        self._markers.add(marker)
+        if timeout is not None:
+            marker._cancel_timeout = self.call_later(timeout, marker.close)
+        return marker
+
+    def _mark_spec(self, text, style, radius, fill, line_width, max_width,
+                   explicit_width):
+        """Everything the mark's view needs, resolved once.
+
+        Wrapping happens here because it needs a width, and a width is
+        exactly what a mark sized to its text does not have - unless the
+        caller says `max_width`, which is what opting into wrapping means.
+        An explicit `w` is a width too, so text wraps to that.
+        """
+        # The same resolution the ordinary text path uses: the prebuilt base
+        # faces for style.font=None, the per-Style face otherwise. Reaching
+        # for _ui_font directly gets NSNull before open() has built one.
+        if style.font is None:
+            weight = (TextAttribute.BOLD
+                      if style.attr & TextAttribute.BOLD
+                      else TextAttribute.NORMAL)
+            ns_font = self._fonts[weight]
+        else:
+            ns_font = self._resolve_style_font(style)
+        attrs = {
+            NSFontAttributeName: ns_font,
+            NSForegroundColorAttributeName: _ns_color(
+                style.fg if style.fg is not None else (255, 255, 255)),
+        }
+        measure = lambda t: float(_attr_string(t, attrs).size().width)
+        limit = explicit_width if explicit_width is not None else max_width
+        lines = []
+        for paragraph in (text.split("\n") if text else []):
+            if limit is not None:
+                inner = max(1.0, float(limit) - 2 * _MARK_PADDING)
+                lines.extend(wrap_text(paragraph, inner, measure) or [""])
+            else:
+                lines.append(paragraph)
+        line_height = float(_attr_string("Ag", attrs).size().height) if lines else 0.0
+        return {
+            "lines": lines,
+            "attrs": attrs,
+            "measure": measure,
+            "line_height": line_height,
+            "radius": 0.0 if radius is None else float(radius),
+            "fill": bool(fill),
+            "line_width": float(line_width),
+            "fg": _ns_color(style.fg) if style.fg is not None else None,
+            "bg": _ns_color(style.bg) if style.bg is not None else None,
+        }
+
+    def _mark_size(self, spec, w, h):
+        """The mark's size: what was asked for, or what the text needs."""
+        if w is not None and h is not None:
+            return float(w), float(h)
+        text_w = max((spec["measure"](line) for line in spec["lines"]),
+                     default=0.0)
+        text_h = spec["line_height"] * len(spec["lines"])
+        pad = 2 * _MARK_PADDING
+        return (float(w) if w is not None else text_w + pad,
+                float(h) if h is not None else text_h + pad)
 
     def create_window(self, width: int, height: int, title: str = "",
                       style: WindowStyle | None = None) -> MacWindowHandle:
