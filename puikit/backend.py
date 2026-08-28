@@ -930,6 +930,7 @@ class Backend(ABC):
         line_width: float = 1.0,
         max_width: float | None = None,
         timeout: float | None = None,
+        flash: bool = False,
     ) -> ScreenMarker:
         """Draw a rectangle on the screen and return a handle to it
         (capability ``screen_markers``).
@@ -952,6 +953,14 @@ class Backend(ABC):
                 text wraps to that instead, since there is a width to wrap to.
             timeout: Close it after this many seconds. What a tooltip wants,
                 and portable in a way a fade is not.
+            flash: Come up bright and settle to `style`, so the eye finds the
+                mark on a screen it did not choose. A **colour** transition,
+                which is why it is here at all: puikit already calls a colour
+                flash a "highlight" and already tweens colour on a backend
+                that cannot composite, so this asks for nothing an opacity
+                fade would have asked for. Fading is still not offered - that
+                one needs per-pixel alpha and would take the portability this
+                whole shape exists for.
 
         Returns:
             A :class:`ScreenMarker`. The base returns one that is already

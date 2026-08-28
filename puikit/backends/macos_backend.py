@@ -1431,6 +1431,26 @@ def _load_tray_image(path: str):
 #: against the outline.
 _MARK_PADDING = 6.0
 
+#: How long a mark's arrival flash takes, matching the Panel's own default
+#: transition (``duration_ms`` 200).
+_MARK_FLASH_SECONDS = 0.2
+
+#: How far toward white the flash starts.
+_MARK_FLASH_LIFT = 0.65
+
+
+def _lighten_ns(colour):
+    """An NSColor lifted toward white, for the bright end of a flash."""
+    white = NSColor.whiteColor()
+    return colour.blendedColorWithFraction_ofColor_(_MARK_FLASH_LIFT, white)
+
+
+def _mix_ns_color(start, end, t: float):
+    """`start` blended toward `end` by `t`, both NSColors."""
+    if end is None:
+        return start
+    return start.blendedColorWithFraction_ofColor_(max(0.0, min(1.0, t)), end)
+
 
 class _MarkerView(NSView):
     """Draws one screen mark: a fill, an outline, and its text.
@@ -1497,6 +1517,43 @@ class MacScreenMarker(ScreenMarker):
         self._window.setFrame_display_(
             NSMakeRect(x, flip - y - height, width, height), True)
         self._view.setNeedsDisplay_(True)
+
+    def _start_flash(self) -> None:
+        """Come up bright and settle, so the eye finds the mark.
+
+        A colour transition, tick by tick. Not opacity: that needs per-pixel
+        alpha, which is exactly what a backend can lack - and puikit already
+        treats a colour flash as what a "highlight" degrades to where it
+        cannot composite.
+        """
+        spec = self._spec
+        base = {"fg": spec["fg"], "bg": spec["bg"]}
+        started = time.monotonic()
+
+        def tick() -> bool:
+            if self._closed:
+                return False
+            t = (time.monotonic() - started) / _MARK_FLASH_SECONDS
+            if t >= 1.0:
+                spec["fg"], spec["bg"] = base["fg"], base["bg"]
+                self._view.setNeedsDisplay_(True)
+                return False
+            for role in ("fg", "bg"):
+                colour = self._flash_from[role]
+                if colour is not None:
+                    spec[role] = _mix_ns_color(colour, base[role], t)
+            self._view.setNeedsDisplay_(True)
+            return True
+
+        self._flash_from = {
+            role: _lighten_ns(base[role]) if base[role] is not None else None
+            for role in ("fg", "bg")
+        }
+        for role in ("fg", "bg"):
+            if self._flash_from[role] is not None:
+                spec[role] = self._flash_from[role]
+        self._view.setNeedsDisplay_(True)
+        self._backend.request_animation_ticks(tick)
 
     def close(self) -> None:
         """lazydocs: ignore"""
@@ -1891,7 +1948,8 @@ class MacOSBackend(Backend):
 
     def mark_screen(self, x, y, w=None, h=None, *, text="",
                     style=DEFAULT_STYLE, radius=None, fill=False,
-                    line_width=1.0, max_width=None, timeout=None):
+                    line_width=1.0, max_width=None, timeout=None,
+                    flash=False):
         """Draw a rectangle on the screen (Backend API).
 
         One borderless, floating, non-activating window that paints no
@@ -1934,6 +1992,8 @@ class MacOSBackend(Backend):
 
         marker = MacScreenMarker(self, window, view, spec)
         self._markers.add(marker)
+        if flash:
+            marker._start_flash()
         if timeout is not None:
             marker._cancel_timeout = self.call_later(timeout, marker.close)
         return marker

@@ -221,6 +221,7 @@ anyone, which a published window flag could not be.
 | `radius`, `fill`, `line_width` | the same vocabulary again |
 | `max_width` | **opts into wrapping** when sizing to content |
 | `timeout` | close after N seconds |
+| `flash` | come up bright and settle to `style` |
 
 `ScreenMarker.set_rect()` moves and resizes — and re-wraps, because a width is
 a width whenever it arrives: a mark made narrower otherwise keeps lines that no
@@ -230,6 +231,15 @@ loop**, driven by `request_animation_ticks` like any other frame. Nothing
 fades — opacity over time is exactly what a backend without per-pixel alpha
 cannot do, so putting it in the vocabulary would undo the portability the
 shape exists for.
+
+`flash=True` is the one animation the primitive does itself, and it is a
+**colour** transition for that same reason: puikit already calls a colour
+flash a "highlight" and already tweens colour on a backend that cannot
+composite, so it asks for nothing an opacity fade would have asked for. It
+lifts the mark's colours toward white and settles over 200 ms, the Panel's own
+default transition length. Use it when the mark appears somewhere the user is
+not already looking, which is most of the time — the screen was not chosen by
+whoever put the mark on it.
 
 A backend without the capability returns a mark that is **already closed**, so
 a caller needs no branch and an unsupported request costs nothing.

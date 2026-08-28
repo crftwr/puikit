@@ -1191,6 +1191,54 @@ class TestScreenMarkers:
         b.close()
         assert mark.closed
 
+    def _components(self, colour):
+        return (colour.redComponent(), colour.greenComponent(),
+                colour.blueComponent())
+
+    def test_a_flash_starts_brighter_than_what_was_asked_for(self, backend):
+        """Colour, not opacity: a fade needs per-pixel alpha, which is what a
+        backend can lack, while puikit already treats a colour flash as what
+        a highlight degrades to where it cannot composite."""
+        from puikit import Style
+        plain = backend.mark_screen(300, 300, 200, 100,
+                                    style=Style(fg=(200, 40, 40)))
+        flashing = backend.mark_screen(300, 500, 200, 100,
+                                       style=Style(fg=(200, 40, 40)),
+                                       flash=True)
+        settled = self._components(plain._spec["fg"])
+        started = self._components(flashing._spec["fg"])
+        assert all(a >= b for a, b in zip(started, settled))
+        assert started != settled
+        plain.close()
+        flashing.close()
+
+    def test_a_flash_settles_on_the_colour_that_was_asked_for(self, backend):
+        import time as _time
+        from puikit import Style
+        from puikit.backends import macos_backend
+
+        mark = backend.mark_screen(300, 300, 200, 100,
+                                   style=Style(fg=(200, 40, 40)), flash=True)
+        # Run the tick past the end rather than sleeping through it.
+        _time.sleep(macos_backend._MARK_FLASH_SECONDS + 0.01)
+        backend._tick_callbacks = [cb for cb in backend._tick_callbacks if cb()]
+        assert self._components(mark._spec["fg"]) == pytest.approx(
+            (200 / 255, 40 / 255, 40 / 255), abs=0.01)
+        mark.close()
+
+    def test_a_mark_that_is_closed_mid_flash_stops_ticking(self, backend):
+        """Otherwise the tick keeps waking the backend to repaint a window
+        that is not on the screen any more."""
+        from puikit import Style
+        before = list(backend._tick_callbacks)
+        mark = backend.mark_screen(300, 300, 200, 100,
+                                   style=Style(fg=(200, 40, 40)), flash=True)
+        added = [cb for cb in backend._tick_callbacks if cb not in before]
+        assert added, "the flash registered no tick"
+        mark.close()
+        assert all(cb() is False for cb in added)
+
+
     def test_the_backend_knows_what_is_on_screen(self, backend):
         mark = backend.mark_screen(300, 300, 200, 100)
         assert mark in backend._markers
