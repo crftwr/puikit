@@ -255,6 +255,31 @@ class WindowHandle:
         drag, which is exactly the window that has to draw its own grip and
         resize itself."""
 
+    def set_frame_px(self, x: float, y: float, w: float, h: float) -> None:
+        """Move **and** resize in one step, in the coordinates ``frame_px``
+        reports. The base is a no-op.
+
+        What a resize from the top or left edge needs: those hold the far
+        side still, so the window's origin moves by whatever its size gains.
+        Doing that as ``move_to_px`` then ``resize_to_px`` puts the window
+        through an intermediate frame with the new origin and the old size —
+        one where the *far* edge, the one the user is holding still, is
+        somewhere else. The eye catches it as the opposite edge twitching
+        with every step of the drag."""
+
+    @property
+    def corner_radius_px(self) -> float:
+        """The radius the platform clips this window's corners to, in the
+        same pixels ``frame_px`` reports. 0 where they are square (the base,
+        and a borderless window on macOS).
+
+        Here because it is a fact about the window, and an app that draws its
+        own chrome cannot see it any other way: a window's own border, drawn
+        square at its extent, loses exactly its four corners to this clip —
+        with nothing in the drawing API to explain why. It is the platform's
+        number, so it is the platform layer's to know."""
+        return 0.0
+
     @property
     def closed(self) -> bool:
         return False
@@ -936,6 +961,28 @@ class Backend(ABC):
         when opened with start_hidden=True). Base returns True, matching
         backends that cannot hide their surface."""
         return True
+
+    def pointer_position_px(self) -> tuple[float, float] | None:
+        """Where the pointer is **now**, in the portable screen coordinates
+        ``screen_frames()`` / ``WindowHandle.frame_px()`` report. None where
+        the backend cannot say (the base, a terminal).
+
+        Asked of the OS rather than read off an event, and that is the whole
+        point of it: a mouse event carries its position *relative to a
+        window*, frozen when the event was posted (``locationInWindow`` on
+        macOS, ``lParam`` on Windows). An app that **moves that window while
+        the gesture runs** — dragging a frameless window by its content,
+        resizing it from its top or left edge — cannot recover a screen
+        position from such an event: adding the window's current origin to a
+        location measured against its previous one overstates the travel by
+        exactly the move, and the correction feeds the next frame. The window
+        oscillates.
+
+        A pointer position that never mentions a window is immune to that.
+        Everything else should keep using the event: it is coalesced with the
+        gesture, and this is the live pointer, which is a different question
+        once events queue up."""
+        return None
 
     def mark_screen(
         self,

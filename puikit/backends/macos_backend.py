@@ -1363,19 +1363,39 @@ class MacWindowHandle(WindowHandle):
         self.nswindow.setFrameOrigin_((x, flip_h - y - h))
 
     def resize_to_px(self, w: float, h: float) -> None:
+        frame = self.frame_px()
+        if frame is None:
+            return
+        # Through the portable frame, which is where the top-left corner this
+        # has to hold still is already written down: AppKit's own origin is
+        # the bottom-left, so setting the size against it would hold the
+        # *bottom* edge and push the top up the screen as the window grows.
+        self.set_frame_px(frame[0], frame[1], w, h)
+
+    def set_frame_px(self, x: float, y: float, w: float, h: float) -> None:
         flip_h = _flip_height()
         if flip_h is None:
             return
-        frame = self.nswindow.frame()
         w = max(1.0, float(w))
         h = max(1.0, float(h))
-        # The origin is recomputed rather than kept: AppKit's is the window's
-        # bottom-left, so setting the size alone would hold the *bottom* edge
-        # and push the top edge up the screen as the window grows. The portable
-        # top is what stays.
-        top = flip_h - float(frame.origin.y) - float(frame.size.height)
         self.nswindow.setFrame_display_(
-            NSMakeRect(frame.origin.x, flip_h - top - h, w, h), True)
+            NSMakeRect(x, flip_h - y - h, w, h), True)
+
+    @property
+    def corner_radius_px(self) -> float:
+        # AppKit rounds every window that has a frame - which this one has
+        # even when `frameless` hid it, since the mask that separates "key"
+        # from "active" is only defined for a titled panel. A genuinely
+        # borderless window is the square case. The number is not readable
+        # through public API; it is 15 pt on macOS 26 (measured off
+        # NSThemeFrame's private cornerRadius, which is not called here), and
+        # has been in that region since the flat window style arrived.
+        return 0.0 if self._borderless() else 15.0
+
+    def _borderless(self) -> bool:
+        style = self.window_style
+        overlay = style.overlay_input if not style.activates else "none"
+        return style.frameless and overlay not in ("mouse", "keyboard")
 
     @property
     def closed(self) -> bool:
@@ -1938,6 +1958,16 @@ class MacOSBackend(Backend):
 
     def is_main_window_visible(self) -> bool:
         return self._window is not None and bool(self._window.isVisible())
+
+    def pointer_position_px(self) -> tuple[float, float] | None:
+        """The live pointer, flipped into portable screen coordinates.
+        ``NSEvent.mouseLocation`` is a class method: it answers where the
+        pointer is now, with no event and no window in the question."""
+        flip_h = _flip_height()
+        if flip_h is None:
+            return None
+        point = NSEvent.mouseLocation()
+        return (float(point.x), flip_h - float(point.y))
 
     def screen_frames(self) -> list:
         """[(frame, visible_frame)] per screen, main screen first, each an

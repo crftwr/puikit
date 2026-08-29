@@ -449,6 +449,75 @@ class TestWindowResizing:
         assert flip_h - appkit_y - new_h == top
 
 
+class TestSettingTheWholeFrame:
+    """set_frame_px(): origin and size in one step, for the edges that hold
+    the far side still."""
+
+    def _window(self):
+        backend = MemoryBackend(80, 24)
+        backend.open()
+        return backend.create_window(30, 10, title="pop")
+
+    def test_base_handle_is_a_no_op(self):
+        from puikit.backend import WindowHandle
+        WindowHandle().set_frame_px(1, 2, 3, 4)  # must not raise
+
+    def test_it_moves_and_resizes_at_once(self):
+        window = self._window()
+        window.set_frame_px(100, 200, 40, 12)
+        assert window.frame_px() == (100.0, 200.0, 40.0, 12.0)
+
+    def test_it_is_the_two_halves_agreeing(self):
+        # Whatever move_to_px + resize_to_px would have ended at, without the
+        # intermediate frame in between.
+        one = self._window()
+        one.set_frame_px(100, 200, 40, 12)
+        two = self._window()
+        two.move_to_px(100, 200)
+        two.resize_to_px(40, 12)
+        assert one.frame_px() == two.frame_px()
+
+
+class TestCornerRadius:
+    """What the platform clips a window's corners to - the fact an app
+    drawing its own border cannot see any other way."""
+
+    def test_base_and_grid_are_square(self):
+        from puikit.backend import WindowHandle
+        assert WindowHandle().corner_radius_px == 0.0
+        backend = MemoryBackend(80, 24)
+        backend.open()
+        assert backend.create_window(30, 10).corner_radius_px == 0.0
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="AppKit rounding")
+    def test_macos_rounds_a_framed_window_and_not_a_borderless_one(self):
+        from puikit.backends.macos_backend import MacWindowHandle
+        handle = MacWindowHandle.__new__(MacWindowHandle)
+        handle.window_style = WindowStyle(frameless=True, activates=False,
+                                          overlay_input="mouse")
+        # The panel that separates key from active is titled underneath, so
+        # AppKit rounds it even though `frameless` hid the title bar.
+        assert handle.corner_radius_px == 15.0
+        handle.window_style = WindowStyle(frameless=True, activates=False)
+        assert handle.corner_radius_px == 0.0
+
+
+class TestPointerPosition:
+    """The live pointer, which is a different question from where an event
+    says the pointer was."""
+
+    def test_base_cannot_say(self):
+        from puikit.backend import Backend
+        assert Backend.pointer_position_px(MemoryBackend()) is None
+
+    def test_memory_answers_what_a_test_put_there(self):
+        backend = MemoryBackend(80, 24)
+        backend.open()
+        assert backend.pointer_position_px() is None
+        backend.pointer_px = (412.0, 96.0)
+        assert backend.pointer_position_px() == (412.0, 96.0)
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Win32 flag mapping")
 class TestWindowsFlagMapping:
     """The (ex_style, style) pair the main window and every secondary one

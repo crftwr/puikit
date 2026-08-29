@@ -133,6 +133,17 @@ class _MemoryWindowHandle(WindowHandle):
             self.on_event(Event(type=EventType.RESIZE,
                                 hints={"w": width, "h": height}))
 
+    def set_frame_px(self, x: float, y: float, w: float, h: float) -> None:
+        self.x = float(x)
+        self.y = float(y)
+        self.resize_to_px(w, h)
+
+    @property
+    def corner_radius_px(self) -> float:
+        # A character grid has no rounding to clip against, whatever profile
+        # it is handed - the same reason it masks vector_shapes off.
+        return 0.0
+
     @property
     def closed(self) -> bool:
         return self._closed
@@ -189,6 +200,9 @@ class MemoryBackend(Backend):
         self.round_rect_calls: list[tuple] = []
         self.check_calls: list[tuple] = []
         self.chevron_calls: list[tuple] = []
+        #: Where a test says the pointer is, in portable screen coordinates -
+        #: what pointer_position_px() answers. None until a test sets it.
+        self.pointer_px: tuple[float, float] | None = None
         self.shadow_calls: list[tuple] = []       # draw_shadow (GUI compositing)
         self.shadow_rect_calls: list[tuple] = []  # shadow_rect (TUI stand-in)
         self.flash_calls: list[tuple] = []
@@ -312,6 +326,11 @@ class MemoryBackend(Backend):
     def end_text_input(self) -> None:
         self.text_input_active = False
         self.text_input_calls.append("end")
+
+    def pointer_position_px(self) -> tuple[float, float] | None:
+        """Whatever a test put in ``pointer_px`` (None until one does), so a
+        gesture driven by the live pointer is drivable headless."""
+        return self.pointer_px
 
     @property
     def capabilities(self) -> CapabilityProfile:
