@@ -3863,6 +3863,19 @@ class MacOSBackend(Backend):
         "ew-resize": "resizeLeftRightCursor",
         "row-resize": "resizeUpDownCursor",
         "ns-resize": "resizeUpDownCursor",
+        # The diagonals AppKit has and does not publish. A window resized from
+        # a corner has no other honest pointer - the public map's nearest
+        # neighbours name one axis and mean it - and the alternative to asking
+        # for them is that every corner in every app reads as "not draggable".
+        # Guarded by respondsToSelector below, so a release that withdrew them
+        # gets the arrow back rather than an exception; the same pair Qt and
+        # Chromium have used for this since the cursors existed.
+        "nwse-resize": "_windowResizeNorthWestSouthEastCursor",
+        "nw-resize": "_windowResizeNorthWestSouthEastCursor",
+        "se-resize": "_windowResizeNorthWestSouthEastCursor",
+        "nesw-resize": "_windowResizeNorthEastSouthWestCursor",
+        "ne-resize": "_windowResizeNorthEastSouthWestCursor",
+        "sw-resize": "_windowResizeNorthEastSouthWestCursor",
     }
 
     def set_pointer_shape(self, shape: str | None) -> None:
@@ -3885,6 +3898,11 @@ class MacOSBackend(Backend):
         if shape == current:
             return
         selector = self._CURSORS.get(shape) if shape else None
+        # respondsToSelector, not hasattr: the diagonal resize cursors are
+        # AppKit's own and unpublished, so a release that dropped one must
+        # cost this call an arrow and nothing else.
+        if selector and not NSCursor.respondsToSelector_(selector):
+            selector = None
         resolved = getattr(NSCursor, selector)() if selector else None
         self._pointer_cursors[window] = (shape, resolved)
         if window is not self._cursor_window:

@@ -622,3 +622,28 @@ class TestMarkTextLayout:
         w, h = _screen_mark.size(self._spec(["abcd", "ab"]), None, None)
         assert w == 4 + pad
         assert h == 20 + pad
+
+
+class TestResizeCursors:
+    """A window resized from a corner needs a diagonal pointer. AppKit has
+    them and does not publish them; the public map's nearest neighbours name
+    one axis and mean it, so without these every corner reads as "nothing to
+    drag here"."""
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="NSCursor map")
+    def test_every_resize_name_resolves_to_a_real_cursor(self):
+        from AppKit import NSCursor
+        from puikit.backends.macos_backend import MacOSBackend
+        for name in ("ew-resize", "ns-resize", "nwse-resize", "nesw-resize",
+                     "nw-resize", "se-resize", "ne-resize", "sw-resize"):
+            selector = MacOSBackend._CURSORS[name]
+            assert NSCursor.respondsToSelector_(selector), name
+            assert getattr(NSCursor, selector)() is not None
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="NSCursor map")
+    def test_the_diagonals_are_the_two_axes_of_one_pair(self):
+        from puikit.backends.macos_backend import MacOSBackend
+        cursors = MacOSBackend._CURSORS
+        assert cursors["nwse-resize"] == cursors["nw-resize"] == cursors["se-resize"]
+        assert cursors["nesw-resize"] == cursors["ne-resize"] == cursors["sw-resize"]
+        assert cursors["nwse-resize"] != cursors["nesw-resize"]
