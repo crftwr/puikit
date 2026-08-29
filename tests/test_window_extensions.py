@@ -388,3 +388,100 @@ class TestWindowPositioning:
         assert portable_y == 780.0
         # and back again (move_to_px inverts frame_px)
         assert flip_h - portable_y - window_h == appkit_y
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Win32 flag mapping")
+class TestWindowsFlagMapping:
+    """The (ex_style, style) pair the main window and every secondary one
+    share. They did not: `_window_style_flags`' docstring promised a drift
+    that could not happen, and the main window had duplicated the mapping
+    line for line, so a flag added to the helper would have missed it."""
+
+    def _flags(self, **kwargs):
+        from puikit.backends.windows_backend import _window_style_flags
+        return _window_style_flags(WindowStyle(**kwargs))
+
+    def test_the_helper_maps_every_field_it_claims(self):
+        from puikit.backends import _win32_native as native
+        plain_ex, plain = self._flags()
+        assert not plain_ex & native.WS_EX_TOPMOST
+        assert self._flags(topmost=True)[0] & native.WS_EX_TOPMOST
+        assert self._flags(activates=False)[0] & native.WS_EX_NOACTIVATE
+        assert self._flags(tool=True)[0] & native.WS_EX_TOOLWINDOW
+        assert self._flags(frameless=True)[1] & native.WS_POPUP
+        assert not self._flags(resizable=False)[1] & native.WS_THICKFRAME
+
+    def test_the_main_window_asks_the_helper(self):
+        """Reading the source, because building a real main window here would
+        need a message loop: what matters is that the mapping exists once."""
+        import inspect
+        from puikit.backends import windows_backend
+
+        source = inspect.getsource(windows_backend.WindowsBackend.open)
+        assert "_window_style_flags" in source
+        assert "WS_EX_TOOLWINDOW" not in source, "the mapping is duplicated again"
+
+
+class TestScreenMarkerBase:
+    """The base's answer for a backend that cannot mark the screen."""
+
+    def test_the_base_hands_back_a_closed_mark(self):
+        """So a caller needs no branch: it can close it, and closing does
+        nothing, which is what "there is no mark" should cost."""
+        from puikit.backend import Backend, ScreenMarker
+        mark = Backend.mark_screen(object(), 0, 0)
+        assert isinstance(mark, ScreenMarker)
+        assert mark.closed
+        mark.close()
+        mark.set_rect(10, 10)
+
+    def test_only_a_desktop_backend_claims_it(self):
+        from puikit.capability import PROFILE_GUI_DESKTOP, PROFILE_TUI
+        assert PROFILE_GUI_DESKTOP.supports("screen_markers")
+        assert not PROFILE_TUI.supports("screen_markers")
+
+    def test_a_backend_without_it_still_accepts_the_call(self):
+        """The base recipe: an unknown request degrades, it does not raise."""
+        backend = MemoryBackend(20, 5)
+        assert backend.mark_screen(0, 0, 10, 10).closed
+
+
+class TestMarkTextLayout:
+    """The wrapping and sizing the backends share, in _screen_mark.py. Two
+    copies of this would drift the way the Win32 style mapping did before it
+    had one caller, and the backend that draws with it only runs on Windows."""
+
+    def _measure(self, text):
+        return float(len(text))          # one unit per character
+
+    def _spec(self, lines):
+        return {"lines": lines, "measure": self._measure, "line_height": 10.0}
+
+    def test_without_a_limit_only_real_line_breaks_count(self):
+        from puikit.backends import _screen_mark
+        assert _screen_mark.lines("one two three", self._measure, None) == \
+            ["one two three"]
+        assert _screen_mark.lines("one\ntwo", self._measure, None) == \
+            ["one", "two"]
+
+    def test_a_limit_wraps_and_leaves_room_for_the_padding(self):
+        from puikit.backends import _screen_mark
+        limit = 10 + 2 * _screen_mark.PADDING
+        lines = _screen_mark.lines("aaa bbb ccc ddd", self._measure, limit)
+        assert len(lines) > 1
+        assert all(self._measure(line) <= 10 for line in lines)
+
+    def test_empty_text_is_no_lines(self):
+        from puikit.backends import _screen_mark
+        assert _screen_mark.lines("", self._measure, None) == []
+
+    def test_a_size_given_is_the_size_used(self):
+        from puikit.backends import _screen_mark
+        assert _screen_mark.size(self._spec(["x"]), 200, 100) == (200, 100)
+
+    def test_otherwise_it_is_the_text_plus_padding(self):
+        from puikit.backends import _screen_mark
+        pad = 2 * _screen_mark.PADDING
+        w, h = _screen_mark.size(self._spec(["abcd", "ab"]), None, None)
+        assert w == 4 + pad
+        assert h == 20 + pad

@@ -32,6 +32,8 @@ import ctypes
 from ctypes import wintypes
 from typing import Any
 
+from ..text import utf16_units
+
 import numpy as np
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -663,7 +665,7 @@ def rt_draw_text(
     # the buffer — invisible when it lands in trailing padding, but it cuts
     # off the final real character of an unpadded string (e.g. a selected
     # list row's icon-prefixed label losing its last letter).
-    length = len(text.encode("utf-16-le")) // 2
+    length = utf16_units(text)
     rt.call(
         _IDX_RT_DRAW_TEXT,
         None,
@@ -761,7 +763,7 @@ def dwrite_create_text_layout(
     factory: ComPtr, text: str, text_format: ComPtr, max_width: float = 1_000_000.0, max_height: float = 1_000_000.0
 ) -> ComPtr:
     buf = ctypes.create_unicode_buffer(text)
-    length = len(text.encode("utf-16-le")) // 2  # UTF-16 code units, not Python chars (see rt_draw_text)
+    length = utf16_units(text)  # UTF-16 code units, not Python chars (see rt_draw_text)
     out = ctypes.c_void_p()
     hr = factory.call(
         _IDX_DWRITE_FACTORY_CREATE_TEXT_LAYOUT,
@@ -1897,7 +1899,7 @@ def set_clipboard_text(hwnd: int, text: str) -> None:
         return
     try:
         user32.EmptyClipboard()
-        data = (text + "\0").encode("utf-16-le")
+        data = (text + "\0").encode("utf-16-le", "surrogatepass")
         handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
         if not handle:
             return
@@ -2024,3 +2026,202 @@ MONITOR_DEFAULTTONULL = 0
 
 SW_HIDE = 0
 SW_MINIMIZE = 6
+
+
+# --- screen marks: a layered, click-through window with per-pixel alpha ------
+#
+# A mark is a rectangle drawn over *other applications*, see-through wherever
+# it paints nothing and click-through everywhere. On Windows that is a layered
+# window: UpdateLayeredWindow hands the compositor the whole surface, alpha
+# included, from a 32-bit top-down DIB section that Direct2D renders into
+# through an ID2D1DCRenderTarget.
+#
+# Deliberately a private path rather than a window style. A layered window
+# cannot present a DXGI swap chain, so per-pixel alpha here means *not* the
+# surface every ordinary window draws through -- which is the reason it is a
+# mark's mechanism and not a published WindowStyle flag
+# (docs/window_management.md).
+
+WS_EX_TRANSPARENT = 0x00000020
+WS_EX_LAYERED = 0x00080000
+
+ULW_ALPHA = 0x00000002
+AC_SRC_OVER = 0x00
+AC_SRC_ALPHA = 0x01
+
+BI_RGB = 0
+DIB_RGB_COLORS = 0
+
+
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", wintypes.DWORD),
+        ("biWidth", ctypes.c_long),
+        ("biHeight", ctypes.c_long),
+        ("biPlanes", wintypes.WORD),
+        ("biBitCount", wintypes.WORD),
+        ("biCompression", wintypes.DWORD),
+        ("biSizeImage", wintypes.DWORD),
+        ("biXPelsPerMeter", ctypes.c_long),
+        ("biYPelsPerMeter", ctypes.c_long),
+        ("biClrUsed", wintypes.DWORD),
+        ("biClrImportant", wintypes.DWORD),
+    ]
+
+
+class BITMAPINFO(ctypes.Structure):
+    _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wintypes.DWORD * 3)]
+
+
+class BLENDFUNCTION(ctypes.Structure):
+    _fields_ = [
+        ("BlendOp", ctypes.c_ubyte),
+        ("BlendFlags", ctypes.c_ubyte),
+        ("SourceConstantAlpha", ctypes.c_ubyte),
+        ("AlphaFormat", ctypes.c_ubyte),
+    ]
+
+
+gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+gdi32.CreateCompatibleDC.restype = wintypes.HDC
+gdi32.CreateDIBSection.argtypes = [
+    wintypes.HDC, ctypes.POINTER(BITMAPINFO), ctypes.c_uint,
+    ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, wintypes.DWORD,
+]
+gdi32.CreateDIBSection.restype = wintypes.HBITMAP
+gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+gdi32.SelectObject.restype = wintypes.HGDIOBJ
+gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+gdi32.DeleteObject.restype = wintypes.BOOL
+gdi32.DeleteDC.argtypes = [wintypes.HDC]
+gdi32.DeleteDC.restype = wintypes.BOOL
+
+user32.GetDC.argtypes = [HWND]
+user32.GetDC.restype = wintypes.HDC
+user32.ReleaseDC.argtypes = [HWND, wintypes.HDC]
+user32.ReleaseDC.restype = ctypes.c_int
+user32.UpdateLayeredWindow.argtypes = [
+    HWND, wintypes.HDC, ctypes.POINTER(wintypes.POINT),
+    ctypes.POINTER(wintypes.SIZE), wintypes.HDC,
+    ctypes.POINTER(wintypes.POINT), wintypes.COLORREF,
+    ctypes.POINTER(BLENDFUNCTION), wintypes.DWORD,
+]
+user32.UpdateLayeredWindow.restype = wintypes.BOOL
+
+
+def create_layered_surface(width: int, height: int) -> tuple:
+    """A memory DC holding a 32-bit top-down DIB section, sized in pixels.
+
+    The one surface both halves need: Direct2D renders into it (BindDC) and
+    UpdateLayeredWindow reads it. Top-down (a negative biHeight) so Direct2D's
+    origin and GDI's agree, and 32bpp because the alpha channel is the point.
+    Returns (hdc, hbitmap, previous_bitmap) for destroy_layered_surface."""
+    hdc = gdi32.CreateCompatibleDC(None)
+    if not hdc:
+        raise OSError("CreateCompatibleDC failed: %d" % ctypes.get_last_error())
+    info = BITMAPINFO()
+    info.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+    info.bmiHeader.biWidth = max(1, int(width))
+    info.bmiHeader.biHeight = -max(1, int(height))  # negative: top-down rows
+    info.bmiHeader.biPlanes = 1
+    info.bmiHeader.biBitCount = 32
+    info.bmiHeader.biCompression = BI_RGB
+    bits = ctypes.c_void_p()
+    hbitmap = gdi32.CreateDIBSection(
+        hdc, ctypes.byref(info), DIB_RGB_COLORS, ctypes.byref(bits), None, 0)
+    if not hbitmap:
+        err = ctypes.get_last_error()
+        gdi32.DeleteDC(hdc)
+        raise OSError("CreateDIBSection failed: %d" % err)
+    previous = gdi32.SelectObject(hdc, hbitmap)
+    return (hdc, hbitmap, previous)
+
+
+def destroy_layered_surface(hdc: int, hbitmap: int, previous: int) -> None:
+    """Release what create_layered_surface built."""
+    if hdc:
+        if previous:
+            gdi32.SelectObject(hdc, previous)
+        if hbitmap:
+            gdi32.DeleteObject(hbitmap)
+        gdi32.DeleteDC(hdc)
+
+
+def update_layered_window(hwnd: int, hdc: int, x: int, y: int,
+                          width: int, height: int) -> bool:
+    """Put the surface on screen at (x, y): position, size and pixels in one
+    call, which is how a layered window is painted -- it gets no WM_PAINT.
+    ULW_ALPHA + AC_SRC_ALPHA means the DIB's own (premultiplied) alpha is the
+    per-pixel opacity, so the mark is see-through wherever it drew nothing."""
+    screen_dc = user32.GetDC(None)
+    try:
+        position = wintypes.POINT(int(x), int(y))
+        size = wintypes.SIZE(int(width), int(height))
+        source = wintypes.POINT(0, 0)
+        blend = BLENDFUNCTION(AC_SRC_OVER, 0, 255, AC_SRC_ALPHA)
+        return bool(user32.UpdateLayeredWindow(
+            hwnd, screen_dc, ctypes.byref(position), ctypes.byref(size),
+            hdc, ctypes.byref(source), 0, ctypes.byref(blend), ULW_ALPHA))
+    finally:
+        user32.ReleaseDC(None, screen_dc)
+
+
+# --- ID2D1DCRenderTarget (ID2D1RenderTarget[0-56] + BindDC[57]), created by
+#     ID2D1Factory::CreateDCRenderTarget[16] (after ReloadSystemMetrics[3],
+#     GetDesktopDpi[4], Create*Geometry[5-10], CreateStrokeStyle[11],
+#     CreateDrawingStateBlock[12], CreateWicBitmapRenderTarget[13],
+#     CreateHwndRenderTarget[14], CreateDxgiSurfaceRenderTarget[15]) ----------
+
+_IDX_FACTORY_CREATE_DC_RENDER_TARGET = 16
+_IDX_DC_RT_BIND_DC = 57
+
+D2D1_RENDER_TARGET_TYPE_DEFAULT = 0
+D2D1_RENDER_TARGET_USAGE_NONE = 0
+D2D1_FEATURE_LEVEL_DEFAULT = 0
+D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE = 2
+
+
+class D2D1_RENDER_TARGET_PROPERTIES(ctypes.Structure):
+    _fields_ = [
+        ("type", ctypes.c_uint32),
+        ("pixelFormat", D2D1_PIXEL_FORMAT),
+        ("dpiX", ctypes.c_float),
+        ("dpiY", ctypes.c_float),
+        ("usage", ctypes.c_uint32),
+        ("minLevel", ctypes.c_uint32),
+    ]
+
+
+def create_dc_render_target(factory: ComPtr) -> ComPtr:
+    """An ID2D1DCRenderTarget that draws premultiplied BGRA into a GDI DC.
+
+    96 DPI is stated rather than defaulted (0 would take the desktop's): a
+    mark is positioned in the physical screen pixels screen_frames() reports,
+    so one DIP has to be one pixel whatever the display scale is."""
+    props = D2D1_RENDER_TARGET_PROPERTIES(
+        D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        D2D1_PIXEL_FORMAT(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.0, 96.0, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_FEATURE_LEVEL_DEFAULT,
+    )
+    out = ctypes.c_void_p()
+    hr = factory.call(
+        _IDX_FACTORY_CREATE_DC_RENDER_TARGET, ctypes.c_int32,
+        [ctypes.POINTER(D2D1_RENDER_TARGET_PROPERTIES), ctypes.POINTER(ctypes.c_void_p)],
+        ctypes.byref(props), ctypes.byref(out),
+    )
+    if not hresult_ok(hr):
+        raise OSError("ID2D1Factory.CreateDCRenderTarget failed: 0x%08x" % (hr & 0xFFFFFFFF))
+    return ComPtr(out.value or 0)
+
+
+def dc_render_target_bind(rt: ComPtr, hdc: int, width: int, height: int) -> None:
+    """Point the DC render target at ``hdc``'s top-left width x height. Called
+    before every BeginDraw: it is also how the target learns its size, so a
+    resized mark re-binds rather than being recreated."""
+    rect = wintypes.RECT(0, 0, int(width), int(height))
+    hr = rt.call(
+        _IDX_DC_RT_BIND_DC, ctypes.c_int32,
+        [wintypes.HDC, ctypes.POINTER(wintypes.RECT)], hdc, ctypes.byref(rect),
+    )
+    if not hresult_ok(hr):
+        raise OSError("ID2D1DCRenderTarget.BindDC failed: 0x%08x" % (hr & 0xFFFFFFFF))

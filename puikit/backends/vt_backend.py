@@ -1458,7 +1458,7 @@ class _WindowsConsole:
                 return
             try:
                 self._u32.EmptyClipboard()
-                data = text.encode("utf-16-le") + b"\x00\x00"
+                data = text.encode("utf-16-le", "surrogatepass") + b"\x00\x00"
                 handle = self._k32.GlobalAlloc(GMEM_MOVEABLE, len(data))
                 if not handle:
                     return

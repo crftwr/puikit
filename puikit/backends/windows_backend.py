@@ -36,22 +36,22 @@ import time
 from ctypes import wintypes
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
-from . import _win32_dragdrop, _win32_ime
+from . import _screen_mark, _win32_dragdrop, _win32_ime
 from . import _win32_native as native
 from ._d3d_shader import HAVE_D3D_SHADER, D3DShaderBackground
 from ..background import Shader, Wallpaper
 from ..backend import (
-    Backend, DEFAULT_STYLE, EventHandler, Style, TextAttribute, WindowHandle,
-    WindowStyle, _run_tick_callbacks, is_transparent,
+    Backend, DEFAULT_STYLE, EventHandler, ScreenMarker, Style, TextAttribute,
+    WindowHandle, WindowStyle, _run_tick_callbacks, is_transparent,
 )
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..easing import resolve as _resolve_easing
 from ..event import Event, EventType, char_key_event
 from ..font import Font, FontMetrics, grid_aligned
-from ..text import display_width, glyph_runs as _glyph_runs, is_cjk, cjk_segments
+from ..text import display_width, glyph_runs as _glyph_runs, is_cjk, cjk_segments, utf16_units
 
 # Bundled default fonts (puikit/fonts): Noto Sans + Noto Sans Mono, a
 # designed-together superfamily whose proportional and monospace faces share
@@ -499,6 +499,119 @@ class WinWindowHandle(WindowHandle):
             on_close()
 
 
+class WinScreenMarker(ScreenMarker):
+    """A screen mark as one layered, click-through window.
+
+    Its pixels — the alpha channel included — are handed to the compositor by
+    UpdateLayeredWindow from a DIB section Direct2D renders into. That is the
+    whole mechanism: a layered window gets no WM_PAINT and presents no swap
+    chain, so the mark is repainted by drawing the DIB again and calling that
+    one function (see _win32_native.create_layered_surface). It is why a mark
+    can be see-through where it paints nothing while an ordinary puikit window
+    — which does present a swap chain, and so cannot be layered — cannot.
+    """
+
+    def __init__(self, backend: "WindowsBackend", hwnd: int, spec: dict,
+                 rect: tuple):
+        self._backend = backend
+        self._hwnd = hwnd
+        self._spec = spec
+        self._rect = rect  # (x, y, w, h) in screen pixels
+        self._surface: tuple | None = None  # (hdc, hbitmap, previous)
+        self._surface_size = (0, 0)
+        self._cancel_timeout: Callable[[], None] | None = None
+        self._flash_from: dict = {}
+        self._closed = False
+
+    # -- ScreenMarker ---------------------------------------------------------
+
+    def set_rect(self, x: float, y: float,
+                 w: float | None = None, h: float | None = None) -> None:
+        """lazydocs: ignore"""
+        if self._closed:
+            return
+        # A width is a width whenever it arrives: text wrapped to the one the
+        # mark was built with has to re-wrap to a new one, or a mark resized
+        # narrower keeps lines that no longer fit inside it.
+        _screen_mark.rewrap(self._spec, w)
+        width, height = _screen_mark.size(self._spec, w, h)
+        self._rect = (x, y, width, height)
+        self._backend._draw_mark(self)
+
+    def close(self) -> None:
+        """lazydocs: ignore"""
+        if self._closed:
+            return
+        self._closed = True
+        if self._cancel_timeout is not None:
+            self._cancel_timeout()
+            self._cancel_timeout = None
+        if self._surface is not None:
+            native.destroy_layered_surface(*self._surface)
+            self._surface = None
+        if self._hwnd:
+            hwnd, self._hwnd = self._hwnd, 0
+            native.user32.DestroyWindow(hwnd)
+        self._backend._markers.discard(self)
+
+    @property
+    def closed(self) -> bool:
+        """lazydocs: ignore"""
+        return self._closed
+
+    # -- internals ------------------------------------------------------------
+
+    def _surface_dc(self, width: int, height: int) -> int:
+        """The memory DC to draw this frame into, resized if the mark has.
+
+        A DIB section is a fixed size, so a mark that changed size gets a new
+        one — the HWND survives, since UpdateLayeredWindow carries the new
+        size with the new pixels."""
+        if self._surface is not None and self._surface_size != (width, height):
+            native.destroy_layered_surface(*self._surface)
+            self._surface = None
+        if self._surface is None:
+            self._surface = native.create_layered_surface(width, height)
+            self._surface_size = (width, height)
+        return self._surface[0]
+
+    def _start_flash(self) -> None:
+        """Come up bright and settle, so the eye finds the mark.
+
+        A colour transition, tick by tick — the same one MacScreenMarker runs,
+        and for the same reason: opacity over time needs per-pixel alpha of a
+        kind a backend can lack, and puikit already treats a colour flash as
+        what a "highlight" degrades to where it cannot composite.
+        """
+        spec = self._spec
+        base = {"fg": spec["fg"], "bg": spec["bg"]}
+        started = time.monotonic()
+
+        def tick() -> bool:
+            if self._closed:
+                return False
+            t = (time.monotonic() - started) / _screen_mark.FLASH_SECONDS
+            if t >= 1.0:
+                spec["fg"], spec["bg"] = base["fg"], base["bg"]
+                self._backend._draw_mark(self)
+                return False
+            for role in ("fg", "bg"):
+                colour = self._flash_from[role]
+                if colour is not None:
+                    spec[role] = _screen_mark.mix_rgb(colour, base[role], t)
+            self._backend._draw_mark(self)
+            return True
+
+        self._flash_from = {
+            role: _screen_mark.lift_rgb(base[role]) if base[role] is not None else None
+            for role in ("fg", "bg")
+        }
+        for role in ("fg", "bg"):
+            if self._flash_from[role] is not None:
+                spec[role] = self._flash_from[role]
+        self._backend._draw_mark(self)
+        self._backend.request_animation_ticks(tick)
+
 def _global_wndproc(hwnd: int, msg: int, wparam: int, lparam: int) -> int:
     backend = _hwnd_backends.get(hwnd)
     if backend is not None:
@@ -806,6 +919,11 @@ class WindowsBackend(Backend):
         # Secondary windows (capability multi_window), and the one currently
         # scoped by _window_scope (None == the main window).
         self._secondary_windows: list[WinWindowHandle] = []
+        # Live screen marks, and the DC render target + brush they all draw
+        # through (built on first use, since most apps never make a mark).
+        self._markers: set = set()
+        self._mark_rt: Any = None
+        self._mark_brush: Any = None
         self._hwnd_windows: dict[int, WinWindowHandle] = {}
         self._active_win: WinWindowHandle | None = None
         self._fonts: dict[TextAttribute, Any] = {}
@@ -900,20 +1018,10 @@ class WindowsBackend(Backend):
         # be read (per-monitor aware), then derive the base unit and correct the
         # frame to the requested base-unit size. Layouts re-resolve from the
         # live size each render, so the provisional size is never shown.
-        ws = self._window_style
-        if ws.frameless:
-            win_style = native.WS_POPUP
-        else:
-            win_style = native.WS_OVERLAPPEDWINDOW
-            if not ws.resizable:
-                win_style &= ~(native.WS_THICKFRAME | native.WS_MAXIMIZEBOX)
-        ex_style = 0
-        if ws.topmost:
-            ex_style |= native.WS_EX_TOPMOST
-        if not ws.activates:
-            ex_style |= native.WS_EX_NOACTIVATE
-        if ws.tool:
-            ex_style |= native.WS_EX_TOOLWINDOW
+        # Through the shared helper, which this used to duplicate line for
+        # line - the drift its docstring promises cannot happen was already
+        # here, and a flag added to one would have missed the other.
+        ex_style, win_style = _window_style_flags(self._window_style)
         self._hwnd = native.user32.CreateWindowExW(
             ex_style,
             _CLASS_NAME,
@@ -1105,6 +1213,13 @@ class WindowsBackend(Backend):
         if self._wic_factory is not None:
             self._wic_factory.release()
             self._wic_factory = None
+        # Marks before the render resources and the factory below: each is
+        # a window of its own, and a backend that stopped without closing them
+        # would leave rectangles painted over the user's screen with nothing
+        # left to remove them.
+        for marker in list(self._markers):
+            marker.close()
+        self._release_mark_target()
         self._release_render_resources()
         if self._font_collection is not None:
             self._font_collection.release()
@@ -1332,7 +1447,7 @@ class WindowsBackend(Backend):
             # offset by each segment's UTF-16 length (astral CJK is 2 units).
             u16 = 0
             for seg, seg_cjk in cjk_segments(text):
-                seg_len = len(seg.encode("utf-16-le")) // 2
+                seg_len = utf16_units(seg)
                 if seg_cjk:
                     native.text_layout_set_font_collection(layout, collection, u16, seg_len)
                     native.text_layout_set_font_family(layout, family, u16, seg_len)
@@ -3193,6 +3308,197 @@ class WindowsBackend(Backend):
         native.user32.EnumDisplayMonitors(None, None, native.MONITORENUMPROC(_cb), 0)
         results.sort(key=lambda e: not e[1])  # primary first
         return [frames for frames, _primary in results]
+
+    # --- screen marks (capability "screen_markers") ------------------------
+
+    def mark_screen(self, x, y, w=None, h=None, *, text="",
+                    style=DEFAULT_STYLE, radius=None, fill=False,
+                    line_width=1.0, max_width=None, timeout=None,
+                    flash=False):
+        """Draw a rectangle on the screen (Backend API).
+
+        One layered, click-through popup per mark. WS_EX_LAYERED carries the
+        per-pixel alpha, so the mark is see-through wherever it paints nothing;
+        WS_EX_TRANSPARENT lets clicks, scrolls and hovers reach whatever it is
+        pointing at; WS_EX_NOACTIVATE and WS_EX_TOOLWINDOW keep it out of the
+        foreground and out of Alt-Tab. It is registered in no window map, so
+        the shared window procedure hands its messages straight to
+        DefWindowProcW — a layered window is painted by UpdateLayeredWindow
+        and has no use for WM_PAINT.
+
+        lazydocs: ignore
+        """
+        self._assert_ui_thread("mark_screen")
+        if self._d2d_factory is None or not self._fonts:
+            # The factory and the fonts arrive with open(); before that a mark
+            # has nothing to draw with. Closed rather than raised: the base
+            # contract is that a mark a backend cannot make costs the caller
+            # nothing and needs no branch.
+            return ScreenMarker()
+        spec = self._mark_spec(text, style, radius, fill, line_width,
+                               max_width, w)
+        width, height = _screen_mark.size(spec, w, h)
+        ex_style = (native.WS_EX_LAYERED | native.WS_EX_TRANSPARENT
+                    | native.WS_EX_TOPMOST | native.WS_EX_TOOLWINDOW
+                    | native.WS_EX_NOACTIVATE)
+        hwnd = native.user32.CreateWindowExW(
+            ex_style, _CLASS_NAME, "", native.WS_POPUP,
+            int(x), int(y), max(1, int(width)), max(1, int(height)),
+            None, None, native.get_module_handle(), None,
+        )
+        if not hwnd:
+            raise OSError(f"CreateWindowExW failed: {ctypes.get_last_error()}")
+        marker = WinScreenMarker(self, hwnd, spec, (x, y, width, height))
+        self._markers.add(marker)
+        self._draw_mark(marker)
+        # SW_SHOWNA, never SW_SHOW: a mark points at what the user is working
+        # in, so taking the foreground would defeat it.
+        native.user32.ShowWindow(hwnd, native.SW_SHOWNA)
+        if flash:
+            marker._start_flash()
+        if timeout is not None:
+            marker._cancel_timeout = self.call_later(timeout, marker.close)
+        return marker
+
+    def _mark_spec(self, text: str, style: Style, radius, fill: bool,
+                   line_width: float, max_width, explicit_width) -> dict:
+        """Everything a mark's frames need, resolved once.
+
+        Wrapping happens here because it needs a width, and a width is exactly
+        what a mark sized to its text does not have — unless the caller says
+        `max_width`, which is what opting into wrapping means. An explicit `w`
+        is a width too, so text wraps to that.
+        """
+        # style.font=None is the base font here as everywhere else, but drawn
+        # through the flow path rather than the character grid: a mark is a
+        # label, so it wants the face at its natural advances — and the CJK
+        # fallback that comes with a flow layout. Naming the size is what takes
+        # it off the grid (font.grid_aligned), and it is the base size, so the
+        # face and its metrics are the app's own.
+        if style.font is None:
+            style = replace(style, font=Font(monospace=True,
+                                             size=self._base_size_pt()))
+        # measure == draw by construction: both go through the same flow
+        # layout, in pixels (measure_text answers in base units).
+        def measure(line: str) -> float:
+            return self.measure_text(line, style) * self._base_w
+
+        limit = explicit_width if explicit_width is not None else max_width
+        return {
+            "text": text,
+            "style": style,
+            "max_width": max_width,
+            "wrapped_to": limit,
+            "lines": _screen_mark.lines(text, measure, limit),
+            "measure": measure,
+            "line_height": self.measure_line_height(style) * self._base_h,
+            "radius": 0.0 if radius is None else float(radius),
+            "fill": bool(fill),
+            "line_width": float(line_width),
+            "fg": tuple(style.fg) if style.fg is not None else None,
+            "bg": tuple(style.bg) if style.bg is not None else None,
+        }
+
+    def _mark_render_target(self) -> Any:
+        """The one ID2D1DCRenderTarget every mark draws through.
+
+        Not the backend's own device context: that one presents a DXGI swap
+        chain, which a layered window cannot have. A DC render target renders
+        into a GDI DC instead — which is exactly the DIB section
+        UpdateLayeredWindow wants — and it needs no D3D device, so a mark
+        survives a device-loss recreate untouched.
+        """
+        if self._mark_rt is None:
+            self._mark_rt = native.create_dc_render_target(self._d2d_factory)
+            self._mark_brush = native.rt_create_solid_color_brush(
+                self._mark_rt, native.D2D1_COLOR_F(1, 1, 1, 1))
+        return self._mark_rt
+
+    def _release_mark_target(self) -> None:
+        for attr in ("_mark_brush", "_mark_rt"):
+            obj = getattr(self, attr, None)
+            if obj is not None:
+                obj.release()
+                setattr(self, attr, None)
+
+    def _draw_mark(self, marker: WinScreenMarker) -> None:
+        """Repaint one mark and hand the pixels to the compositor."""
+        if marker.closed or self._d2d_factory is None:
+            return
+        x, y, w, h = marker._rect
+        w_px, h_px = max(1, int(round(w))), max(1, int(round(h)))
+        hdc = marker._surface_dc(w_px, h_px)
+        rt = self._mark_render_target()
+        native.dc_render_target_bind(rt, hdc, w_px, h_px)
+        native.rt_begin_draw(rt)
+        # Clear to fully transparent, not to a background: everything the mark
+        # does not paint has to stay the application underneath.
+        native.rt_clear(rt, native.D2D1_COLOR_F(0.0, 0.0, 0.0, 0.0))
+        native.rt_set_antialias_mode(rt, native.D2D1_ANTIALIAS_MODE_PER_PRIMITIVE)
+        # Grayscale, not ClearType: subpixel antialiasing needs to know the
+        # pixels behind the glyph, and behind a mark is another application.
+        native.rt_set_text_antialias_mode(
+            rt, native.D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE)
+        self._render_mark(marker._spec, w_px, h_px)
+        hr = native.rt_end_draw(rt)
+        if (hr & 0xFFFFFFFF) == 0x8899000C:  # D2DERR_RECREATE_TARGET
+            # Drop it; the next frame builds a fresh one. Nothing is presented
+            # from a target that asked to be recreated.
+            self._release_mark_target()
+            return
+        native.update_layered_window(marker._hwnd, hdc, int(x), int(y),
+                                     w_px, h_px)
+
+    def _render_mark(self, spec: dict, width: int, height: int) -> None:
+        """A mark's fill, outline and text, inside an open draw batch."""
+        rt, brush = self._mark_rt, self._mark_brush
+        line_width = spec["line_width"]
+        inset = line_width / 2.0
+        body = native.D2D1_RECT_F(inset, inset, max(inset, width - inset),
+                                  max(inset, height - inset))
+        radius = spec["radius"]
+        rounded = (native.D2D1_ROUNDED_RECT(body, radius, radius)
+                   if radius else None)
+        if spec["fill"] and spec["bg"] is not None:
+            self._set_mark_brush(spec["bg"])
+            if rounded is not None:
+                native.rt_fill_rounded_rectangle(rt, rounded, brush)
+            else:
+                native.rt_fill_rectangle(rt, body, brush)
+        if spec["fg"] is not None and line_width > 0:
+            self._set_mark_brush(spec["fg"])
+            if rounded is not None:
+                native.rt_draw_rounded_rectangle(rt, rounded, brush, line_width)
+            else:
+                native.rt_draw_rectangle(rt, body, brush, line_width)
+        if not spec["lines"]:
+            return
+        style = spec["style"]
+        self._set_mark_brush(spec["fg"] if spec["fg"] is not None else _DEFAULT_FG)
+        y = _screen_mark.PADDING
+        for line in spec["lines"]:
+            layout = self._build_flow_layout(line, style)
+            try:
+                # The same re-anchor _render_flow_text does: a CJK range would
+                # otherwise take the line's baseline down with it.
+                dy = (self._flow_baseline_fix(style)
+                      if self._cjk_available and any(is_cjk(c) for c in line)
+                      else 0.0)
+                native.rt_draw_text_layout(
+                    rt, _screen_mark.PADDING, y - dy, layout, brush)
+            finally:
+                layout.release()
+            y += spec["line_height"]
+
+    def _set_mark_brush(self, colour: tuple, alpha: float = 1.0) -> None:
+        """SetColor on the mark target's own brush — _brush belongs to the
+        device context, and a resource cannot cross render targets."""
+        if len(colour) == 4:
+            alpha *= colour[3] / 255.0
+        r, g, b = colour[0], colour[1], colour[2]
+        native.brush_set_color(
+            self._mark_brush,
+            native.D2D1_COLOR_F(r / 255, g / 255, b / 255, alpha))
 
     # --- multi-window (capability "multi_window") --------------------------
 

@@ -181,3 +181,90 @@ One-shot timer on the UI thread; returns a zero-argument cancel function
   backends. From a worker thread, hand the schedule over:
   `panel.call_on_main_thread(lambda: panel.call_later(1.0, fn))`. (The guard
   arms in `open()`; before it, headless construction stays unrestricted.)
+
+
+## Screen marks (capability `screen_markers`)
+
+```python
+outline = backend.mark_screen(x, y, w, h, style=Style(fg=(255, 90, 90)),
+                              line_width=3.0, radius=8.0)
+label = backend.mark_screen(x, y, text="A", fill=True,
+                            style=Style(fg=(255, 255, 255), bg=(30, 90, 200)))
+tip = backend.mark_screen(x, y, text=long_text, max_width=220, fill=True,
+                          timeout=3.0, style=Style(bg=(250, 240, 170)))
+```
+
+A rectangle drawn **on the screen**, over whatever is already there, for
+*marking* something rather than being used — an outline around the control
+something is pointing at, a label over each of them, a tooltip beside the
+caret. Never interactive: clicks, scrolls and hovers pass through to the
+application underneath, which is the point of a mark that points at something
+clickable.
+
+**Why an intent and not a window.** The obvious shape is a transparent,
+click-through window an app fills with widgets, and it was built that way
+first. As a *published* shape it cannot be portable: a see-through window on
+Windows is `WS_EX_LAYERED` with per-pixel alpha, and a layered window cannot
+present a DXGI swap chain — so it is not a flag one could set on an ordinary
+puikit window, it is a different way of putting pixels on the screen.
+"Outline this rectangle" has an implementation on both, so the request is the
+intent and the mechanism is the backend's — and because the mechanism is
+private, Windows is free to use exactly that layered window *here*, where
+nothing else draws through it. The cost is generality: a mark is a rectangle,
+some text and nothing else. No consumer wanted more, and one that does can be
+answered without breaking anyone, which a published window flag could not be.
+
+| | |
+|---|---|
+| `x`, `y` | top-left, in the coordinates `screen_frames()` reports |
+| `w`, `h` | the size, or `None` to fit `text` |
+| `text` | `\n` separates lines; a mark with none is an outline or a wash |
+| `style` | `fg` strokes and draws text, `bg` fills — as in `draw_round_rect` |
+| `radius`, `fill`, `line_width` | the same vocabulary again |
+| `max_width` | **opts into wrapping** when sizing to content |
+| `timeout` | close after N seconds |
+| `flash` | come up bright and settle to `style` |
+
+`ScreenMarker.set_rect()` moves and resizes — and re-wraps, because a width is
+a width whenever it arrives: a mark made narrower otherwise keeps lines that no
+longer fit inside it. It re-flows only when the width actually changed, since
+this is what an animation calls every frame. **Animating a mark is that in a
+loop**, driven by `request_animation_ticks` like any other frame. Nothing
+fades — opacity over time is exactly what a backend without per-pixel alpha
+cannot do, so putting it in the vocabulary would undo the portability the
+shape exists for.
+
+`flash=True` is the one animation the primitive does itself, and it is a
+**colour** transition for that same reason: puikit already calls a colour
+flash a "highlight" and already tweens colour on a backend that cannot
+composite, so it asks for nothing an opacity fade would have asked for. It
+lifts the mark's colours toward white and settles over 200 ms, the Panel's own
+default transition length. Use it when the mark appears somewhere the user is
+not already looking, which is most of the time — the screen was not chosen by
+whoever put the mark on it.
+
+A backend without the capability returns a mark that is **already closed**, so
+a caller needs no branch and an unsupported request costs nothing.
+
+**macOS** draws one borderless floating window per mark:
+`ignoresMouseEvents`, `setOpaque_(False)` with a clear background, and no
+shadow — macOS derives the shadow from the alpha channel, so a window painting
+nothing has one that must be invalidated by hand on every content change and a
+mark being moved would trail the previous frame. It joins all Spaces, because
+what it points at is on the screen in front of the user. Closing the backend
+closes every mark: they are floating windows of their own, and stopping
+without them would leave rectangles painted over the screen with nothing left
+to remove them.
+
+**Windows** draws one layered, click-through popup per mark:
+`WS_EX_LAYERED` for the per-pixel alpha, `WS_EX_TRANSPARENT` so clicks reach
+what the mark points at, `WS_EX_NOACTIVATE` and `WS_EX_TOOLWINDOW` so it
+neither takes the foreground nor appears in Alt-Tab. Its pixels are handed to
+the compositor whole by `UpdateLayeredWindow`, from a 32-bit top-down DIB
+section that Direct2D renders into through an `ID2D1DCRenderTarget` — a
+layered window gets no `WM_PAINT` and presents no swap chain, so that one call
+*is* the paint. The DC render target needs no D3D device, so a mark is
+untouched by a device-loss recreate; text draws with grayscale antialiasing,
+since subpixel AA would need to know the pixels behind the glyph and behind a
+mark is another application. Closing the backend closes every mark, as on
+macOS.

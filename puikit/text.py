@@ -83,6 +83,24 @@ def _context_width(ch: str, nxt: str) -> int:
 
 
 @lru_cache(maxsize=8192)
+
+def utf16_units(text: str) -> int:
+    """How many UTF-16 code units ``text`` occupies.
+
+    The unit Win32, DirectWrite and NSString ranges all count in, where a
+    non-BMP character is two units and one Python character.
+
+    ``surrogatepass``, because a string that came *from* one of those APIs can
+    hold a **lone surrogate**: a UTF-16 buffer cut between the halves of a pair
+    decodes to one, and ctypes hands it straight through (an application that
+    truncates its own control names by units produces exactly this). Strict
+    UTF-16 refuses to encode that, which turned one such name into a
+    ``UnicodeEncodeError`` out of every measure and every draw of the row that
+    held it - a window that cannot paint, from a character. Counted this way
+    the number still matches the buffer, since a lone surrogate is one unit.
+    """
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
 def display_width(text: str) -> int:
     """Total display columns of ``text``, accounting for emoji/text variation
     selectors that change the preceding character's width.
