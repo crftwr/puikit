@@ -123,14 +123,44 @@ win.on_close = ...                       # user clicked close
 - `MemoryBackend` windows record everything (`win.snapshot()`,
   `win.style_at()`), so multi-window UIs are testable headlessly.
 - Geometry is one rectangle read and written in the same portable top-left
-  coordinates: `frame_px()` reads it, `move_to_px(x, y)` sets the corner and
-  `resize_to_px(w, h)` sets the size, holding that corner still (AppKit
+  coordinates: `frame_px()` reads it, `move_to_px(x, y)` sets the corner,
+  `resize_to_px(w, h)` sets the size holding that corner still (AppKit
   measures from the bottom-left, so a window sized without this walks its top
-  edge up the screen). `size_units` stays the *drawable* size — the same
+  edge up the screen), and `set_frame_px(x, y, w, h)` sets both at once —
+  which is what a resize from the *top* or *left* edge needs, since those
+  hold the far side still and would otherwise pass through a frame with the
+  new origin and the old size, visibly twitching the edge the user is holding. `size_units` stays the *drawable* size — the same
   rectangle for a frameless window, smaller by the chrome for a framed one.
   `WindowStyle.resizable` governs the user's grip on the frame, not these: a
   frameless window has no frame to drag, which is exactly the window that
   draws its own grip and resizes itself.
+- A window that draws its own chrome should also ask for `movable=False`.
+  On macOS `frameless` hides a title bar it cannot remove — the mask that
+  makes a window non-activating is defined only for a titled panel — and
+  AppKit goes on dragging the window by that invisible bar. An app with its
+  own drag handle then runs two gestures at once, and an app resizing from
+  its top edge watches the window slide out from under the edge it is
+  dragging. Programmatic moves are unaffected.
+- Two more facts that window needs, because it is drawing what the window
+  manager would have drawn:
+  - `WindowHandle.corner_radius_px` — what the platform clips the window's
+    corners to (15 pt on macOS for anything with a frame under it, 0 for a
+    genuinely borderless window; 8 px on Windows 11's default rounding, 0
+    before it). A border drawn square at the window's extent loses exactly
+    its four corners to that clip, with nothing in the drawing API to say why.
+  - A `MOUSE_MOVE` when the pointer **enters** the window, not only when it
+    leaves. Crossing a window's edge and stopping there produces an entry and
+    no move — every move event in that gesture was outside the window — so an
+    app shaping the pointer per region had nothing to shape it from until the
+    hand moved again, and an edge approached from outside said nothing.
+    (Windows already sends `WM_MOUSEMOVE` on entry.)
+  - `Backend.pointer_position_px()` — where the pointer is *now*, asked of
+    the OS. A mouse event's position is measured against a window and frozen
+    when the event was posted, so an app that moves that window mid-gesture
+    cannot recover a screen position from it: adding the current origin to a
+    location taken against the previous one overstates the travel by exactly
+    the move, and the correction feeds the next frame. Everything that does
+    not move its own window should keep reading the event.
 
 **Decided fidelity mapping** (2026-07): secondary windows are **real windows
 on every backend that has them** — native OS windows on GUI-Desktop, real
@@ -144,6 +174,7 @@ exist.
 | `topmost` | window level / `WS_EX_TOPMOST` | best-effort (`window.focus` on show; browsers do not expose true always-on-top) | a higher layer `z` |
 | `frameless` | borderless window | browser-chrome-limited (popup features) | no frame box around the layer |
 | `activates=False` | no focus stealing | open without `focus()` | non-interactive layer; keys keep flowing below |
+| `movable=False` | the user cannot drag it (the app still can) | — | — |
 | `overlay_input` | clicks, or keys, without app activation | — | — (macOS-only in effect) |
 | position/size | screen coordinates | `window.open` features (best-effort; browser-gated) | a rect on the terminal surface |
 | z-order between windows | OS compositor | browser window manager | layer `z`; topmost *interactive* layer is modal |

@@ -105,6 +105,9 @@ class WindowStyle:
       overlays: the window takes no keyboard focus, and on macOS a *click* on
       it still activates the application even though a borderless window
       cannot become key. ``overlay_input`` is how an overlay becomes usable.
+    - ``resizable``: user-resizable frame (ignored when ``frameless``).
+    - ``tool``: keep the window out of the taskbar / Alt-Tab list
+      (WS_EX_TOOLWINDOW). Windows-only today; no-op on macOS.
     - ``overlay_input``: what input reaches the window while its application
       is **not** active — the axis ``activates=False`` leaves open. Ignored
       when ``activates`` is True.
@@ -127,9 +130,16 @@ class WindowStyle:
       focus to activation and ``WS_EX_NOACTIVATE`` refuses focus by design, so
       both values degrade there to plain ``activates=False``. An unrecognized
       value degrades the same way.
-    - ``resizable``: user-resizable frame (ignored when ``frameless``).
-    - ``tool``: keep the window out of the taskbar / Alt-Tab list
-      (WS_EX_TOOLWINDOW). Windows-only today; no-op on macOS.
+    - ``movable``: whether the **user** may drag the window. False takes that
+      from the OS and leaves it to the app - which a window drawing its own
+      chrome has to do, because on macOS ``frameless`` hides a title bar it
+      cannot remove: the mask that makes a window non-activating is defined
+      only for a titled panel, and AppKit goes on dragging the window by that
+      invisible bar. An app with its own drag handle then gets both gestures
+      at once, and an app resizing from its top edge gets the window sliding
+      out from under the edge it is dragging. Programmatic ``move_to_px`` /
+      ``set_frame_px`` are unaffected. No-op on Windows, where a frameless
+      popup has nothing the window manager would drag it by.
 
     Backends without the ``window_styles`` capability accept the parameter
     and ignore it (the base recipe: unknown requests degrade, not raise)."""
@@ -140,6 +150,7 @@ class WindowStyle:
     resizable: bool = True
     tool: bool = False
     overlay_input: str = "none"
+    movable: bool = True
 
 
 EventHandler = Callable[[Event], None]
@@ -254,6 +265,31 @@ class WindowHandle:
         *user* may drag the frame, and a frameless window has no frame to
         drag, which is exactly the window that has to draw its own grip and
         resize itself."""
+
+    def set_frame_px(self, x: float, y: float, w: float, h: float) -> None:
+        """Move **and** resize in one step, in the coordinates ``frame_px``
+        reports. The base is a no-op.
+
+        What a resize from the top or left edge needs: those hold the far
+        side still, so the window's origin moves by whatever its size gains.
+        Doing that as ``move_to_px`` then ``resize_to_px`` puts the window
+        through an intermediate frame with the new origin and the old size —
+        one where the *far* edge, the one the user is holding still, is
+        somewhere else. The eye catches it as the opposite edge twitching
+        with every step of the drag."""
+
+    @property
+    def corner_radius_px(self) -> float:
+        """The radius the platform clips this window's corners to, in the
+        same pixels ``frame_px`` reports. 0 where they are square (the base,
+        and a borderless window on macOS).
+
+        Here because it is a fact about the window, and an app that draws its
+        own chrome cannot see it any other way: a window's own border, drawn
+        square at its extent, loses exactly its four corners to this clip —
+        with nothing in the drawing API to explain why. It is the platform's
+        number, so it is the platform layer's to know."""
+        return 0.0
 
     @property
     def closed(self) -> bool:
@@ -936,6 +972,28 @@ class Backend(ABC):
         when opened with start_hidden=True). Base returns True, matching
         backends that cannot hide their surface."""
         return True
+
+    def pointer_position_px(self) -> tuple[float, float] | None:
+        """Where the pointer is **now**, in the portable screen coordinates
+        ``screen_frames()`` / ``WindowHandle.frame_px()`` report. None where
+        the backend cannot say (the base, a terminal).
+
+        Asked of the OS rather than read off an event, and that is the whole
+        point of it: a mouse event carries its position *relative to a
+        window*, frozen when the event was posted (``locationInWindow`` on
+        macOS, ``lParam`` on Windows). An app that **moves that window while
+        the gesture runs** — dragging a frameless window by its content,
+        resizing it from its top or left edge — cannot recover a screen
+        position from such an event: adding the window's current origin to a
+        location measured against its previous one overstates the travel by
+        exactly the move, and the correction feeds the next frame. The window
+        oscillates.
+
+        A pointer position that never mentions a window is immune to that.
+        Everything else should keep using the event: it is coalesced with the
+        gesture, and this is the live pointer, which is a different question
+        once events queue up."""
+        return None
 
     def mark_screen(
         self,

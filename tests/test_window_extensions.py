@@ -37,6 +37,15 @@ class TestWindowStyleDataclass:
     def test_capability_declared(self):
         assert PROFILE_GUI_DESKTOP.supports("window_styles")
 
+    def test_movable_defaults_to_the_window_manager_owning_the_drag(self):
+        assert WindowStyle().movable is True
+        assert dataclasses.replace(WindowStyle(), movable=False).movable is False
+
+    def test_movable_round_trips_with_the_other_fields(self):
+        ws = WindowStyle(frameless=True, activates=False,
+                         overlay_input="mouse", movable=False)
+        assert WindowStyle(**dataclasses.asdict(ws)) == ws
+
 
 class TestOverlayInput:
     """What input reaches a window while its application is not active - the
@@ -449,6 +458,75 @@ class TestWindowResizing:
         assert flip_h - appkit_y - new_h == top
 
 
+class TestSettingTheWholeFrame:
+    """set_frame_px(): origin and size in one step, for the edges that hold
+    the far side still."""
+
+    def _window(self):
+        backend = MemoryBackend(80, 24)
+        backend.open()
+        return backend.create_window(30, 10, title="pop")
+
+    def test_base_handle_is_a_no_op(self):
+        from puikit.backend import WindowHandle
+        WindowHandle().set_frame_px(1, 2, 3, 4)  # must not raise
+
+    def test_it_moves_and_resizes_at_once(self):
+        window = self._window()
+        window.set_frame_px(100, 200, 40, 12)
+        assert window.frame_px() == (100.0, 200.0, 40.0, 12.0)
+
+    def test_it_is_the_two_halves_agreeing(self):
+        # Whatever move_to_px + resize_to_px would have ended at, without the
+        # intermediate frame in between.
+        one = self._window()
+        one.set_frame_px(100, 200, 40, 12)
+        two = self._window()
+        two.move_to_px(100, 200)
+        two.resize_to_px(40, 12)
+        assert one.frame_px() == two.frame_px()
+
+
+class TestCornerRadius:
+    """What the platform clips a window's corners to - the fact an app
+    drawing its own border cannot see any other way."""
+
+    def test_base_and_grid_are_square(self):
+        from puikit.backend import WindowHandle
+        assert WindowHandle().corner_radius_px == 0.0
+        backend = MemoryBackend(80, 24)
+        backend.open()
+        assert backend.create_window(30, 10).corner_radius_px == 0.0
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="AppKit rounding")
+    def test_macos_rounds_a_framed_window_and_not_a_borderless_one(self):
+        from puikit.backends.macos_backend import MacWindowHandle
+        handle = MacWindowHandle.__new__(MacWindowHandle)
+        handle.window_style = WindowStyle(frameless=True, activates=False,
+                                          overlay_input="mouse")
+        # The panel that separates key from active is titled underneath, so
+        # AppKit rounds it even though `frameless` hid the title bar.
+        assert handle.corner_radius_px == 15.0
+        handle.window_style = WindowStyle(frameless=True, activates=False)
+        assert handle.corner_radius_px == 0.0
+
+
+class TestPointerPosition:
+    """The live pointer, which is a different question from where an event
+    says the pointer was."""
+
+    def test_base_cannot_say(self):
+        from puikit.backend import Backend
+        assert Backend.pointer_position_px(MemoryBackend()) is None
+
+    def test_memory_answers_what_a_test_put_there(self):
+        backend = MemoryBackend(80, 24)
+        backend.open()
+        assert backend.pointer_position_px() is None
+        backend.pointer_px = (412.0, 96.0)
+        assert backend.pointer_position_px() == (412.0, 96.0)
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Win32 flag mapping")
 class TestWindowsFlagMapping:
     """The (ex_style, style) pair the main window and every secondary one
@@ -544,3 +622,28 @@ class TestMarkTextLayout:
         w, h = _screen_mark.size(self._spec(["abcd", "ab"]), None, None)
         assert w == 4 + pad
         assert h == 20 + pad
+
+
+class TestResizeCursors:
+    """A window resized from a corner needs a diagonal pointer. AppKit has
+    them and does not publish them; the public map's nearest neighbours name
+    one axis and mean it, so without these every corner reads as "nothing to
+    drag here"."""
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="NSCursor map")
+    def test_every_resize_name_resolves_to_a_real_cursor(self):
+        from AppKit import NSCursor
+        from puikit.backends.macos_backend import MacOSBackend
+        for name in ("ew-resize", "ns-resize", "nwse-resize", "nesw-resize",
+                     "nw-resize", "se-resize", "ne-resize", "sw-resize"):
+            selector = MacOSBackend._CURSORS[name]
+            assert NSCursor.respondsToSelector_(selector), name
+            assert getattr(NSCursor, selector)() is not None
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="NSCursor map")
+    def test_the_diagonals_are_the_two_axes_of_one_pair(self):
+        from puikit.backends.macos_backend import MacOSBackend
+        cursors = MacOSBackend._CURSORS
+        assert cursors["nwse-resize"] == cursors["nw-resize"] == cursors["se-resize"]
+        assert cursors["nesw-resize"] == cursors["ne-resize"] == cursors["sw-resize"]
+        assert cursors["nwse-resize"] != cursors["nesw-resize"]

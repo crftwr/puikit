@@ -1141,6 +1141,18 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
         else:
             objc.super(_PuiKitView, self).cursorUpdate_(ns_event)
 
+    def mouseEntered_(self, ns_event):
+        # The partner of mouseExited_'s off-canvas move, and not a nicety: an
+        # app that shapes the pointer per region has to be told where the
+        # pointer *arrived*. Crossing a window's edge and stopping there
+        # produces this and no mouseMoved - every move event in that gesture
+        # was outside the window - so without it the pointer keeps whatever
+        # shape it had until the hand moves again, and a resize edge
+        # approached from outside says nothing.
+        self.backend._cursor_window = getattr(self, "pk_window", None)
+        x, y = self._mouse_unit(ns_event)
+        self._pk_dispatch(Event(type=EventType.MOUSE_MOVE, x=x, y=y))
+
     def mouseExited_(self, ns_event):
         if self.backend._cursor_window is getattr(self, "pk_window", None):
             self.backend._cursor_window = _NO_CURSOR_WINDOW
@@ -1363,19 +1375,39 @@ class MacWindowHandle(WindowHandle):
         self.nswindow.setFrameOrigin_((x, flip_h - y - h))
 
     def resize_to_px(self, w: float, h: float) -> None:
+        frame = self.frame_px()
+        if frame is None:
+            return
+        # Through the portable frame, which is where the top-left corner this
+        # has to hold still is already written down: AppKit's own origin is
+        # the bottom-left, so setting the size against it would hold the
+        # *bottom* edge and push the top up the screen as the window grows.
+        self.set_frame_px(frame[0], frame[1], w, h)
+
+    def set_frame_px(self, x: float, y: float, w: float, h: float) -> None:
         flip_h = _flip_height()
         if flip_h is None:
             return
-        frame = self.nswindow.frame()
         w = max(1.0, float(w))
         h = max(1.0, float(h))
-        # The origin is recomputed rather than kept: AppKit's is the window's
-        # bottom-left, so setting the size alone would hold the *bottom* edge
-        # and push the top edge up the screen as the window grows. The portable
-        # top is what stays.
-        top = flip_h - float(frame.origin.y) - float(frame.size.height)
         self.nswindow.setFrame_display_(
-            NSMakeRect(frame.origin.x, flip_h - top - h, w, h), True)
+            NSMakeRect(x, flip_h - y - h, w, h), True)
+
+    @property
+    def corner_radius_px(self) -> float:
+        # AppKit rounds every window that has a frame - which this one has
+        # even when `frameless` hid it, since the mask that separates "key"
+        # from "active" is only defined for a titled panel. A genuinely
+        # borderless window is the square case. The number is not readable
+        # through public API; it is 15 pt on macOS 26 (measured off
+        # NSThemeFrame's private cornerRadius, which is not called here), and
+        # has been in that region since the flat window style arrived.
+        return 0.0 if self._borderless() else 15.0
+
+    def _borderless(self) -> bool:
+        style = self.window_style
+        overlay = style.overlay_input if not style.activates else "none"
+        return style.frameless and overlay not in ("mouse", "keyboard")
 
     @property
     def closed(self) -> bool:
@@ -1939,6 +1971,16 @@ class MacOSBackend(Backend):
     def is_main_window_visible(self) -> bool:
         return self._window is not None and bool(self._window.isVisible())
 
+    def pointer_position_px(self) -> tuple[float, float] | None:
+        """The live pointer, flipped into portable screen coordinates.
+        ``NSEvent.mouseLocation`` is a class method: it answers where the
+        pointer is now, with no event and no window in the question."""
+        flip_h = _flip_height()
+        if flip_h is None:
+            return None
+        point = NSEvent.mouseLocation()
+        return (float(point.x), flip_h - float(point.y))
+
     def screen_frames(self) -> list:
         """[(frame, visible_frame)] per screen, main screen first, each an
         (x, y, w, h) tuple in portable screen coordinates - top-left origin,
@@ -2130,6 +2172,13 @@ class MacOSBackend(Backend):
                 False
             )
         nswindow.setTitle_(title)
+        if not ws.movable:
+            # The user cannot drag it; the app still can, through move_to_px /
+            # set_frame_px. For a window that draws its own chrome this is the
+            # difference between one gesture and two: `frameless` hides the
+            # title bar the panel mask forces, and AppKit keeps dragging the
+            # window by it regardless of whether anything is drawn there.
+            nswindow.setMovable_(False)
         if ws.topmost:
             nswindow.setLevel_(NSFloatingWindowLevel)
         # AppKit's default releases a closed window while the Python handle
@@ -3826,6 +3875,19 @@ class MacOSBackend(Backend):
         "ew-resize": "resizeLeftRightCursor",
         "row-resize": "resizeUpDownCursor",
         "ns-resize": "resizeUpDownCursor",
+        # The diagonals AppKit has and does not publish. A window resized from
+        # a corner has no other honest pointer - the public map's nearest
+        # neighbours name one axis and mean it - and the alternative to asking
+        # for them is that every corner in every app reads as "not draggable".
+        # Guarded by respondsToSelector below, so a release that withdrew them
+        # gets the arrow back rather than an exception; the same pair Qt and
+        # Chromium have used for this since the cursors existed.
+        "nwse-resize": "_windowResizeNorthWestSouthEastCursor",
+        "nw-resize": "_windowResizeNorthWestSouthEastCursor",
+        "se-resize": "_windowResizeNorthWestSouthEastCursor",
+        "nesw-resize": "_windowResizeNorthEastSouthWestCursor",
+        "ne-resize": "_windowResizeNorthEastSouthWestCursor",
+        "sw-resize": "_windowResizeNorthEastSouthWestCursor",
     }
 
     def set_pointer_shape(self, shape: str | None) -> None:
@@ -3848,6 +3910,11 @@ class MacOSBackend(Backend):
         if shape == current:
             return
         selector = self._CURSORS.get(shape) if shape else None
+        # respondsToSelector, not hasattr: the diagonal resize cursors are
+        # AppKit's own and unpublished, so a release that dropped one must
+        # cost this call an arrow and nothing else.
+        if selector and not NSCursor.respondsToSelector_(selector):
+            selector = None
         resolved = getattr(NSCursor, selector)() if selector else None
         self._pointer_cursors[window] = (shape, resolved)
         if window is not self._cursor_window:

@@ -483,6 +483,25 @@ class WinWindowHandle(WindowHandle):
             self.hwnd, None, 0, 0, max(1, int(w)), max(1, int(h)),
             native.SWP_NOZORDER | native.SWP_NOACTIVATE | native.SWP_NOMOVE)
 
+    def set_frame_px(self, x: float, y: float, w: float, h: float) -> None:
+        if self._closed:
+            return
+        # One SetWindowPos: origin and size land in the same window-server
+        # update, so an edge that holds the far side still never shows the
+        # intermediate frame where it had moved.
+        native.user32.SetWindowPos(
+            self.hwnd, None, int(x), int(y), max(1, int(w)), max(1, int(h)),
+            native.SWP_NOZORDER | native.SWP_NOACTIVATE)
+
+    @property
+    def corner_radius_px(self) -> float:
+        # Windows 11 (build 22000+) rounds a top-level window through DWM,
+        # including a popup; earlier releases are square. DWM will not report
+        # the radius back, so this is the documented default rounding rather
+        # than a measurement - which is the number an app drawing its own
+        # border needs to clear.
+        return 8.0 if sys.getwindowsversion().build >= 22000 else 0.0
+
     @property
     def closed(self) -> bool:
         return self._closed
@@ -3298,6 +3317,14 @@ class WindowsBackend(Backend):
 
     def is_main_window_visible(self) -> bool:
         return bool(self._hwnd) and bool(native.user32.IsWindowVisible(self._hwnd))
+
+    def pointer_position_px(self) -> tuple[float, float] | None:
+        """The live pointer in virtual-screen pixels, which are already the
+        portable top-left convention."""
+        point = wintypes.POINT()
+        if not native.user32.GetCursorPos(ctypes.byref(point)):
+            return None
+        return (float(point.x), float(point.y))
 
     def screen_frames(self) -> list:
         """[(frame, work_area)] per monitor, primary first, in portable
