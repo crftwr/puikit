@@ -105,6 +105,9 @@ class WindowStyle:
       overlays: the window takes no keyboard focus, and on macOS a *click* on
       it still activates the application even though a borderless window
       cannot become key. ``overlay_input`` is how an overlay becomes usable.
+    - ``resizable``: user-resizable frame (ignored when ``frameless``).
+    - ``tool``: keep the window out of the taskbar / Alt-Tab list
+      (WS_EX_TOOLWINDOW). Windows-only today; no-op on macOS.
     - ``overlay_input``: what input reaches the window while its application
       is **not** active — the axis ``activates=False`` leaves open. Ignored
       when ``activates`` is True.
@@ -137,9 +140,6 @@ class WindowStyle:
       out from under the edge it is dragging. Programmatic ``move_to_px`` /
       ``set_frame_px`` are unaffected. No-op on Windows, where a frameless
       popup has nothing the window manager would drag it by.
-    - ``resizable``: user-resizable frame (ignored when ``frameless``).
-    - ``tool``: keep the window out of the taskbar / Alt-Tab list
-      (WS_EX_TOOLWINDOW). Windows-only today; no-op on macOS.
 
     Backends without the ``window_styles`` capability accept the parameter
     and ignore it (the base recipe: unknown requests degrade, not raise)."""
