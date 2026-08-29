@@ -37,6 +37,15 @@ class TestWindowStyleDataclass:
     def test_capability_declared(self):
         assert PROFILE_GUI_DESKTOP.supports("window_styles")
 
+    def test_movable_defaults_to_the_window_manager_owning_the_drag(self):
+        assert WindowStyle().movable is True
+        assert dataclasses.replace(WindowStyle(), movable=False).movable is False
+
+    def test_movable_round_trips_with_the_other_fields(self):
+        ws = WindowStyle(frameless=True, activates=False,
+                         overlay_input="mouse", movable=False)
+        assert WindowStyle(**dataclasses.asdict(ws)) == ws
+
 
 class TestOverlayInput:
     """What input reaches a window while its application is not active - the

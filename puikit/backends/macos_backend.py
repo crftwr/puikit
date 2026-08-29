@@ -2160,6 +2160,13 @@ class MacOSBackend(Backend):
                 False
             )
         nswindow.setTitle_(title)
+        if not ws.movable:
+            # The user cannot drag it; the app still can, through move_to_px /
+            # set_frame_px. For a window that draws its own chrome this is the
+            # difference between one gesture and two: `frameless` hides the
+            # title bar the panel mask forces, and AppKit keeps dragging the
+            # window by it regardless of whether anything is drawn there.
+            nswindow.setMovable_(False)
         if ws.topmost:
             nswindow.setLevel_(NSFloatingWindowLevel)
         # AppKit's default releases a closed window while the Python handle

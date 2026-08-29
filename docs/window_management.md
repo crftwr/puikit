@@ -134,6 +134,13 @@ win.on_close = ...                       # user clicked close
   `WindowStyle.resizable` governs the user's grip on the frame, not these: a
   frameless window has no frame to drag, which is exactly the window that
   draws its own grip and resizes itself.
+- A window that draws its own chrome should also ask for `movable=False`.
+  On macOS `frameless` hides a title bar it cannot remove — the mask that
+  makes a window non-activating is defined only for a titled panel — and
+  AppKit goes on dragging the window by that invisible bar. An app with its
+  own drag handle then runs two gestures at once, and an app resizing from
+  its top edge watches the window slide out from under the edge it is
+  dragging. Programmatic moves are unaffected.
 - Two more facts that window needs, because it is drawing what the window
   manager would have drawn:
   - `WindowHandle.corner_radius_px` — what the platform clips the window's
@@ -161,6 +168,7 @@ exist.
 | `topmost` | window level / `WS_EX_TOPMOST` | best-effort (`window.focus` on show; browsers do not expose true always-on-top) | a higher layer `z` |
 | `frameless` | borderless window | browser-chrome-limited (popup features) | no frame box around the layer |
 | `activates=False` | no focus stealing | open without `focus()` | non-interactive layer; keys keep flowing below |
+| `movable=False` | the user cannot drag it (the app still can) | — | — |
 | `overlay_input` | clicks, or keys, without app activation | — | — (macOS-only in effect) |
 | position/size | screen coordinates | `window.open` features (best-effort; browser-gated) | a rect on the terminal surface |
 | z-order between windows | OS compositor | browser window manager | layer `z`; topmost *interactive* layer is modal |

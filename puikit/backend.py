@@ -127,6 +127,16 @@ class WindowStyle:
       focus to activation and ``WS_EX_NOACTIVATE`` refuses focus by design, so
       both values degrade there to plain ``activates=False``. An unrecognized
       value degrades the same way.
+    - ``movable``: whether the **user** may drag the window. False takes that
+      from the OS and leaves it to the app - which a window drawing its own
+      chrome has to do, because on macOS ``frameless`` hides a title bar it
+      cannot remove: the mask that makes a window non-activating is defined
+      only for a titled panel, and AppKit goes on dragging the window by that
+      invisible bar. An app with its own drag handle then gets both gestures
+      at once, and an app resizing from its top edge gets the window sliding
+      out from under the edge it is dragging. Programmatic ``move_to_px`` /
+      ``set_frame_px`` are unaffected. No-op on Windows, where a frameless
+      popup has nothing the window manager would drag it by.
     - ``resizable``: user-resizable frame (ignored when ``frameless``).
     - ``tool``: keep the window out of the taskbar / Alt-Tab list
       (WS_EX_TOOLWINDOW). Windows-only today; no-op on macOS.
@@ -140,6 +150,7 @@ class WindowStyle:
     resizable: bool = True
     tool: bool = False
     overlay_input: str = "none"
+    movable: bool = True
 
 
 EventHandler = Callable[[Event], None]
