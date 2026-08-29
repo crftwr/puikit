@@ -461,7 +461,7 @@ def _build_hdrop_hglobal(paths: list[str]) -> int:
     followed by the paths as a double-null-terminated UTF-16 list, exactly the
     layout ``DragQueryFileW`` reads. Returns the HGLOBAL, or 0 on failure."""
     text = "\0".join(paths) + "\0\0"
-    encoded = text.encode("utf-16-le")
+    encoded = text.encode("utf-16-le", "surrogatepass")
     header_size = ctypes.sizeof(DROPFILES)
     total = header_size + len(encoded)
     hglobal = kernel32.GlobalAlloc(GMEM_MOVEABLE, total)

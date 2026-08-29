@@ -137,7 +137,7 @@ from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..easing import resolve as _resolve_easing
 from ..event import Event, EventType, char_key_event
 from ..font import Font, FontMetrics, FontWeight
-from ..text import cjk_segments, display_width, glyph_runs as _glyph_runs
+from ..text import cjk_segments, display_width, glyph_runs as _glyph_runs, utf16_units
 
 try:
     from Quartz import (
@@ -480,7 +480,7 @@ def _cjk_bold_ranges(text: str) -> list[tuple[int, int]]:
     ranges: list[tuple[int, int]] = []
     loc = 0
     for segment, cjk in cjk_segments(text):
-        length = len(segment.encode("utf-16-le")) // 2
+        length = utf16_units(segment)
         if cjk:
             if ranges and ranges[-1][0] + ranges[-1][1] == loc:
                 ranges[-1] = (ranges[-1][0], ranges[-1][1] + length)

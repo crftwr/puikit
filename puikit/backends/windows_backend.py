@@ -51,7 +51,7 @@ from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..easing import resolve as _resolve_easing
 from ..event import Event, EventType, char_key_event
 from ..font import Font, FontMetrics, grid_aligned
-from ..text import display_width, glyph_runs as _glyph_runs, is_cjk, cjk_segments
+from ..text import display_width, glyph_runs as _glyph_runs, is_cjk, cjk_segments, utf16_units
 
 # Bundled default fonts (puikit/fonts): Noto Sans + Noto Sans Mono, a
 # designed-together superfamily whose proportional and monospace faces share
@@ -1447,7 +1447,7 @@ class WindowsBackend(Backend):
             # offset by each segment's UTF-16 length (astral CJK is 2 units).
             u16 = 0
             for seg, seg_cjk in cjk_segments(text):
-                seg_len = len(seg.encode("utf-16-le")) // 2
+                seg_len = utf16_units(seg)
                 if seg_cjk:
                     native.text_layout_set_font_collection(layout, collection, u16, seg_len)
                     native.text_layout_set_font_family(layout, family, u16, seg_len)

@@ -7,6 +7,7 @@ from puikit.text import (
     glyph_runs,
     is_word_char,
     truncate_to_width,
+    utf16_units,
     word_bounds,
     wrap_text,
 )
@@ -266,3 +267,20 @@ def test_wrap_text_japanese_keeps_combined_glyph_together():
     # An emoji-presentation sequence is one glyph (two columns); the wrap must
     # never split the base from its selector at a break boundary.
     assert wrap_text("あ🏷️い", 4, _cols) == ["あ🏷️", "い"]
+
+
+def test_utf16_units_counts_the_unit_windows_and_nsstring_count_in():
+    assert utf16_units("") == 0
+    assert utf16_units("abc") == 3
+    assert utf16_units("\U0001F600") == 2, "one Python character, two units"
+    assert utf16_units("a\U00020b9fb") == 4
+
+
+def test_utf16_units_accepts_a_lone_surrogate():
+    """Text read back from a UTF-16 buffer cut between the halves of a pair
+    decodes to one, and ctypes hands it straight through. Strict UTF-16
+    refuses to encode it, which is a traceback out of every measure and every
+    draw of the string that holds it - a window that cannot paint, from one
+    character."""
+    assert utf16_units("abc\ud842") == 4
+    assert utf16_units("𠮟") == 2, "the halves still count as two"

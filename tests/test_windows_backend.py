@@ -1615,6 +1615,25 @@ def test_wm_timer_still_ticks_for_native_modal_loops(monkeypatch):
         be.close()
 
 
+
+def test_a_lone_surrogate_measures_and_draws_instead_of_raising():
+    """A name an application truncated by UTF-16 units arrives as a lone
+    surrogate, and every measure and every draw of the string holding it used
+    to raise UnicodeEncodeError - out of a paint, into the window procedure,
+    on every mouse move after it. It is one broken character, not a window
+    that cannot paint."""
+    backend = WindowsBackend(width=30, height=6, title="puikit-surrogate-test")
+    backend.open()
+    try:
+        broken = "a truncated name \ud842"
+        assert backend.measure_text(broken) > 0
+        backend.draw_text(0, 0, broken)
+        backend.present()
+        backend._render()
+    finally:
+        backend.close()
+
+
 # --- screen marks: a layered, click-through window per mark -------------------
 
 

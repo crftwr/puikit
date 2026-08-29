@@ -32,6 +32,8 @@ import ctypes
 from ctypes import wintypes
 from typing import Any
 
+from ..text import utf16_units
+
 import numpy as np
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -663,7 +665,7 @@ def rt_draw_text(
     # the buffer — invisible when it lands in trailing padding, but it cuts
     # off the final real character of an unpadded string (e.g. a selected
     # list row's icon-prefixed label losing its last letter).
-    length = len(text.encode("utf-16-le")) // 2
+    length = utf16_units(text)
     rt.call(
         _IDX_RT_DRAW_TEXT,
         None,
@@ -761,7 +763,7 @@ def dwrite_create_text_layout(
     factory: ComPtr, text: str, text_format: ComPtr, max_width: float = 1_000_000.0, max_height: float = 1_000_000.0
 ) -> ComPtr:
     buf = ctypes.create_unicode_buffer(text)
-    length = len(text.encode("utf-16-le")) // 2  # UTF-16 code units, not Python chars (see rt_draw_text)
+    length = utf16_units(text)  # UTF-16 code units, not Python chars (see rt_draw_text)
     out = ctypes.c_void_p()
     hr = factory.call(
         _IDX_DWRITE_FACTORY_CREATE_TEXT_LAYOUT,
@@ -1897,7 +1899,7 @@ def set_clipboard_text(hwnd: int, text: str) -> None:
         return
     try:
         user32.EmptyClipboard()
-        data = (text + "\0").encode("utf-16-le")
+        data = (text + "\0").encode("utf-16-le", "surrogatepass")
         handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
         if not handle:
             return
