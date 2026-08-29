@@ -3876,7 +3876,15 @@ class WindowsBackend(Backend):
     def _on_mouse_down(self, msg: int, lparam: int) -> int:
         button = _BUTTON_BY_MSG[msg]
         x, y = self._mouse_xy(lparam)
-        native.user32.SetCapture(self._hwnd)
+        # The window the press landed in, which is not always the main one:
+        # this runs inside _window_scope for a secondary window's messages, so
+        # capturing self._hwnd sent every subsequent move and the button-up to
+        # the main window instead. A drag that leaves the window it started in
+        # is exactly what a frameless window's own resize edge and drag handle
+        # are - so on Windows they stopped dead the moment the pointer crossed
+        # the border, while macOS, which routes a drag to the window that took
+        # the mouse-down and has no capture to get wrong, was fine.
+        native.user32.SetCapture(self._target_hwnd())
         if button == "right":
             # Right-click acts on press (context menus), so it stays an atomic click.
             self._dispatch(Event(type=EventType.MOUSE_CLICK, x=x, y=y, button="right"))
@@ -3896,7 +3904,10 @@ class WindowsBackend(Backend):
             tme = native.TRACKMOUSEEVENT()
             tme.cbSize = ctypes.sizeof(native.TRACKMOUSEEVENT)
             tme.dwFlags = native.TME_LEAVE
-            tme.hwndTrack = self._hwnd
+            # Track the window being handled, for the reason SetCapture above
+            # takes the same care: a secondary window asking the main one to
+            # report the pointer leaving is asking the wrong window.
+            tme.hwndTrack = self._target_hwnd()
             tme.dwHoverTime = 0
             native.user32.TrackMouseEvent(ctypes.byref(tme))
             self._tracking_mouse = True

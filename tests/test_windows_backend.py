@@ -1818,3 +1818,35 @@ class TestScreenMarks:
         backend = WindowsBackend(width=30, height=8)
         mark = backend.mark_screen(300, 300, 200, 100)
         assert mark.closed
+
+
+def test_a_press_in_a_secondary_window_captures_that_window(monkeypatch):
+    """The mouse capture a press takes belongs to the window pressed in.
+
+    Capture is what keeps a drag alive once the pointer leaves the window it
+    started in, and that is precisely what a frameless window's own resize
+    edge and drag handle are: dragging an edge outwards, or carrying the
+    window by a handle, puts the pointer outside within a few pixels.
+    Capturing the *main* window instead sent every later move and the
+    button-up there, so those gestures stopped dead at the border - on
+    Windows only, since macOS routes a drag to the window that took the
+    mouse-down and has no capture to point at the wrong one.
+    """
+    backend = WindowsBackend(width=30, height=8, title="puikit-test-capture")
+    backend.open()
+    try:
+        window = backend.create_window(20, 6, title="puikit-test-secondary")
+        captured = []
+        monkeypatch.setattr(native.user32, "SetCapture",
+                            lambda hwnd: captured.append(hwnd) or 0)
+        with backend._window_scope(window):
+            backend._on_mouse_down(native.WM_LBUTTONDOWN, 0)
+        assert captured == [window.hwnd]
+        assert window.hwnd != backend._hwnd     # the bug's two candidates differ
+
+        # The main window still captures itself when the press is its own.
+        captured.clear()
+        backend._on_mouse_down(native.WM_LBUTTONDOWN, 0)
+        assert captured == [backend._hwnd]
+    finally:
+        backend.close()
