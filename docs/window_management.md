@@ -122,6 +122,15 @@ win.on_close = ...                       # user clicked close
   surface.
 - `MemoryBackend` windows record everything (`win.snapshot()`,
   `win.style_at()`), so multi-window UIs are testable headlessly.
+- Geometry is one rectangle read and written in the same portable top-left
+  coordinates: `frame_px()` reads it, `move_to_px(x, y)` sets the corner and
+  `resize_to_px(w, h)` sets the size, holding that corner still (AppKit
+  measures from the bottom-left, so a window sized without this walks its top
+  edge up the screen). `size_units` stays the *drawable* size — the same
+  rectangle for a frameless window, smaller by the chrome for a framed one.
+  `WindowStyle.resizable` governs the user's grip on the frame, not these: a
+  frameless window has no frame to drag, which is exactly the window that
+  draws its own grip and resizes itself.
 
 **Decided fidelity mapping** (2026-07): secondary windows are **real windows
 on every backend that has them** — native OS windows on GUI-Desktop, real

@@ -1362,6 +1362,21 @@ class MacWindowHandle(WindowHandle):
         h = float(self.nswindow.frame().size.height)
         self.nswindow.setFrameOrigin_((x, flip_h - y - h))
 
+    def resize_to_px(self, w: float, h: float) -> None:
+        flip_h = _flip_height()
+        if flip_h is None:
+            return
+        frame = self.nswindow.frame()
+        w = max(1.0, float(w))
+        h = max(1.0, float(h))
+        # The origin is recomputed rather than kept: AppKit's is the window's
+        # bottom-left, so setting the size alone would hold the *bottom* edge
+        # and push the top edge up the screen as the window grows. The portable
+        # top is what stays.
+        top = flip_h - float(frame.origin.y) - float(frame.size.height)
+        self.nswindow.setFrame_display_(
+            NSMakeRect(frame.origin.x, flip_h - top - h, w, h), True)
+
     @property
     def closed(self) -> bool:
         return self._closed

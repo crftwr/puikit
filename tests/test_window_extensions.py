@@ -8,6 +8,7 @@ import pytest
 
 from puikit import PROFILE_GUI_DESKTOP, WindowStyle
 from puikit.backends.memory_backend import MemoryBackend
+from puikit.event import EventType
 
 
 class TestWindowStyleDataclass:
@@ -388,6 +389,64 @@ class TestWindowPositioning:
         assert portable_y == 780.0
         # and back again (move_to_px inverts frame_px)
         assert flip_h - portable_y - window_h == appkit_y
+
+
+class TestWindowResizing:
+    """resize_to_px(): the pair to move_to_px, holding the top-left corner."""
+
+    def _window(self):
+        backend = MemoryBackend(80, 24)
+        backend.open()
+        return backend.create_window(30, 10, title="pop")
+
+    def test_base_handle_is_a_no_op(self):
+        from puikit.backend import WindowHandle
+        WindowHandle().resize_to_px(40, 12)  # must not raise
+
+    def test_resize_shows_up_in_frame_px_and_size_units(self):
+        window = self._window()
+        window.resize_to_px(48, 16)
+        assert window.frame_px() == (160.0, 160.0, 48.0, 16.0)
+        assert window.size_units == (48.0, 16.0)
+
+    def test_resize_holds_the_top_left_corner(self):
+        # The whole point of the contract: a window grown from a bottom-right
+        # grip must not walk up or left across the screen.
+        window = self._window()
+        window.move_to_px(415, 230)
+        window.resize_to_px(60, 24)
+        assert window.frame_px()[:2] == (415.0, 230.0)
+
+    def test_resize_reports_the_new_size_like_a_gui_backend(self):
+        window = self._window()
+        seen = []
+        window.on_event = seen.append
+        window.resize_to_px(40, 12)
+        assert [(e.type, e.hints) for e in seen] == [
+            (EventType.RESIZE, {"w": 40, "h": 12})]
+
+    def test_resize_to_the_same_size_says_nothing(self):
+        window = self._window()
+        seen = []
+        window.on_event = seen.append
+        window.resize_to_px(30, 10)
+        assert seen == []
+
+    def test_a_window_never_shrinks_below_one_unit(self):
+        window = self._window()
+        window.resize_to_px(0, -5)
+        assert window.size_units == (1.0, 1.0)
+
+    def test_macos_resize_flip_math(self):
+        # AppKit holds the bottom edge, so the origin has to be recomputed
+        # from the portable top or the window grows upward off its corner.
+        flip_h, top = 1080.0, 780.0
+        old_h, new_h = 200.0, 320.0
+        assert flip_h - top - old_h == 100.0          # AppKit y before
+        appkit_y = flip_h - top - new_h               # ... and after
+        assert appkit_y == -20.0
+        # read back through frame_px's conversion: the top has not moved
+        assert flip_h - appkit_y - new_h == top
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Win32 flag mapping")
