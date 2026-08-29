@@ -444,3 +444,44 @@ class TestScreenMarkerBase:
         """The base recipe: an unknown request degrades, it does not raise."""
         backend = MemoryBackend(20, 5)
         assert backend.mark_screen(0, 0, 10, 10).closed
+
+
+class TestMarkTextLayout:
+    """The wrapping and sizing the backends share, in _screen_mark.py. Two
+    copies of this would drift the way the Win32 style mapping did before it
+    had one caller, and the backend that draws with it only runs on Windows."""
+
+    def _measure(self, text):
+        return float(len(text))          # one unit per character
+
+    def _spec(self, lines):
+        return {"lines": lines, "measure": self._measure, "line_height": 10.0}
+
+    def test_without_a_limit_only_real_line_breaks_count(self):
+        from puikit.backends import _screen_mark
+        assert _screen_mark.lines("one two three", self._measure, None) == \
+            ["one two three"]
+        assert _screen_mark.lines("one\ntwo", self._measure, None) == \
+            ["one", "two"]
+
+    def test_a_limit_wraps_and_leaves_room_for_the_padding(self):
+        from puikit.backends import _screen_mark
+        limit = 10 + 2 * _screen_mark.PADDING
+        lines = _screen_mark.lines("aaa bbb ccc ddd", self._measure, limit)
+        assert len(lines) > 1
+        assert all(self._measure(line) <= 10 for line in lines)
+
+    def test_empty_text_is_no_lines(self):
+        from puikit.backends import _screen_mark
+        assert _screen_mark.lines("", self._measure, None) == []
+
+    def test_a_size_given_is_the_size_used(self):
+        from puikit.backends import _screen_mark
+        assert _screen_mark.size(self._spec(["x"]), 200, 100) == (200, 100)
+
+    def test_otherwise_it_is_the_text_plus_padding(self):
+        from puikit.backends import _screen_mark
+        pad = 2 * _screen_mark.PADDING
+        w, h = _screen_mark.size(self._spec(["abcd", "ab"]), None, None)
+        assert w == 4 + pad
+        assert h == 20 + pad
