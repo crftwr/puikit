@@ -472,6 +472,17 @@ class WinWindowHandle(WindowHandle):
             self.hwnd, None, int(x), int(y), 0, 0,
             native.SWP_NOZORDER | native.SWP_NOACTIVATE | native.SWP_NOSIZE)
 
+    def resize_to_px(self, w: float, h: float) -> None:
+        if self._closed:
+            return
+        # The window rect is already the portable frame here, so there is no
+        # top-left to preserve by hand: SWP_NOMOVE holds the origin, and the
+        # WM_SIZE this generates resizes the swap chain and reports the new
+        # size to the app.
+        native.user32.SetWindowPos(
+            self.hwnd, None, 0, 0, max(1, int(w)), max(1, int(h)),
+            native.SWP_NOZORDER | native.SWP_NOACTIVATE | native.SWP_NOMOVE)
+
     @property
     def closed(self) -> bool:
         return self._closed

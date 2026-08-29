@@ -17,7 +17,7 @@ from ..backend import (
 )
 from contextlib import contextmanager
 from ..capability import PROFILE_TUI, CapabilityProfile
-from ..event import Event
+from ..event import Event, EventType
 
 # Scroll bar colors (shared intent with the curses/GUI backends).
 _SCROLLBAR_THUMB = (150, 150, 150)
@@ -117,6 +117,21 @@ class _MemoryWindowHandle(WindowHandle):
     def move_to_px(self, x: float, y: float) -> None:
         self.x = float(x)
         self.y = float(y)
+
+    def resize_to_px(self, w: float, h: float) -> None:
+        width, height = max(1, int(w)), max(1, int(h))
+        if (width, height) == (self.width, self.height):
+            return
+        self.width, self.height = width, height
+        self.grid = [[" "] * width for _ in range(height)]
+        self.styles = [[DEFAULT_STYLE] * width for _ in range(height)]
+        # A GUI backend gets the RESIZE event back from the OS (windowDidResize
+        # / WM_SIZE) whether the resize came from the user or from the app, so
+        # a headless one has to raise it itself - otherwise a Panel that
+        # relayouts on resize is untestable here.
+        if self.on_event is not None:
+            self.on_event(Event(type=EventType.RESIZE,
+                                hints={"w": width, "h": height}))
 
     @property
     def closed(self) -> bool:

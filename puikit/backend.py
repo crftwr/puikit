@@ -234,6 +234,27 @@ class WindowHandle:
         (Replaces 1.0.5's provisional native-coordinates move_px(), which
         meant a different origin per OS and was removed with no callers.)"""
 
+    def resize_to_px(self, w: float, h: float) -> None:
+        """Resize the window to (w, h) in the same portable coordinates
+        frame_px() reports, **keeping its top-left corner where it is**.
+        Absolute, like move_to_px; the base is a no-op.
+
+        The corner matters: AppKit measures a frame from the bottom-left, so
+        a window that only had its size set would walk its visible top edge
+        up the screen as it grew. Holding the top-left still is also what a
+        caller dragging a grip in the bottom-right corner means.
+
+        The **frame**, not the drawable area — the pair to frame_px, so
+        move_to_px and resize_to_px together set exactly the rect frame_px
+        reads back. ``size_units`` keeps reporting the drawable size, which
+        for a framed window is smaller by its chrome; for a frameless one
+        the two are the same rectangle.
+
+        ``WindowStyle.resizable`` does not gate this: it says whether the
+        *user* may drag the frame, and a frameless window has no frame to
+        drag, which is exactly the window that has to draw its own grip and
+        resize itself."""
+
     @property
     def closed(self) -> bool:
         return False
