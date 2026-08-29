@@ -148,6 +148,12 @@ win.on_close = ...                       # user clicked close
     genuinely borderless window; 8 px on Windows 11's default rounding, 0
     before it). A border drawn square at the window's extent loses exactly
     its four corners to that clip, with nothing in the drawing API to say why.
+  - A `MOUSE_MOVE` when the pointer **enters** the window, not only when it
+    leaves. Crossing a window's edge and stopping there produces an entry and
+    no move — every move event in that gesture was outside the window — so an
+    app shaping the pointer per region had nothing to shape it from until the
+    hand moved again, and an edge approached from outside said nothing.
+    (Windows already sends `WM_MOUSEMOVE` on entry.)
   - `Backend.pointer_position_px()` — where the pointer is *now*, asked of
     the OS. A mouse event's position is measured against a window and frozen
     when the event was posted, so an app that moves that window mid-gesture

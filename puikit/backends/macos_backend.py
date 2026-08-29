@@ -1141,6 +1141,18 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
         else:
             objc.super(_PuiKitView, self).cursorUpdate_(ns_event)
 
+    def mouseEntered_(self, ns_event):
+        # The partner of mouseExited_'s off-canvas move, and not a nicety: an
+        # app that shapes the pointer per region has to be told where the
+        # pointer *arrived*. Crossing a window's edge and stopping there
+        # produces this and no mouseMoved - every move event in that gesture
+        # was outside the window - so without it the pointer keeps whatever
+        # shape it had until the hand moves again, and a resize edge
+        # approached from outside says nothing.
+        self.backend._cursor_window = getattr(self, "pk_window", None)
+        x, y = self._mouse_unit(ns_event)
+        self._pk_dispatch(Event(type=EventType.MOUSE_MOVE, x=x, y=y))
+
     def mouseExited_(self, ns_event):
         if self.backend._cursor_window is getattr(self, "pk_window", None):
             self.backend._cursor_window = _NO_CURSOR_WINDOW
