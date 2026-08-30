@@ -31,7 +31,7 @@ from ..backend import DEFAULT_STYLE, Style, TextAttribute
 from ..event import Event, EventType
 from ..font import Font
 from ..panel import DrawContext
-from ..text import display_width, truncate_to_width
+from ..text import display_width, glyph_runs, truncate_to_width
 from ..theme import lift
 from ._scroll import search_scroll_offset
 from .base import Widget
@@ -82,6 +82,36 @@ def _is_number(text: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _col_slice(text: str, lo: int, hi: int) -> str:
+    """The part of ``text`` covering display columns ``[lo, hi)``, as a string that
+    begins exactly at column ``lo`` — the horizontal-pan cut of a laid-out row.
+
+    ``text[lo:hi]`` would cut by *character*, and a full-width (CJK) glyph is one
+    character across two columns, so that cut lands further and further left of the
+    column it names. A glyph straddling either edge cannot be drawn as itself; its
+    cells inside the window come back blank, the same rule the text viewer's pan
+    and the VT grid's clipping follow."""
+    if hi <= lo:
+        return ""
+    if len(text) == display_width(text):        # all-narrow fast path
+        return text[lo:hi]
+    out: list[str] = []
+    col = 0
+    for glyph in glyph_runs(text):
+        w = display_width(glyph)
+        if col + w <= lo:
+            col += w
+            continue
+        if col >= hi:
+            break
+        if col < lo or col + w > hi:
+            out.append(" " * (min(col + w, hi) - max(col, lo)))
+        else:
+            out.append(glyph)
+        col += w
+    return "".join(out)
 
 
 class TableView(Widget):
@@ -177,14 +207,23 @@ class TableView(Widget):
     def _line(self, cells: Sequence[str]) -> str:
         """The full-width text of one row: each padded cell placed at its content
         origin on a blank field (border + pad columns left as spaces, so the ``│``
-        bars overlaid at draw time never sit on a glyph)."""
-        buf = [" "] * self._total_w
+        bars overlaid at draw time never sit on a glyph).
+
+        Laid out in **display columns**, not characters: a cell of full-width (CJK)
+        text spans two columns per character, so the run of spaces before each cell
+        is measured against the columns the cells before it actually cover. Filling
+        a character buffer indexed by column instead would leave the finished line
+        wider on screen than the grid it is drawn on, and every cell past the first
+        wide one would drift right of its own column rule (xefm#355)."""
+        out: list[str] = []
+        col = 0
         for j in range(self._ncols):
-            cell = self._pad(self._cell(cells, j), self._colw[j], self._numeric[j])
             cx = self._content_x[j]
-            for k, ch in enumerate(cell[:self._colw[j]]):
-                buf[cx + k] = ch
-        return "".join(buf)
+            out.append(" " * (cx - col))
+            out.append(self._pad(self._cell(cells, j), self._colw[j], self._numeric[j]))
+            col = cx + self._colw[j]
+        out.append(" " * (self._total_w - col))
+        return "".join(out)
 
     # --- drawing -------------------------------------------------------------
 
@@ -259,7 +298,7 @@ class TableView(Widget):
         # beneath it (its own surface, scrolled horizontally with the body).
         header_bg = (theme.surface_bg("header") if theme is not None else None) or bg
         ctx.fill_rect(0, 0, view_w, row_h, Style(bg=header_bg))
-        head = self._header_line[l:l + text_w]
+        head = _col_slice(self._header_line, l, l + text_w)
         ctx.draw_text(0, 0, head, Style(fg=base_fg, bg=header_bg,
                                         attr=TextAttribute.BOLD, font=_MONO))
 
@@ -346,7 +385,8 @@ class TableView(Widget):
 
     def _draw_body_row(self, ctx, top, index, l, text_w, base_fg, row_bg) -> None:
         line = self._body_lines[index]
-        ctx.draw_text(0, top, line[l:l + text_w], Style(fg=base_fg, bg=row_bg, font=_MONO))
+        ctx.draw_text(0, top, _col_slice(line, l, l + text_w),
+                      Style(fg=base_fg, bg=row_bg, font=_MONO))
 
     def _span_x(self, c0: int, c1: int, l: int, text_w: int) -> tuple[int, int] | None:
         """Visible [x0, x1) column window for absolute columns [c0, c1), clipped
@@ -382,7 +422,7 @@ class TableView(Widget):
             top = self._body_top + (row * row_h - self.offset)
             if top >= self._body_bottom:
                 break
-            sub = self._body_lines[row][l + x0:l + x1]
+            sub = _col_slice(self._body_lines[row], l + x0, l + x1)
             ctx.draw_text(x0, top, sub, Style(fg=base_fg, bg=sel_bg, font=_MONO))
 
     def _draw_matches(self, ctx, first, nrows, l, text_w, row_h, base_fg, bg) -> None:
@@ -404,11 +444,14 @@ class TableView(Widget):
                     break
                 end = hit + len(pat)
                 start = end
-                span = self._span_x(hit, end, l, text_w)
+                # ``find`` answers in characters; the highlight is placed in
+                # columns, which differ once the row holds a wide glyph.
+                span = self._span_x(display_width(line[:hit]),
+                                    display_width(line[:end]), l, text_w)
                 if span is None:
                     continue
                 x0, x1 = span
-                ctx.draw_text(x0, top, line[l + x0:l + x1],
+                ctx.draw_text(x0, top, _col_slice(line, l + x0, l + x1),
                               Style(fg=base_fg, bg=hl_bg, font=_MONO))
 
     # --- scroll helpers ------------------------------------------------------
