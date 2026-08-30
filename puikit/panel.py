@@ -289,6 +289,24 @@ class DrawContext:
         return self._caps.supports("vector_shapes")
 
     @property
+    def colored_underlines(self) -> bool:
+        """True when an underline's rule can take a color of its own
+        (``Style.underline_color``) rather than inking in ``fg``. True on the
+        desktop GUI backends and in a terminal that is sent SGR 58; false under
+        curses, on the web, and in a terminal whose SGR parser cannot be handed
+        a sub-parameter safely.
+
+        Read this the way ``images`` is read, and for the same reason — the
+        fidelity reading of §5 in ``docs/rendering_system.md``: NOT to decide
+        whether to underline — a style carrying a color it cannot have
+        still draws its rule, in ``fg`` — but where the fallback should be
+        something better than a colorless rule. A cursor cue that marks a row by
+        ruling it in one accent has no cue left when every rule is the text
+        color, and wants its other spelling instead.
+        """
+        return self._caps.supports("colored_underlines")
+
+    @property
     def images(self) -> bool:
         """True when the backend can draw real pixel images, so ``draw_image``
         renders a picture rather than falling back to the centered alt glyph.

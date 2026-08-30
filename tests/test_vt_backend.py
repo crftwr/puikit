@@ -15,6 +15,7 @@ import pytest
 from puikit.backends.vt_backend import (
     VTBackend,
     _StreamConsole,
+    _supports_underline_color,
     _VK_PROCESSKEY,
     _win_key_record,
 )
@@ -232,6 +233,7 @@ def test_clipboard_round_trips(backend):
 
 def test_underline_color_reaches_the_cell(backend):
     be, con = backend
+    be._underline_colors = True   # the detection is env-dependent; pin it
     be.clear()
     be.draw_text(0, 0, "x", Style(fg=(1, 2, 3), attr=TextAttribute.UNDERLINE,
                                   underline_color=(231, 76, 76)))
@@ -242,6 +244,85 @@ def test_underline_color_without_an_underline_is_dropped(backend):
     # It would put a difference into the cell that no screen can show, and every
     # pen change is paid for in the frame diff.
     be, con = backend
+    be._underline_colors = True
     be.clear()
     be.draw_text(0, 0, "x", Style(fg=(1, 2, 3), underline_color=(231, 76, 76)))
     assert be._grid.cell_at(0, 0)[4] is None
+
+
+def test_underline_color_is_dropped_where_sgr_58_cannot_be_sent(backend):
+    # The underline attribute stays: the rule is drawn, in fg. Losing the color
+    # is the degradation; losing the cue is not.
+    be, con = backend
+    be._underline_colors = False
+    be.clear()
+    style = Style(fg=(1, 2, 3), attr=TextAttribute.UNDERLINE, underline_color=(231, 76, 76))
+    be.draw_text(0, 0, "x", style)
+    glyph, fg, _bg, attr, ul = be._grid.cell_at(0, 0)
+    assert ul is None
+    assert attr & TextAttribute.UNDERLINE
+    assert "58:" not in be._grid.render()
+
+
+# --- who may be sent a colored underline ----------------------------------
+
+def test_terminal_app_is_not_sent_sgr_58():
+    # It abandons the whole sequence at the first colon, losing the underline
+    # attribute and the row's colors with it (xefm#350).
+    assert not _supports_underline_color({"TERM_PROGRAM": "Apple_Terminal", "TERM": "xterm-256color"})
+
+
+def test_an_unknown_terminal_is_not_sent_sgr_58():
+    # The whitelist's whole point: unrecognized costs a color, guessing costs the row.
+    assert not _supports_underline_color({"TERM": "xterm-256color"})
+    assert not _supports_underline_color({})
+
+
+def test_multiplexers_are_not_sent_sgr_58():
+    # TERM says nothing about the emulator underneath, and neither forwards 58
+    # unless configured to.
+    assert not _supports_underline_color({"TERM": "tmux-256color"})
+    assert not _supports_underline_color({"TERM": "screen-256color"})
+
+
+@pytest.mark.parametrize("env", [
+    {"KITTY_WINDOW_ID": "1"},
+    {"WT_SESSION": "abc"},
+    {"VTE_VERSION": "6003"},
+    {"KONSOLE_VERSION": "230801"},
+    {"TERM_PROGRAM": "iTerm.app"},
+    {"TERM_PROGRAM": "WezTerm"},
+    {"TERM": "xterm-kitty"},
+    {"TERM": "alacritty"},
+])
+def test_terminals_that_implement_sgr_58_are(env):
+    assert _supports_underline_color(env)
+
+
+def test_a_version_below_the_floor_is_not():
+    assert not _supports_underline_color({"VTE_VERSION": "5002"})        # VTE 0.50
+    assert not _supports_underline_color({"KONSOLE_VERSION": "220401"})  # 22.04
+
+
+def test_xterm_is_not_on_the_list():
+    # It parses the parameter away safely, so sending 58 would cost nothing —
+    # but it draws no colored rule, and the bracket spelling a widget picks
+    # instead is better than a rule inked in fg. The predicate is IMPLEMENTS.
+    assert not _supports_underline_color({"XTERM_VERSION": "XTerm(370)",
+                                          "TERM": "xterm-256color"})
+
+
+def test_the_capability_follows_the_detection(monkeypatch):
+    # Widgets never see _supports_underline_color; they see this, and a cue that
+    # needs a colored rule reads it to pick its other spelling.
+    monkeypatch.setenv("PUIKIT_UNDERLINE_COLOR", "1")
+    assert VTBackend(FakeConsole()).capabilities.supports("colored_underlines")
+    monkeypatch.setenv("PUIKIT_UNDERLINE_COLOR", "0")
+    assert not VTBackend(FakeConsole()).capabilities.supports("colored_underlines")
+
+
+def test_the_override_wins_both_ways():
+    assert _supports_underline_color({"PUIKIT_UNDERLINE_COLOR": "1",
+                                      "TERM_PROGRAM": "Apple_Terminal"})
+    assert not _supports_underline_color({"PUIKIT_UNDERLINE_COLOR": "0",
+                                          "TERM": "xterm-kitty"})

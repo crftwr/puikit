@@ -67,6 +67,17 @@ PROFILE_TUI = CapabilityProfile(
     media_keys=False,
     icons=False,
     images=False,
+    colored_underlines=False,  # an underline whose rule takes a color of its own
+                               # (Style.underline_color), independent of the text.
+                               # Off for the class: curses cannot color a rule at
+                               # all, and a terminal is only sent SGR 58 when it
+                               # is recognized as parsing sub-parameters, so
+                               # VTBackend flips this on per instance
+                               # (vt_backend._supports_underline_color). Widgets
+                               # read it the way they read `images` — not to draw
+                               # the underline, which degrades on its own, but
+                               # where the FALLBACK should be something better
+                               # than a colorless rule.
     post_effects=False,      # full-screen composited effect (CRT/phosphor look).
                              # Needs real pixels to filter the rendered frame; a
                              # character grid has none, so it stays off and
@@ -109,6 +120,7 @@ PROFILE_GUI_DESKTOP = CapabilityProfile(
         "system_tray": True,
         "native_menus": True,
         "os_drag_drop": True,  # native NSDraggingSource: drag files to other apps
+        "colored_underlines": True,  # NSUnderlineColorAttributeName / its own brush
         "gpu_acceleration": True,
         "media_keys": True,
         # WindowStyle requests (frameless / topmost / no-activate /
