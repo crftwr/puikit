@@ -67,7 +67,7 @@ def test_thumb_body_is_a_background_not_a_block_glyph(backend):
     be.clear()
     be.draw_scrollbar(0, 0, 6, 0.0, 1.0)   # thumb covers everything
     for row in range(6):
-        glyph, _fg, bg, _attr = grid.cell_at(0, row)
+        glyph, _fg, bg, _attr, _ul = grid.cell_at(0, row)
         assert glyph == " "
         assert bg == (150, 150, 150)
 
@@ -90,7 +90,7 @@ def test_upper_cap_inverts_the_colors(backend):
     caps = [(r, grid.cell_at(0, r)) for r in range(8)
             if grid.cell_at(0, r)[0] in LOWER_BLOCKS[1:-1]]
     assert caps
-    for _row, (_glyph, fg, bg, _attr) in caps:
+    for _row, (_glyph, fg, bg, _attr, _ul) in caps:
         assert {fg, bg} == {(150, 150, 150), (60, 60, 60)}
 
 
@@ -101,7 +101,7 @@ def test_horizontal_bar_is_a_thin_band(backend):
     be.clear()
     be.draw_scrollbar(0, 0, 8, 0.0, 0.5, orientation="horizontal", surface=(9, 9, 9))
     for col in range(8):
-        glyph, _fg, bg, _attr = grid.cell_at(col, 0)
+        glyph, _fg, bg, _attr, _ul = grid.cell_at(col, 0)
         assert glyph == "▄"
         assert bg == (9, 9, 9)
 
@@ -149,7 +149,7 @@ def test_shadow_keeps_the_page_color_in_the_uncovered_half(backend):
     be.clear()
     be.fill_rect(0, 0, 30, 12, style=Style(bg=(20, 40, 80)))
     be.shadow_rect(2, 2, 6, 2)
-    _glyph, fg, bg, _attr = grid.cell_at(3, 4)
+    _glyph, fg, bg, _attr, _ul = grid.cell_at(3, 4)
     assert fg == (20, 40, 80)
     assert bg != fg
 

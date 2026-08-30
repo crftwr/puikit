@@ -107,6 +107,16 @@ units; `x`/`y`/`w`/`h`/`length` may be fractional on a pixel backend.
 | `draw_text_baseline(x, baseline_y, text, style)` | Place text by its baseline, not the top of the line box, so runs of different fonts on one row align. The proportional/mixed-font path (unsliced). |
 | `measure_text`, `line_height`, `font_metrics`, `font_size` | The measurement seam: displayed width / row pitch / ascent+descent / point size of `style`'s (folded) font, in this pane's unit. Whole-unit backends count columns and answer `1.0` line height, so the same math runs everywhere (`docs/font_system.md`). |
 
+**Underlines carry their own color.** `Style.underline_color` colors the rule
+drawn for `TextAttribute.UNDERLINE` independently of `fg` — a cursor cue that
+underlines a whole row in one accent while every filename on it keeps its own
+type color. It is a hint that degrades in one direction: where a backend cannot
+color a rule separately the underline is still drawn, in `fg`. The VT backend
+emits SGR 58 in the sub-parameter form (`58:2::r:g:b`) so a terminal without
+colored underlines drops that one parameter and keeps the rule; `MacOSBackend`
+and `WindowsBackend` honor it natively; the curses and web backends ignore it.
+Read only when an underline attribute is set.
+
 ### Fills and rectangles
 
 | Method | Intent / resolution |
@@ -344,3 +354,21 @@ Backend        core:      clear, draw_text, draw_box, dim_rect, draw_scrollbar,
    widget from branching its drawing model on `vector_shapes`; §5 is the rule,
    and review is what keeps it. A lint that flags a `draw_*` call guarded by a
    capability `if` could make it mechanical.
+4. **No row-marker primitive, and a known §5 violation living on it.** Marking
+   *the row you are on* in a list is a stroked outline on a vector backend and
+   bracket characters plus an underline attribute on a grid — different in kind,
+   with no intent primitive to resolve it, so the branch sits in the app: xefm's
+   `FilePane` reads `vector_shapes` to choose between them (its `file_pane.py`
+   records the deviation at the branch). A `draw_row_marker(x, y, w, style,
+   hints)` in the control-face family would take it, but it needs a second half
+   the other faces do not: the grid variant spends a gutter column at each end,
+   so a widget has to be able to *ask what the marker costs* before it lays out
+   its columns — the same shape as `draw_border` insetting the content clip.
+5. **No tree-connector primitive either, with the same consequence.** Drawing a
+   tree's `├ └ │` structure is thin strokes on a vector backend and box-drawing
+   glyphs on a grid, and with no primitive for it xefm's
+   `DirectoryDiffViewer` keeps two whole row renderers behind a `vector_shapes`
+   branch (recorded at that branch, and in its
+   `doc/dev/CAPABILITY_BRANCHING_AUDIT.md`). `draw_hairline` already makes this
+   choice for a single rule; a connector is that plus the elbow/tee/stem cases
+   and their indent arithmetic. Two apps' worth of tree UI would justify it.

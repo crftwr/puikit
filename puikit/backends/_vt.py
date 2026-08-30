@@ -36,13 +36,15 @@ from ..text import display_width, glyph_runs, is_emoji_glyph
 # detected and the surviving half cleaned up (see _break_wide_at).
 _TRAIL = object()
 
-# (glyph, fg, bg, attr). A plain tuple rather than a dataclass: a frame compares
-# thousands of these, and tuple equality is a single C-level call.
+# (glyph, fg, bg, attr, ul). A plain tuple rather than a dataclass: a frame
+# compares thousands of these, and tuple equality is a single C-level call.
+# ``ul`` is the underline color (Style.underline_color), carried per cell
+# because the rule under a glyph can be a different color from the glyph.
 Cell = tuple
 
 
-def blank_cell(fg=None, bg=None, attr: int = 0) -> Cell:
-    return (" ", fg, bg, attr)
+def blank_cell(fg=None, bg=None, attr: int = 0, ul=None) -> Cell:
+    return (" ", fg, bg, attr, ul)
 
 
 class VTGrid:
@@ -125,7 +127,7 @@ class VTGrid:
             for x in range(self._w):
                 row[x] = cell
 
-    def _break_wide_at(self, row: list[Cell], x: int, fg, bg, attr) -> None:
+    def _break_wide_at(self, row: list[Cell], x: int, fg, bg, attr, ul=None) -> None:
         """Make column ``x`` safe to write into.
 
         Writing over half of a wide glyph would leave the other half stranded —
@@ -140,12 +142,12 @@ class VTGrid:
         if row[x] is _TRAIL:
             # x is the trail half; its lead sits immediately left.
             if x - 1 >= 0:
-                row[x - 1] = blank_cell(fg, bg, attr)
+                row[x - 1] = blank_cell(fg, bg, attr, ul)
         elif x + 1 < self._w and row[x + 1] is _TRAIL:
             # x is a lead half; the trail to its right loses its owner.
-            row[x + 1] = blank_cell(fg, bg, attr)
+            row[x + 1] = blank_cell(fg, bg, attr, ul)
 
-    def draw_text(self, x: float, y: float, text: str, fg=None, bg=None, attr: int = 0) -> None:
+    def draw_text(self, x: float, y: float, text: str, fg=None, bg=None, attr: int = 0, ul=None) -> None:
         """Place ``text`` with its left edge at column ``x`` on row ``y``.
 
         Advances by DISPLAY WIDTH, not character count, so a wide glyph consumes
@@ -172,21 +174,22 @@ class VTGrid:
             if col + w > cx1:
                 break
             if col >= cx0 and col >= 0:
-                self._break_wide_at(row, col, fg, bg, attr)
+                self._break_wide_at(row, col, fg, bg, attr, ul)
                 if w == 2:
-                    self._break_wide_at(row, col + 1, fg, bg, attr)
-                row[col] = (glyph, fg, bg, attr)
+                    self._break_wide_at(row, col + 1, fg, bg, attr, ul)
+                row[col] = (glyph, fg, bg, attr, ul)
                 if w == 2 and col + 1 < self._w:
                     row[col + 1] = _TRAIL
             col += w
 
-    def fill_rect(self, x: float, y: float, w: float, h: float, fg=None, bg=None, attr: int = 0) -> None:
+    def fill_rect(self, x: float, y: float, w: float, h: float, fg=None, bg=None,
+                  attr: int = 0, ul=None) -> None:
         x, y, w, h = round(x), round(y), round(w), round(h)
         if w <= 0 or h <= 0:
             return
         run = " " * w
         for row in range(h):
-            self.draw_text(x, y + row, run, fg, bg, attr)
+            self.draw_text(x, y + row, run, fg, bg, attr, ul)
 
     def cell_at(self, x: int, y: int) -> Cell | None:
         """The cell at (x, y), or None outside the grid. ``_TRAIL`` means the
@@ -273,7 +276,7 @@ class VTGrid:
                     if cell is _TRAIL:
                         # The lead already moved the cursor across this column.
                         continue
-                    glyph, fg, bg, attr = cell
+                    glyph, fg, bg, attr, ul = cell
                     if reanchor:
                         # Put the cursor back where WE believe it is, because the
                         # glyph just emitted is one whose width the terminal may
@@ -284,7 +287,7 @@ class VTGrid:
                         # doubling a character.
                         append(f"\x1b[{y + 1};{x + 1}H")
                         reanchor = False
-                    style = (fg, bg, attr)
+                    style = (fg, bg, attr, ul)
                     if style != pen:
                         append(_sgr_delta(style, pen))
                         pen = style
@@ -361,7 +364,26 @@ def _color_code(color, layer: int) -> str:
 
 
 @lru_cache(maxsize=8192)
-def _sgr(fg, bg, attr: int) -> str:
+def _underline_code(color) -> str:
+    """The SGR parameter coloring the underline rule.
+
+    Written in the SUB-PARAMETER form — ``58:2::r:g:b``, one parameter with
+    colon-separated parts — not ``58;2;r;g;b``. A terminal that does not
+    implement colored underlines discards an unknown parameter whole, so the
+    colon form costs the color and keeps the underline; with semicolons that same
+    terminal reads the leftovers as codes of their own and applies ``2`` (dim)
+    plus three stray colors. The empty part after ``2`` is the color-space id
+    ITU-T T.416 puts there, which every implementation leaves blank.
+
+    There is no counterpart for "back to the default rule color" (59) because
+    nothing needs one: a pen carrying no underline color is established from a
+    reset, which restores it along with everything else.
+    """
+    return f"58:2::{color[0]}:{color[1]}:{color[2]}"
+
+
+@lru_cache(maxsize=8192)
+def _sgr(fg, bg, attr: int, ul=None) -> str:
     """One SGR sequence establishing exactly this pen, built from a reset.
 
     Used whenever the previous pen is unknown or its ATTRIBUTES differ: clearing
@@ -377,6 +399,10 @@ def _sgr(fg, bg, attr: int) -> str:
         codes.append(_color_code(fg, 38))
     if bg is not None:
         codes.append(_color_code(bg, 48))
+    # The reset this is built from already restored the default underline color,
+    # so 59 is never worth emitting here — only an explicit color is.
+    if ul is not None:
+        codes.append(_underline_code(ul))
     return "\x1b[" + ";".join(codes) + "m"
 
 
@@ -397,9 +423,13 @@ def _sgr_delta(new: tuple, old: tuple | None) -> str:
     """
     if old is None:
         return _sgr(*new)
-    new_fg, new_bg, new_attr = new
-    old_fg, old_bg, old_attr = old
-    if new_attr != old_attr:
+    new_fg, new_bg, new_attr, new_ul = new
+    old_fg, old_bg, old_attr, old_ul = old
+    if new_attr != old_attr or new_ul != old_ul:
+        # The underline color goes with the attributes rather than with fg/bg: it
+        # is what a reset clears, and expressing its "off" state as a delta means
+        # trusting every terminal's handling of 59 — exactly the per-terminal
+        # modelling this function refuses to do.
         return _sgr(*new)
     # Spelled out per case rather than accumulated into a list and joined: this
     # runs once per changed cell, and on an animated background that is every

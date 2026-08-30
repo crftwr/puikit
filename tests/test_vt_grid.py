@@ -274,3 +274,50 @@ def test_several_emoji_each_re_anchor():
     g.draw_text(0, 0, "⌨️a✂️b")
     # One CUP to open the span, then one after each emoji.
     assert len(cup_positions(g.render())) == 3
+
+
+# --- colored underlines ---------------------------------------------------
+
+_UL = 2  # TextAttribute.UNDERLINE, as the grid takes it (a plain int)
+
+
+def test_underline_color_goes_out_as_one_subparameter():
+    # SGR 58 in the colon form. A terminal without colored underlines drops the
+    # whole parameter and still draws the rule; the semicolon spelling would
+    # leave it reading 2 (dim) and three stray color codes instead.
+    g = VTGrid(10, 1)
+    g.draw_text(0, 0, "ab", fg=(200, 200, 200), attr=_UL, ul=(231, 76, 76))
+    vt = g.render()
+    assert "58:2::231:76:76" in vt
+    assert "58;2;" not in vt
+
+
+def test_underline_color_rides_with_the_attributes_not_the_colors():
+    # Two cells that differ only in the color of their rule: the pen has to be
+    # re-established, and from a reset, the same as any other attribute change.
+    g = VTGrid(10, 1)
+    g.draw_text(0, 0, "a", fg=(10, 10, 10), attr=_UL, ul=(231, 76, 76))
+    g.draw_text(1, 0, "b", fg=(10, 10, 10), attr=_UL, ul=(80, 80, 80))
+    vt = g.render()
+    assert "58:2::231:76:76" in vt and "58:2::80:80:80" in vt
+
+
+def test_a_plain_cell_after_a_colored_underline_resets():
+    # No 59 is emitted: the next pen starts from SGR 0, which restores the
+    # default underline color along with everything else.
+    g = VTGrid(10, 1)
+    g.draw_text(0, 0, "a", fg=(10, 10, 10), attr=_UL, ul=(231, 76, 76))
+    g.draw_text(1, 0, "b", fg=(10, 10, 10))
+    vt = g.render()
+    tail = vt[vt.index("58:2::231:76:76"):]
+    assert "\x1b[0" in tail
+    assert "59" not in tail.replace("58:2::231:76:76", "")
+
+
+def test_a_wide_glyph_broken_apart_keeps_the_rule_color():
+    # The blank left behind by overwriting half a wide glyph inherits the pen it
+    # was overwritten with, the rule color included.
+    g = VTGrid(10, 1)
+    g.draw_text(0, 0, "日")
+    g.draw_text(1, 0, "x", fg=(1, 2, 3), attr=_UL, ul=(9, 9, 9))
+    assert g.cell_at(0, 0) == (" ", (1, 2, 3), None, _UL, (9, 9, 9))

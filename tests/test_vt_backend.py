@@ -18,6 +18,7 @@ from puikit.backends.vt_backend import (
     _VK_PROCESSKEY,
     _win_key_record,
 )
+from puikit.backend import Style, TextAttribute
 from puikit.event import EventType
 
 
@@ -227,3 +228,20 @@ def test_clipboard_round_trips(backend):
     be, con = backend
     be.set_clipboard("copied")
     assert be.get_clipboard() == "copied"
+
+
+def test_underline_color_reaches_the_cell(backend):
+    be, con = backend
+    be.clear()
+    be.draw_text(0, 0, "x", Style(fg=(1, 2, 3), attr=TextAttribute.UNDERLINE,
+                                  underline_color=(231, 76, 76)))
+    assert be._grid.cell_at(0, 0)[4] == (231, 76, 76)
+
+
+def test_underline_color_without_an_underline_is_dropped(backend):
+    # It would put a difference into the cell that no screen can show, and every
+    # pen change is paid for in the frame diff.
+    be, con = backend
+    be.clear()
+    be.draw_text(0, 0, "x", Style(fg=(1, 2, 3), underline_color=(231, 76, 76)))
+    assert be._grid.cell_at(0, 0)[4] is None

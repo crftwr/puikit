@@ -89,6 +89,7 @@ from AppKit import (
     NSTrackingMouseEnteredAndExited,
     NSTrackingMouseMoved,
     NSStrikethroughStyleAttributeName,
+    NSUnderlineColorAttributeName,
     NSUnderlineStyleAttributeName,
     NSUnderlineStyleSingle,
     NSUnderlineStyleThick,
@@ -3346,6 +3347,8 @@ class MacOSBackend(Backend):
             attrs[NSUnderlineStyleAttributeName] = (
                 NSUnderlineStyleThick if thick else NSUnderlineStyleSingle
             )
+            if style.underline_color is not None:
+                attrs[NSUnderlineColorAttributeName] = _ns_color(style.underline_color, alpha)
         if strike:
             attrs[NSStrikethroughStyleAttributeName] = NSUnderlineStyleSingle
         shadow = self._drop_shadow_ns()
@@ -3382,7 +3385,8 @@ class MacOSBackend(Backend):
         # routinely Japanese (every wide ideograph, and halfwidth katakana via
         # its off-grid 6.0 advance), and it may equally be an emoji, which
         # _with_cjk_faux_bold declines on its own.
-        sig = (id(ns_font), fg, alpha, underline, thick, strike, shadow is not None, cjk_bold)
+        sig = (id(ns_font), fg, alpha, underline, thick, strike, shadow is not None, cjk_bold,
+               style.underline_color if underline else None)
         col = 0
         i = 0
         n = len(runs)
@@ -3452,13 +3456,16 @@ class MacOSBackend(Backend):
             attrs[NSUnderlineStyleAttributeName] = (
                 NSUnderlineStyleThick if thick else NSUnderlineStyleSingle
             )
+            if style.underline_color is not None:
+                attrs[NSUnderlineColorAttributeName] = _ns_color(style.underline_color, alpha)
         if strike:
             attrs[NSStrikethroughStyleAttributeName] = NSUnderlineStyleSingle
         shadow = self._drop_shadow_ns()
         if shadow is not None:
             attrs[NSShadowAttributeName] = shadow
         key = ("f", text, id(ns_font), tuple(fg) if fg else None, alpha,
-               underline, thick, strike, shadow is not None, cjk_bold)
+               underline, thick, strike, shadow is not None, cjk_bold,
+               style.underline_color if underline else None)
         ns_text = self._cached_attr_string(key, text, attrs, cjk_bold)
         origin = self._unit_rect(x, y, 1, 1).origin
         if bg is not None and not is_transparent(bg):

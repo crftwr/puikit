@@ -152,6 +152,16 @@ _VK_KEYS = {
 }
 
 
+def _underline_color(style: Style):
+    """``style.underline_color``, but only where it means anything: the rule is
+    drawn for UNDERLINE, so a color carried on a style without it would put a
+    difference into the cell that the screen cannot show — and every pen change
+    is paid for in the frame diff."""
+    if style.underline_color is None or not (style.attr & TextAttribute.UNDERLINE):
+        return None
+    return style.underline_color
+
+
 class VTBackend(Backend):
     """A TUI backend that writes VT to a console it owns."""
 
@@ -261,7 +271,8 @@ class VTBackend(Backend):
 
     def draw_text(self, x: int, y: int, text: str, style: Style = DEFAULT_STYLE) -> None:
         assert self._grid is not None
-        self._grid.draw_text(x, y, text, style.fg, style.bg, int(style.attr))
+        self._grid.draw_text(x, y, text, style.fg, style.bg, int(style.attr),
+                             _underline_color(style))
 
     def draw_box(
         self,
@@ -285,7 +296,8 @@ class VTBackend(Backend):
 
     def fill_rect(self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE) -> None:
         assert self._grid is not None
-        self._grid.fill_rect(x, y, w, h, style.fg, style.bg, int(style.attr))
+        self._grid.fill_rect(x, y, w, h, style.fg, style.bg, int(style.attr),
+                             _underline_color(style))
 
     def dim_rect(
         self,
@@ -312,18 +324,24 @@ class VTBackend(Backend):
                 cell = self._grid.cell_at(col, row)
                 if cell is None or not isinstance(cell, tuple):
                     continue  # off-grid, or the trail half of a wide glyph
-                glyph, fg, bg, attr = cell
+                glyph, fg, bg, attr, ul = cell
+                # An underline rule is ink: it washes exactly like the
+                # foreground, or a dimmed layer's cursor cue would glow through
+                # the scrim at full strength.
                 if fade:
                     # Opacity, not a wash: pull the ink toward the cell's own
                     # paper so the frame reads as the page fading, keeping bg.
                     new_fg = _blend(fg or veil_fg, bg or veil_bg, 0.5)
                     new_bg = bg
+                    new_ul = _blend(ul, bg or veil_bg, 0.5) if ul else None
                 elif per_cell:
                     new_fg = _blend(fg or veil_fg, veil_bg, 0.55)
                     new_bg = _blend(bg or veil_bg, veil_bg, 0.55)
+                    new_ul = _blend(ul, veil_bg, 0.55) if ul else None
                 else:
                     new_fg, new_bg = veil_fg, veil_bg
-                self._grid.set_cell(col, row, (glyph, new_fg, new_bg, attr))
+                    new_ul = veil_fg if ul else None
+                self._grid.set_cell(col, row, (glyph, new_fg, new_bg, attr, new_ul))
 
     def draw_scrollbar(
         self, x: int, y: int, h: int, pos: float, ratio: float,

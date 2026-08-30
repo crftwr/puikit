@@ -79,6 +79,20 @@ class Style:
     # backends without `fonts` have the Panel fold weight/slant into `attr` and
     # drop the rest (see docs/font_system.md §6).
     font: Font | None = None
+    # Color of the rule drawn for UNDERLINE / UNDERLINE_THICK, independent of the
+    # text color. None (the default) draws it in `fg`, which is what every
+    # underline did before this field existed. Only read when an underline
+    # attribute is set.
+    #
+    # It is a HINT, not a guarantee, and it degrades in one direction only: a
+    # backend that cannot color a rule separately still draws the underline, in
+    # `fg`. The VT backend emits SGR 58 in the sub-parameter form
+    # (`58:2::r:g:b`), so a terminal that does not implement colored underlines
+    # discards that one parameter and keeps the underline; the semicolon form
+    # would be misread as `2` (dim) followed by three color codes. Honored by
+    # `VTBackend`, `MacOSBackend` and `WindowsBackend`; ignored by the curses and
+    # web backends.
+    underline_color: Color | None = None
 
 
 DEFAULT_STYLE = Style()

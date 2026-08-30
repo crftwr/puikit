@@ -325,6 +325,20 @@ _ANIM_FRAME_SECONDS = 1.0 / 60.0
 _WM_ACTIVATE = 0x0006  # wParam low word: 0 = WA_INACTIVE, nonzero = activated
 
 
+def _rules(style: Style, underline: bool, strike: bool, under_y: float, strike_y: float):
+    """The horizontal rules a text run draws, as ``(y, color)`` pairs — the
+    underline first, then the strikethrough. A rule's color is None when it inks
+    in the text color, which is every rule except an underline carrying an
+    explicit ``Style.underline_color``; the caller only swaps the brush where a
+    color is given."""
+    rules = []
+    if underline:
+        rules.append((under_y, style.underline_color))
+    if strike:
+        rules.append((strike_y, None))
+    return rules
+
+
 def _key_modifiers() -> frozenset[str]:
     mods = set()
     if native.user32.GetKeyState(native.VK_SHIFT) & 0x8000:
@@ -2646,12 +2660,18 @@ class WindowsBackend(Backend):
             col += width
         if underline or strike:
             full = self._unit_rect(x, y, total, 1)
-            for ly in (
-                [full.bottom - 2.0] if underline else []
-            ) + ([(full.top + full.bottom) / 2.0] if strike else []):
+            for ly, rule_fg in _rules(style, underline, strike,
+                                      full.bottom - 2.0, (full.top + full.bottom) / 2.0):
+                # A colored underline paints its own rule and hands the brush
+                # back in the text color, so the strikethrough after it — and the
+                # next run — still ink in fg.
+                if rule_fg is not None:
+                    self._set_brush(rule_fg, alpha)
                 native.rt_draw_line(
                     self._render_target, native.D2D1_POINT_2F(full.left, ly), native.D2D1_POINT_2F(full.right, ly), self._brush
                 )
+                if rule_fg is not None:
+                    self._set_brush(fg, alpha)
 
     def _render_flow_text(
         self, x: int, y: int, text: str, style: Style, fg: tuple, bg: tuple | None, alpha: float, underline: bool, strike: bool = False
@@ -2707,15 +2727,18 @@ class WindowsBackend(Backend):
             native.rt_draw_text_layout(self._render_target, origin_x, origin_y, layout, self._brush)
         finally:
             layout.release()
-        for ly in (
-            [origin_y + line_h - 2.0] if underline else []
-        ) + ([origin_y + line_h / 2.0] if strike else []):
+        for ly, rule_fg in _rules(style, underline, strike,
+                                  origin_y + line_h - 2.0, origin_y + line_h / 2.0):
+            if rule_fg is not None:
+                self._set_brush(rule_fg, alpha)
             native.rt_draw_line(
                 self._render_target,
                 native.D2D1_POINT_2F(origin_x, ly),
                 native.D2D1_POINT_2F(origin_x + width, ly),
                 self._brush,
             )
+            if rule_fg is not None:
+                self._set_brush(fg, alpha)
 
     def _render_box(self, x: int, y: int, w: int, h: int, style: Style, hints: dict[str, Any]) -> None:
         rect = self._unit_rect(x, y, w, h)

@@ -173,7 +173,7 @@ class DrawContext:
         different meaning (a scrollbar thumb / box-line color, where `None`
         selects the backend's own default) keep using `_resolve` directly."""
         if style.fg is None and self._panel is not None and self._panel.theme is not None:
-            style = Style(self._panel.theme.text, style.bg, style.attr, style.font)
+            style = replace(style, fg=self._panel.theme.text)
         resolved = self._resolve(style)
         # Opt-in auto-ink: with the final foreground and its opaque background both
         # known, lift the foreground to a weight-aware legibility floor. Floor-only
@@ -187,7 +187,7 @@ class DrawContext:
                 and not is_transparent(resolved.fg) and not is_transparent(resolved.bg)):
             inked = legible_ink(resolved.fg, resolved.bg, _auto_ink_target(resolved.attr))
             if inked != resolved.fg:
-                resolved = Style(inked, resolved.bg, resolved.attr, resolved.font)
+                resolved = replace(resolved, fg=inked)
         # Don't repaint a background the pane already filled: on a compositing
         # backend, draw the glyphs over it transparently. Repainting it would
         # (1) double-blend under a fading layer — the pane's fill and this one
@@ -235,7 +235,10 @@ class DrawContext:
             fg = _composite(fg, bg or base)
         if (fg, bg, attr, font) == (style.fg, style.bg, style.attr, style.font):
             return style
-        return Style(fg, bg, attr, font)
+        # replace() rather than Style(fg, bg, attr, font): every field this seam
+        # does not touch (underline_color, and whatever is appended next) has to
+        # survive it, and a positional rebuild silently drops them.
+        return replace(style, fg=fg, bg=bg, attr=attr, font=font)
 
     @property
     def width(self) -> int:
