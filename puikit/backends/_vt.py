@@ -368,12 +368,21 @@ def _underline_code(color) -> str:
     """The SGR parameter coloring the underline rule.
 
     Written in the SUB-PARAMETER form — ``58:2::r:g:b``, one parameter with
-    colon-separated parts — not ``58;2;r;g;b``. A terminal that does not
-    implement colored underlines discards an unknown parameter whole, so the
-    colon form costs the color and keeps the underline; with semicolons that same
-    terminal reads the leftovers as codes of their own and applies ``2`` (dim)
-    plus three stray colors. The empty part after ``2`` is the color-space id
-    ITU-T T.416 puts there, which every implementation leaves blank.
+    colon-separated parts — not ``58;2;r;g;b``: a terminal that PARSES
+    sub-parameters and does not implement 58 discards the parameter whole, so
+    the colon form costs the color and keeps the underline, while with semicolons
+    that same terminal reads the leftovers as codes of their own and applies
+    ``2`` (dim) plus three stray colors. The empty part after ``2`` is the
+    color-space id ITU-T T.416 puts there, which every implementation leaves
+    blank.
+
+    That safety holds only where sub-parameters are parsed at all. A terminal
+    that does not parse them may abandon the WHOLE sequence at the first colon —
+    macOS Terminal.app does, losing the underline attribute and the colors sent
+    with it (xefm#350) — which is why the caller sends this only to terminals
+    known to IMPLEMENT colored underlines, a strictly smaller set than the ones
+    that would merely tolerate the parameter: see
+    ``vt_backend._supports_underline_color``.
 
     There is no counterpart for "back to the default rule color" (59) because
     nothing needs one: a pen carrying no underline color is established from a

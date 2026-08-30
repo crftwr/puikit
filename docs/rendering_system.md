@@ -112,10 +112,23 @@ drawn for `TextAttribute.UNDERLINE` independently of `fg` — a cursor cue that
 underlines a whole row in one accent while every filename on it keeps its own
 type color. It is a hint that degrades in one direction: where a backend cannot
 color a rule separately the underline is still drawn, in `fg`. The VT backend
-emits SGR 58 in the sub-parameter form (`58:2::r:g:b`) so a terminal without
-colored underlines drops that one parameter and keeps the rule; `MacOSBackend`
-and `WindowsBackend` honor it natively; the curses and web backends ignore it.
-Read only when an underline attribute is set.
+emits SGR 58 in the sub-parameter form (`58:2::r:g:b`), which a terminal that
+parses sub-parameters and does not implement 58 drops whole, keeping the rule —
+but only to terminals it recognizes as parsing them at all, since one that does
+not (macOS Terminal.app) abandons the whole sequence at the first colon and
+loses the pen with it (`vt_backend._supports_underline_color`, overridable with
+`PUIKIT_UNDERLINE_COLOR`). `MacOSBackend` and `WindowsBackend` honor it
+natively; the curses and web backends ignore it. Read only when an underline
+attribute is set.
+
+Whether it will actually be honored is published as the `colored_underlines`
+capability (`DrawContext.colored_underlines`), per backend INSTANCE on the VT
+backend since it is a fact about the terminal, not about terminals. Read it the
+way `images` is read — not to decide whether to underline, which degrades on its
+own, but where the fallback should be better than a colorless rule. A cursor cue
+that marks a row by ruling it in one accent has no cue left when every rule is
+the text color, and wants its other spelling (xefm's `FilePane` switches to `[`
+`]` brackets there).
 
 ### Fills and rectangles
 
@@ -221,6 +234,30 @@ it only makes the widget *add or omit an ornament the grid can't afford*, it
 belongs in the widget. This is why `vector_shapes`' own docstring says the
 visible-vs-grid choice "still lives in the Panel layer."
 
+### The fidelity reading, and what it costs
+
+Two more booleans are readable, under one narrow extension of the rule and only
+under it: **`images`** and **`colored_underlines`**. Both name a fidelity the
+framework *already* falls back for on its own — `draw_image` degrades to a
+centered alt glyph, an underline carrying a color it cannot have still draws its
+rule in `fg` — so neither is ever read to decide *whether* to draw. They are
+read where that fallback would lose the **meaning** rather than the fidelity,
+and the widget has a better one of its own to offer: an image viewer whose whole
+subject is the picture wants more than one glyph in the middle of an empty pane,
+and a cursor cue that says "you are here" by ruling a row in one accent has
+nothing left to say it with once every rule is the text color (xefm's `FilePane`
+marks the row `[` … `]` there instead).
+
+Be clear about what this buys and what it costs. It does **not** suspend the
+litmus test: the second spelling a widget picks under this reading is a
+different mark in kind, so the branch is still in the wrong place — it is in the
+widget only because no primitive exists that can express both. Where one can be
+written the widget should call it and the reading should disappear
+(`draw_row_marker`, §9.4). The list above is the set a widget may read *today*,
+not a set that should grow: a new entry needs a fidelity the framework falls
+back for, a fallback that loses the meaning, and a widget that has a better one
+— and it should arrive with the primitive that would retire it named.
+
 ---
 
 ## 6. Authoring a custom widget
@@ -306,7 +343,8 @@ DrawContext    text:      draw_text, draw_text_baseline,
                           set_cursor, background, ink, theme,
                           size_units, base_size, width, height, screen_rect, panel
                caps:      vector_shapes, pixel_layout, transparency,
-                          animated, native_menus
+                          animated, native_menus,
+                          images, colored_underlines  (the §5 fidelity reading)
 
 Backend        core:      clear, draw_text, draw_box, dim_rect, draw_scrollbar,
 (puikit.backend)          fill_rect, push_clip, pop_clip, present, + measurement
@@ -355,15 +393,17 @@ Backend        core:      clear, draw_text, draw_box, dim_rect, draw_scrollbar,
    and review is what keeps it. A lint that flags a `draw_*` call guarded by a
    capability `if` could make it mechanical.
 4. **No row-marker primitive, and a known §5 violation living on it.** Marking
-   *the row you are on* in a list is a stroked outline on a vector backend and
-   bracket characters plus an underline attribute on a grid — different in kind,
-   with no intent primitive to resolve it, so the branch sits in the app: xefm's
-   `FilePane` reads `vector_shapes` to choose between them (its `file_pane.py`
-   records the deviation at the branch). A `draw_row_marker(x, y, w, style,
-   hints)` in the control-face family would take it, but it needs a second half
-   the other faces do not: the grid variant spends a gutter column at each end,
-   so a widget has to be able to *ask what the marker costs* before it lays out
-   its columns — the same shape as `draw_border` insetting the content clip.
+   *the row you are on* in a list is a stroked outline on a vector backend and,
+   on a grid, either an underlined row or bracket characters depending on whether
+   the terminal can color a rule — different in kind, with no intent primitive to
+   resolve it, so the branch sits in the app: xefm's `FilePane` reads
+   `vector_shapes` and then `colored_underlines` to choose between the three (its
+   `file_pane.py` records the deviation at the branch). A `draw_row_marker(x, y,
+   w, style, hints)` in the control-face family would take it, but it needs a
+   second half the other faces do not: the grid spellings spend a gutter column
+   at each end and the vector one spends none, so a widget has to be able to *ask
+   what the marker costs* before it lays out its columns — the same shape as
+   `draw_border` insetting the content clip.
 5. **No tree-connector primitive either, with the same consequence.** Drawing a
    tree's `├ └ │` structure is thin strokes on a vector backend and box-drawing
    glyphs on a grid, and with no primitive for it xefm's

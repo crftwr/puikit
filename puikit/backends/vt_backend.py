@@ -152,12 +152,89 @@ _VK_KEYS = {
 }
 
 
-def _underline_color(style: Style):
+#: Emulators identified by TERM_PROGRAM that IMPLEMENT colored underlines. The
+#: version each one landed it in is noted where the env var carries no version to
+#: check it against — the residual gap, and all of it.
+_UL_TERM_PROGRAMS = frozenset({
+    "iterm.app",   # long-standing
+    "wezterm",     # long-standing
+    "ghostty",     # since 1.0
+    "contour",     # long-standing
+    "mintty",      # since 3.4
+    "vscode",      # xterm.js >= 5.0
+})
+
+#: Substrings of TERM that say the same thing (checked after the env vars).
+#: ``alacritty`` since 0.11.0 — TERM has carried the name since 0.4, so this is
+#: the widest of the unversioned guesses.
+_UL_TERM_HINTS = ("kitty", "ghostty", "wezterm", "foot", "alacritty", "contour")
+
+
+def _version_at_least(value: str | None, floor: int) -> bool:
+    """True when ``value`` — an env var carrying its version as a run of digits
+    (``"6003"``, ``"221201"``) — parses to at least ``floor``."""
+    found = re.search(r"\d+", value or "")
+    return found is not None and int(found.group()) >= floor
+
+
+def _supports_underline_color(env: dict[str, str] | None = None) -> bool:
+    """Whether this terminal IMPLEMENTS a colored underline (SGR 58).
+
+    A WHITELIST, not a blacklist, because the two ways to get this wrong are not
+    the same size. A terminal that parses sub-parameters and does not implement
+    58 discards that one parameter and keeps the rule, one color short; one that
+    does not parse them may abandon the WHOLE sequence at the first colon,
+    losing the pen — macOS Terminal.app drops the underline attribute, the
+    foreground and the background along with the color, so the row comes out in
+    the terminal's own default ink (xefm#350). Unrecognized therefore means "no
+    SGR 58".
+
+    The predicate is IMPLEMENTS, not "parses safely", though safe parsing is the
+    weaker fact this function's own caller needs: a widget that reads the
+    ``colored_underlines`` capability does so to pick a spelling that does not
+    need the color at all, and that spelling is better than a rule inked in
+    ``fg``. So there is nothing to win by sending 58 to a terminal that would
+    merely tolerate it, and the stronger predicate serves both readers.
+
+    Where an emulator publishes a version this checks it; where it does not
+    (``WT_SESSION``, ``TERM=alacritty``) the entry's own comment carries the
+    version the guess assumes, and being wrong there costs the color, not the
+    pen. ``PUIKIT_UNDERLINE_COLOR=1`` forces it on for a terminal not listed
+    here, ``=0`` off for one that is. ``env`` defaults to ``os.environ`` and is
+    injectable for tests.
+    """
+    env = os.environ if env is None else env
+    override = (env.get("PUIKIT_UNDERLINE_COLOR") or "").strip().lower()
+    if override in ("0", "off", "none", "no"):
+        return False
+    if override in ("1", "on", "yes"):
+        return True
+    # kitty defined the sequence. Windows Terminal parsed it from 1.6 but only
+    # DREW it from 1.20, and WT_SESSION is a GUID carrying no version to check.
+    if env.get("KITTY_WINDOW_ID") or env.get("WT_SESSION"):
+        return True
+    if _version_at_least(env.get("VTE_VERSION"), 5200):        # VTE 0.51.2; 0.52 stable
+        return True
+    if _version_at_least(env.get("KONSOLE_VERSION"), 221200):  # KDE Applications 22.12
+        return True
+    if (env.get("TERM_PROGRAM") or "").strip().lower() in _UL_TERM_PROGRAMS:
+        return True
+    # Deliberately absent: Apple_Terminal; xterm, which does not implement 58 at
+    # all (it is in no edition of its ctlseqs) though it parses the parameter
+    # away safely; and every multiplexer — tmux and screen forward 58 only when
+    # configured to, and TERM says nothing about the emulator underneath them.
+    term = (env.get("TERM") or "").lower()
+    return any(hint in term for hint in _UL_TERM_HINTS)
+
+
+def _underline_color(style: Style, supported: bool = True):
     """``style.underline_color``, but only where it means anything: the rule is
     drawn for UNDERLINE, so a color carried on a style without it would put a
     difference into the cell that the screen cannot show — and every pen change
-    is paid for in the frame diff."""
-    if style.underline_color is None or not (style.attr & TextAttribute.UNDERLINE):
+    is paid for in the frame diff. Dropped entirely on a terminal that cannot be
+    sent SGR 58 (``supported``), which then rules the underline in ``fg``."""
+    if (not supported or style.underline_color is None
+            or not (style.attr & TextAttribute.UNDERLINE)):
         return None
     return style.underline_color
 
@@ -193,8 +270,18 @@ class VTBackend(Backend):
         # this is not merely detected but ACTIONABLE: owning the output stream is
         # what lets the escape reach the screen (xefm#306).
         self._term_graphics = _terminal_graphics.detect_protocol()
+        # Whether a colored underline (SGR 58) may be sent at all. Detected once:
+        # it is read for every underlined cell of every frame.
+        self._underline_colors = _supports_underline_color()
+        # Both are per-instance: what this terminal turns out to be, not what a
+        # terminal is. A widget reads them through the DrawContext.
+        detected = {}
         if self._term_graphics is not None:
-            self.PROFILE = CapabilityProfile({**PROFILE_TUI, "images": True})
+            detected["images"] = True
+        if self._underline_colors:
+            detected["colored_underlines"] = True
+        if detected:
+            self.PROFILE = CapabilityProfile({**PROFILE_TUI, **detected})
 
     # --- lifecycle -----------------------------------------------------------
 
@@ -272,7 +359,7 @@ class VTBackend(Backend):
     def draw_text(self, x: int, y: int, text: str, style: Style = DEFAULT_STYLE) -> None:
         assert self._grid is not None
         self._grid.draw_text(x, y, text, style.fg, style.bg, int(style.attr),
-                             _underline_color(style))
+                             _underline_color(style, self._underline_colors))
 
     def draw_box(
         self,
@@ -297,7 +384,7 @@ class VTBackend(Backend):
     def fill_rect(self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE) -> None:
         assert self._grid is not None
         self._grid.fill_rect(x, y, w, h, style.fg, style.bg, int(style.attr),
-                             _underline_color(style))
+                             _underline_color(style, self._underline_colors))
 
     def dim_rect(
         self,

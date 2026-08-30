@@ -87,11 +87,12 @@ class Style:
     # It is a HINT, not a guarantee, and it degrades in one direction only: a
     # backend that cannot color a rule separately still draws the underline, in
     # `fg`. The VT backend emits SGR 58 in the sub-parameter form
-    # (`58:2::r:g:b`), so a terminal that does not implement colored underlines
-    # discards that one parameter and keeps the underline; the semicolon form
-    # would be misread as `2` (dim) followed by three color codes. Honored by
-    # `VTBackend`, `MacOSBackend` and `WindowsBackend`; ignored by the curses and
-    # web backends.
+    # (`58:2::r:g:b`), and only to a terminal known to implement colored
+    # underlines — one that cannot even parse the sub-parameter may abandon the
+    # whole sequence at the first colon and lose the underline with it, which is
+    # a cue lost rather than a color
+    # (`vt_backend._supports_underline_color`). Honored by `VTBackend`,
+    # `MacOSBackend` and `WindowsBackend`; ignored by the curses and web backends.
     underline_color: Color | None = None
 
 
