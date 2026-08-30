@@ -5,7 +5,9 @@ import pytest
 from puikit import (CapabilityProfile, Event, EventType, Panel, Style,
                    PROFILE_GUI_DESKTOP, PROFILE_TUI)
 from puikit.backends.memory_backend import MemoryBackend
+from puikit.text import display_width
 from puikit.widgets import TableView
+from puikit.widgets.table_view import _col_slice
 
 _BOX_GLYPHS = "│─┼├┤┬┴┌┐└┘"
 
@@ -317,3 +319,54 @@ def test_search_matcher_unions_extra_rows():
 
     view.search_matcher = matcher
     assert view.search_set("grail") == 2           # literal row + matcher row
+
+
+# --- full-width (CJK) cells --------------------------------------------------
+
+
+def _cjk_table():
+    # A Japanese header over ASCII data — the shape of the CSV in xefm#355.
+    return TableView(
+        ["回数", "時刻", "データ"],
+        [["1", "11:53", "23-04-2026"],
+         ["2", "11:57", "23-04-2026"]],
+    )
+
+
+def test_cjk_rows_measure_the_width_the_grid_reserves():
+    # A full-width glyph is one character across two columns, so a row laid out by
+    # character index renders wider than the column geometry says: past the first
+    # wide cell the header drifts right of its own rules and the last columns are
+    # pushed off the end (xefm#355). Every laid-out row must measure exactly the
+    # table's total width.
+    view = _cjk_table()
+    assert display_width(view._header_line) == view._total_w
+    for line in view._body_lines:
+        assert display_width(line) == view._total_w
+
+
+def test_cjk_header_cells_start_on_their_column_origins():
+    view = _cjk_table()
+    line = view._header_line
+    for j, text in enumerate(view.header):
+        assert display_width(line[:line.index(text)]) == view._content_x[j]
+
+
+def test_cjk_pan_fills_the_window_from_every_offset():
+    # Horizontal scroll cuts the row at a column, not at a character: whatever the
+    # pan, the visible slice covers the window it was asked for (a glyph split by
+    # the left edge contributing blank cells rather than shifting the rest along).
+    view = _cjk_table()
+    for left in range(view._total_w):
+        slice_ = _col_slice(view._header_line, left, view._total_w)
+        assert display_width(slice_) == view._total_w - left
+
+
+@pytest.mark.parametrize("lo,hi,expected", [
+    (0, 4, "回数"),      # whole glyphs, both inside the window
+    (1, 4, " 数"),       # left edge splits the first glyph: its cells go blank
+    (0, 3, "回 "),       # right edge splits the second
+    (2, 6, "数ab"),      # a wide glyph followed by narrow ones
+])
+def test_col_slice_cuts_on_columns_blanking_split_glyphs(lo, hi, expected):
+    assert _col_slice("回数ab", lo, hi) == expected
