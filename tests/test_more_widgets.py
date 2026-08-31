@@ -265,8 +265,8 @@ def test_splitter_drag_lights_immediately_without_dwell(monkeypatch):
 
 def test_splitter_grab_first_widens_the_upper_grab_zone():
     # A flat vertical splitter where an adjacent bar above the boundary reads as
-    # the divider: grab_first makes that bar's whole height grabbable, while the
-    # lower side keeps the default margin.
+    # the divider: grab_first makes that bar's whole height grabbable, and the
+    # zone stops at the boundary — the widget below keeps its own top row.
     backend = MemoryBackend(width=40, height=16, capabilities=PROFILE_TUI)
     panel = Panel(backend)
     left, right = Checkbox("top"), Checkbox("bottom")
@@ -280,8 +280,15 @@ def test_splitter_grab_first_widens_the_upper_grab_zone():
 
     # 3 cells above the boundary is inside grab_first (default margin is only 1).
     assert split._near_handle(15.0, boundary - 3)
-    # 3 cells below is not: the second side keeps the default hairline margin.
+    # The band is the whole zone: the undeclared side gets no reach at all, so
+    # neither the row under the boundary nor anything below it is grabbable —
+    # clicks there belong to the widget, not to the divider.
+    assert not split._near_handle(15.0, boundary)
+    assert not split._near_handle(15.0, boundary + 1)
     assert not split._near_handle(15.0, boundary + 3)
+    # ...and the band itself covers exactly grab_first cells, no more.
+    assert split._near_handle(15.0, boundary - 1)
+    assert not split._near_handle(15.0, boundary - 4)
 
     # Pressing up in the widened zone starts a drag WITHOUT snapping the boundary
     # up to the pressed point (grab-offset preservation) — the fraction holds.
@@ -292,6 +299,26 @@ def test_splitter_grab_first_widens_the_upper_grab_zone():
     # Dragging then tracks the pointer's motion: moving down grows the first pane.
     panel.dispatch_event(Event(type=EventType.MOUSE_DRAG, x=15.0, y=boundary + 1))
     assert split.fraction > 0.5
+
+
+def test_splitter_grab_zone_spans_one_cell_each_side_of_the_handle():
+    # No band: the default margin is symmetric, and on a character grid the
+    # pointer reports a cell *index* — so the zone is the handle cell plus one
+    # cell on each side, not two below it (xefm#377).
+    backend = MemoryBackend(width=40, height=16, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+    split = Splitter(
+        Checkbox("top"), Checkbox("bottom"), orientation="vertical",
+        fraction=0.5, min_first=2, min_second=2,
+    )
+    panel.add(split, x=0, y=0, w=30, h=16)
+    panel.render()
+    handle = split._handle_rect
+    inside = [
+        cell for cell in range(16)
+        if split._near_handle(15.0, float(cell))
+    ]
+    assert inside == [handle.y - 1, handle.y, handle.y + 1]
 
 
 class _FakeCtx:
