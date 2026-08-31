@@ -74,12 +74,15 @@ class Splitter(FocusContainer, Widget):
         # pane footer) reads as the divider. The drag still works through the
         # grab margin straddling the boundary. The vector hairline is unchanged.
         self._flat = flat
-        # Extra grab/hover reach (base units) on the first / second side, beyond
-        # the default hairline margin. When an adjacent bar *is* the visible
-        # divider (a flat splitter with a pane footer above it), pass that bar's
-        # thickness here so its whole height is grabbable — not just the hairline
-        # at its edge. Combined with the default margin via max, so 0.0 leaves the
-        # symmetric hairline behavior untouched.
+        # Grab/hover reach (base units) on the first / second side. When an
+        # adjacent bar *is* the visible divider (a flat splitter with a pane
+        # footer above it), pass that bar's thickness here so its whole height is
+        # grabbable — not just the hairline at its edge. Declaring either side
+        # replaces the symmetric default margin on *both*: the grab zone becomes
+        # exactly the band(s) ``_brighten_bands`` lights up, so what reacts to the
+        # pointer is what the pointer can grab, and a side left at 0.0 reaches no
+        # further than the handle — its neighbor keeps the clicks on its own edge.
+        # Leave both at 0.0 for the plain symmetric hairline margin.
         self._grab_first = grab_first
         self._grab_second = grab_second
         self.fraction = fraction
@@ -336,17 +339,26 @@ class Splitter(FocusContainer, Widget):
 
     def _near_handle(self, x: float | None, y: float | None) -> bool:
         # A grab margin on each side of the handle so it is easy to grab even
-        # where the visible line is a hairline (vector) or a single cell. The
-        # default margin is symmetric; an extended ``grab_*`` widens one side to
-        # cover an adjacent bar that reads as the divider (never below default).
+        # where the visible line is a hairline (vector) or a single cell. With no
+        # band the margin is the symmetric default; a ``grab_*`` band names the
+        # adjacent bar that reads as the divider, and then the zone is exactly the
+        # declared band(s) — a side left at 0.0 keeps none of the default reach,
+        # so the widget there is not robbed of its edge.
+        #
+        # The zone is half-open at its trailing edge, like ``Rect.contains``: a
+        # character grid reports the *index* of the cell the pointer is in, so an
+        # inclusive bound would hand the zone one whole cell more than the margin
+        # asks for.
         if x is None or y is None:
             return False
         h = self._handle_rect
-        g1 = max(self._grab, self._grab_first)
-        g2 = max(self._grab, self._grab_second)
+        if self._has_band():
+            g1, g2 = self._grab_first, self._grab_second
+        else:
+            g1 = g2 = self._grab
         if self._horizontal:
-            return h.x - g1 <= x <= h.x + h.w + g2
-        return h.y - g1 <= y <= h.y + h.h + g2
+            return h.x - g1 <= x < h.x + h.w + g2
+        return h.y - g1 <= y < h.y + h.h + g2
 
     def _begin_drag(self, x: float | None, y: float | None) -> None:
         """Arm the drag, handing the DragBar the pointer and the current divider
