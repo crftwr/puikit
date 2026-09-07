@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from enum import IntFlag
 from typing import TYPE_CHECKING, Any
 
+from . import _watchdog
 from .capability import CapabilityProfile
 from .event import Event
 from .font import Font, FontMetrics
@@ -339,14 +340,21 @@ def _run_tick_callbacks(callbacks: list) -> list:
     snapshot first (the web backend, for thread-safety) keep doing so.
     """
     survivors = []
-    for cb in callbacks:
-        try:
-            if cb():
-                survivors.append(cb)
-        except Exception:
-            _logger.exception(
-                "animation tick callback %r raised; unregistering it", cb
-            )
+    # One frame of ticks is one unit of UI-thread work, and every backend's tick
+    # dispatch comes through here — so bracketing it here covers all of them for
+    # the stall detector (puikit._watchdog), which is off unless asked for.
+    _watchdog.enter("animation tick")
+    try:
+        for cb in callbacks:
+            try:
+                if cb():
+                    survivors.append(cb)
+            except Exception:
+                _logger.exception(
+                    "animation tick callback %r raised; unregistering it", cb
+                )
+    finally:
+        _watchdog.leave()
     return survivors
 
 
@@ -1086,8 +1094,13 @@ class Backend(ABC):
         _assert_ui_thread and misuse fails identically on every backend —
         instead of diverging per platform (e.g. an NSTimer scheduled from a
         worker thread attaches to that thread's non-running run loop and
-        silently never fires)."""
+        silently never fires).
+
+        It is also where the UI-thread stall detector (:mod:`puikit._watchdog`)
+        picks up its subject: whichever thread runs the loop is the one whose
+        stalls matter."""
         self._ui_thread_ident = threading.get_ident()
+        _watchdog.install(threading.current_thread())
 
     def _assert_ui_thread(self, api: str) -> None:
         """Raise when called off the UI thread. Inert until _note_ui_thread
@@ -1099,6 +1112,26 @@ class Backend(ABC):
                 f"{api} must be called from the UI thread; from a worker "
                 f"thread, hand it over with call_on_main_thread(lambda: {api}(...))."
             )
+
+    def _watch_handler(self, handler: EventHandler) -> EventHandler:
+        """``handler``, bracketed for the UI-thread stall detector.
+
+        Event loops pass the app's handler through this on the way in, so a
+        handler that takes too long is reported with the stack it was in. Returns
+        the handler unchanged while the detector is off (see puikit._watchdog),
+        which is why a loop may wrap on every iteration."""
+        return _watchdog.wrap_handler(handler)
+
+    def _watch_callback(self, callback: Callable, label: str = "timer callback") -> Callable:
+        """``callback``, bracketed the same way for the stall detector. For the
+        UI-thread work a backend runs outside event dispatch — a timer firing."""
+        return _watchdog.wrap_callback(callback, label)
+
+    def _watchdog_paused(self):
+        """Stop the stall detector's clock around a nested OS loop — a native
+        menu tracking session, an OS drag, a shell-out. The app is not painting
+        because the user is busy in that loop, which is not a stall."""
+        return _watchdog.paused()
 
     def call_later(self, delay_seconds: float, callback: Callable[[], None]) -> Callable[[], None]:
         """Schedule ``callback`` to run once on the UI thread after
@@ -1113,6 +1146,9 @@ class Backend(ABC):
         tick granularity); native backends override it with a real OS timer
         (NSTimer / WM_TIMER)."""
         self._assert_ui_thread("call_later")
+        # A timer callback runs on the UI thread outside any event dispatch, so
+        # it is bracketed here rather than by the loop's handler wrapper.
+        callback = _watchdog.wrap_callback(callback, "timer callback")
         deadline = time.monotonic() + delay_seconds
         state = {"cancelled": False}
 
@@ -1144,4 +1180,7 @@ class Backend(ABC):
         opens in its own window and nothing needs releasing. Terminal backends
         override this to leave curses/raw mode on entry and restore it on exit.
         Use as ``with backend.suspended(): subprocess.run(...)``."""
-        yield
+        # The child owns the display (or its own window) and the caller blocks
+        # until it exits — a deliberate wait, not a stall worth reporting.
+        with _watchdog.paused():
+            yield

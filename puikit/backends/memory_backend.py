@@ -666,12 +666,14 @@ class MemoryBackend(Backend):
 
     def run_event_loop(self, handler: EventHandler) -> None:
         self._quit_requested = False
+        handler = self._watch_handler(handler)
         while not self._quit_requested and self._events:
             handler(self._events.popleft())
 
     def run_event_loop_iteration(self, handler: EventHandler, timeout_ms: int = 0) -> bool:
         if self._quit_requested:
             return False
+        handler = self._watch_handler(handler)
         if self._events:
             handler(self._events.popleft())
         return not self._quit_requested

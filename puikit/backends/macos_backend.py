@@ -2841,6 +2841,7 @@ class MacOSBackend(Backend):
         attaches to the CALLING thread's run loop, so a worker-thread call
         would otherwise silently never fire."""
         self._assert_ui_thread("call_later")
+        callback = self._watch_callback(callback)
 
         def _fire(timer) -> None:
             callback()
@@ -4405,7 +4406,11 @@ class MacOSBackend(Backend):
         # `responder` stays referenced here through the synchronous popup loop,
         # so its item callbacks survive the tracking session.
         point = NSMakePoint(x * self._base_w, y * self._base_h)
-        ns_menu.popUpMenuPositioningItem_atLocation_inView_(None, point, self._view)
+        # popUpMenuPositioningItem_ runs its own tracking loop and returns when
+        # the menu closes: the UI thread is held for as long as the user reads
+        # the menu, which is theirs to spend, not a stall.
+        with self._watchdog_paused():
+            ns_menu.popUpMenuPositioningItem_atLocation_inView_(None, point, self._view)
         if on_done is not None:
             on_done()
 
@@ -4448,7 +4453,7 @@ class MacOSBackend(Backend):
             self._metal_layer.setPresentsWithTransaction_(active)
 
     def run_event_loop(self, handler: EventHandler) -> None:
-        self._handler = handler
+        self._handler = self._watch_handler(handler)
         self._quit_requested = False
         NSApp.run()
         self._handler = None
@@ -4456,7 +4461,7 @@ class MacOSBackend(Backend):
     def run_event_loop_iteration(self, handler: EventHandler, timeout_ms: int = 0) -> bool:
         if self._quit_requested:
             return False
-        self._handler = handler
+        self._handler = self._watch_handler(handler)
         until = NSDate.dateWithTimeIntervalSinceNow_(timeout_ms / 1000.0)
         ns_event = NSApp.nextEventMatchingMask_untilDate_inMode_dequeue_(
             NSEventMaskAny, until, NSDefaultRunLoopMode, True

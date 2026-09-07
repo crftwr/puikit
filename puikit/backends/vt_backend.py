@@ -313,11 +313,13 @@ class VTBackend(Backend):
         it wiped the text.
         """
         if self._grid is None:
-            yield
+            with self._watchdog_paused():
+                yield
             return
         self._console.suspend()
         try:
-            yield
+            with self._watchdog_paused():
+                yield
         finally:
             self._console.resume()
             self._grid.invalidate(0, 0, *self._grid.size)
@@ -806,6 +808,7 @@ class VTBackend(Backend):
     def run_event_loop_iteration(self, handler: EventHandler, timeout_ms: int = 0) -> bool:
         if self._quit_requested:
             return False
+        handler = self._watch_handler(handler)
         if self._pending:
             handler(self._pending.pop(0))
             return not self._quit_requested
