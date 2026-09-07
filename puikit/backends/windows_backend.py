@@ -1847,7 +1847,7 @@ class WindowsBackend(Backend):
             return super().call_later(delay_seconds, callback)
         timer_id = self._later_timer_next_id
         self._later_timer_next_id += 1
-        self._later_timers[timer_id] = callback
+        self._later_timers[timer_id] = self._watch_callback(callback)
         # USER_TIMER_MINIMUM is 10 ms; SetTimer clamps shorter delays itself.
         native.user32.SetTimer(self._hwnd, timer_id, max(1, int(delay_seconds * 1000)), None)
 
@@ -3261,7 +3261,10 @@ class WindowsBackend(Backend):
         # before starting a drag operation?").
         native.user32.ReleaseCapture()
         _win32_dragdrop.ensure_ole_initialized()
-        op = _win32_dragdrop.do_drag_drop(data_object, operations)
+        # DoDragDrop blocks with its own message pump for the whole drag — the
+        # user's gesture, so the stall detector's clock stops for it.
+        with self._watchdog_paused():
+            op = _win32_dragdrop.do_drag_drop(data_object, operations)
         if on_complete is not None:
             on_complete(op)
         return True
@@ -3698,7 +3701,10 @@ class WindowsBackend(Backend):
         pt = wintypes.POINT(int(x * self._base_w), int(y * self._base_h))
         native.user32.ClientToScreen(self._hwnd, ctypes.byref(pt))
         native.user32.SetForegroundWindow(self._hwnd)
-        native.user32.TrackPopupMenu(hmenu, native.TPM_RIGHTBUTTON, pt.x, pt.y, 0, self._hwnd, None)
+        # TrackPopupMenu pumps its own message loop until the menu closes: time
+        # the user spends reading a menu, not a stall to report.
+        with self._watchdog_paused():
+            native.user32.TrackPopupMenu(hmenu, native.TPM_RIGHTBUTTON, pt.x, pt.y, 0, self._hwnd, None)
         # MS-documented workaround so the popup closes correctly if the user
         # clicks elsewhere instead of choosing an item.
         native.user32.PostMessageW(self._hwnd, 0, 0, 0)
@@ -4102,7 +4108,7 @@ class WindowsBackend(Backend):
         dragging a repaint behind it — still yields a tick between dispatches,
         and an idle app still sleeps in the wait until something happens.
         """
-        self._handler = handler
+        self._handler = self._watch_handler(handler)
         self._quit_requested = False
         msg = wintypes.MSG()
         while not self._quit_requested:
@@ -4122,7 +4128,7 @@ class WindowsBackend(Backend):
     def run_event_loop_iteration(self, handler: EventHandler, timeout_ms: int = 0) -> bool:
         if self._quit_requested:
             return False
-        self._handler = handler
+        self._handler = self._watch_handler(handler)
         # An embedder driving the loop by hand gets the same deadline-driven
         # tick the built-in loop does.
         self._pump_animation_tick()

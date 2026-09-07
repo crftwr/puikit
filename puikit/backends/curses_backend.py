@@ -585,7 +585,8 @@ class CursesBackend(Backend):
         raw DECSET sequences, not curses) and the hidden cursor are toggled by
         hand since ``reset_prog_mode`` does not cover them."""
         if self._stdscr is None:
-            yield
+            with self._watchdog_paused():
+                yield
             return
         curses.def_prog_mode()
         self._set_mouse_tracking(False)
@@ -595,7 +596,8 @@ class CursesBackend(Backend):
             pass
         curses.endwin()
         try:
-            yield
+            with self._watchdog_paused():
+                yield
         finally:
             curses.reset_prog_mode()
             try:
@@ -1860,6 +1862,7 @@ class CursesBackend(Backend):
         assert self._stdscr is not None
         if self._quit_requested:
             return False
+        handler = self._watch_handler(handler)
         # Deliver an event deferred by coalescing before reading more, so it is
         # never dropped and keeps its arrival order (see _coalesce_input).
         if self._pending_event is not None:

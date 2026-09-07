@@ -1061,6 +1061,7 @@ class WebBackend(Backend):
         end. Under a perpetual animation the ticker keeps enqueuing ticks; if a
         render falls behind, the backlog collapses to one frame (drop stale
         frames) instead of rendering each and starving input."""
+        handler = self._watch_handler(handler)
         items = [first]
         while True:
             try:

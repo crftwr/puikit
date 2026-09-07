@@ -48,6 +48,7 @@ The same descriptor model applied to the output surface rather than a widget.
 |---|---|
 | [`testing.md`](testing.md) | `MemoryBackend`: headless widget tests that run on every capability profile, inspecting the grid and driving events |
 | [`memory_profiling.md`](memory_profiling.md) | Playbook for tracking down memory growth: headless RSS sampling, bisecting, naming the leaking objects, the patterns PuiKit has hit |
+| [`ui_watchdog.md`](ui_watchdog.md) | The built-in UI-thread stall detector: `PUIKIT_UI_WATCHDOG`, reading a report, what the loop brackets and what it refuses to call a stall |
 
 ## Elsewhere in the repo
 
