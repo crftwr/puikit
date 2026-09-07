@@ -287,6 +287,12 @@ class VTBackend(Backend):
 
     def open(self) -> None:
         self._console.open()
+        # Same contract every other backend's open() honors: this thread runs
+        # the loop, which is what _assert_ui_thread enforces against and what
+        # the stall detector watches. Missing here since the backend was
+        # written, so on the TUI - where this backend is the default - neither
+        # had a subject.
+        self._note_ui_thread()
         w, h = self._console.size()
         self._grid = VTGrid(w, h)
         self._quit_requested = False

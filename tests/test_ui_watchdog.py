@@ -1,6 +1,7 @@
 """The UI-thread stall detector: what it reports, and what it refuses to."""
 
 import logging
+import sys
 import threading
 import time
 
@@ -164,6 +165,31 @@ def test_a_long_stall_is_reported_again_as_it_grows(watching, caplog):
     elapsed = [float(r.split()[3]) for r in reports]
     assert elapsed == sorted(elapsed)
     assert len(reports) < 8, "a long freeze must not report once per sample"
+
+
+def test_every_backend_open_notes_the_ui_thread():
+    """The watchdog's subject — and _assert_ui_thread's — comes from open().
+
+    VTBackend never called it, so on the TUI (where it is the default) the
+    stall detector had nothing to watch and the UI-thread contract went
+    unenforced. A backend added later can make the same omission silently, so
+    this checks the source of every open() we can import here."""
+    import inspect
+
+    from puikit.backends.curses_backend import CursesBackend
+    from puikit.backends.vt_backend import VTBackend
+    from puikit.backends.web_backend import WebBackend
+
+    backends = [VTBackend, CursesBackend, WebBackend, MemoryBackend]
+    if sys.platform == "darwin":
+        from puikit.backends.macos_backend import MacOSBackend
+        backends.append(MacOSBackend)
+    elif sys.platform == "win32":
+        from puikit.backends.windows_backend import WindowsBackend
+        backends.append(WindowsBackend)
+
+    for backend in backends:
+        assert "_note_ui_thread()" in inspect.getsource(backend.open), backend.__name__
 
 
 # --- the loop's side of it -------------------------------------------------
