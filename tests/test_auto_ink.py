@@ -101,3 +101,27 @@ def test_frame_divider_matches_box_border_under_auto_ink():
     assert box_line == border                # frame border not lifted
     assert rule_line == border               # divider not lifted (the fix)
     assert rule_line == box_line             # …so the two match
+
+
+def test_progress_bar_rules_keep_theme_colors_under_auto_ink():
+    # The two rules a ProgressBar paints on a character grid — the quiet track and
+    # the accent fill — are structural marks, not text. Lifting both to the body
+    # floor pushed them to the same near-foreground pale, and the bar then said how
+    # far along it was by glyph weight alone; the fill has to stay the accent.
+    from puikit.capability import PROFILE_TUI
+    from puikit.widgets import ProgressBar
+
+    theme = THEME_TUI
+    bg = theme.surfaces["content"]
+    # Meaningful only while both colors are ones auto-ink would otherwise lift.
+    assert legible_ink(theme.accent, bg, LC_BODY) != theme.accent
+    assert legible_ink(theme.control_border, bg, LC_BODY) != theme.control_border
+
+    backend = MemoryBackend(width=20, height=3, capabilities=PROFILE_TUI)
+    panel = Panel(backend, theme=theme)
+    panel.auto_ink = True
+    panel.set_layout(VSplit(Item(ProgressBar(0.5), hints={"surface": "content"})))
+    panel.render()
+
+    assert backend.style_at(2, 0).fg == theme.accent           # filled run
+    assert backend.style_at(18, 0).fg == theme.control_border  # track

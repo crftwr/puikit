@@ -77,10 +77,20 @@ class ProgressBar(Widget):
         # Light rule for the whole track, then overpaint the filled run with the
         # heavy rule in the fill color. Foreground glyphs keep the surrounding
         # pane background, so the bar reads as a thin line, not a filled band.
-        ctx.draw_text(0, 0, _TRACK_GLYPH * cols, Style(fg=theme.control_border))
+        #
+        # ink=False on both: these are structural marks, not text — the same case
+        # as a divider or a table gridline (see DrawContext.draw_divider). Under
+        # ``Panel.auto_ink`` a text run is lifted to a body-text contrast floor,
+        # and lifting *both* rules to the same floor collapses the one difference
+        # the pair is made of: the quiet track and the accent fill arrive at the
+        # same near-foreground pale, leaving only the glyph weight to say how far
+        # along the bar is. The widget owns this palette — the theme already
+        # separated the accent from the control outline — so it opts out.
+        ctx.draw_text(0, 0, _TRACK_GLYPH * cols, Style(fg=theme.control_border),
+                      ink=False)
         filled = int(round(cols * v))
         if filled > 0:
-            ctx.draw_text(0, 0, _FILL_GLYPH * filled, Style(fg=fill))
+            ctx.draw_text(0, 0, _FILL_GLYPH * filled, Style(fg=fill), ink=False)
 
     def measure(self, ctx: LayoutContext, axis: str, available: float) -> SizeRequest:
         # A one-line bar on the cross axis; the main axis fills its slot (place
