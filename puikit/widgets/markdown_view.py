@@ -84,6 +84,14 @@ try:  # pragma: no cover - import guard
 except Exception:  # pragma: no cover
     _PYGMENTS = False
 
+# Lexer options for every lexer :func:`_highlight` builds. Pygments preprocesses
+# its input before lexing, and ``stripnl`` — on by default — eats the blank lines
+# at the top and bottom of that input: a code block opening with a blank line
+# would tokenize from its first non-blank line, and every row of the block would
+# then carry the *next* line's text. ``stripall`` would do the same to leading
+# indentation, which in code is the one thing that must not move.
+_LEXER_OPTS = {"stripnl": False, "stripall": False}
+
 # Default body / code faces. ``Font()`` (all defaults) is the backend's
 # proportional UI font on GUI; ``Font(monospace=True)`` is its fixed-advance
 # face. Both fold to the single terminal font on a non-``fonts`` backend, so a
@@ -168,12 +176,13 @@ def _syntax_color(token_type) -> Color | None:
 def _highlight(lines: list[str], lang: str) -> list[list[tuple[str, "Color | None"]]] | None:
     """Tokenize ``lines`` as ``lang`` with Pygments, returning per-source-line
     ``(text, color)`` segments (color None = block default). Returns None when
-    Pygments is absent or the language is unknown, so the caller falls back to
-    plain code. One row per input line is preserved so wrapping stays line-based."""
+    Pygments is absent, the language is unknown, or the tokens do not reproduce
+    the lines given, so the caller falls back to plain code. One row per input
+    line is preserved so wrapping stays line-based."""
     if not _PYGMENTS or not lang:
         return None
     try:
-        lexer = get_lexer_by_name(lang)
+        lexer = get_lexer_by_name(lang, **_LEXER_OPTS)
     except Exception:
         return None
     out: list[list[tuple[str, Color | None]]] = [[]]
@@ -194,6 +203,12 @@ def _highlight(lines: list[str], lang: str) -> list[list[tuple[str, "Color | Non
         out = out[: len(lines)]
     while len(out) < len(lines):
         out.append([])
+    # Row i must *be* line i: the caller lays these out against the block's own
+    # source lines, so a row holding another line's text silently rewrites the
+    # code. A lexer that reshapes its input despite _LEXER_OPTS gives the block
+    # up to the plain path above instead — losing the colors, not the text.
+    if any("".join(t for t, _ in row) != line for row, line in zip(out, lines)):
+        return None
     return out
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
