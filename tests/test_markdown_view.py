@@ -232,6 +232,19 @@ def test_syntax_highlighting_colors_a_keyword(backend):
     assert backend.style_at(col, row).fg == _SYNTAX["keyword"]
 
 
+def test_code_block_keeps_its_leading_blank_line(backend):
+    """A code block opening with a blank line renders its lines where they were
+    written. Pygments strips the blank lines off its input by default, which used
+    to shift every row of such a block up by one — the block's last line falling
+    off the bottom and each row carrying the text of the line below it."""
+    panel = Panel(backend)
+    panel.add(MarkdownView("```python\n\nx = 1\ny = 2\n```\n"), x=0, y=0, w=40, h=8)
+    panel.render()
+    rows = backend.snapshot()
+    code = [y for y in range(len(rows)) if backend.style_at(0, y).bg == DEFAULT_THEME.control_bg]
+    assert [rows[y].strip() for y in code] == ["", "x = 1", "y = 2"]
+
+
 def test_unknown_language_falls_back_to_flat_code_color(backend):
     from puikit.widgets.markdown_view import _CODE_FG
 
