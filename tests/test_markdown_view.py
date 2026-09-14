@@ -14,6 +14,7 @@ from puikit.widgets.markdown_view import (
     _block_style,
     _parse_inline,
     _search_bg,
+    _split_table_row,
     parse_markdown,
 )
 from puikit.theme import DEFAULT_THEME, lift
@@ -809,6 +810,34 @@ def test_table_parses_alignment():
     tbl = next(s.table for s in sems if s.block == "table")
     assert tbl.aligns == ["left", "center", "right"]
     assert len(tbl.rows) == 1 and len(tbl.header) == 3
+
+
+def _table_key_cell(cell: str):
+    """The first cell of a one-row table, as ``(text, roles)`` pairs."""
+    src = f"| Key(s) | Action |\n| --- | --- |\n| {cell} | Go to the root |\n"
+    tbl = next(s.table for s in parse_markdown(src) if s.block == "table")
+    return [(text, roles) for text, roles, _ in tbl.rows[-1][0]]
+
+
+def test_table_row_resolves_only_the_pipe_escape():
+    # GFM singles out "\|" because it is the only way a pipe reaches a cell.
+    # Every other backslash is the inline parser's, and consuming it here ate
+    # the character behind it too.
+    assert _split_table_row(r"| a \| b | c |") == ["a | b", "c"]
+    assert _split_table_row(r"| `\` | c |") == [r"`\`", "c"]
+    assert _split_table_row(r"| C:\Users | c |") == [r"C:\Users", "c"]
+
+
+def test_table_code_span_keeps_a_literal_backslash():
+    # A key bound to backslash is a real case (xefm's "go to root"); it used to
+    # render as an empty code span, the backslash and its closing backtick both
+    # swallowed before the inline parser ever saw them.
+    assert _table_key_cell(r"`\`") == [("\\", frozenset({"code"}))]
+    assert _table_key_cell(r"`C:\Users`") == [(r"C:\Users", frozenset({"code"}))]
+
+
+def test_table_cell_still_takes_an_escaped_pipe():
+    assert _table_key_cell(r"`\|`") == [("|", frozenset({"code"}))]
 
 
 def test_table_renders_cells_and_borders(backend):

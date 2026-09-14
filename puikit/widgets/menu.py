@@ -450,6 +450,20 @@ class MenuBar(Widget):
 
     # --- opening --------------------------------------------------------------
 
+    @property
+    def takes_activation_key(self) -> bool:
+        """Whether an activation key (F10, a bare Alt tap) opens this bar.
+
+        False once the OS bar has taken the menu over, where activation belongs
+        to the platform and :meth:`open_menu` answers nothing. An app asks the
+        bar this — never the backend's capabilities — so that a help screen or a
+        shortcut hint can leave out a key that would do nothing, without the app
+        learning what a ``native_menus`` backend is.
+
+        True before the first draw: nothing has been installed yet, and the
+        in-window bar is what a bar is until a backend says otherwise."""
+        return not self._installed_native
+
     def open_menu(self, index: int = 0) -> bool:
         """Open the pulldown of bar entry ``index`` — what the app's
         menu-activation key (F10, a bare Alt tap) calls. Once open, ←/→ walk

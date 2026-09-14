@@ -48,6 +48,7 @@ def test_menu_item_predicates_evaluated_live():
     assert item.is_enabled() is True and item.is_checked() is True
 
 
+
 def test_menu_item_activate_respects_enabled():
     fired = []
     item = MenuItem("Go", on_select=lambda: fired.append(1), enabled=False)
@@ -410,6 +411,22 @@ class _NativeBackend(MemoryBackend):
         self.popup_calls.append((menu, x, y))
         if on_done is not None:
             on_done()
+
+
+def test_activation_key_is_offered_until_the_os_bar_takes_over():
+    # What an app asks instead of asking the backend what menus it has: the bar
+    # reports whether its activation key (F10, a bare Alt tap) does anything, so
+    # a help screen can leave out a key that would answer nothing.
+    for backend, expected in ((MemoryBackend(width=40, height=16), True),
+                              (_NativeBackend(width=40, height=16), False)):
+        bar = MenuBar(_bar_menu([]))
+        assert bar.takes_activation_key, "an undrawn bar is the in-window one"
+        panel = Panel(backend)
+        panel.add(bar, x=0, y=0, w=40, h=1)
+        panel.render()
+        assert bar.takes_activation_key is expected
+        # And it agrees with what opening actually does.
+        assert bar.open_menu() is expected
 
 
 def test_native_backend_receives_menu_bar_and_popup():
