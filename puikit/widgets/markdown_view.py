@@ -577,7 +577,14 @@ def _join_para(raw_lines: list[str]) -> str:
 
 def _split_table_row(line: str) -> list[str]:
     """Split a pipe-table row into trimmed cell texts, honoring ``\\|`` escapes
-    and the optional leading/trailing outer pipes."""
+    and the optional leading/trailing outer pipes.
+
+    Only ``\\|`` is resolved here. GFM gives that one pair its own rule — it is
+    the only way a pipe reaches a cell at all, code spans included — but every
+    other backslash is ordinary inline text and belongs to :func:`_parse_inline`,
+    which knows that a code span takes its content literally. Unescaping the
+    whole row instead swallowed the backslash *and* the character behind it, so
+    a cell reading ``\\`` came out as an empty code span (xefm#389)."""
     s = line.strip()
     if s.startswith("|"):
         s = s[1:]
@@ -589,7 +596,9 @@ def _split_table_row(line: str) -> list[str]:
     while k < len(s):
         ch = s[k]
         if ch == "\\" and k + 1 < len(s):
-            buf.append(s[k + 1])
+            # Either way the pair is consumed as one unit, so the pipe in a
+            # "\\|" never reads as a cell boundary.
+            buf.append("|" if s[k + 1] == "|" else ch + s[k + 1])
             k += 2
             continue
         if ch == "|":
