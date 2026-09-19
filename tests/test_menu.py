@@ -449,3 +449,60 @@ def test_native_backend_receives_menu_bar_and_popup():
     assert backend.popup_calls == [(menu, 3, 4)]
     assert done == [True]
     assert panel._layers == []  # native path pushes no widget layer
+
+
+def test_set_menu_redraws_the_bar_from_the_new_menu(backend):
+    # xefm#382: an app whose menu labels quote the live keymap rebuilds the menu
+    # when the user rebinds a key. The bar must show what it was just handed.
+    panel = Panel(backend)
+    fired = []
+    bar = MenuBar(_bar_menu(fired))
+    panel.add(bar, x=0, y=0, w=40, h=1)
+    panel.render()
+    assert "Edit" in backend.snapshot()[0]
+
+    bar.set_menu(Menu(
+        MenuItem("File", submenu=Menu(
+            MenuItem("New", on_select=lambda: fired.append("new2")))),
+        MenuItem("View", submenu=Menu(MenuItem("Zoom"))),
+    ))
+    panel.render()
+    row = backend.snapshot()[0]
+    assert "View" in row and "Edit" not in row
+
+    # And the entry opens the submenu it now carries, not the one it replaced.
+    panel.dispatch_event(_click(bar._entry_x[1][0] + 1, 0))
+    panel.render()
+    assert panel._layers[-1].widget.menu.items[0].label == "Zoom"
+
+
+def test_set_menu_reinstalls_the_os_bar():
+    # The OS bar is installed once, on the first draw; replacing the menu is the
+    # only way to change it, so a swap must re-register rather than leave the
+    # platform showing the menu built at startup (xefm#382).
+    backend = _NativeBackend(width=40, height=16)
+    panel = Panel(backend)
+    first = _bar_menu([])
+    bar = MenuBar(first)
+    panel.add(bar, x=0, y=0, w=40, h=1)
+    panel.render()
+    assert backend.menu_bar_calls == [first]
+
+    second = _bar_menu([])
+    bar.set_menu(second)
+    assert backend.menu_bar_calls == [first, second]
+    panel.render()
+    assert backend.menu_bar_calls == [first, second], "the draw re-installs nothing"
+
+
+def test_set_menu_before_the_first_draw_installs_only_the_new_one():
+    # Nothing is registered yet, so there is nothing to replace — the first draw
+    # installs the menu the bar holds by then, exactly once.
+    backend = _NativeBackend(width=40, height=16)
+    panel = Panel(backend)
+    bar = MenuBar(_bar_menu([]))
+    second = _bar_menu([])
+    bar.set_menu(second)
+    panel.add(bar, x=0, y=0, w=40, h=1)
+    panel.render()
+    assert backend.menu_bar_calls == [second]

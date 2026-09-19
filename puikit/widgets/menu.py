@@ -388,6 +388,24 @@ class MenuBar(Widget):
         self._index = 0      # entry of the open (or last-open) pulldown
         self._open = False   # whether that pulldown is up right now
 
+    def set_menu(self, menu: Menu) -> None:
+        """Swap in a rebuilt menu — for an app whose labels are derived from
+        something that can change while it runs (xefm#382: the shortcut hints
+        beside each item name the live keymap, and a config reload rebinds it).
+
+        The in-window bar just draws the new titles on the next frame. An OS bar
+        is already installed by then, and installing is the only way to change
+        it — ``set_menu_bar`` replaces the platform bar wholesale — so it is
+        re-registered here rather than left showing the menu built at startup."""
+        self.menu = menu
+        # Title spans belong to the titles that were drawn; the next draw lays
+        # out the new ones. Until then a click maps to nothing, which is right:
+        # better than opening the entry that used to be at those pixels.
+        self._entry_x = []
+        self._index = min(self._index, max(0, len(self._entries()) - 1))
+        if self._installed_native and self._panel is not None:
+            self._panel.set_menu_bar(menu)
+
     # --- geometry -------------------------------------------------------------
 
     def measure(self, ctx: LayoutContext, axis: str, available: float) -> SizeRequest:
