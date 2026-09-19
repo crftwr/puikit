@@ -2611,10 +2611,33 @@ class Panel:
         OS menu bar at the top of the screen; on others it is a no-op here —
         the app places a MenuBar widget that renders the bar in-window. The
         MenuBar widget calls this itself once it knows the backend, so the app
-        never branches on the capability."""
+        never branches on the capability.
+
+        The bar is handed over with :meth:`_menu_bar_active`, so an OS bar
+        follows the layer stack instead of standing outside it."""
         self._menu_bar = menu
         if self.backend.capabilities.supports("native_menus"):
-            self.backend.set_menu_bar(menu)
+            self.backend.set_menu_bar(menu, is_active=self._menu_bar_active)
+
+    def _menu_bar_active(self) -> bool:
+        """Whether the installed menu bar is the active surface's — asked by a
+        native backend each time one of its menus opens, and again before an
+        item fires.
+
+        An OS menu bar lives outside the layer stack: a click on it never
+        passes through :meth:`dispatch_event`, so a modal layer could own the
+        keyboard while every menu item went on driving the surface underneath
+        it (xefm#388). The in-window MenuBar has no such hole — the top
+        interactive layer takes events exclusively, so both the activation key
+        and a click on the strip are swallowed by the open surface. This is
+        what makes the two agree.
+
+        The menu handed to :meth:`set_menu_bar` is the base surface's, so it is
+        the active one exactly while no modal layer is up. The question is
+        whose bar is installed rather than whether a layer exists, which is
+        what leaves room for a layer that installs a bar of its own.
+        """
+        return self._top_interactive_slot() is None
 
     def popup_menu(
         self, menu: Any, x: float, y: float, on_done: Any | None = None,
