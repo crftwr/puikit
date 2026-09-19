@@ -27,6 +27,7 @@ backend = create_backend(
 | `resizable` | `True` | drops `NSWindowStyleMaskResizable` | drops `WS_THICKFRAME \| WS_MAXIMIZEBOX` |
 | `tool` | `False` | no-op today | `WS_EX_TOOLWINDOW` (out of taskbar / Alt-Tab) |
 | `overlay_input` | `"none"` | with `activates=False`: `"mouse"` / `"keyboard"` build an `NSPanel` + `NSWindowStyleMaskNonactivatingPanel \| Titled \| UtilityWindow`; `"mouse"` adds `becomesKeyOnlyIfNeeded` | no equivalent; ignored |
+| `takes_first_click` | `False` | `True`: `acceptsFirstMouse:` — the click that activates the app is also delivered as a press | already the behavior (`WM_MOUSEACTIVATE` → `MA_ACTIVATE`); ignored |
 
 - `style=None` (the default) ≡ `WindowStyle()` ≡ the classic window.
 - Backends without the `window_styles` capability (curses, web, memory)
@@ -64,6 +65,16 @@ backend = create_backend(
   frameless window. `hidesOnDeactivate` is turned off, or a utility panel would
   hide itself whenever the owning application is not active, which for this
   window is always.
+- `takes_first_click` decides who gets the click that brings the application
+  forward. macOS spends it on activation alone, which protects a window whose
+  controls should not be pressed by a glance at it — and breaks any gesture
+  that cannot be split in two. A drag begins on a press, so a press that never
+  arrives begins nothing: dragging a row out of a background window does
+  nothing at all until the window has been clicked forward first (xefm#431).
+  A file list, a canvas, a shelf to drag items off — anything Finder-like —
+  asks for `True`. macOS-only in effect: Windows delivers that click either
+  way. A window with `activates=False` takes it regardless of the field, since
+  it has no activation to spend it on.
 - The **pointer shape is per window**. Each window's `Panel` pushes a shape
   once per frame from its own hover state, so one shared slot let two open
   windows overwrite each other every frame — a popup's I-beam against a
@@ -175,6 +186,7 @@ exist.
 | `frameless` | borderless window | browser-chrome-limited (popup features) | no frame box around the layer |
 | `activates=False` | no focus stealing | open without `focus()` | non-interactive layer; keys keep flowing below |
 | `movable=False` | the user cannot drag it (the app still can) | — | — |
+| `takes_first_click` | the activating click also presses | n/a (a page has no activation click to spend) | n/a |
 | `overlay_input` | clicks, or keys, without app activation | — | — (macOS-only in effect) |
 | position/size | screen coordinates | `window.open` features (best-effort; browser-gated) | a rect on the terminal surface |
 | z-order between windows | OS compositor | browser window manager | layer `z`; topmost *interactive* layer is modal |
