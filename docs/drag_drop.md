@@ -94,6 +94,26 @@ On macOS this rides the view's `draggingSession:sourceOperationMaskForDraggingCo
 The clipboard fallback is copy semantics, so it reports `"copy"`; a terminal
 cannot express a cross-app move.
 
+## Dragging out of a window that is not in front
+
+A drag begins on the press. macOS, by convention, spends the click that
+activates an application on activation alone — so on a window that has not
+declared otherwise, the first press into a background window never reaches the
+view, and the drag the user is making does nothing. They let go, click again,
+and only that second gesture drags.
+
+An app whose window is made of draggable things asks for the click:
+
+```python
+backend = create_backend("gui", style=WindowStyle(takes_first_click=True))
+```
+
+The flag is `acceptsFirstMouse:` (see `docs/window_management.md`), macOS-only
+in effect — Windows delivers the activating click either way. The cost is that
+*every* first click now acts, which is the same bargain Finder makes: clicking
+a file in a background window both brings the window forward and selects the
+file.
+
 ## Drop-in (`drag_and_drop`)
 
 Receiving files/text dropped *onto* the app is the mirror image and is tracked

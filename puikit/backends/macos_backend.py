@@ -848,14 +848,28 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
     def acceptsFirstResponder(self):
         return True
 
-    def acceptsFirstMouse_(self, ns_event):
-        # A window that never activates has no activation click to spend, so
-        # the macOS convention of swallowing the first click into an inactive
-        # window would swallow *every* click it ever gets. An overlay is
-        # clicked to act on it, not to bring it forward.
+    def _pk_style(self):
+        """The WindowStyle of the window this view fills: a secondary window
+        carries it on its handle, the main window on the backend (whose view has
+        no ``pk_window``)."""
         handle = getattr(self, "pk_window", None)
-        style = getattr(handle, "window_style", None)
-        return style is not None and not style.activates
+        if handle is not None:
+            return getattr(handle, "window_style", None)
+        return getattr(self.backend, "_window_style", None)
+
+    def acceptsFirstMouse_(self, ns_event):
+        # Two windows want the click that activates the application, rather than
+        # spending it on activation alone:
+        #
+        # - one that never activates, which has no activation to spend it on:
+        #   the macOS convention would swallow *every* click it ever gets. An
+        #   overlay is clicked to act on it, not to bring it forward.
+        # - one that asked (``takes_first_click``), because a gesture cannot be
+        #   split in two. A drag starts on a press, so a press spent on
+        #   activation starts nothing, and dragging a row out of a background
+        #   window does nothing until the window has been clicked forward first.
+        style = self._pk_style()
+        return style is not None and (not style.activates or style.takes_first_click)
 
     def drawRect_(self, rect):
         if self.backend is None:

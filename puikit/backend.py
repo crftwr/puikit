@@ -156,6 +156,19 @@ class WindowStyle:
       out from under the edge it is dragging. Programmatic ``move_to_px`` /
       ``set_frame_px`` are unaffected. No-op on Windows, where a frameless
       popup has nothing the window manager would drag it by.
+    - ``takes_first_click``: whether the click that activates the application
+      is *also* delivered to the window (macOS ``acceptsFirstMouse:``). The
+      macOS convention is to spend that click on activation alone, which is
+      right for a window whose controls should not be pressed by a glance at
+      it - and wrong for a gesture that cannot be split in two. A drag starts
+      on a press, so a press that never arrives starts nothing: the user has
+      to click the window forward and only then drag, which reads as the first
+      drag out of a background window being ignored. A file list, a canvas, a
+      shelf to drag items off - anything Finder-like - wants this True.
+      macOS-only in effect: Windows delivers the activating click either way
+      (``DefWindowProc`` answers ``WM_MOUSEACTIVATE`` with ``MA_ACTIVATE``), so
+      the field changes nothing there. A window with ``activates=False`` takes
+      the click regardless of this field - it has no activation to spend it on.
 
     Backends without the ``window_styles`` capability accept the parameter
     and ignore it (the base recipe: unknown requests degrade, not raise)."""
@@ -167,6 +180,7 @@ class WindowStyle:
     tool: bool = False
     overlay_input: str = "none"
     movable: bool = True
+    takes_first_click: bool = False
 
 
 EventHandler = Callable[[Event], None]

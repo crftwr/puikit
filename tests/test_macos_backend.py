@@ -986,6 +986,52 @@ def test_popup_menu_is_never_gated(monkeypatch):
     assert activated == [True]
 
 
+# --- who gets the click that activates the application -----------------------
+
+
+class TestTakesFirstClick:
+    """``acceptsFirstMouse:``: the click that brings the application forward is
+    either spent on activation (the macOS default) or also delivered as a press.
+    A drag cannot start without that press, which is why a window full of
+    draggable rows asks for it (xefm#431)."""
+
+    def _main_view(self, style=None):
+        """A view standing in for the main window's: no ``pk_window``, so it
+        reads the style the backend was built with."""
+        from Foundation import NSMakeRect
+        view = _PuiKitView.alloc().initWithFrame_(NSMakeRect(0, 0, 10, 10))
+        view.backend = MacOSBackend(style=style)
+        return view
+
+    def test_default_spends_it_on_activation(self):
+        # Unchanged for every app that did not ask: clicking a background window
+        # brings it forward and presses nothing.
+        assert self._main_view().acceptsFirstMouse_(None) is False
+
+    def test_a_window_that_asked_takes_it(self):
+        from puikit.backend import WindowStyle
+        view = self._main_view(WindowStyle(takes_first_click=True))
+        assert view.acceptsFirstMouse_(None) is True
+
+    def test_a_window_that_never_activates_takes_it_regardless(self):
+        # No activation to spend the click on: swallowing it would swallow every
+        # click the overlay ever gets.
+        from puikit.backend import WindowStyle
+        view = self._main_view(WindowStyle(activates=False))
+        assert view.acceptsFirstMouse_(None) is True
+
+    def test_a_secondary_window_reads_its_own_style(self):
+        # The handle carries the style of the window this view fills; the main
+        # window's (default) style has no say over it.
+        from types import SimpleNamespace
+
+        from puikit.backend import WindowStyle
+        view = self._main_view()
+        view.pk_window = SimpleNamespace(
+            window_style=WindowStyle(takes_first_click=True))
+        assert view.acceptsFirstMouse_(None) is True
+
+
 class TestOverlayInputWindow:
     """The real NSPanel, built through create_window (no event loop needed).
 
