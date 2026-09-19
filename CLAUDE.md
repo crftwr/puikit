@@ -199,6 +199,13 @@ panel.set_layout(VSplit(Item(MenuBar(menu), size="content"), Item(body, weight=1
 `MenuBar` widget then claims **zero** in-window space. Other backends fall back
 to a widget-rendered menu (`puikit.widgets.menu`). The app never branches.
 
+Either way the bar follows the app's **modality**: the in-window one for free
+(the top interactive layer takes events exclusively), the OS one because the
+Panel hands the backend a gate — an OS bar lives outside the layer stack, so a
+click on it never passes through `dispatch_event`, and without the gate every
+item would go on driving the surface under an open dialog (xefm#388). A context
+menu is never gated: it is raised by whatever surface is already on top.
+
 **Drag & drop** splits into two capabilities — drop-*in* (`drag_and_drop`) and
 drag-*out* (`os_drag_drop`, which a terminal app can never have, since the
 emulator owns the window). See [`docs/drag_drop.md`](docs/drag_drop.md).

@@ -17,6 +17,8 @@ growing command-id space) instead of building a new one per call.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from . import _win32_native as w
 from ..menu import Menu, MenuItem, MenuSeparator
 
@@ -24,27 +26,46 @@ from ..menu import Menu, MenuItem, MenuSeparator
 class MenuResponder:
     """Owns the command-id <-> MenuItem mapping for every menu this backend
     has ever built, plus enough bookkeeping to re-validate a popup's
-    enabled/checked state right before it opens (``WM_INITMENUPOPUP``)."""
+    enabled/checked state right before it opens (``WM_INITMENUPOPUP``).
+
+    One responder serves the menu bar, every context popup and the tray menu
+    (see the module docstring), so the Panel's modality gate is recorded *per
+    menu tree* rather than on the responder: only the bar answers to it — a
+    popup is raised by whatever surface is already on top, and the tray icon is
+    outside the window altogether."""
 
     def __init__(self) -> None:
         self._items_by_tag: dict[int, MenuItem] = {}
         self._tag_by_item: dict[int, int] = {}  # id(item) -> tag
         self._popups: dict[int, Menu] = {}  # HMENU address -> the Menu shown there
+        self._gate_by_tag: dict[int, Callable[[], bool]] = {}
+        self._gate_by_popup: dict[int, Callable[[], bool]] = {}
         self._next_tag = 1
 
-    def register(self, item: MenuItem) -> int:
+    def register(self, item: MenuItem, is_active: Callable[[], bool] | None = None) -> int:
         tag = self._tag_by_item.get(id(item))
         if tag is None:
             tag = self._next_tag
             self._next_tag += 1
             self._tag_by_item[id(item)] = tag
             self._items_by_tag[tag] = item
+        if is_active is not None:
+            self._gate_by_tag[tag] = is_active
         return tag
 
-    def register_popup(self, hmenu: int, menu: Menu) -> None:
+    def register_popup(self, hmenu: int, menu: Menu,
+                       is_active: Callable[[], bool] | None = None) -> None:
         self._popups[hmenu] = menu
+        if is_active is not None:
+            self._gate_by_popup[hmenu] = is_active
 
     def fire(self, tag: int) -> None:
+        # Asked again here, not only in revalidate: an inert bar's items are
+        # greyed, and Win32 sends no WM_COMMAND for a greyed item — this is the
+        # second lock on a door the OS has already shut.
+        gate = self._gate_by_tag.get(tag)
+        if gate is not None and not gate():
+            return
         item = self._items_by_tag.get(tag)
         if item is not None:
             item.activate()
@@ -55,23 +76,29 @@ class MenuResponder:
         menu = self._popups.get(hmenu)
         if menu is None:
             return
+        # A bar whose owner is no longer the active surface greys out whole,
+        # whatever each item's own predicate says.
+        gate = self._gate_by_popup.get(hmenu)
+        active = gate is None or gate()
         for entry in menu.items:
             if not isinstance(entry, MenuItem) or entry.submenu is not None:
                 continue
             tag = self._tag_by_item.get(id(entry))
             if tag is None:
                 continue
+            enabled = active and entry.is_enabled()
             w.user32.EnableMenuItem(
-                hmenu, tag, w.MF_BYCOMMAND | (w.MF_ENABLED if entry.is_enabled() else w.MF_GRAYED)
+                hmenu, tag, w.MF_BYCOMMAND | (w.MF_ENABLED if enabled else w.MF_GRAYED)
             )
             w.user32.CheckMenuItem(
                 hmenu, tag, w.MF_BYCOMMAND | (w.MF_CHECKED if entry.is_checked() else w.MF_UNCHECKED)
             )
 
 
-def _build_menu(menu: Menu, responder: MenuResponder) -> int:
+def _build_menu(menu: Menu, responder: MenuResponder,
+                is_active: Callable[[], bool] | None = None) -> int:
     hmenu = w.user32.CreatePopupMenu()
-    responder.register_popup(hmenu, menu)
+    responder.register_popup(hmenu, menu, is_active)
     for entry in menu.items:
         if isinstance(entry, MenuSeparator):
             w.user32.AppendMenuW(hmenu, w.MF_SEPARATOR, 0, None)
@@ -80,23 +107,26 @@ def _build_menu(menu: Menu, responder: MenuResponder) -> int:
             continue
         label = f"{entry.label}\t{entry.shortcut}" if entry.shortcut else entry.label
         if entry.submenu is not None:
-            submenu_hmenu = _build_menu(entry.submenu, responder)
+            submenu_hmenu = _build_menu(entry.submenu, responder, is_active)
             w.user32.AppendMenuW(hmenu, w.MF_POPUP, submenu_hmenu, label)
         else:
-            tag = responder.register(entry)
+            tag = responder.register(entry, is_active)
             w.user32.AppendMenuW(hmenu, w.MF_STRING, tag, label)
     return hmenu
 
 
-def build_menu_bar(menu: Menu, responder: MenuResponder) -> int:
+def build_menu_bar(menu: Menu, responder: MenuResponder,
+                   is_active: Callable[[], bool] | None = None) -> int:
     """Build the HMENU for a window's menu bar: one top-level entry per item
-    in ``menu``, each carrying its own dropdown submenu."""
+    in ``menu``, each carrying its own dropdown submenu. ``is_active`` is the
+    Panel's modality gate (see ``Backend.set_menu_bar``), recorded on every
+    dropdown this bar owns."""
     hmenu = w.user32.CreateMenu()
     for entry in menu.items:
         if not isinstance(entry, MenuItem):
             continue
         submenu = entry.submenu if entry.submenu is not None else Menu(title=entry.label)
-        submenu_hmenu = _build_menu(submenu, responder)
+        submenu_hmenu = _build_menu(submenu, responder, is_active)
         w.user32.AppendMenuW(hmenu, w.MF_POPUP, submenu_hmenu, entry.label)
     return hmenu
 

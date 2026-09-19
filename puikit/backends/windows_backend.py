@@ -3271,7 +3271,7 @@ class WindowsBackend(Backend):
 
     # --- native menus --------------------------------------------------------
 
-    def set_menu_bar(self, menu: Any) -> None:
+    def set_menu_bar(self, menu: Any, is_active: Any | None = None) -> None:
         from . import _win32_menu
 
         if self._menu_responder is None:
@@ -3282,7 +3282,8 @@ class WindowsBackend(Backend):
         if menu is None:
             native.user32.SetMenu(self._hwnd, None)
             return
-        self._menu_bar_hmenu = _win32_menu.build_menu_bar(menu, self._menu_responder)
+        self._menu_bar_hmenu = _win32_menu.build_menu_bar(
+            menu, self._menu_responder, is_active)
         native.user32.SetMenu(self._hwnd, self._menu_bar_hmenu)
 
     def set_tray(self, title: str | None = None, menu: Any = None,

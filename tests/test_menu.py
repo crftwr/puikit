@@ -20,7 +20,7 @@ from puikit import (
 )
 from puikit.backends.memory_backend import MemoryBackend
 from puikit.layout import LayoutContext
-from puikit.widgets import MenuBar
+from puikit.widgets import Label, MenuBar
 from puikit.widgets.menu import popup_geometry
 
 
@@ -394,6 +394,7 @@ class _NativeBackend(MemoryBackend):
     def __init__(self, **kwargs):
         super().__init__(capabilities=PROFILE_GUI_DESKTOP, **kwargs)
         self.menu_bar_calls = []
+        self.menu_bar_gates = []
         self.popup_calls = []
 
     @property
@@ -404,8 +405,9 @@ class _NativeBackend(MemoryBackend):
 
         return CapabilityProfile({**self._capabilities, "vector_shapes": False})
 
-    def set_menu_bar(self, menu):
+    def set_menu_bar(self, menu, is_active=None):
         self.menu_bar_calls.append(menu)
+        self.menu_bar_gates.append(is_active)
 
     def popup_menu(self, menu, x, y, on_done=None):
         self.popup_calls.append((menu, x, y))
@@ -449,6 +451,41 @@ def test_native_backend_receives_menu_bar_and_popup():
     assert backend.popup_calls == [(menu, 3, 4)]
     assert done == [True]
     assert panel._layers == []  # native path pushes no widget layer
+
+
+def test_native_menu_bar_goes_inert_while_a_modal_layer_is_up():
+    # xefm#388: an OS bar lives outside the layer stack — a click on it never
+    # passes through dispatch_event, so without this gate every item would go
+    # on driving the surface under an open dialog. The in-window bar needs no
+    # such gate: there the top interactive layer swallows the click on the
+    # strip, which is the behaviour this makes the OS bar agree with.
+    backend = _NativeBackend(width=40, height=16)
+    panel = Panel(backend)
+    bar = MenuBar(_bar_menu([]))
+    panel.add(bar, x=0, y=0, w=40, h=1)
+    panel.render()
+    is_active = backend.menu_bar_gates[-1]
+    assert is_active is not None
+    assert is_active() is True
+
+    panel.push_layer(Label("DIALOG"), z=10, hints={"w": 10, "h": 4})
+    assert is_active() is False
+    panel.pop_layer()
+    assert is_active() is True
+
+
+def test_native_menu_bar_stays_active_under_a_non_interactive_overlay():
+    # What makes the bar inert is a layer owning the keyboard, not a layer
+    # existing: a completion popup floats above the surface without taking it.
+    backend = _NativeBackend(width=40, height=16)
+    panel = Panel(backend)
+    bar = MenuBar(_bar_menu([]))
+    panel.add(bar, x=0, y=0, w=40, h=1)
+    panel.render()
+    is_active = backend.menu_bar_gates[-1]
+    panel.push_layer(Label("HINT"), z=11, hints={"w": 10, "h": 3},
+                     interactive=False)
+    assert is_active() is True
 
 
 def test_set_menu_redraws_the_bar_from_the_new_menu(backend):

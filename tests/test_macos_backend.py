@@ -923,6 +923,69 @@ def test_menu_fire_without_forwarder_always_activates(monkeypatch):
     assert activated == [True]
 
 
+# --- native menu: the bar follows the Panel's modality -----------------------
+#
+# The OS bar is outside the Panel's layer stack, so a click on it never passes
+# through dispatch_event: without a gate, every item goes on driving the file
+# list under an open dialog (xefm#388). Panel._menu_bar_active is what the
+# responder asks here.
+
+
+def test_menu_bar_items_go_inert_when_the_gate_says_so(monkeypatch):
+    from puikit.backends import _macos_menu
+    from puikit.menu import Menu, MenuItem
+
+    active = {"value": True}
+    activated = []
+    menu = Menu(MenuItem("File", submenu=Menu(
+        MenuItem("New", on_select=lambda: activated.append(True)))))
+    main, responder = _macos_menu.build_menu_bar(
+        menu, "App", is_active=lambda: active["value"])
+    # Index 0 is the standard application menu; the bar's own entries follow.
+    ns_item = main.itemAtIndex_(1).submenu().itemAtIndex_(0)
+    monkeypatch.setattr(_macos_menu, "_current_key_event", lambda: None)
+    assert responder.validateMenuItem_(ns_item) is True
+
+    active["value"] = False
+    assert responder.validateMenuItem_(ns_item) is False  # greys out whole
+    responder.fire_(ns_item)
+    assert activated == []  # ... and refuses to fire if AppKit asks anyway
+
+    active["value"] = True
+    responder.fire_(ns_item)
+    assert activated == [True]
+
+
+def test_inert_menu_bar_still_forwards_its_key_equivalent(monkeypatch):
+    from AppKit import NSEventModifierFlagCommand, NSEventModifierFlagShift
+
+    from puikit.backends import _macos_menu
+
+    # The chord is the app's, not the menu's (shortcuts are display-only), so
+    # an inert bar must hand it back rather than swallow it: the keystroke
+    # belongs to whatever modal layer made the bar inert in the first place.
+    forwarded = []
+    responder, ns_item, activated = _menu_fixture(forward=forwarded.append)
+    responder._is_active = lambda: False
+    chord = _FakeKeyEvent("C", NSEventModifierFlagCommand | NSEventModifierFlagShift)
+    monkeypatch.setattr(_macos_menu, "_current_key_event", lambda: chord)
+    responder.fire_(ns_item)
+    assert forwarded == [chord]
+    assert activated == []
+
+
+def test_popup_menu_is_never_gated(monkeypatch):
+    from puikit.backends import _macos_menu
+
+    # A context menu is raised by whatever surface is already on top, so its
+    # responder carries no gate at all.
+    responder, ns_item, activated = _menu_fixture(forward=None)
+    assert responder._is_active is None
+    monkeypatch.setattr(_macos_menu, "_current_key_event", lambda: None)
+    responder.fire_(ns_item)
+    assert activated == [True]
+
+
 class TestOverlayInputWindow:
     """The real NSPanel, built through create_window (no event loop needed).
 

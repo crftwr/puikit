@@ -4378,11 +4378,12 @@ class MacOSBackend(Backend):
 
     # --- native menus --------------------------------------------------------
 
-    def set_menu_bar(self, menu: Any) -> None:
+    def set_menu_bar(self, menu: Any, is_active: Any | None = None) -> None:
         from ._macos_menu import install_menu_bar
 
         self._menu_responder = install_menu_bar(
-            menu, self._title, forward_key=self._forward_menu_key
+            menu, self._title, forward_key=self._forward_menu_key,
+            is_active=is_active,
         )
 
     def _forward_menu_key(self, ns_event) -> None:

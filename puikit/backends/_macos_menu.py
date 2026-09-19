@@ -76,6 +76,9 @@ class _MenuResponder(NSObject):
         # keyDown path) instead of firing the item — see fire_. None (a
         # popup's responder) keeps every activation interactive.
         self._forward_key = None
+        # Asked whether this menu's owner is still the active surface (the
+        # Panel's modality gate). None — a popup's responder — is always active.
+        self._is_active = None
         return self
 
     def fire_(self, sender) -> None:
@@ -95,6 +98,11 @@ class _MenuResponder(NSObject):
             if ev is not None and _matches_equivalent(sender, ev):
                 self._forward_key(ev)
                 return
+        # Asked again here, not only in validateMenuItem:. An inert bar's items
+        # are greyed, so this is the second lock on a door AppKit has already
+        # shut — cheap, and the one that holds if it ever opens the door anyway.
+        if not _active(self):
+            return
         item.activate()
 
     def validateMenuItem_(self, ns_item) -> bool:
@@ -104,7 +112,22 @@ class _MenuResponder(NSObject):
         # Reflect the live checked predicate too, so a toggle item updates its
         # checkmark each time the menu opens.
         ns_item.setState_(1 if item.is_checked() else 0)
+        # A bar whose owner is no longer the active surface greys out whole,
+        # whatever each item's own predicate says.
+        if not _active(self):
+            return False
         return item.is_enabled()
+
+
+def _active(responder: _MenuResponder) -> bool:
+    """Whether ``responder``'s menu is still the active surface's — the Panel's
+    modality gate, or True when it was given none.
+
+    A module function rather than a method: every method on an NSObject
+    subclass is bridged into a selector, and this one is ours to call, not
+    AppKit's (same reason ``_register`` below sits out here)."""
+    gate = responder._is_active
+    return gate is None or bool(gate())
 
 
 def _register(responder: _MenuResponder, item: MenuItem) -> int:
@@ -221,14 +244,17 @@ def _build_menu(menu: Menu, responder: _MenuResponder) -> Any:
 
 
 def build_menu_bar(
-    menu: Menu, app_title: str, forward_key: Any | None = None
+    menu: Menu, app_title: str, forward_key: Any | None = None,
+    is_active: Any | None = None,
 ) -> tuple[Any, _MenuResponder]:
     """Build the NSMenu main menu: a standard application menu (with Quit)
     followed by one bar entry per top-level item in ``menu``. ``forward_key``
     receives the NSEvent of a key-equivalent activation instead of the item
-    firing (see ``_MenuResponder.fire_``)."""
+    firing (see ``_MenuResponder.fire_``); ``is_active`` is the Panel's
+    modality gate (see ``Backend.set_menu_bar``)."""
     responder = _MenuResponder.alloc().init()
     responder._forward_key = forward_key
+    responder._is_active = is_active
     main = NSMenu.alloc().init()
 
     # The application menu (its title is ignored; macOS shows the app name).
@@ -262,14 +288,15 @@ def build_popup_menu(menu: Menu) -> tuple[Any, _MenuResponder]:
 
 
 def install_menu_bar(
-    menu: Menu | None, app_title: str, forward_key: Any | None = None
+    menu: Menu | None, app_title: str, forward_key: Any | None = None,
+    is_active: Any | None = None,
 ) -> _MenuResponder | None:
     """Set (or clear) the application main menu. Returns the responder, which
-    the caller must retain so the item callbacks survive. ``forward_key`` is
-    passed through to ``build_menu_bar``."""
+    the caller must retain so the item callbacks survive. ``forward_key`` and
+    ``is_active`` are passed through to ``build_menu_bar``."""
     if menu is None:
         NSApp.setMainMenu_(NSMenu.alloc().init())
         return None
-    main, responder = build_menu_bar(menu, app_title, forward_key)
+    main, responder = build_menu_bar(menu, app_title, forward_key, is_active)
     NSApp.setMainMenu_(main)
     return responder

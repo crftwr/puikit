@@ -712,11 +712,21 @@ class Backend(ABC):
 
     # --- native menus (capability "native_menus"; Panel gates the calls) -----
 
-    def set_menu_bar(self, menu: Any) -> None:
+    def set_menu_bar(
+        self, menu: Any, is_active: Callable[[], bool] | None = None
+    ) -> None:
         """Install ``menu`` (a puikit.menu.Menu whose items carry submenus) as
         the OS application menu bar. ``None`` clears it. Backends without the
         ``native_menus`` capability never receive this — the Panel falls back
-        to a widget-rendered MenuBar placed in the app's own layout."""
+        to a widget-rendered MenuBar placed in the app's own layout.
+
+        ``is_active`` is asked — each time one of the bar's menus opens, and
+        again before an item fires — whether this bar is the one the active
+        surface owns. A False answer greys every item and refuses to fire it,
+        which is how a bar that lives outside the Panel's layer stack still
+        follows a modal layer. ``None`` (the default) means always active.
+        A context menu from :meth:`popup_menu` is never gated: it is raised by
+        whatever surface is already on top."""
         raise CapabilityNotSupported("native_menus")
 
     def popup_menu(
