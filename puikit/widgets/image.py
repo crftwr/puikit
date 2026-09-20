@@ -6,6 +6,10 @@ fit" — and the backend decides how. A backend with the ``images`` capability
 Panel layer to the ``alt`` emoji (a neutral ``●`` when none is given),
 centered in the footprint. The widget never branches on the backend.
 
+The source is a filesystem path or a :class:`~puikit.image.RasterImage` — pixels
+the application decoded itself, for a format the backend's own decoder does not
+read. Both travel the same way from here down.
+
 ``fit`` controls how the image relates to the rect the layout assigns:
 
 - ``"fill"``    — stretch to the rect, ignoring aspect ratio (default).
@@ -27,6 +31,8 @@ differs.
 
 from __future__ import annotations
 
+from typing import Any
+
 from ..image import ASPECT_FITS, FILL, FITS, WIDTH, aspect_extent
 from ..layout import LayoutContext, SizeRequest
 from ..panel import DrawContext
@@ -35,11 +41,15 @@ from .base import Widget
 
 class ImageView(Widget):
     def __init__(
-        self, path: str, fit: str = FILL, alt: str | None = None, alpha: float = 1.0,
+        self, path: Any, fit: str = FILL, alt: str | None = None, alpha: float = 1.0,
         src: tuple[float, float, float, float] | None = None,
     ):
         if fit not in FITS:
             raise ValueError(f"unknown image fit {fit!r}; expected one of {sorted(FITS)}")
+        # A filesystem path the backend opens, or a RasterImage of pixels the
+        # caller decoded itself (puikit.image). Still spelled ``path``, because
+        # that is what it is in every ordinary use and renaming it would break
+        # every call that passes it by keyword.
         self.path = path
         self.fit = fit
         # Emoji/glyph shown in place of the picture on backends without images

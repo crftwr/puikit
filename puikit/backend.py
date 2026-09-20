@@ -711,18 +711,54 @@ class Backend(ABC):
     def end_group(self, key: Any) -> None:
         """Counterpart of begin_group."""
 
-    def draw_image(self, x: int, y: int, path: str, hints: dict[str, Any] | None = None) -> None:
+    def draw_image(
+        self, x: int, y: int, source: Any, hints: dict[str, Any] | None = None
+    ) -> None:
+        """Draw an image at ``(x, y)``. ``source`` is a filesystem path the
+        backend opens itself, or a :class:`~puikit.image.RasterImage` of decoded
+        RGBA8 pixels handed straight over — see :meth:`image_formats` for which
+        of the two a caller should reach for."""
         raise CapabilityNotSupported("images")
 
-    def image_size(self, path: str) -> tuple[int, int] | None:
+    def image_size(self, source: Any) -> tuple[int, int] | None:
         """Natural ``(width, height)`` of the image in pixels, or None if
         unknown. Lets the layout size an ImageView to its aspect ratio
         (fit="width"/"height") on every backend, even where the image cannot
-        be drawn. The default parses the file header (puikit.image); a backend
-        may override with a native loader."""
-        from .image import image_size
+        be drawn.
 
-        return image_size(path)
+        A :class:`~puikit.image.RasterImage` answers from its own size. A path
+        goes through the dependency-free header parse (puikit.image); a backend
+        with a native loader overrides this to ask it instead, which is what
+        makes the size — and so the layout — available for every format that
+        backend can actually draw, not just the four the header parse knows."""
+        from .image import image_size, is_raster
+
+        if is_raster(source):
+            return source.size
+        return image_size(source)
+
+    def image_formats(self) -> frozenset[str]:
+        """Lowercase file extensions, dot included, that this backend can draw
+        **from a path** — the formats its own decoder reads.
+
+        Empty by default, which claims nothing rather than promising wrongly: a
+        backend that has not answered may still draw the handful of formats every
+        decoder reads, and a caller must not conclude from an empty set that
+        nothing works. What the set is *for* is the other direction. An
+        application that can decode a format itself needs to know whether it has
+        to: a suffix listed here travels as a path, with no decode on the
+        application's side and no pixels copied, and one that is not listed is
+        the application's own to open and hand over as a
+        :class:`~puikit.image.RasterImage`.
+
+        It is a property of the running system, not of the format. The macOS
+        answer comes from ImageIO, which reads HEIC, camera RAW and JPEG XL out
+        of the box; the Windows one from the installed WIC decoders, so the same
+        HEIC is listed only on a machine where the codec is actually present;
+        the terminal backends answer with what Pillow has, plugins included. A
+        caller asks rather than assuming, and gets the truth for the machine it
+        is on."""
+        return frozenset()
 
     # --- native menus (capability "native_menus"; Panel gates the calls) -----
 

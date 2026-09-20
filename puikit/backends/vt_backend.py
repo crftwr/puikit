@@ -53,7 +53,6 @@ from ..backend import Backend, Color, DEFAULT_STYLE, EventHandler, Style, TextAt
 from ..capability import CapabilityProfile, PROFILE_TUI
 from ..event import Event, EventType, char_key_event
 from ..image import CONTAIN, COVER, contain_box, cover_source
-from ..image import image_size as _natural_size
 from ..text import display_width
 from . import _terminal_graphics
 from ._textgrid import (
@@ -300,6 +299,13 @@ class VTBackend(Backend):
     def close(self) -> None:
         self._console.close()
         self._grid = None
+        # The decoded-image cache is the module's, not this backend's, and
+        # nothing else is looking at it once the TUI is down. An embedding
+        # application that opens a terminal and closes it again should not be
+        # left holding the last photograph anyone scrolled past.
+        self._encoded.clear()
+        self._sixel_sources.clear()
+        _terminal_graphics.clear_cache()
 
     @contextlib.contextmanager
     def suspended(self):
@@ -536,7 +542,7 @@ class VTBackend(Backend):
             else:
                 self.draw_text(col, row, " ", Style(bg=shade))
 
-    def draw_image(self, x: int, y: int, path: str, hints: dict[str, Any] | None = None) -> None:
+    def draw_image(self, x: int, y: int, source: Any, hints: dict[str, Any] | None = None) -> None:
         """Record an inline-image placement for this frame.
 
         Nothing is emitted here: pixels must land after the text, or the frame's
@@ -559,7 +565,7 @@ class VTBackend(Backend):
         # caller already chose the crop and the destination box; leave it be.
         if src is None:
             fit = hints.get("fit", "fill")
-            size = _natural_size(path) if fit in (CONTAIN, COVER) else None
+            size = self.image_size(source) if fit in (CONTAIN, COVER) else None
             if size is not None:
                 iw, ih = size
                 cw, ch = self.base_pixel_size
@@ -603,10 +609,18 @@ class VTBackend(Backend):
         # Ids start at 1 (kitty treats 0 as unspecified) and follow draw order,
         # so the same screen redrawn reuses the same ids and one erase clears it.
         image_id = len(self._images) + 1
-        self._images[image_id] = (x, y, cols, rows, path, src, full_box)
+        # The source's identity travels in the placement, not just the source
+        # itself: staleness is decided by comparing this frame's tuple against
+        # last frame's, and a RasterImage painted into between frames is the
+        # same object holding a different picture. Its cache key carries the
+        # revision, so a mutated raster compares unequal and is re-sent, which a
+        # bare object reference would not.
+        self._images[image_id] = (x, y, cols, rows, source, src, full_box,
+                                  _terminal_graphics.source_key(source))
 
-    def _sixel_rect(self, path: str, full_box: tuple, x: int, y: int,
-                    cols: int, rows: int, cell_w: float, cell_h: float) -> str:
+    def _sixel_rect(self, source: Any, key: tuple, full_box: tuple,
+                    x: int, y: int, cols: int, rows: int,
+                    cell_w: float, cell_h: float) -> str:
         """The sixel for the visible part of a placement.
 
         The whole picture is prepared once at its full box size and kept; each
@@ -623,21 +637,46 @@ class VTBackend(Backend):
         fx, fy, fcols, frows, fit_src = full_box
         px_w = max(1, int(round(fcols * cell_w)))
         px_h = max(1, int(round(frows * cell_h)))
-        key = (_terminal_graphics.source_key(path), fit_src, px_w, px_h)
-        source = self._sixel_sources.get(key)
-        if source is None:
-            rendered = _terminal_graphics.render(path, px_w, px_h, fit_src)
+        cache_key = (key, fit_src, px_w, px_h)
+        prepared = self._sixel_sources.get(cache_key)
+        if prepared is None:
+            rendered = _terminal_graphics.render(source, px_w, px_h, fit_src)
             if rendered is None:
                 return ""  # Pillow could not open it
-            source = _terminal_graphics.prepare_sixel(rendered[0])
-            self._sixel_sources[key] = source
+            prepared = _terminal_graphics.prepare_sixel(rendered[0])
+            self._sixel_sources[cache_key] = prepared
             while len(self._sixel_sources) > _SIXEL_SOURCE_CACHE_MAX:
                 self._sixel_sources.pop(next(iter(self._sixel_sources)))
         x0 = int(round((x - fx) * cell_w))
         y0 = int(round((y - fy) * cell_h))
-        return source.encode_rect(x0, y0,
+        return prepared.encode_rect(x0, y0,
                                   x0 + int(round(cols * cell_w)),
                                   y0 + int(round(rows * cell_h)))
+
+    def image_size(self, source: Any) -> tuple[int, int] | None:
+        """The base class's answer, then Pillow's.
+
+        The dependency-free header parse knows PNG, GIF, BMP and JPEG; Pillow —
+        which is this backend's decoder — knows everything it can draw. Asking
+        only the first would report "unknown" for a WebP this terminal renders
+        perfectly well, and an unknown size is what an application reads as a
+        picture it cannot show."""
+        size = super().image_size(source)
+        if size is not None or self._term_graphics is None:
+            return size
+        return _terminal_graphics.natural_size(source)
+
+    def image_formats(self) -> frozenset[str]:
+        """Whatever Pillow can open, because Pillow *is* this backend's decoder —
+        every placement goes through ``_terminal_graphics.render``. A plugin the
+        application installed (``pillow-heif``, ``pillow-jxl-plugin``) widens the
+        answer without either side arranging it.
+
+        Empty when the terminal speaks no inline-image protocol: nothing can be
+        drawn from a path there, whatever Pillow could decode."""
+        if self._term_graphics is None:
+            return frozenset()
+        return _terminal_graphics.extensions()
 
     def _erase_stale_images(self) -> str:
         """Clear placements that moved, changed source, or vanished.
@@ -660,7 +699,7 @@ class VTBackend(Backend):
         if erase:
             return erase
         for k in stale:
-            ix, iy, icols, irows, _path, _src, _full = self._prev_images[k]
+            ix, iy, icols, irows, _source, _src, _full, _key = self._prev_images[k]
             # One row and one column beyond the footprint. A protocol paints
             # pixels, not cells, and its own rounding can put a few of them just
             # outside the box — which the frame diff would never repaint, since
@@ -687,9 +726,9 @@ class VTBackend(Backend):
             return ""
         cell_w, cell_h = self.base_pixel_size
         parts = []
-        for image_id, (x, y, cols, rows, path, src, full_box) in fresh.items():
+        for image_id, (x, y, cols, rows, source, src, full_box, key) in fresh.items():
             if protocol == _terminal_graphics.SIXEL:
-                sequence = self._sixel_rect(path, full_box, x, y, cols, rows,
+                sequence = self._sixel_rect(source, key, full_box, x, y, cols, rows,
                                             cell_w, cell_h)
                 if sequence:
                     parts.append(f"\x1b[{y + 1};{x + 1}H{sequence}")
@@ -703,11 +742,10 @@ class VTBackend(Backend):
             # Keyed on the SOURCE's identity, not its path — see
             # _terminal_graphics.source_key. A path names a location, and the
             # same location can hold different pixels later.
-            key = (_terminal_graphics.source_key(path), cols, rows, src,
-                   cell_w, cell_h, protocol, image_id)
-            sequence = self._encoded.get(key)
+            cache_key = (key, cols, rows, src, cell_w, cell_h, protocol, image_id)
+            sequence = self._encoded.get(cache_key)
             if sequence is None:
-                rendered = _terminal_graphics.render(path, cols * cell_w, rows * cell_h, src)
+                rendered = _terminal_graphics.render(source, cols * cell_w, rows * cell_h, src)
                 if rendered is None:
                     continue  # Pillow could not open it
                 image, png = rendered
@@ -716,7 +754,7 @@ class VTBackend(Backend):
                 )
                 if not sequence:
                     continue
-                self._encoded[key] = sequence
+                self._encoded[cache_key] = sequence
                 # Bounded, and evicted oldest-first: a file browser walking a
                 # directory of photos would otherwise hold every one it passed.
                 while len(self._encoded) > _ENCODED_CACHE_MAX:
@@ -750,7 +788,7 @@ class VTBackend(Backend):
         # Which placements this frame's text is about to paint over. Asked before
         # render(), because render() is what consumes the diff.
         overpainted = frozenset(
-            k for k, (ix, iy, icols, irows, _p, _s, _f) in self._images.items()
+            k for k, (ix, iy, icols, irows, _obj, _s, _f, _k) in self._images.items()
             if self._grid.rect_is_dirty(ix, iy, icols, irows)
         )
         out = erase + self._grid.render()

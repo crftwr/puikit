@@ -1,13 +1,18 @@
 # PuiKit Images — Design
 
 Images follow the same rule as everything else: the app states an **intent** —
-this file, fitted this way — and the backend decides how, or whether, to realize
-it. What makes images interesting is that "whether" has three answers, not two:
-a GUI backend draws real pixels, *some terminals* draw real pixels through an
-out-of-band protocol, and the rest stamp an alt glyph.
+this picture, fitted this way — and the backend decides how, or whether, to
+realize it. What makes images interesting is that "whether" has three answers,
+not two: a GUI backend draws real pixels, *some terminals* draw real pixels
+through an out-of-band protocol, and the rest stamp an alt glyph.
 
-`puikit/image.py` (geometry) · `puikit/widgets/image.py` (`ImageView`) ·
-`puikit/backends/_terminal_graphics.py` (terminal protocols) · capability
+A source is a **path** or a **`RasterImage`** (§8), and `image_formats()` (§5) is
+how an application learns which of the two a given file wants to be.
+
+`puikit/image.py` (geometry, `RasterImage`, `source_key`) ·
+`puikit/widgets/image.py` (`ImageView`) ·
+`puikit/backends/_terminal_graphics.py` (terminal protocols) ·
+`puikit/backends/_image_cache.py` (the GUI backends' budgeted LRU) · capability
 `images`
 
 ---
@@ -119,16 +124,84 @@ every emulator implementing these protocols, so the trade is worth it.
 **Pillow is optional.** It is what crops (for the pan/zoom `src` hint) and
 re-encodes; without it, a terminal falls back to what it can do unaided.
 
+### What a scroll step actually costs
+
+`render()` is called again whenever the cell box or the source crop changes, and
+a scroll and a zoom both do that on every step. So a step's cost is what matters,
+and it is not distributed the way one would guess. Measured on a 12-megapixel
+JPEG scaled into a terminal window:
+
+| stage | ms/step |
+|---|---|
+| open + decode | 7.3 |
+| crop + LANCZOS resample | 27.4 |
+| PNG encode | 0.4 |
+| kitty / iTerm2 wire encode | ~0 |
+| sixel wire encode | 7.3 |
+
+**The resample dominates**, and the decode is the part that looks expensive.
+Both are addressed, in different ways.
+
+**Decoded sources are cached** by `source_key`, in `_terminal_graphics._decoded`
+— byte-budgeted (`ImageCache`), because what is held is the picture at its
+original size, so "how many" says nothing about how much. Module-level and
+shared: two backends looking at one file should not decode it twice.
+`clear_cache()`, called from each TUI backend's `close()`, is how the session
+ends. The mode conversion (paletted GIF, CMYK TIFF → RGB/RGBA) moved into the
+decode, so it too happens once per source rather than once per frame.
+
+**The resample reduces first.** `Image.resize(..., reducing_gap=2.0)` lets
+Pillow average the image down by an integer factor until it is within 2× of the
+target, then runs LANCZOS from there. On a downscale that is 3.7× faster; on an
+image of pure high-frequency noise — the worst case, since a reducing pre-pass
+is what aliases detail — it differs from a plain LANCZOS by a mean of 0.87/255.
+It engages only on large downscales, which is both the slow case and the one
+where fidelity matters least: an image fitted to a window is a thumbnail, and
+zooming in shrinks the reduction factor until the pre-pass stops running at all.
+
+**The crop is a real crop**, not `resize(box=...)`. They are not the same
+picture: a resample handed a box reaches *outside* it for the filter's support,
+so a region taken from the middle of an image comes back fringed with whatever
+it was next to — visible as contamination at the edges of a zoomed, panned view.
+Cropping first makes those pixels not exist, and costs one copy of the region,
+a fraction of the resample it feeds.
+
+End to end, 12 scroll steps of that photo through a clip:
+
+| | before | after |
+|---|---|---|
+| kitty / iTerm2 | 262 ms | 51 ms |
+| sixel | 44 ms | 12 ms |
+
+Above this sit the two caches the backends keep: `_encoded` (the wire payload
+for one picture in one cell box) and `_sixel_sources` (one image's palette and
+per-band column bits, from which `encode_rect` cuts the visible rectangle, so a
+vertical scroll reuses prepared bands outright). A picture that neither moves
+nor changes costs nothing at all per frame — see `_emit_images`.
+
 ---
 
-## 5. Per-backend decode
+## 5. Per-backend decode, and `image_formats()`
 
-| Backend | Path |
-|---|---|
-| macOS | `NSImage` — reports **points**, not pixels (see §3) |
-| Windows | WIC decode, then **manual alpha premultiply** with numpy — neither WIC's converter nor `CreateBitmap` will do it. See [`windows_backend.md`](windows_backend.md) §4 |
-| Web | The browser decodes; the replayer draws to canvas |
-| Curses | `_terminal_graphics.py`, or the alt glyph |
+| Backend | Decoder | `image_formats()` comes from |
+|---|---|---|
+| macOS | `NSImage` / ImageIO — `NSImage.size` reports **points**, not pixels (see §3), so `image_size` reads the stored pixel size from `CGImageSourceCopyPropertiesAtIndex` instead | `NSImage.imageFileTypes()`, minus the Classic OSType codes it mixes in |
+| Windows | WIC decode, then **manual alpha premultiply** with numpy — neither WIC's converter nor `CreateBitmap` will do it. See [`windows_backend.md`](windows_backend.md) §4 | the installed WIC decoders, enumerated (`CreateComponentEnumerator`) |
+| Web | The browser decodes; the replayer draws to canvas | a fixed list — the decoder is on the far end of the socket and cannot be asked |
+| VT / curses | `_terminal_graphics.py`, or the alt glyph | Pillow's own registry, plugins included, **plus the OS decoder** (§9) |
+
+`image_formats()` answers **"which extensions do you draw from a path?"** and is
+empty by default — which claims nothing, and must never be read as "nothing
+works".
+
+It exists because the answer is a property of the *running system*, not of the
+format. ImageIO reads HEIC, camera RAW and JPEG XL on any current macOS. On
+Windows the same formats arrive as Microsoft Store extensions the user may not
+have, so the honest answer differs between two machines running the same build.
+On a terminal it is whatever Pillow plugins happen to be installed. An
+application that can decode a picture itself asks rather than assumes: a listed
+suffix travels as a path, with no decode on its side and no pixels copied, and an
+unlisted one is its own to open and hand over as a `RasterImage`.
 
 ---
 
@@ -146,11 +219,10 @@ re-encodes; without it, a terminal falls back to what it can do unaided.
 ## 7. Document sources: `base_dir` and `http(s)://` (`MarkdownView`)
 
 A backend opens image *files*; the path string travels from widget to backend
-untouched, and it is also the cache key in four places (the macOS/Windows
-decoded-image dicts, the web backend's sent-asset set, the `image_size` LRU).
-Both facts pin where document-level sources get resolved: **in the widget,
-before layout**, so `measure_image` and `draw_image` read the same real file
-and no backend learns URLs exist.
+untouched, and it is what every cache in the pipeline is keyed through
+(`source_key`, §8). Both facts pin where document-level sources get resolved:
+**in the widget, before layout**, so `measure_image` and `draw_image` read the
+same real file and no backend learns URLs exist.
 
 - **Relative paths.** `MarkdownView(..., base_dir=...)` resolves a relative
   `![alt](docs/a.png)` against the document's own directory — `from_file`
@@ -168,3 +240,108 @@ and no backend learns URLs exist.
   and picked up by the next natural draw as a last resort. A failed download
   is remembered for the life of the process, like the Windows backend's
   negative decode cache, not re-attempted every layout pass.
+
+---
+
+## 8. `RasterImage`: pixels without a file
+
+A path is the fast lane — every backend has a decoder behind it — but it is only
+ever a *file*. An application that produced its pixels some other way (a format
+the backend's decoder does not know, a frame it rendered, bytes that never
+touched a disk) used to have exactly one way to hand them over: write a PNG back
+out and pass its name. That is an encode and a decode to move data the backend
+was about to be given.
+
+`RasterImage(width, height, data)` is the other thing every `draw_image`,
+`image_size` and `measure_image` accepts.
+
+**The buffer is straight-alpha RGBA8**, tightly packed, top-left origin, stride
+`width * 4`. Straight rather than premultiplied because that is what a decoder
+hands over — Pillow's `tobytes()` on an `RGBA` image is already exactly this, and
+so is every other library's. Windows needs premultiplied BGRA and pays a swizzle
+for it; that is the cheaper trade than making every producer premultiply for a
+backend it cannot see.
+
+**Identity, not content, is what caches key on.** `source_key(source)` returns
+`("raster", identity, revision)` for a raster and `("path", path, mtime, size)`
+for a file. Content hashing is the obvious identity for a raster and the wrong
+one: an application that paints into its buffer changes it every frame, and
+hashing megabytes per frame costs more than the work the cache exists to avoid.
+So a raster names itself, and says when it changed — `update()` or `touch()`. A
+producer that writes through `data` without calling `touch()` is the one way to
+get a stale picture on screen.
+
+Keying the *path* case by `(mtime, size)` rather than by the name alone closed a
+bug of its own: the same path holds different pixels after a rebuild or a
+thumbnail refresh, and a name-keyed cache kept serving the old picture until it
+happened to be evicted.
+
+**Per backend.** macOS builds an `NSBitmapImageRep` with
+`NSBitmapFormatAlphaNonpremultiplied` and pins the `NSImage`'s size to pixels, so
+a raster measures the same here as everywhere else. Windows skips WIC and goes
+straight to the RGBA→BGRA swizzle, the premultiply and `CreateBitmap` — the
+second half of the path it already ran. The terminals wrap the buffer with
+`Image.frombuffer` instead of `Image.open`, which makes a re-crop of a magnified
+picture *cheaper* than the path case, where every zoom step re-decoded the file.
+The web backend is the one place a PNG encode is unavoidable: it is the wire
+format the browser reads.
+
+**The caches are budgeted.** The macOS and Windows decoded-image dicts used to be
+unbounded, which was defensible while only files could land in them. A raster
+admits a 24-megapixel photo as ~100MB of RGBA, so both now use
+`_image_cache.ImageCache`: an LRU spending a byte budget, evicting least-recently
+used first, telling the backend so it can release a native handle, and never
+evicting an entry to make room for itself — an image larger than the whole budget
+is still drawn, and still cached, alone.
+
+---
+
+## 9. Borrowing the OS decoder (`_platform_image`)
+
+§5 says `image_formats()` is a property of the running system. That is true of a
+GUI backend and *not* true of a terminal, and the difference is a bug.
+
+A terminal's decoder is Pillow, because Pillow is what produces pixels for the
+sixel and kitty encoders. So a terminal on macOS reported it could not read a
+HEIC — while ImageIO sat in the same process reading HEIC perfectly well. Same
+machine, same file, and the answer depended on which backend happened to be
+drawing. `Backend.image_formats()` was being asked two questions at once:
+
+1. *which formats can you draw from a path?* — a backend question, and the one
+   the fast lane needs
+2. *which formats can this machine decode at all?* — never a backend question
+
+`puikit/_platform_image.py` is the second one asked separately. It is not a
+Backend, knows nothing about drawing, and hands back a `RasterImage`:
+
+| | decoder | needs |
+|---|---|---|
+| macOS | `NSBitmapImageRep`, i.e. ImageIO | AppKit only — no Quartz, so a terminal session pays one framework |
+| Windows | WIC — the same calls `WindowsBackend` makes | no render target, so it works with no window at all |
+| elsewhere | none | — |
+
+`_terminal_graphics` uses it in two places: `extensions()` unions it with
+Pillow's registry, and `_open()` falls through to it when Pillow refuses a file.
+Nothing above changes — a terminal simply reports, truthfully, that it can draw
+a HEIC, and the picture takes the ordinary path fast lane.
+
+**8-bit RGB and RGBA only.** A 16-bit or CMYK image is declined rather than
+converted. The cheap conversions do not exist: a `CGBitmapContext` refuses
+straight alpha outright, so the obvious macOS route returns premultiplied pixels
+and turns `(255, 255, 255, 8)` into `(8, 8, 8, 8)`. And the shape of a buffer
+does not say what is in it — a CMYK TIFF is also 8 bits per sample, also four
+samples, also 32 bits per pixel, and reading one as RGBX yields a picture in the
+wrong colours with nothing reporting a problem. The colour space is checked, not
+inferred.
+
+**COM apartments are per thread**, which this made matter for the first time.
+`_ensure_com_initialized` kept a process-global "done" flag, which was invisible
+while every COM call happened on the one UI thread; an application that asks
+which formats exist from a worker (a directory scan deciding what counts as an
+image) and decodes from the thread that draws would have left the second thread
+in no apartment at all. The flag and the WIC factory are both thread-local now.
+
+**Cost.** The enumeration imports a platform framework, so it is deferred to the
+first question rather than done at import. On macOS that is ~65ms once, and only
+for a terminal — a GUI backend has AppKit loaded already. On Linux it is one
+`sys.platform` test.

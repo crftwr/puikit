@@ -354,7 +354,7 @@ def test_oversized_image_is_clipped_to_the_screen(kitty_backend):
     # the bottom (over the status bar, etc.). The source is cropped to match.
     kitty_backend._stdscr = _FakeScreen()  # 80 cols x 24 rows
     kitty_backend.draw_image(10, 20, "img.png", {"w": 30, "h": 30, "src": None})
-    x, y, cols, rows, _, src = next(iter(kitty_backend._images.values()))
+    x, y, cols, rows, _, src, _ = next(iter(kitty_backend._images.values()))
     assert (x, y, cols, rows) == (10, 20, 30, 4)  # 30 rows -> 4 (screen bottom)
     assert src == pytest.approx((0.0, 0.0, 1.0, 4 / 30))  # only the visible top
 
@@ -363,7 +363,7 @@ def test_image_clipped_to_a_pushed_clip_rect(kitty_backend):
     kitty_backend._stdscr = _FakeScreen()
     kitty_backend.push_clip(0, 0, 40, 15)  # a pane
     kitty_backend.draw_image(5, 5, "img.png", {"w": 50, "h": 50})
-    x, y, cols, rows, _, _ = next(iter(kitty_backend._images.values()))
+    x, y, cols, rows, _, _, _ = next(iter(kitty_backend._images.values()))
     assert (x, y, cols, rows) == (5, 5, 35, 10)  # trimmed to the pane
 
 
@@ -391,9 +391,9 @@ def test_object_fits_resolve_distinctly_on_the_terminal(kitty_backend, tmp_path)
         kitty_backend.draw_image(5, 1, scene, {"w": 30, "h": 20, "fit": fit})
         return next(iter(kitty_backend._images.values()))
 
-    fx, fy, fcols, frows, _, fsrc = place("fill")
-    cx, cy, ccols, crows, _, csrc = place("contain")
-    vx, vy, vcols, vrows, _, vsrc = place("cover")
+    fx, fy, fcols, frows, _, fsrc, _ = place("fill")
+    cx, cy, ccols, crows, _, csrc, _ = place("contain")
+    vx, vy, vcols, vrows, _, vsrc, _ = place("cover")
 
     # fill: whole image, whole box.
     assert (fcols, frows) == (30, 20) and fsrc == (0.0, 0.0, 1.0, 1.0)
@@ -569,3 +569,143 @@ def test_close_erases_images_left_on_screen(kitty_backend, quadrants):
         pass  # the rest of close() needs a real terminal; the erase came first
     # Images live outside the grid, so endwin() would leave them in scrollback.
     assert "a=d" in buffer.getvalue()
+
+
+# --- the decoded-source cache ------------------------------------------------
+#
+# render() is called again whenever the cell box or the source crop changes, and
+# a scroll and a zoom both do that on every step. What it must not do is read
+# and decode the file again each time — nor, having cached it, serve pixels that
+# are no longer what the source holds.
+
+
+@pytest.fixture(autouse=True)
+def clean_decode_cache():
+    """The cache is module-level and shared; keep it out of every other test."""
+    tg.clear_cache()
+    yield
+    tg.clear_cache()
+
+
+def _decode_counter(monkeypatch):
+    """Counts real decodes, by watching the one call that performs one."""
+    from PIL import Image
+
+    calls = []
+    real = Image.open
+
+    def counting(*args, **kwargs):
+        calls.append(args[0] if args else None)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(Image, "open", counting)
+    return calls
+
+
+def test_a_file_is_decoded_once_however_often_it_is_rendered(quadrants, monkeypatch):
+    calls = _decode_counter(monkeypatch)
+    for step in range(6):
+        # A different crop each time, as a zoom step gives: every one of these
+        # is a cache miss for the *rendered* result and must still not re-read
+        # the file.
+        tg.render(quadrants, 12, 6, src=(0.0, 0.0, 1.0 - step * 0.1, 1.0))
+    assert len(calls) == 1
+
+
+def test_a_file_rewritten_in_place_is_decoded_again(tmp_path, monkeypatch):
+    from PIL import Image
+
+    path = tmp_path / "thumb.png"
+    Image.new("RGB", (16, 16), (255, 0, 0)).save(path)
+    first, _ = tg.render(str(path), 8, 8)
+    assert first.getpixel((0, 0))[:3] == (255, 0, 0)
+
+    # Same name, different pixels — a thumbnail refreshed, a build artifact
+    # rewritten. Caching on the name alone would keep serving the old picture.
+    Image.new("RGB", (16, 16), (0, 0, 255)).save(path)
+    second, _ = tg.render(str(path), 8, 8)
+    assert second.getpixel((0, 0))[:3] == (0, 0, 255)
+
+
+def test_a_raster_painted_into_is_decoded_again():
+    from puikit.image import RasterImage
+
+    raster = RasterImage(4, 4, bytes((255, 0, 0, 255)) * 16)
+    first, _ = tg.render(raster, 4, 4)
+    assert first.getpixel((0, 0))[:3] == (255, 0, 0)
+
+    raster.update(4, 4, bytes((0, 0, 255, 255)) * 16)
+    second, _ = tg.render(raster, 4, 4)
+    assert second.getpixel((0, 0))[:3] == (0, 0, 255)
+
+
+def test_a_source_that_cannot_be_read_is_attempted_once(tmp_path, monkeypatch):
+    # Otherwise a missing file is re-opened on every frame, forever.
+    calls = _decode_counter(monkeypatch)
+    missing = str(tmp_path / "gone.png")
+    assert tg.render(missing, 4, 4) is None
+    assert tg.render(missing, 4, 4) is None
+    assert len(calls) == 1
+
+
+def test_the_cache_spends_a_budget_not_a_count(monkeypatch, tmp_path):
+    from PIL import Image
+
+    # One picture far larger than the whole budget still renders, and still
+    # caches — alone. Refusing it would refuse exactly the images that most
+    # need a cache.
+    monkeypatch.setattr(tg, "_decoded", tg.ImageCache(budget=4096))
+    path = tmp_path / "big.png"
+    Image.new("RGB", (400, 400), (10, 20, 30)).save(path)
+    assert tg.render(str(path), 20, 20) is not None
+    assert len(tg._decoded) == 1
+    assert tg._decoded.nbytes > 4096
+
+
+def test_clearing_the_cache_makes_the_next_render_decode_again(quadrants, monkeypatch):
+    calls = _decode_counter(monkeypatch)
+    tg.render(quadrants, 12, 6)
+    tg.clear_cache()
+    tg.render(quadrants, 12, 6)
+    assert len(calls) == 2
+
+
+def test_the_cached_image_is_not_damaged_by_rendering_it(quadrants):
+    # render() crops, converts and resamples, and hands what it produced to an
+    # encoder; every one of those has to produce a new image rather than change
+    # the one being kept. At its natural size render() returns the cached object
+    # itself, so an encoder that wrote to it would poison every later frame.
+    image, png = tg.render(quadrants, 24, 12)
+    tg.prepare_sixel(image)                       # quantizes; must not mutate
+    tg.encode("kitty", image, png, 4, 2, 1)
+    tg.render(quadrants, 6, 3, src=(0.5, 0.5, 0.5, 0.5))
+
+    again, _ = tg.render(quadrants, 24, 12)
+    assert again.size == (24, 12)
+    assert again.mode in ("RGB", "RGBA")
+    assert again.getpixel((0, 0))[:3] == (255, 0, 0)     # top-left still red
+    assert again.getpixel((23, 11))[:3] == (255, 255, 0)  # bottom-right yellow
+
+
+def test_a_crop_never_shows_what_was_next_to_it(quadrants):
+    # The reason the crop is a real crop and not ``resize(box=...)``: a resample
+    # handed a box reaches outside it for the filter's support, so a region
+    # taken from the middle of an image comes back fringed with its neighbours.
+    # Scaled down hard enough for a reducing pre-pass to run, which is where
+    # that contamination would be widest.
+    image, _ = tg.render(quadrants, 4, 2, src=(0.5, 0.5, 0.5, 0.5))
+    assert [color for _, color in image.getcolors()] == [(255, 255, 0)]
+
+
+def test_a_paletted_source_is_converted_once(tmp_path, monkeypatch):
+    # The conversion moved from after the crop to the decode, so a GIF is
+    # converted for its whole life rather than on every frame. What must not
+    # change is that the encoders still see RGB or RGBA.
+    from PIL import Image
+
+    path = tmp_path / "flag.gif"
+    Image.new("P", (16, 16)).save(path)
+    for _ in range(3):
+        image, _ = tg.render(str(path), 8, 8)
+        assert image.mode in ("RGB", "RGBA")
+    assert len(tg._decoded) == 1

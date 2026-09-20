@@ -35,9 +35,11 @@ from AppKit import (
     NSAttributedString,
     NSBackingStoreBuffered,
     NSBezierPath,
+    NSBitmapImageRep,
     NSColor,
     NSCursor,
     NSDate,
+    NSDeviceRGBColorSpace,
     NSDefaultRunLoopMode,
     NSDragOperationCopy,
     NSDragOperationLink,
@@ -135,6 +137,8 @@ except ImportError:  # pragma: no cover - older/partial PyObjC
     CATransaction = None
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, ScreenMarker, Style, TextAttribute, WindowHandle, WindowStyle, _run_tick_callbacks, is_transparent
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
+from ..image import is_raster, source_key
+from ._image_cache import MISS, ImageCache
 from ..easing import resolve as _resolve_easing
 from ..event import Event, EventType, char_key_event
 from ..font import Font, FontMetrics, FontWeight
@@ -162,6 +166,18 @@ try:
 except ImportError:  # animation gracefully degrades to immediate switches
     _HAS_QUARTZ = False
     _DEVICE_RGB = None
+
+try:
+    # ImageIO, reached through Quartz's bridge. Only the metadata probe in
+    # _imageio_pixel_size needs it; without it that falls back to the
+    # dependency-free header parse, which knows four formats instead of sixty.
+    from Quartz import (
+        CGImageSourceCopyPropertiesAtIndex,
+        CGImageSourceCreateWithURL,
+    )
+except ImportError:  # pragma: no cover - older/partial PyObjC
+    CGImageSourceCopyPropertiesAtIndex = None
+    CGImageSourceCreateWithURL = None
 
 #: Vignette falloff, in units of the rect's half-extent after an aspect-correct
 #: CTM scale (see _render_vignette): clear out to _INNER, fully dark by _OUTER.
@@ -716,6 +732,72 @@ def _fill_rect(rect, color) -> None:
         NSRectFillUsingOperation(rect, NSCompositingOperationSourceOver)
     else:
         NSRectFill(rect)
+
+
+#: ``NSBitmapImageRep`` format flag for straight (non-premultiplied) alpha —
+#: ``NSBitmapFormatAlphaNonpremultiplied``. Spelled out rather than imported
+#: because the name is missing from some PyObjC builds, and the value is fixed
+#: by the framework.
+_NS_ALPHA_NON_PREMULTIPLIED = 2
+
+def _imageio_pixel_size(path: Any) -> tuple[int, int] | None:
+    """``(width, height)`` in stored pixels, from ImageIO's metadata alone — no
+    frame is decoded. ``None`` when the file cannot be read or is not an image
+    ImageIO knows."""
+    if CGImageSourceCreateWithURL is None:
+        return None
+    try:
+        url = NSURL.fileURLWithPath_(str(path))
+        source = CGImageSourceCreateWithURL(url, None)
+        if source is None:
+            return None
+        properties = CGImageSourceCopyPropertiesAtIndex(source, 0, None)
+        if not properties:
+            return None
+        width = properties.get("PixelWidth")
+        height = properties.get("PixelHeight")
+        if not width or not height:
+            return None
+        return (int(width), int(height))
+    except Exception:
+        return None
+
+
+def _image_from_raster(raster: Any) -> Any:
+    """An ``NSImage`` over a :class:`~puikit.image.RasterImage`'s pixels.
+
+    The rep is built straight-alpha (``NSBitmapFormatAlphaNonpremultiplied``),
+    which is the format the raster promises, so nothing has to be swizzled or
+    scaled on the way in — pyobjc copies the buffer once and that is the whole
+    cost.
+
+    The image's *size* is then set in pixels explicitly. An ``NSImage`` built
+    from a rep otherwise takes its size from the rep's DPI, and everything above
+    this line — the fit math, the ``src`` crop — works in whatever units
+    ``NSImage.size`` reports. Pinning points to pixels is what keeps a raster
+    measuring the same on this backend as it does on every other."""
+    try:
+        data = bytes(raster.data)
+        rep = NSBitmapImageRep.alloc().initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bitmapFormat_bytesPerRow_bitsPerPixel_(
+            (data, None, None, None, None),
+            raster.width,
+            raster.height,
+            8,
+            4,
+            True,
+            False,
+            NSDeviceRGBColorSpace,
+            _NS_ALPHA_NON_PREMULTIPLIED,
+            raster.width * 4,
+            32,
+        )
+        if rep is None:
+            return None
+        image = NSImage.alloc().initWithSize_(NSMakeSize(raster.width, raster.height))
+        image.addRepresentation_(rep)
+        return image
+    except Exception:
+        return None
 
 
 def _wallpaper_rect(bounds, image_size, fit: str):
@@ -1832,12 +1914,20 @@ class MacOSBackend(Backend):
         # are bounded (resolved faces by _style_fonts, glyphs by the scripts
         # actually drawn).
         self._glyph_metric_cache: dict[int, dict[str, tuple[float, float, float]]] = {}
-        # Decoded images keyed by path. Without this, _render_image decoded a
-        # fresh NSImage from disk on every frame for every visible image; the
-        # AppKit/CoreGraphics backing-store caches behind those accumulate as
-        # animations drive repeated redraws (a native memory leak invisible to
-        # Python object counts). Bounded by the number of distinct image paths.
-        self._image_cache: dict[str, Any] = {}
+        # Decoded images keyed by source identity (puikit.image.source_key).
+        # Without this, _render_image decoded a fresh NSImage from disk on every
+        # frame for every visible image; the AppKit/CoreGraphics backing-store
+        # caches behind those accumulate as animations drive repeated redraws (a
+        # native memory leak invisible to Python object counts).
+        #
+        # Keyed by identity rather than by path for two reasons that arrived
+        # together: a path names a location, and the same location holds
+        # different pixels after a rebuild — so a path-keyed cache drew the old
+        # picture — and a RasterImage has no path at all. Budgeted rather than
+        # merely bounded for the same second reason: a decoded 24-megapixel
+        # photo is ~100 MB of RGBA, and "one entry per distinct source" is no
+        # longer a small number of megabytes.
+        self._image_cache = ImageCache()
         self._animations: dict[int, Animation] = {}  # keyed by id(widget)
         self._anim_timer = None
         self._anim_timer_interval: float | None = None  # rate of the live timer
@@ -2885,8 +2975,8 @@ class MacOSBackend(Backend):
         glyph = _ICON_GLYPHS.get(icon_name, "❓")
         self._back.append(("text", x, y, glyph, style))
 
-    def draw_image(self, x: int, y: int, path: str, hints: dict[str, Any] | None = None) -> None:
-        self._back.append(("image", x, y, path, hints or {}))
+    def draw_image(self, x: int, y: int, source: Any, hints: dict[str, Any] | None = None) -> None:
+        self._back.append(("image", x, y, source, hints or {}))
 
     def present(self) -> None:
         self._front = self._back
@@ -3704,13 +3794,10 @@ class MacOSBackend(Backend):
         thumb_color.setFill()
         NSRectFill(NSMakeRect(track.origin.x, thumb_y, track.size.width, thumb_h))
 
-    def _render_image(self, x: int, y: int, path: str, hints: dict[str, Any]) -> None:
-        image = self._image_cache.get(path)
+    def _render_image(self, x: int, y: int, source: Any, hints: dict[str, Any]) -> None:
+        image = self._load_image(source)
         if image is None:
-            image = NSImage.alloc().initWithContentsOfFile_(path)
-            if image is None:
-                return
-            self._image_cache[path] = image
+            return
         iw, ih = image.size().width, image.size().height
         w_units = hints.get("w", max(1, round(iw / self._base_w)))
         h_units = hints.get("h", max(1, round(ih / self._base_h)))
@@ -3729,6 +3816,62 @@ class MacOSBackend(Backend):
             True,
             None,
         )
+
+    def _load_image(self, source: Any) -> Any:
+        """The cached ``NSImage`` for a path or a
+        :class:`~puikit.image.RasterImage`, or ``None`` when it cannot be built.
+
+        A failure is cached too — as ``None`` — so a missing or undecodable
+        source is attempted once rather than once per frame, which is the same
+        bargain the Windows backend strikes."""
+        key = source_key(source)
+        cached = self._image_cache.get(key)
+        if cached is not MISS:
+            return cached
+        if is_raster(source):
+            image = _image_from_raster(source)
+            weight = source.nbytes
+        else:
+            image = NSImage.alloc().initWithContentsOfFile_(source)
+            size = image.size() if image is not None else None
+            weight = int(size.width * size.height * 4) if size is not None else 0
+        self._image_cache.put(key, image, weight)
+        return image
+
+    def image_size(self, source: Any) -> tuple[int, int] | None:
+        """The image's size in **pixels**, read through ImageIO.
+
+        The base class parses the file header itself and knows four formats;
+        ImageIO knows every format this backend can draw, which is what makes the
+        size available for a HEIC or a camera RAW — and an unknown size is what
+        an application reads as "I cannot show this", so the two answers have to
+        agree about what is drawable.
+
+        Pixels, not points: ``CGImageSourceCopyPropertiesAtIndex`` reports the
+        stored dimensions without decoding a single one of them, where
+        ``NSImage.size`` would report the file's DPI-scaled *point* size and make
+        a 144-DPI photo measure half its real width."""
+        if is_raster(source):
+            return source.size
+        size = _imageio_pixel_size(source)
+        return size if size is not None else super().image_size(source)
+
+    def image_formats(self) -> frozenset[str]:
+        """The file extensions AppKit's own image loader reads — ImageIO's list,
+        which on a current macOS runs to HEIC, AVIF, JPEG XL, DICOM and every
+        major camera RAW alongside the ordinary formats.
+
+        Asked of the system rather than written down here, because it *is* a
+        property of the system: the same question on the same code answers
+        differently on a newer macOS, and that is the answer an application
+        deciding whether it must decode a file itself needs.
+
+        The same list :mod:`puikit._platform_image` answers with, because it is
+        the same decoder — here it happens to be the backend's own, and there it
+        is borrowed by a backend that has none of its own (a terminal)."""
+        from .._platform_image import extensions
+
+        return extensions()
 
     def _fit_rects(self, fit: str, target, iw: float, ih: float, src=None):
         """Destination and source rects for an object-fit. The geometry lives

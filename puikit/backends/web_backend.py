@@ -195,6 +195,52 @@ class _Face:
         self.grid_tiles: dict[str, bool] = {}
 
 
+#: Image formats every current browser engine decodes. The web backend hands
+#: the client raw bytes in a data URL and the page's ``<img>`` does the reading,
+#: so this is a statement about browsers, not about anything running here.
+_BROWSER_IMAGE_FORMATS = frozenset({
+    ".png", ".apng", ".jpg", ".jpeg", ".jfif", ".gif", ".webp", ".avif",
+    ".bmp", ".ico", ".cur", ".svg",
+})
+
+
+def _asset_id(source: Any) -> str:
+    """The id the client files an image's bytes under.
+
+    Built from the source's identity (``puikit.image.source_key``) rather than
+    its path: the same path holds different pixels after a rebuild, and a
+    ``RasterImage`` holds different pixels after it is painted into. Either way
+    the id changes, the bytes are sent again, and the client draws the picture
+    that is actually there."""
+    from ..image import source_key
+
+    key = source_key(source)
+    if key[0] == "raster":
+        return f"raster:{key[1]}:{key[2]}"
+    _, path, mtime, size = key
+    return str(path) if mtime is None else f"{path}#{mtime}:{size}"
+
+
+def _png_bytes(raster: Any) -> bytes | None:
+    """A raster encoded as PNG — the one place in the toolkit where handing
+    decoded pixels to a backend still costs an encode, because PNG *is* the wire
+    format here. Needs Pillow, and returns ``None`` without it (the frame then
+    references an asset the client does not hold and draws nothing, the same as
+    an unreadable file)."""
+    import io
+
+    try:
+        image = raster.to_pillow()
+    except Exception:
+        return None
+    buffer = io.BytesIO()
+    try:
+        image.save(buffer, format="PNG")
+    except Exception:
+        return None
+    return buffer.getvalue()
+
+
 class WebBackend(Backend):
     PROFILE = PROFILE_WEB
 
@@ -533,8 +579,19 @@ class WebBackend(Backend):
     ) -> None:
         self._back.append(("sbar", x, y, h, pos, ratio, style, orientation))
 
-    def draw_image(self, x: int, y: int, path: str, hints: dict[str, Any] | None = None) -> None:
-        self._back.append(("image", x, y, path, hints or {}))
+    def draw_image(self, x: int, y: int, source: Any, hints: dict[str, Any] | None = None) -> None:
+        self._back.append(("image", x, y, source, hints or {}))
+
+    def image_formats(self) -> frozenset[str]:
+        """What a browser decodes from the bytes this backend hands it.
+
+        A fixed list rather than a probe, because the decoder is on the other end
+        of the socket: the page's ``<img>`` is what reads the asset, and there is
+        no way to ask it in advance. These are the formats every current engine
+        supports; anything else the application decodes itself and sends as a
+        :class:`~puikit.image.RasterImage`, which arrives here as a PNG the
+        browser is certain to read."""
+        return _BROWSER_IMAGE_FORMATS
 
     def push_clip(self, x: float, y: float, w: float, h: float) -> None:
         self._back.append(("clip", x, y, w, h))
@@ -727,8 +784,8 @@ class WebBackend(Backend):
     def _ser_image(self, cmd, ops):
         from ..image import CONTAIN, COVER, contain_box, cover_source
 
-        _, x, y, path, hints = cmd
-        size = self.image_size(path)
+        _, x, y, source, hints = cmd
+        size = self.image_size(source)
         if size is None:
             return
         iw, ih = size
@@ -750,7 +807,7 @@ class WebBackend(Backend):
         elif fit == COVER and src is None:
             sx, sy, sw, sh = cover_source(iw, ih, tw, th)
         alpha = float(hints.get("alpha", 1.0))
-        ops.append(["img", path, sx, sy, sw, sh, dx, dy, dw, dh, alpha])
+        ops.append(["img", _asset_id(source), sx, sy, sw, sh, dx, dy, dw, dh, alpha])
 
     # --- present ----------------------------------------------------------
 
@@ -775,19 +832,35 @@ class WebBackend(Backend):
         )
         server.send(json.dumps({"type": "frame", "w": w, "h": h, "ops": ops}))
 
-    def _ensure_image(self, path: str) -> None:
-        if path in self._sent_images or self._server is None:
+    def _ensure_image(self, source: Any) -> None:
+        """Make sure the client holds the bytes this frame is about to
+        reference, sending them once under :func:`_asset_id`.
+
+        Keyed on the source's identity rather than its name, so a file rewritten
+        under the same path is re-sent instead of the client redrawing the copy
+        it was given first — and so a raster that was painted into arrives again
+        with its new pixels."""
+        from ..image import is_raster
+
+        asset = _asset_id(source)
+        if asset in self._sent_images or self._server is None:
             return
-        self._sent_images.add(path)
-        try:
-            with open(path, "rb") as fh:
-                data = fh.read()
-        except OSError:
-            return
-        ext = os.path.splitext(path)[1].lstrip(".").lower() or "png"
-        mime = "jpeg" if ext in ("jpg", "jpeg") else ext
+        self._sent_images.add(asset)
+        if is_raster(source):
+            data = _png_bytes(source)
+            if data is None:
+                return
+            mime = "png"
+        else:
+            try:
+                with open(source, "rb") as fh:
+                    data = fh.read()
+            except (OSError, TypeError, ValueError):
+                return
+            ext = os.path.splitext(source)[1].lstrip(".").lower() or "png"
+            mime = "jpeg" if ext in ("jpg", "jpeg") else ext
         url = f"data:image/{mime};base64," + base64.b64encode(data).decode()
-        self._server.send(json.dumps({"type": "asset", "id": path, "url": url}))
+        self._server.send(json.dumps({"type": "asset", "id": asset, "url": url}))
 
     # --- system integration ------------------------------------------------
 

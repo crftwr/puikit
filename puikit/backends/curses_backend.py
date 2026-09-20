@@ -17,7 +17,6 @@ from ..backend import Backend, Color, DEFAULT_STYLE, EventHandler, Style, TextAt
 from ..capability import CapabilityProfile, PROFILE_TUI
 from ..event import Event, EventType, char_key_event
 from ..image import CONTAIN, COVER, contain_box, cover_source
-from ..image import image_size as _natural_size
 from ..text import display_width as _display_width
 from ..text import glyph_runs as _glyph_runs
 from ..text import is_emoji_glyph as _is_emoji_glyph
@@ -399,10 +398,11 @@ class CursesBackend(Backend):
         # targets the terminal; fall back to ``sys.stdout`` only if it is missing
         # (pythonw / embedded). Overridable in tests.
         self._raw_out = sys.__stdout__ or sys.stdout
-        # Images drawn this frame and last, as {id: (col, row, cols, rows, path,
-        # src)}. present() diffs them: a placement that moved or vanished must be
-        # erased, which curses' cell diff cannot see (it has no idea pixels were
-        # painted over its grid). See _present_images.
+        # Images drawn this frame and last, as {id: (col, row, cols, rows,
+        # source, src, source_key)}. present() diffs them: a placement that
+        # moved, changed picture or vanished must be erased, which curses' cell
+        # diff cannot see (it has no idea pixels were painted over its grid).
+        # See _present_images.
         self._images: dict[int, tuple] = {}
         self._prev_images: dict[int, tuple] = {}
         # Cell pixel size, resolved lazily on first image draw (TIOCGWINSZ), so a
@@ -574,6 +574,9 @@ class CursesBackend(Backend):
         curses.echo()
         curses.endwin()
         self._stdscr = None
+        # See VTBackend.close: the decoded-image cache outlives a frame on
+        # purpose, but not the session.
+        _terminal_graphics.clear_cache()
 
     @contextlib.contextmanager
     def suspended(self):
@@ -1251,8 +1254,31 @@ class CursesBackend(Backend):
                 self.draw_text(x, y + row, _LOWER_BLOCKS[_SUBCELL - eighths],
                                Style(fg=track, bg=thumb))
 
+    def image_size(self, source: Any) -> tuple[int, int] | None:
+        """The base class's answer, then Pillow's.
+
+        The dependency-free header parse knows PNG, GIF, BMP and JPEG; Pillow —
+        which is this backend's decoder — knows everything it can draw. Asking
+        only the first would report "unknown" for a WebP this terminal renders
+        perfectly well, and an unknown size is what an application reads as a
+        picture it cannot show."""
+        size = super().image_size(source)
+        if size is not None or self._term_graphics is None:
+            return size
+        return _terminal_graphics.natural_size(source)
+
+    def image_formats(self) -> frozenset[str]:
+        """Whatever Pillow can open — see
+        :meth:`puikit.backends.vt_backend.VTBackend.image_formats`, which this
+        mirrors for the same reason: every placement here is rendered by
+        ``_terminal_graphics``, so Pillow's registry *is* the answer. Empty
+        without an inline-image protocol."""
+        if self._term_graphics is None:
+            return frozenset()
+        return _terminal_graphics.extensions()
+
     def draw_image(
-        self, x: int, y: int, path: str, hints: dict[str, Any] | None = None
+        self, x: int, y: int, source: Any, hints: dict[str, Any] | None = None
     ) -> None:
         """Record an inline-image placement for this frame.
 
@@ -1282,7 +1308,7 @@ class CursesBackend(Backend):
         #   cover   -> crop the image to the box aspect, then fill
         if src is None:
             fit = hints.get("fit", "fill")
-            size = _natural_size(path) if fit in (CONTAIN, COVER) else None
+            size = self.image_size(source) if fit in (CONTAIN, COVER) else None
             if size is not None:
                 iw, ih = size
                 cw, ch = self.base_pixel_size
@@ -1324,10 +1350,14 @@ class CursesBackend(Backend):
         # Ids start at 1 (kitty treats 0 as "unspecified") and are assigned in
         # draw order, so the same screen redrawn reuses the same ids.
         image_id = len(self._images) + 1
-        self._images[image_id] = (x, y, cols, rows, path, src)
+        # The source's cache key rides along so staleness sees a RasterImage
+        # that was painted into between frames: the object is the same, and only
+        # its revision says the picture is not.
+        self._images[image_id] = (x, y, cols, rows, source, src,
+                                  _terminal_graphics.source_key(source))
         _terminal_graphics.debug(
             f"[draw_image] id={image_id} cell=({x},{y}) size=({cols}x{rows}) "
-            f"src={src} path={path}"
+            f"src={src} source={source}"
         )
 
     @staticmethod
@@ -1407,14 +1437,14 @@ class CursesBackend(Backend):
         # a single save/restore around the batch is enough.
         self._raw_out.write("\x1b7")
         try:
-            for image_id, (x, y, cols, rows, path, src) in fresh.items():
+            for image_id, (x, y, cols, rows, source, src, _key) in fresh.items():
                 rendered = _terminal_graphics.render(
-                    path, cols * cell_w, rows * cell_h, src
+                    source, cols * cell_w, rows * cell_h, src
                 )
                 if rendered is None:
                     _terminal_graphics.debug(
                         f"[present]   id={image_id} render()=None (Pillow could "
-                        f"not open {path}) — skipped"
+                        f"not open {source}) — skipped"
                     )
                     continue
                 image, png = rendered

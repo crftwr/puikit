@@ -22,6 +22,16 @@ from puikit.backends.vt_backend import VTBackend, _StreamConsole, _win_mouse_rec
 from puikit.event import EventType
 
 
+def _placement(x, y, cols, rows, source):
+    """One entry of ``VTBackend._images``, built the way ``draw_image`` builds
+    it: the placement, then the source's cache key, which is what makes a
+    changed picture at an unchanged position compare unequal."""
+    from puikit.image import source_key
+
+    return (x, y, cols, rows, source, None, (x, y, cols, rows, None),
+            source_key(source))
+
+
 class FakeConsole(_StreamConsole):
     def __init__(self, width=40, height=10):
         super().__init__(stream=io.StringIO(), size=(width, height))
@@ -226,8 +236,11 @@ def test_placement_is_recorded_with_its_cell_box(backend):
     be._term_graphics = "sixel"
     be.clear()
     be.draw_image(3, 2, "pic.png", {"w": 6, "h": 4})
+    from puikit.image import source_key
+
     assert be._images == {1: (3, 2, 6, 4, "pic.png", (0.0, 0.0, 1.0, 1.0),
-                          (3, 2, 6, 4, (0.0, 0.0, 1.0, 1.0)))}
+                          (3, 2, 6, 4, (0.0, 0.0, 1.0, 1.0)),
+                          source_key("pic.png"))}
 
 
 def test_placement_is_clipped_to_the_enclosing_clip(backend):
@@ -239,7 +252,7 @@ def test_placement_is_clipped_to_the_enclosing_clip(backend):
     be.push_clip(0, 0, 5, 3)
     be.draw_image(0, 0, "pic.png", {"w": 10, "h": 8})
     be.pop_clip()
-    x, y, cols, rows, _path, src, _full = be._images[1]
+    x, y, cols, rows, _source, src, _full, _key = be._images[1]
     assert (cols, rows) == (5, 3)
     assert src[2] == pytest.approx(0.5)   # source cropped to the visible half
     assert src[3] == pytest.approx(0.375)
@@ -264,7 +277,7 @@ def test_a_vanished_image_invalidates_only_its_own_cells(backend):
     be.clear()
     be.draw_text(0, 0, "x" * 40)
     be.draw_text(0, 9, "keep me")
-    be._images = {1: (2, 1, 4, 3, "pic.png", None, (2, 1, 4, 3, None))}
+    be._images = {1: _placement(2, 1, 4, 3, "pic.png")}
     be.present()
     be.clear()                      # next frame draws no image at all
     be.draw_text(0, 0, "x" * 40)
@@ -280,7 +293,7 @@ def test_a_vanished_image_invalidates_only_its_own_cells(backend):
 def test_unchanged_placement_is_not_retransmitted(backend):
     be, con = backend
     be._term_graphics = "sixel"
-    placement = (0, 0, 2, 2, "pic.png", None, (0, 0, 2, 2, None))
+    placement = _placement(0, 0, 2, 2, "pic.png")
     be.clear()
     be._images = {1: placement}
     be.present()
@@ -335,7 +348,7 @@ def test_an_overpainted_image_is_resent_even_though_it_did_not_move(backend, png
     # frame re-sends lands on top of the pixels and erases them.
     be, con = backend
     be._term_graphics = "sixel"
-    placement = (0, 0, 6, 3, png, None, (0, 0, 6, 3, None))
+    placement = _placement(0, 0, 6, 3, png)
     be.clear()
     be.draw_text(0, 0, "button")
     be._images = {1: placement}
@@ -353,7 +366,7 @@ def test_an_untouched_image_is_still_not_resent(backend, png):
     # only genuinely overpainted placements pay.
     be, con = backend
     be._term_graphics = "sixel"
-    placement = (0, 0, 4, 2, png, None, (0, 0, 4, 2, None))
+    placement = _placement(0, 0, 4, 2, png)
     be.clear()
     be.draw_text(0, 8, "far away")
     be._images = {1: placement}
@@ -370,7 +383,7 @@ def test_a_first_placement_is_emitted_at_its_cell(backend, png):
     be, con = backend
     be._term_graphics = "sixel"
     be.clear()
-    be._images = {1: (4, 2, 3, 2, png, None, (4, 2, 3, 2, None))}
+    be._images = {1: _placement(4, 2, 3, 2, png)}
     con.written.clear()
     be.present()
     out = "".join(con.written)
@@ -388,7 +401,7 @@ def test_erasing_a_stale_image_also_clears_the_row_below(backend):
     be.clear()
     be.draw_text(0, 0, "x" * 20)
     be.draw_text(0, 5, "row below the image")
-    be._images = {1: (0, 1, 4, 3, "pic.png", None, (0, 1, 4, 3, None))}
+    be._images = {1: _placement(0, 1, 4, 3, "pic.png")}
     be.present()
     be.clear()                       # next frame: the image is gone
     be.draw_text(0, 0, "x" * 20)
@@ -399,3 +412,92 @@ def test_erasing_a_stale_image_also_clears_the_row_below(backend):
     # Row 5 (1-based) is one past the footprint's last row (rows 2..4) and must
     # be re-sent even though its text is unchanged.
     assert "\x1b[5;1H" in out, out[:200]
+
+
+# --- decoded pixels as a source -------------------------------------------
+#
+# The other thing draw_image takes: a RasterImage the application decoded
+# itself, for a format no backend reads. What is worth checking on this side is
+# not the picture (test_raster_image covers the decode) but the diff: a raster
+# is the one source that can change *without* the placement changing, because it
+# is the same object holding different bytes.
+
+def test_a_raster_is_drawn_without_a_file_anywhere(backend):
+    from puikit.image import RasterImage
+
+    pytest.importorskip("PIL")
+    be, con = backend
+    be._term_graphics = "sixel"
+    be.clear()
+    be.draw_image(0, 0, RasterImage(4, 4, bytes((200, 30, 30, 255)) * 16),
+                  {"w": 4, "h": 2})
+    con.written.clear()
+    be.present()
+    assert "\x1b7" in "".join(con.written)
+
+
+def test_a_repainted_raster_is_re_emitted_where_it_stands(backend):
+    # The case a placement tuple alone cannot see: same object, same position,
+    # different pixels. Without the source's revision in the tuple the frame
+    # compares equal and the screen keeps the picture from before the edit.
+    from puikit.image import RasterImage
+
+    pytest.importorskip("PIL")
+    be, con = backend
+    be._term_graphics = "sixel"
+
+    raster = RasterImage(4, 4, bytes((200, 30, 30, 255)) * 16)
+    for _ in range(2):
+        be.clear()
+        be.draw_image(0, 0, raster, {"w": 4, "h": 2})
+        be.present()
+
+    con.written.clear()
+    be.clear()
+    raster.update(4, 4, bytes((30, 30, 200, 255)) * 16)   # painted into
+    be.draw_image(0, 0, raster, {"w": 4, "h": 2})
+    be.present()
+    assert "\x1b7" in "".join(con.written)
+
+
+def test_a_still_raster_is_not_re_emitted(backend):
+    # The counterpart: a raster nobody wrote to costs nothing per frame, or a
+    # viewer showing one would re-encode it forever.
+    from puikit.image import RasterImage
+
+    pytest.importorskip("PIL")
+    be, con = backend
+    be._term_graphics = "sixel"
+
+    raster = RasterImage(4, 4, bytes((200, 30, 30, 255)) * 16)
+    for _ in range(2):
+        be.clear()
+        be.draw_image(0, 0, raster, {"w": 4, "h": 2})
+        be.present()
+
+    con.written.clear()
+    be.clear()
+    be.draw_image(0, 0, raster, {"w": 4, "h": 2})
+    be.present()
+    assert "\x1b7" not in "".join(con.written)
+
+
+def test_a_file_rewritten_under_the_same_name_is_re_emitted(backend, png, tmp_path):
+    # The same gap on the path side, and the reason source_key stats the file
+    # rather than trusting its name: a thumbnail refreshed in place, or a build
+    # artifact rewritten, is a different picture at an unchanged placement.
+    from PIL import Image
+
+    be, con = backend
+    be._term_graphics = "sixel"
+    for _ in range(2):
+        be.clear()
+        be.draw_image(0, 0, png, {"w": 4, "h": 2})
+        be.present()
+
+    Image.new("RGB", (40, 30), (10, 10, 200)).save(png)
+    con.written.clear()
+    be.clear()
+    be.draw_image(0, 0, png, {"w": 4, "h": 2})
+    be.present()
+    assert "\x1b7" in "".join(con.written)
