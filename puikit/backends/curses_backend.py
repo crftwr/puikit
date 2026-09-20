@@ -574,6 +574,9 @@ class CursesBackend(Backend):
         curses.echo()
         curses.endwin()
         self._stdscr = None
+        # See VTBackend.close: the decoded-image cache outlives a frame on
+        # purpose, but not the session.
+        _terminal_graphics.clear_cache()
 
     @contextlib.contextmanager
     def suspended(self):

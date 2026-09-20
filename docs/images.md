@@ -124,6 +124,61 @@ every emulator implementing these protocols, so the trade is worth it.
 **Pillow is optional.** It is what crops (for the pan/zoom `src` hint) and
 re-encodes; without it, a terminal falls back to what it can do unaided.
 
+### What a scroll step actually costs
+
+`render()` is called again whenever the cell box or the source crop changes, and
+a scroll and a zoom both do that on every step. So a step's cost is what matters,
+and it is not distributed the way one would guess. Measured on a 12-megapixel
+JPEG scaled into a terminal window:
+
+| stage | ms/step |
+|---|---|
+| open + decode | 7.3 |
+| crop + LANCZOS resample | 27.4 |
+| PNG encode | 0.4 |
+| kitty / iTerm2 wire encode | ~0 |
+| sixel wire encode | 7.3 |
+
+**The resample dominates**, and the decode is the part that looks expensive.
+Both are addressed, in different ways.
+
+**Decoded sources are cached** by `source_key`, in `_terminal_graphics._decoded`
+— byte-budgeted (`ImageCache`), because what is held is the picture at its
+original size, so "how many" says nothing about how much. Module-level and
+shared: two backends looking at one file should not decode it twice.
+`clear_cache()`, called from each TUI backend's `close()`, is how the session
+ends. The mode conversion (paletted GIF, CMYK TIFF → RGB/RGBA) moved into the
+decode, so it too happens once per source rather than once per frame.
+
+**The resample reduces first.** `Image.resize(..., reducing_gap=2.0)` lets
+Pillow average the image down by an integer factor until it is within 2× of the
+target, then runs LANCZOS from there. On a downscale that is 3.7× faster; on an
+image of pure high-frequency noise — the worst case, since a reducing pre-pass
+is what aliases detail — it differs from a plain LANCZOS by a mean of 0.87/255.
+It engages only on large downscales, which is both the slow case and the one
+where fidelity matters least: an image fitted to a window is a thumbnail, and
+zooming in shrinks the reduction factor until the pre-pass stops running at all.
+
+**The crop is a real crop**, not `resize(box=...)`. They are not the same
+picture: a resample handed a box reaches *outside* it for the filter's support,
+so a region taken from the middle of an image comes back fringed with whatever
+it was next to — visible as contamination at the edges of a zoomed, panned view.
+Cropping first makes those pixels not exist, and costs one copy of the region,
+a fraction of the resample it feeds.
+
+End to end, 12 scroll steps of that photo through a clip:
+
+| | before | after |
+|---|---|---|
+| kitty / iTerm2 | 262 ms | 51 ms |
+| sixel | 44 ms | 12 ms |
+
+Above this sit the two caches the backends keep: `_encoded` (the wire payload
+for one picture in one cell box) and `_sixel_sources` (one image's palette and
+per-band column bits, from which `encode_rect` cuts the visible rectangle, so a
+vertical scroll reuses prepared bands outright). A picture that neither moves
+nor changes costs nothing at all per frame — see `_emit_images`.
+
 ---
 
 ## 5. Per-backend decode, and `image_formats()`

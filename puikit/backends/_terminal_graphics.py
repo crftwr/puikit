@@ -141,6 +141,7 @@ def detect_protocol(env: dict[str, str] | None = None) -> str | None:
 #: source was never a terminal concern. Kept importable here because that is
 #: where every caller in the toolkit already reaches for it.
 from ..image import source_key  # noqa: E402,F401  (re-export)
+from ._image_cache import MISS, ImageCache  # noqa: E402
 
 
 def cell_pixels(fd: int | None = None) -> tuple[float, float] | None:
@@ -213,29 +214,121 @@ def natural_size(path: Any) -> tuple[int, int] | None:
         return None
 
 
+#: Decoded source images, by identity, under a byte budget.
+#:
+#: :func:`render` is called again whenever the cell box or the source crop
+#: changes, which a scroll and a zoom both do constantly, and each call re-read
+#: and re-decoded the file. Measured on a 12-megapixel JPEG that was 7.3ms of
+#: every step; on an 800x600 screenshot scrolling through a Markdown document,
+#: 0.7ms. Neither is the largest part of a step (the resample is — see
+#: :data:`_REDUCING_GAP`), but both are pure repetition: the pixels behind a
+#: source cannot change without its identity changing, which is exactly what
+#: ``source_key`` is for.
+#:
+#: Budgeted rather than counted, unlike the caches the backends keep, because
+#: what is held here is the picture at its *original* size: one 24-megapixel
+#: photo is ~72MB where a screenshot is ~1.4MB, so "how many" says nothing about
+#: how much. Module-level, and shared: two backends looking at the same file
+#: should not decode it twice. :func:`clear_cache` is how a backend says nobody
+#: is looking any more.
+_DECODED_BUDGET = 64 * 1024 * 1024
+
+_decoded = ImageCache(budget=_DECODED_BUDGET)
+
+#: How far Pillow may reduce an image by simple averaging before the real
+#: resampling filter runs (``Image.resize``'s ``reducing_gap``): the pre-pass
+#: stops once the image is within this factor of the target, and LANCZOS
+#: finishes from there.
+#:
+#: It only engages on a large *downscale*, which is precisely the slow case —
+#: and, conveniently, the one where fidelity matters least: an image fitted to a
+#: terminal window is a thumbnail, and zooming in shrinks the reduction factor
+#: until the pre-pass stops happening at all. So the approximation is largest
+#: where the picture is smallest on screen, and gone where the user is looking
+#: closely.
+#:
+#: Measured, resampling a 4000x2400 crop to 480x320 of an image made of pure
+#: high-frequency noise — the worst case there is, since a reducing pre-pass is
+#: what aliases detail:
+#:
+#: =========  ======  ================================
+#: gap        time    difference from a plain LANCZOS
+#: =========  ======  ================================
+#: (none)     27.9ms  —
+#: 1.1         4.2ms  mean 2.95/255, max 23
+#: **2.0**     7.6ms  mean 0.87/255, max 21
+#: 3.0        11.9ms  mean 0.43/255, max 12
+#: =========  ======  ================================
+#:
+#: 2.0 is the knee. A mean of under one part in 255 is below what a terminal can
+#: show at all — sixel quantizes to 256 colours on top of it — for 3.7x the
+#: speed, and a real photograph is far gentler than the test image.
+_REDUCING_GAP = 2.0
+
+
+def clear_cache() -> None:
+    """Drop the decoded-image cache. A backend calls this when it closes: the
+    cache outlives any one frame on purpose, but not the session — an embedding
+    application that shuts its TUI down should not be left holding the last
+    photograph anyone looked at."""
+    _decoded.clear()
+
+
+def _weight(image: Any) -> int:
+    """What a decoded image costs, in bytes of pixel data — the currency
+    :data:`_decoded` spends. Bands, not a fixed 4, because RGB is three
+    quarters of RGBA and both are common."""
+    try:
+        return image.width * image.height * len(image.getbands())
+    except Exception:
+        return 0
+
+
 def _open(source: Any):
-    """The Pillow image for a source, loaded, or ``None`` when it cannot be
-    read. A :class:`~puikit.image.RasterImage` wraps its own buffer with no
-    decode at all — which is the point of accepting one: a viewer re-cropping a
-    magnified picture comes back through here on every zoom step, and a path
-    would be re-opened and re-decoded each time."""
+    """The decoded source image in ``RGB`` or ``RGBA``, or ``None`` when it
+    cannot be read — **cached by identity, and to be treated as read-only.**
+
+    A :class:`~puikit.image.RasterImage` wraps its own buffer with no decode at
+    all; a path is opened once and kept (see :data:`_decoded`). A failure is
+    kept too, so an unreadable source is attempted once rather than once per
+    frame.
+
+    The mode conversion happens *here* rather than after the crop, which is
+    where it used to be, so that a paletted GIF or a CMYK TIFF is converted once
+    for its whole life instead of once per frame — and so that the crop can be
+    folded into the resample, which needs a resamplable mode to begin with. An
+    animated GIF or multi-frame TIFF still renders its first frame.
+    """
     from ..image import is_raster
 
     try:
         from PIL import Image
     except ImportError:
         return None
+    key = source_key(source)
+    cached = _decoded.get(key)
+    if cached is not MISS:
+        return cached
+    image = None
     if is_raster(source):
         try:
-            return source.to_pillow()
+            image = source.to_pillow()
         except Exception:
-            return None
-    try:
-        image = Image.open(source)
-        image.load()
-        return image
-    except Exception:
-        return None
+            image = None
+    else:
+        try:
+            image = Image.open(source)
+            image.load()
+        except Exception:
+            image = None
+    if image is not None and image.mode not in ("RGB", "RGBA"):
+        try:
+            image = image.convert(
+                "RGBA" if "A" in image.mode or image.mode == "P" else "RGB")
+        except Exception:
+            image = None
+    _decoded.put(key, image, _weight(image))
+    return image
 
 
 def render(
@@ -263,22 +356,20 @@ def render(
     image = _open(source)
     if image is None:
         return None
+    box = None
     if src is not None:
         # Scale the normalized crop by Pillow's true pixel size (the same
         # fractions the GUI backends scale by their own image size).
         fx, fy, fw, fh = src
         sx, sy = int(round(fx * image.width)), int(round(fy * image.height))
         sw, sh = max(1, int(round(fw * image.width))), max(1, int(round(fh * image.height)))
-        box = (
+        crop = (
             max(0, sx), max(0, sy),
             min(image.width, sx + sw), min(image.height, sy + sh),
         )
-        if box[2] > box[0] and box[3] > box[1]:
-            image = image.crop(box)
-    # An animated GIF / multi-frame TIFF renders its first frame; a paletted or
-    # CMYK source becomes RGB(A) so both encoders see a uniform pixel format.
-    if image.mode not in ("RGB", "RGBA"):
-        image = image.convert("RGBA" if "A" in image.mode or image.mode == "P" else "RGB")
+        if crop[2] > crop[0] and crop[3] > crop[1]:
+            box = crop
+    region = ((box[2] - box[0], box[3] - box[1]) if box is not None else image.size)
     px_w, px_h = max(1, int(px_w)), max(1, int(px_h))
     if src is not None:
         # A crop was requested: the caller sized it to match this pixel box's
@@ -286,17 +377,24 @@ def render(
         # would leave a within-box letterbox that the terminal top-left-aligns,
         # so the blank space piles up at the bottom instead of splitting evenly
         # around a centered image. Any residual distortion is sub-cell.
-        if (image.width, image.height) != (px_w, px_h):
-            image = image.resize((px_w, px_h), Image.LANCZOS)
+        target = (px_w, px_h)
     else:
         # No crop (the size-unknown fallback): show the whole image letterboxed,
         # aspect preserved, downscaling only.
-        scale = min(px_w / image.width, px_h / image.height)
-        if scale < 1.0:
-            image = image.resize(
-                (max(1, int(image.width * scale)), max(1, int(image.height * scale))),
-                Image.LANCZOS,
-            )
+        scale = min(px_w / region[0], px_h / region[1])
+        target = ((max(1, int(region[0] * scale)), max(1, int(region[1] * scale)))
+                  if scale < 1.0 else region)
+    if box is not None:
+        # Cropped first, deliberately, rather than handed to ``resize`` as its
+        # ``box``. The two are not the same picture: a resample given a box
+        # reaches *outside* it for the filter's support, so a crop drawn from
+        # the middle of an image carries a fringe of whatever it was next to —
+        # visible as contamination at the edges of a zoomed, panned view. A real
+        # crop makes those pixels not exist. It costs one copy of the region,
+        # which is a fraction of the resample below.
+        image = image.crop(box)
+    if target != image.size:
+        image = image.resize(target, Image.LANCZOS, reducing_gap=_REDUCING_GAP)
     import io
 
     buffer = io.BytesIO()

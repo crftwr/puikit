@@ -299,6 +299,13 @@ class VTBackend(Backend):
     def close(self) -> None:
         self._console.close()
         self._grid = None
+        # The decoded-image cache is the module's, not this backend's, and
+        # nothing else is looking at it once the TUI is down. An embedding
+        # application that opens a terminal and closes it again should not be
+        # left holding the last photograph anyone scrolled past.
+        self._encoded.clear()
+        self._sixel_sources.clear()
+        _terminal_graphics.clear_cache()
 
     @contextlib.contextmanager
     def suspended(self):
