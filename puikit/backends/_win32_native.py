@@ -938,8 +938,11 @@ ole32.CoCreateInstance.argtypes = [
 #     CreateBitmapFromSource[18], CreateBitmapFromSourceRect[19],
 #     CreateBitmapFromMemory[20], CreateBitmapFromHBITMAP[21],
 #     CreateBitmapFromHICON[22], CreateComponentEnumerator[23]).
-# The first two are verified live; the enumerator is used only by
-# wic_decoder_extensions, which fails soft.
+# All three verified live (Windows 11 26200). The enumerator was checked by
+# walking it with IWICComponentInfo::GetFriendlyName[10] alongside
+# GetFileExtensions[17] and reading the pairs: fourteen decoders, each name
+# agreeing with its own extensions, which a wrong index could not produce —
+# it would splice in some other method's return value.
 _IDX_WIC_FACTORY_CREATE_DECODER_FROM_FILENAME = 3
 _IDX_WIC_FACTORY_CREATE_FORMAT_CONVERTER = 10
 _IDX_WIC_FACTORY_CREATE_COMPONENT_ENUMERATOR = 23
@@ -952,7 +955,7 @@ _IDX_ENUM_UNKNOWN_NEXT = 3
 #     GetVendorGUID[7], GetVersion[8], GetSpecVersion[9], GetFriendlyName[10],
 #     GetContainerFormat[11], GetPixelFormats[12], GetColorManagementVersion[13],
 #     GetDeviceManufacturer[14], GetDeviceModels[15], GetMimeTypes[16],
-#     GetFileExtensions[17]).
+#     GetFileExtensions[17]) — 17 verified live, 10 alongside it as the check.
 _IDX_WIC_CODEC_INFO_GET_FILE_EXTENSIONS = 17
 
 #: What CreateComponentEnumerator is asked for: decoders only, default options.
@@ -1125,6 +1128,10 @@ def wic_decoder_extensions(factory: ComPtr) -> frozenset[str]:
     Fails soft — an empty set — because it is an optimization hint, not a
     prerequisite: a caller that gets nothing decodes its own pictures, which
     works everywhere and is merely slower.
+
+    Measured on Windows 11 26200 with the HEIF, HEVC, Raw, WebP and AV1
+    extensions installed: fourteen decoders, 65 extensions. The enumeration ends
+    on ``S_FALSE`` with ``fetched == 0``, which is what the loop above stops on.
     """
     enum_out = ctypes.c_void_p()
     hr = factory.call(
@@ -1166,6 +1173,12 @@ def wic_decoder_extensions(factory: ComPtr) -> frozenset[str]:
             if not info:
                 continue
             try:
+                # Lowercased because the codecs disagree with each other about
+                # case: most answer ".png", ".bmp", but Microsoft's Raw Image
+                # Decoder and JPEG XL Decoder answer ".CR2", ".NEF", ".JXL".
+                # Verified on Windows 11 26200. Drop the .lower() and those two
+                # decoders' formats — every camera RAW, and JPEG XL — silently
+                # stop matching the suffixes a caller asks about.
                 for ext in _wic_codec_extensions(info).split(","):
                     ext = ext.strip().lower()
                     if ext.startswith(".") and len(ext) > 1:
