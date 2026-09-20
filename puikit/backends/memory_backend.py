@@ -196,7 +196,12 @@ class MemoryBackend(Backend):
         self._events: deque[Event] = deque()
         self._quit_requested = False
         self.icon_calls: list[tuple[int, int, str]] = []
-        self.image_calls: list[tuple[float, float, str, dict[str, Any]]] = []
+        self.image_calls: list[tuple[float, float, Any, dict[str, Any]]] = []
+        #: What :meth:`image_formats` answers. Empty by default, like any
+        #: backend that has not declared a decoder; a test that exercises an
+        #: application's "does the backend read this format, or must I decode it
+        #: myself?" branch sets it to the extensions it wants claimed.
+        self.supported_image_formats: frozenset[str] = frozenset()
         self.round_rect_calls: list[tuple] = []
         self.check_calls: list[tuple] = []
         self.chevron_calls: list[tuple] = []
@@ -642,8 +647,13 @@ class MemoryBackend(Backend):
     def draw_icon(self, x: int, y: int, icon_name: str, style: Style = DEFAULT_STYLE) -> None:
         self.icon_calls.append((x, y, icon_name))
 
-    def draw_image(self, x: int, y: int, path: str, hints: dict[str, Any] | None = None) -> None:
-        self.image_calls.append((x, y, path, hints or {}))
+    def draw_image(self, x: int, y: int, source: Any, hints: dict[str, Any] | None = None) -> None:
+        # Recorded verbatim, path or RasterImage alike: a test asserting which
+        # of the two an application handed over is exactly the point.
+        self.image_calls.append((x, y, source, hints or {}))
+
+    def image_formats(self) -> frozenset[str]:
+        return self.supported_image_formats
 
     def present(self) -> None:
         self.present_count += 1

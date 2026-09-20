@@ -15,6 +15,16 @@ from puikit.backends.vt_backend import VTBackend, _StreamConsole, _win_key_recor
 from puikit.event import EventType
 
 
+def _placement(x, y, cols, rows, source):
+    """One entry of ``VTBackend._images``, built the way ``draw_image`` builds
+    it: the placement, then the source's cache key, which is what makes a
+    changed picture at an unchanged position compare unequal."""
+    from puikit.image import source_key
+
+    return (x, y, cols, rows, source, None, (x, y, cols, rows, None),
+            source_key(source))
+
+
 class FakeConsole(_StreamConsole):
     def __init__(self, width=40, height=10):
         super().__init__(stream=io.StringIO(), size=(width, height))
@@ -235,7 +245,7 @@ def test_resume_retransmits_images(backend, tmp_path):
 
     be, con = backend
     be._term_graphics = "sixel"
-    placement = (0, 0, 2, 2, str(png), None, (0, 0, 2, 2, None))
+    placement = _placement(0, 0, 2, 2, str(png))
     # Two frames, so the placement is genuinely "unchanged" by the second.
     for _ in range(2):
         be.clear()

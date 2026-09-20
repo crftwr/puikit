@@ -1,13 +1,18 @@
 # PuiKit Images — Design
 
 Images follow the same rule as everything else: the app states an **intent** —
-this file, fitted this way — and the backend decides how, or whether, to realize
-it. What makes images interesting is that "whether" has three answers, not two:
-a GUI backend draws real pixels, *some terminals* draw real pixels through an
-out-of-band protocol, and the rest stamp an alt glyph.
+this picture, fitted this way — and the backend decides how, or whether, to
+realize it. What makes images interesting is that "whether" has three answers,
+not two: a GUI backend draws real pixels, *some terminals* draw real pixels
+through an out-of-band protocol, and the rest stamp an alt glyph.
 
-`puikit/image.py` (geometry) · `puikit/widgets/image.py` (`ImageView`) ·
-`puikit/backends/_terminal_graphics.py` (terminal protocols) · capability
+A source is a **path** or a **`RasterImage`** (§8), and `image_formats()` (§5) is
+how an application learns which of the two a given file wants to be.
+
+`puikit/image.py` (geometry, `RasterImage`, `source_key`) ·
+`puikit/widgets/image.py` (`ImageView`) ·
+`puikit/backends/_terminal_graphics.py` (terminal protocols) ·
+`puikit/backends/_image_cache.py` (the GUI backends' budgeted LRU) · capability
 `images`
 
 ---
@@ -121,14 +126,27 @@ re-encodes; without it, a terminal falls back to what it can do unaided.
 
 ---
 
-## 5. Per-backend decode
+## 5. Per-backend decode, and `image_formats()`
 
-| Backend | Path |
-|---|---|
-| macOS | `NSImage` — reports **points**, not pixels (see §3) |
-| Windows | WIC decode, then **manual alpha premultiply** with numpy — neither WIC's converter nor `CreateBitmap` will do it. See [`windows_backend.md`](windows_backend.md) §4 |
-| Web | The browser decodes; the replayer draws to canvas |
-| Curses | `_terminal_graphics.py`, or the alt glyph |
+| Backend | Decoder | `image_formats()` comes from |
+|---|---|---|
+| macOS | `NSImage` / ImageIO — `NSImage.size` reports **points**, not pixels (see §3), so `image_size` reads the stored pixel size from `CGImageSourceCopyPropertiesAtIndex` instead | `NSImage.imageFileTypes()`, minus the Classic OSType codes it mixes in |
+| Windows | WIC decode, then **manual alpha premultiply** with numpy — neither WIC's converter nor `CreateBitmap` will do it. See [`windows_backend.md`](windows_backend.md) §4 | the installed WIC decoders, enumerated (`CreateComponentEnumerator`) |
+| Web | The browser decodes; the replayer draws to canvas | a fixed list — the decoder is on the far end of the socket and cannot be asked |
+| VT / curses | `_terminal_graphics.py`, or the alt glyph | Pillow's own registry, plugins included |
+
+`image_formats()` answers **"which extensions do you draw from a path?"** and is
+empty by default — which claims nothing, and must never be read as "nothing
+works".
+
+It exists because the answer is a property of the *running system*, not of the
+format. ImageIO reads HEIC, camera RAW and JPEG XL on any current macOS. On
+Windows the same formats arrive as Microsoft Store extensions the user may not
+have, so the honest answer differs between two machines running the same build.
+On a terminal it is whatever Pillow plugins happen to be installed. An
+application that can decode a picture itself asks rather than assumes: a listed
+suffix travels as a path, with no decode on its side and no pixels copied, and an
+unlisted one is its own to open and hand over as a `RasterImage`.
 
 ---
 
@@ -146,11 +164,10 @@ re-encodes; without it, a terminal falls back to what it can do unaided.
 ## 7. Document sources: `base_dir` and `http(s)://` (`MarkdownView`)
 
 A backend opens image *files*; the path string travels from widget to backend
-untouched, and it is also the cache key in four places (the macOS/Windows
-decoded-image dicts, the web backend's sent-asset set, the `image_size` LRU).
-Both facts pin where document-level sources get resolved: **in the widget,
-before layout**, so `measure_image` and `draw_image` read the same real file
-and no backend learns URLs exist.
+untouched, and it is what every cache in the pipeline is keyed through
+(`source_key`, §8). Both facts pin where document-level sources get resolved:
+**in the widget, before layout**, so `measure_image` and `draw_image` read the
+same real file and no backend learns URLs exist.
 
 - **Relative paths.** `MarkdownView(..., base_dir=...)` resolves a relative
   `![alt](docs/a.png)` against the document's own directory — `from_file`
@@ -168,3 +185,56 @@ and no backend learns URLs exist.
   and picked up by the next natural draw as a last resort. A failed download
   is remembered for the life of the process, like the Windows backend's
   negative decode cache, not re-attempted every layout pass.
+
+---
+
+## 8. `RasterImage`: pixels without a file
+
+A path is the fast lane — every backend has a decoder behind it — but it is only
+ever a *file*. An application that produced its pixels some other way (a format
+the backend's decoder does not know, a frame it rendered, bytes that never
+touched a disk) used to have exactly one way to hand them over: write a PNG back
+out and pass its name. That is an encode and a decode to move data the backend
+was about to be given.
+
+`RasterImage(width, height, data)` is the other thing every `draw_image`,
+`image_size` and `measure_image` accepts.
+
+**The buffer is straight-alpha RGBA8**, tightly packed, top-left origin, stride
+`width * 4`. Straight rather than premultiplied because that is what a decoder
+hands over — Pillow's `tobytes()` on an `RGBA` image is already exactly this, and
+so is every other library's. Windows needs premultiplied BGRA and pays a swizzle
+for it; that is the cheaper trade than making every producer premultiply for a
+backend it cannot see.
+
+**Identity, not content, is what caches key on.** `source_key(source)` returns
+`("raster", identity, revision)` for a raster and `("path", path, mtime, size)`
+for a file. Content hashing is the obvious identity for a raster and the wrong
+one: an application that paints into its buffer changes it every frame, and
+hashing megabytes per frame costs more than the work the cache exists to avoid.
+So a raster names itself, and says when it changed — `update()` or `touch()`. A
+producer that writes through `data` without calling `touch()` is the one way to
+get a stale picture on screen.
+
+Keying the *path* case by `(mtime, size)` rather than by the name alone closed a
+bug of its own: the same path holds different pixels after a rebuild or a
+thumbnail refresh, and a name-keyed cache kept serving the old picture until it
+happened to be evicted.
+
+**Per backend.** macOS builds an `NSBitmapImageRep` with
+`NSBitmapFormatAlphaNonpremultiplied` and pins the `NSImage`'s size to pixels, so
+a raster measures the same here as everywhere else. Windows skips WIC and goes
+straight to the RGBA→BGRA swizzle, the premultiply and `CreateBitmap` — the
+second half of the path it already ran. The terminals wrap the buffer with
+`Image.frombuffer` instead of `Image.open`, which makes a re-crop of a magnified
+picture *cheaper* than the path case, where every zoom step re-decoded the file.
+The web backend is the one place a PNG encode is unavoidable: it is the wire
+format the browser reads.
+
+**The caches are budgeted.** The macOS and Windows decoded-image dicts used to be
+unbounded, which was defensible while only files could land in them. A raster
+admits a 24-megapixel photo as ~100MB of RGBA, so both now use
+`_image_cache.ImageCache`: an LRU spending a byte budget, evicting least-recently
+used first, telling the backend so it can release a native handle, and never
+evicting an entry to make room for itself — an image larger than the whole budget
+is still drawn, and still cached, alone.

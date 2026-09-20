@@ -136,6 +136,13 @@ def detect_protocol(env: dict[str, str] | None = None) -> str | None:
     return None
 
 
+#: Re-exported from :mod:`puikit.image`, where it moved once the GUI backends
+#: began keying their own caches through it too — the identity of an image
+#: source was never a terminal concern. Kept importable here because that is
+#: where every caller in the toolkit already reaches for it.
+from ..image import source_key  # noqa: E402,F401  (re-export)
+
+
 def cell_pixels(fd: int | None = None) -> tuple[float, float] | None:
     """Pixel size of one character cell as ``(w, h)``, from the kernel's window
     size (``TIOCGWINSZ``'s ``ws_xpixel``/``ws_ypixel``), or ``None`` when the
@@ -163,71 +170,98 @@ def cell_pixels(fd: int | None = None) -> tuple[float, float] | None:
     return (xpixel / cols, ypixel / rows)
 
 
-def source_key(source: Any) -> tuple:
-    """A cache identity for an image source: ``(kind, identity..., revision)``.
+def extensions() -> frozenset[str]:
+    """The file extensions :func:`render` can open — Pillow's own registry of
+    formats it has a *decoder* for, plugins included, so a ``pillow-heif`` or
+    ``pillow-jxl-plugin`` an application installed shows up here without this
+    module knowing either exists. Empty without Pillow, which is the truth: the
+    terminal backends draw nothing at all then.
 
-    Backends cache expensive per-image work — a decoded, scaled, quantized
-    picture, or a fully encoded payload — and must be able to tell when the
-    pixels behind a source have changed.
-
-    **A path alone is not that identity.** It names a location, and the same
-    location holds different pixels after a rebuild, a thumbnail refresh, or a
-    file replaced mid-copy; a path-keyed cache then serves the old picture until
-    it happens to be evicted. So a file source is identified by its path plus the
-    modification time and size — one ``stat`` per emission, nothing beside the
-    decode it protects.
-
-    That is the same bound every mtime-based invalidation lives with: two writes
-    close enough to land on one filesystem timestamp, producing a file of the
-    same size, are indistinguishable. Content hashing would close it and costs
-    more than the decode it guards, so it is not worth paying here; a source that
-    needs exactness names its own revision instead, below.
-
-    The tuple shape exists so a **raster** source — pixel data handed straight to
-    the backend, as a photo editor would, rather than a file on disk — slots in
-    without any cache having to change. Content hashing is the obvious identity
-    and the wrong one: an editor mutates its buffer between frames, and hashing
-    megabytes per frame costs more than the encode being avoided. Such a source
-    instead names itself, exposing a ``cache_key`` of ``(identity, revision)``
-    whose revision it bumps when written to. Every cache keyed through here then
-    invalidates correctly the moment the pixels change, and not before.
-    """
-    own = getattr(source, "cache_key", None)
-    if own is not None:
-        return ("raster", *tuple(own))
+    This is what a terminal backend answers ``image_formats`` with, and it is
+    why the answer is asked of the running system rather than hardcoded."""
     try:
-        stat = os.stat(source)
-    except (OSError, TypeError, ValueError):
-        # Unreadable or not a filesystem path: fall back to the bare name. The
-        # picture cannot be loaded either, so nothing is cached against it.
-        return ("path", source, None, None)
-    return ("path", source, stat.st_mtime_ns, stat.st_size)
+        from PIL import Image
+    except ImportError:
+        return frozenset()
+    # registered_extensions() only populates fully once the plugins have been
+    # imported, which init() is what does; without it the answer is whatever
+    # happens to have been imported already.
+    Image.init()
+    return frozenset(
+        ext.lower() for ext, fmt in Image.registered_extensions().items()
+        if fmt in Image.OPEN
+    )
 
 
-def render(
-    path: str,
-    px_w: int,
-    px_h: int,
-    src: tuple[float, float, float, float] | None = None,
-) -> tuple[Any, bytes] | None:
-    """Crop ``path`` to ``src`` (normalized ``(x, y, w, h)`` fractions of the
-    image, top-left origin — the pan/zoom window) and scale it to fit ``px_w`` x
-    ``px_h`` preserving aspect ratio.
+def natural_size(path: Any) -> tuple[int, int] | None:
+    """``(width, height)`` from Pillow's header read, or ``None``.
 
-    Returns ``(image, png_bytes)`` — the Pillow image for the sixel encoder,
-    and PNG bytes for the two transmit-a-file protocols — or ``None`` if the
-    file cannot be read. Scaling happens *here* rather than in the emulator so
-    the payload stays proportional to the screen box, not the source file: a
-    24-megapixel photo ships as a few hundred KB, and zooming re-crops from
-    the original rather than upscaling an already-downscaled copy."""
+    ``Image.open`` is lazy — it parses the header and stops — so this costs a
+    read of the first few hundred bytes, not a decode. It is what a terminal
+    backend falls back to when the dependency-free parse in ``puikit.image``
+    does not recognize the format: that one knows four, and Pillow knows every
+    format the backend can actually draw. The two have to agree, because an
+    unknown size is what an application reads as "this cannot be shown"."""
     try:
         from PIL import Image
     except ImportError:
         return None
     try:
-        image = Image.open(path)
-        image.load()
+        with Image.open(path) as image:
+            return image.size
     except Exception:
+        return None
+
+
+def _open(source: Any):
+    """The Pillow image for a source, loaded, or ``None`` when it cannot be
+    read. A :class:`~puikit.image.RasterImage` wraps its own buffer with no
+    decode at all — which is the point of accepting one: a viewer re-cropping a
+    magnified picture comes back through here on every zoom step, and a path
+    would be re-opened and re-decoded each time."""
+    from ..image import is_raster
+
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    if is_raster(source):
+        try:
+            return source.to_pillow()
+        except Exception:
+            return None
+    try:
+        image = Image.open(source)
+        image.load()
+        return image
+    except Exception:
+        return None
+
+
+def render(
+    source: Any,
+    px_w: int,
+    px_h: int,
+    src: tuple[float, float, float, float] | None = None,
+) -> tuple[Any, bytes] | None:
+    """Crop ``source`` to ``src`` (normalized ``(x, y, w, h)`` fractions of the
+    image, top-left origin — the pan/zoom window) and scale it to fit ``px_w`` x
+    ``px_h`` preserving aspect ratio.
+
+    ``source`` is a path Pillow opens or a :class:`~puikit.image.RasterImage`
+    whose pixels are already decoded. Returns ``(image, png_bytes)`` — the Pillow
+    image for the sixel encoder, and PNG bytes for the two transmit-a-file
+    protocols — or ``None`` if the source cannot be read. Scaling happens *here*
+    rather than in the emulator so the payload stays proportional to the screen
+    box, not the source file: a 24-megapixel photo ships as a few hundred KB, and
+    zooming re-crops from the original rather than upscaling an already-
+    downscaled copy."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    image = _open(source)
+    if image is None:
         return None
     if src is not None:
         # Scale the normalized crop by Pillow's true pixel size (the same

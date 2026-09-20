@@ -82,7 +82,7 @@ class LayoutContext:
     # backend so an ImageView can size itself to the aspect ratio without ever
     # loading the file. Backend-independent (a file's dimensions are a fact),
     # but routed through the backend like measure, so a backend can override.
-    image_size: Callable[[str], tuple[int, int] | None] | None = None
+    image_size: Callable[[Any], tuple[int, int] | None] | None = None
     # Physical pixel size of a base unit, for aspect-sensitive measurement — an
     # ImageView's fit=width/height sizes itself from the image's pixel aspect.
     # base_w/base_h are the *layout* unit (1,1 on a character grid), but a cell is
@@ -134,11 +134,12 @@ class LayoutContext:
             return self.metrics() if style is None else self.metrics(style)
         return FontMetrics(ascent=1.0, descent=0.0)
 
-    def measure_image(self, path: str) -> tuple[int, int] | None:
+    def measure_image(self, source: Any) -> tuple[int, int] | None:
         """Natural ``(width, height)`` of the image in pixels, or None when no
-        measurer is supplied or the format is unknown."""
+        measurer is supplied or the format is unknown. ``source`` is a path or a
+        :class:`~puikit.image.RasterImage`, which answers from its own size."""
         if self.image_size is not None:
-            return self.image_size(path)
+            return self.image_size(source)
         return None
 
 

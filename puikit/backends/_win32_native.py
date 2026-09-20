@@ -929,10 +929,37 @@ ole32.CoCreateInstance.argtypes = [
     ctypes.POINTER(GUID), ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)
 ]
 
-# IWICImagingFactory (vtable: IUnknown[0-2], CreateDecoderFromFilename[3], ...
-#     CreateFormatConverter[10], ...) — both verified live.
+# IWICImagingFactory (vtable: IUnknown[0-2], CreateDecoderFromFilename[3],
+#     CreateDecoderFromStream[4], CreateDecoderFromFileHandle[5],
+#     CreateComponentInfo[6], CreateDecoder[7], CreateEncoder[8],
+#     CreatePalette[9], CreateFormatConverter[10], CreateBitmapScaler[11],
+#     CreateBitmapClipper[12], CreateBitmapFlipRotator[13], CreateStream[14],
+#     CreateColorContext[15], CreateColorTransformer[16], CreateBitmap[17],
+#     CreateBitmapFromSource[18], CreateBitmapFromSourceRect[19],
+#     CreateBitmapFromMemory[20], CreateBitmapFromHBITMAP[21],
+#     CreateBitmapFromHICON[22], CreateComponentEnumerator[23]).
+# The first two are verified live; the enumerator is used only by
+# wic_decoder_extensions, which fails soft.
 _IDX_WIC_FACTORY_CREATE_DECODER_FROM_FILENAME = 3
 _IDX_WIC_FACTORY_CREATE_FORMAT_CONVERTER = 10
+_IDX_WIC_FACTORY_CREATE_COMPONENT_ENUMERATOR = 23
+
+# IEnumUnknown (vtable: IUnknown[0-2], Next[3], Skip[4], Reset[5], Clone[6]).
+_IDX_ENUM_UNKNOWN_NEXT = 3
+
+# IWICBitmapCodecInfo : IWICComponentInfo (vtable: IUnknown[0-2],
+#     GetComponentType[3], GetCLSID[4], GetSigningStatus[5], GetAuthor[6],
+#     GetVendorGUID[7], GetVersion[8], GetSpecVersion[9], GetFriendlyName[10],
+#     GetContainerFormat[11], GetPixelFormats[12], GetColorManagementVersion[13],
+#     GetDeviceManufacturer[14], GetDeviceModels[15], GetMimeTypes[16],
+#     GetFileExtensions[17]).
+_IDX_WIC_CODEC_INFO_GET_FILE_EXTENSIONS = 17
+
+#: What CreateComponentEnumerator is asked for: decoders only, default options.
+WIC_COMPONENT_TYPE_DECODER = 0x1
+WIC_COMPONENT_ENUMERATE_DEFAULT = 0x0
+
+IID_IWICBitmapDecoderInfo = GUID.from_str("D8CD007F-D08F-4191-9BFC-236EA7F0E4B5")
 
 # IWICBitmapDecoder (vtable: IUnknown[0-2], QueryCapability[3], Initialize[4],
 #     GetContainerFormat[5], GetDecoderInfo[6], CopyPalette[7],
@@ -1044,6 +1071,139 @@ def wic_load_bitmap_source(factory: ComPtr, path: str) -> ComPtr | None:
         decoder.release()
 
 
+def wic_image_size(factory: ComPtr, path: str) -> tuple[int, int] | None:
+    """The stored pixel size of ``path``'s first frame, or ``None`` when WIC
+    cannot read the file.
+
+    Stops at the frame rather than going on to the format converter
+    :func:`wic_load_bitmap_source` builds: the size is metadata, and asking for
+    it should not cost a conversion of pixels nobody has asked to see. What it
+    *does* answer, and the reason it exists, is whether WIC can read the file at
+    all — which on Windows is a question about the codecs installed, not about
+    the format."""
+    buf = ctypes.create_unicode_buffer(path)
+    decoder_out = ctypes.c_void_p()
+    hr = factory.call(
+        _IDX_WIC_FACTORY_CREATE_DECODER_FROM_FILENAME,
+        ctypes.c_int32,
+        [ctypes.c_wchar_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)],
+        buf,
+        None,
+        GENERIC_READ,
+        WIC_DECODE_METADATA_CACHE_ON_DEMAND,
+        ctypes.byref(decoder_out),
+    )
+    if not hresult_ok(hr) or not decoder_out.value:
+        return None
+    decoder = ComPtr(decoder_out.value)
+    try:
+        frame_out = ctypes.c_void_p()
+        hr = decoder.call(
+            _IDX_WIC_DECODER_GET_FRAME, ctypes.c_int32,
+            [ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)], 0, ctypes.byref(frame_out)
+        )
+        if not hresult_ok(hr) or not frame_out.value:
+            return None
+        frame = ComPtr(frame_out.value)
+        try:
+            return wic_bitmap_size(frame)
+        finally:
+            frame.release()
+    finally:
+        decoder.release()
+
+
+def wic_decoder_extensions(factory: ComPtr) -> frozenset[str]:
+    """Lowercase, dotted file extensions every **installed** WIC decoder claims.
+
+    This is the one honest answer to "can this machine show a HEIC?". WIC's
+    codec set is not fixed: HEIF, AVIF and camera RAW arrive as Microsoft Store
+    extensions the user may or may not have, and a list written down here would
+    promise formats that produce nothing on half the machines that read it.
+    Enumerating the registered decoders asks the machine instead.
+
+    Fails soft — an empty set — because it is an optimization hint, not a
+    prerequisite: a caller that gets nothing decodes its own pictures, which
+    works everywhere and is merely slower.
+    """
+    enum_out = ctypes.c_void_p()
+    hr = factory.call(
+        _IDX_WIC_FACTORY_CREATE_COMPONENT_ENUMERATOR,
+        ctypes.c_int32,
+        [ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)],
+        WIC_COMPONENT_TYPE_DECODER,
+        WIC_COMPONENT_ENUMERATE_DEFAULT,
+        ctypes.byref(enum_out),
+    )
+    if not hresult_ok(hr) or not enum_out.value:
+        return frozenset()
+    enumerator = ComPtr(enum_out.value)
+    found: set[str] = set()
+    try:
+        while True:
+            item_out = ctypes.c_void_p()
+            fetched = ctypes.c_uint32(0)
+            hr = enumerator.call(
+                _IDX_ENUM_UNKNOWN_NEXT,
+                ctypes.c_int32,
+                [ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_uint32)],
+                1,
+                ctypes.byref(item_out),
+                ctypes.byref(fetched),
+            )
+            if not hresult_ok(hr) or fetched.value == 0 or not item_out.value:
+                break
+            item = ComPtr(item_out.value)
+            try:
+                # Defined further down, with the D3D interop helpers; it raises
+                # rather than returning None, and one decoder that will not
+                # answer is no reason to abandon the rest of the list.
+                info = com_query_interface(item, IID_IWICBitmapDecoderInfo)
+            except OSError:
+                continue
+            finally:
+                item.release()
+            if not info:
+                continue
+            try:
+                for ext in _wic_codec_extensions(info).split(","):
+                    ext = ext.strip().lower()
+                    if ext.startswith(".") and len(ext) > 1:
+                        found.add(ext)
+            finally:
+                info.release()
+    finally:
+        enumerator.release()
+    return frozenset(found)
+
+
+def _wic_codec_extensions(info: ComPtr) -> str:
+    """``IWICBitmapCodecInfo::GetFileExtensions`` as a string — the usual COM
+    two-call dance: ask with a zero-length buffer for the length it wants, then
+    ask again with one that size."""
+    needed = ctypes.c_uint32(0)
+    hr = info.call(
+        _IDX_WIC_CODEC_INFO_GET_FILE_EXTENSIONS,
+        ctypes.c_int32,
+        [ctypes.c_uint32, ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_uint32)],
+        0,
+        None,
+        ctypes.byref(needed),
+    )
+    if not hresult_ok(hr) or needed.value == 0:
+        return ""
+    buf = ctypes.create_unicode_buffer(needed.value)
+    hr = info.call(
+        _IDX_WIC_CODEC_INFO_GET_FILE_EXTENSIONS,
+        ctypes.c_int32,
+        [ctypes.c_uint32, ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_uint32)],
+        needed.value,
+        buf,
+        ctypes.byref(needed),
+    )
+    return buf.value if hresult_ok(hr) else ""
+
+
 def wic_bitmap_size(source: ComPtr) -> tuple[int, int]:
     w = ctypes.c_uint32()
     h = ctypes.c_uint32()
@@ -1098,13 +1258,46 @@ class D2D1_BITMAP_PROPERTIES(ctypes.Structure):
     _fields_ = [("pixelFormat", D2D1_PIXEL_FORMAT), ("dpiX", ctypes.c_float), ("dpiY", ctypes.c_float)]
 
 
+def rgba_to_bgra(raw: bytes) -> bytes:
+    """Swap the R and B channels of a tightly-packed 32bpp buffer.
+
+    A :class:`~puikit.image.RasterImage` carries RGBA because that is the order
+    every decoder hands over — Pillow's ``tobytes()`` needs no conversion at all
+    — and D2D wants BGRA. Vectorized for the same reason _premultiply_bgra is:
+    a per-byte Python loop over a 1920x1080 image is an order of magnitude
+    slower than the array shuffle, and this runs once per image."""
+    pixels = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 4)
+    out = pixels.copy()
+    out[:, 0] = pixels[:, 2]
+    out[:, 2] = pixels[:, 0]
+    return out.tobytes()
+
+
+def rt_create_bitmap_from_raster(rt: ComPtr, raster: Any) -> ComPtr | None:
+    """An ID2D1Bitmap over a :class:`~puikit.image.RasterImage`'s pixels — the
+    same "hand D2D a premultiplied BGRA buffer" path the WIC route ends in,
+    entered with a buffer that never went through a decoder here.
+
+    Two conversions, both unavoidable and both once per image: RGBA to BGRA
+    because that is the channel order D2D's format takes, and straight alpha to
+    premultiplied because this render target rejects anything else (see
+    :func:`_premultiply_bgra`)."""
+    premultiplied = _premultiply_bgra(rgba_to_bgra(bytes(raster.data)))
+    return _rt_create_bitmap(rt, premultiplied, raster.width, raster.height)
+
+
 def rt_create_bitmap_from_pixels(rt: ComPtr, source: ComPtr, width: int, height: int) -> ComPtr | None:
     """An ID2D1Bitmap built from ``source``'s pixels, premultiplied by hand
     (see _premultiply_bgra) — not CreateBitmapFromWicBitmap, which would have
     D2D pull straight-alpha pixels from the WIC source directly; this render
     target only accepts premultiplied bitmap data."""
     raw = wic_copy_pixels_bgra(source, width, height)
-    premultiplied = _premultiply_bgra(raw)
+    return _rt_create_bitmap(rt, _premultiply_bgra(raw), width, height)
+
+
+def _rt_create_bitmap(rt: ComPtr, premultiplied: bytes, width: int, height: int) -> ComPtr | None:
+    """CreateBitmap over a ready premultiplied-BGRA buffer. The tail both
+    bitmap builders share; only where the bytes came from differs."""
     buf = ctypes.create_string_buffer(premultiplied, len(premultiplied))
     props = D2D1_BITMAP_PROPERTIES(D2D1_PIXEL_FORMAT(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0, 96.0)
     size = D2D1_SIZE_U(width, height)

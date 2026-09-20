@@ -354,7 +354,7 @@ def test_oversized_image_is_clipped_to_the_screen(kitty_backend):
     # the bottom (over the status bar, etc.). The source is cropped to match.
     kitty_backend._stdscr = _FakeScreen()  # 80 cols x 24 rows
     kitty_backend.draw_image(10, 20, "img.png", {"w": 30, "h": 30, "src": None})
-    x, y, cols, rows, _, src = next(iter(kitty_backend._images.values()))
+    x, y, cols, rows, _, src, _ = next(iter(kitty_backend._images.values()))
     assert (x, y, cols, rows) == (10, 20, 30, 4)  # 30 rows -> 4 (screen bottom)
     assert src == pytest.approx((0.0, 0.0, 1.0, 4 / 30))  # only the visible top
 
@@ -363,7 +363,7 @@ def test_image_clipped_to_a_pushed_clip_rect(kitty_backend):
     kitty_backend._stdscr = _FakeScreen()
     kitty_backend.push_clip(0, 0, 40, 15)  # a pane
     kitty_backend.draw_image(5, 5, "img.png", {"w": 50, "h": 50})
-    x, y, cols, rows, _, _ = next(iter(kitty_backend._images.values()))
+    x, y, cols, rows, _, _, _ = next(iter(kitty_backend._images.values()))
     assert (x, y, cols, rows) == (5, 5, 35, 10)  # trimmed to the pane
 
 
@@ -391,9 +391,9 @@ def test_object_fits_resolve_distinctly_on_the_terminal(kitty_backend, tmp_path)
         kitty_backend.draw_image(5, 1, scene, {"w": 30, "h": 20, "fit": fit})
         return next(iter(kitty_backend._images.values()))
 
-    fx, fy, fcols, frows, _, fsrc = place("fill")
-    cx, cy, ccols, crows, _, csrc = place("contain")
-    vx, vy, vcols, vrows, _, vsrc = place("cover")
+    fx, fy, fcols, frows, _, fsrc, _ = place("fill")
+    cx, cy, ccols, crows, _, csrc, _ = place("contain")
+    vx, vy, vcols, vrows, _, vsrc, _ = place("cover")
 
     # fill: whole image, whole box.
     assert (fcols, frows) == (30, 20) and fsrc == (0.0, 0.0, 1.0, 1.0)

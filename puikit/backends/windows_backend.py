@@ -48,6 +48,8 @@ from ..backend import (
     WindowHandle, WindowStyle, _run_tick_callbacks, is_transparent,
 )
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
+from ..image import is_raster, source_key
+from ._image_cache import MISS, ImageCache
 from ..easing import resolve as _resolve_easing
 from ..event import Event, EventType, char_key_event
 from ..font import Font, FontMetrics, grid_aligned
@@ -1013,10 +1015,22 @@ class WindowsBackend(Backend):
         self._menu_bar_hmenu = 0
         self._tracking_mouse = False
         self._wic_factory: Any = None
-        # Decoded ID2D1Bitmaps keyed by path: (bitmap, natural_w, natural_h),
-        # or None for a path that failed to decode (so a missing/corrupt
-        # image doesn't retry-and-fail every single frame).
-        self._image_cache: dict[str, tuple[Any, int, int] | None] = {}
+        # The WIC decoder extension list, enumerated once (see image_formats).
+        # Codecs are installed and uninstalled by the user, but not while the
+        # process is looking.
+        self._formats_cache: frozenset[str] | None = None
+        # Decoded ID2D1Bitmaps keyed by source identity
+        # (puikit.image.source_key): (bitmap, natural_w, natural_h), or None for
+        # a source that failed to decode (so a missing/corrupt image doesn't
+        # retry-and-fail every single frame).
+        #
+        # Identity rather than path, because the same path holds different
+        # pixels after a rebuild and a RasterImage has no path at all; budgeted
+        # rather than unbounded, because a raster admits pictures measured in
+        # tens of megabytes each. Evicting releases the ID2D1Bitmap — a COM
+        # reference nothing else is holding.
+        self._image_cache = ImageCache(
+            on_evict=lambda cached: cached[0].release())
         # Active background behind the UI (set_background): a Shader (GPU), a
         # Wallpaper (static image), or None (solid). A Shader drives a per-frame
         # tick and is composited beneath the UI; a Wallpaper the render pass draws.
@@ -1250,9 +1264,7 @@ class WindowsBackend(Backend):
 
             _win32_menu.destroy_menu_recursive(self._menu_bar_hmenu)
             self._menu_bar_hmenu = 0
-        for cached in self._image_cache.values():
-            if cached is not None:
-                cached[0].release()
+        # Releases each held ID2D1Bitmap through the cache's own eviction hook.
         self._image_cache.clear()
         if self._wic_factory is not None:
             self._wic_factory.release()
@@ -1769,8 +1781,8 @@ class WindowsBackend(Backend):
         glyph = _ICON_GLYPHS.get(icon_name, "❓")
         self._back.append(("text", x, y, glyph, style))
 
-    def draw_image(self, x: int, y: int, path: str, hints: dict[str, Any] | None = None) -> None:
-        self._back.append(("image", x, y, path, hints or {}))
+    def draw_image(self, x: int, y: int, source: Any, hints: dict[str, Any] | None = None) -> None:
+        self._back.append(("image", x, y, source, hints or {}))
 
     # --- animation -----------------------------------------------------------
 
@@ -2997,29 +3009,81 @@ class WindowsBackend(Backend):
             self._render_target, native.D2D1_RECT_F(track.left, thumb_y, track.right, thumb_y + thumb_h), self._brush
         )
 
-    def _get_image(self, path: str) -> tuple[Any, int, int] | None:
-        """The decoded (ID2D1Bitmap, natural_w, natural_h) for ``path``,
-        cached — including caching a failed decode as None, so a missing or
-        corrupt path is retried at most once rather than every frame."""
-        if path in self._image_cache:
-            return self._image_cache[path]
+    def _factory(self) -> Any:
+        """The WIC factory, created on first use. Nothing but images needs it,
+        so a session that shows none never pays for it."""
         if self._wic_factory is None:
             self._wic_factory = native.create_wic_factory()
-        source = native.wic_load_bitmap_source(self._wic_factory, path)
+        return self._wic_factory
+
+    def _get_image(self, source: Any) -> tuple[Any, int, int] | None:
+        """The decoded (ID2D1Bitmap, natural_w, natural_h) for ``source``,
+        cached — including caching a failed decode as None, so a missing or
+        corrupt source is retried at most once rather than every frame.
+
+        A :class:`~puikit.image.RasterImage` skips WIC entirely: its pixels are
+        already decoded, and the half of this path that turns a buffer into an
+        ID2D1Bitmap is the same either way (see
+        ``native.rt_create_bitmap_from_raster``)."""
+        key = source_key(source)
+        cached = self._image_cache.get(key)
+        if cached is not MISS:
+            return cached
         result = None
-        if source is not None:
-            try:
-                iw, ih = native.wic_bitmap_size(source)
-                bitmap = native.rt_create_bitmap_from_pixels(self._render_target, source, iw, ih)
-            finally:
-                source.release()
+        if is_raster(source):
+            bitmap = native.rt_create_bitmap_from_raster(self._render_target, source)
             if bitmap is not None:
-                result = (bitmap, iw, ih)
-        self._image_cache[path] = result
+                result = (bitmap, source.width, source.height)
+        else:
+            wic = native.wic_load_bitmap_source(self._factory(), source)
+            if wic is not None:
+                try:
+                    iw, ih = native.wic_bitmap_size(wic)
+                    bitmap = native.rt_create_bitmap_from_pixels(
+                        self._render_target, wic, iw, ih)
+                finally:
+                    wic.release()
+                if bitmap is not None:
+                    result = (bitmap, iw, ih)
+        weight = 0 if result is None else result[1] * result[2] * 4
+        self._image_cache.put(key, result, weight)
         return result
 
-    def _render_image(self, x: int, y: int, path: str, hints: dict[str, Any]) -> None:
-        cached = self._get_image(path)
+    def image_size(self, source: Any) -> tuple[int, int] | None:
+        """The image's pixel size, read through WIC.
+
+        The base class parses the file header itself and knows four formats; WIC
+        knows whatever decoders this machine has installed, which is the set this
+        backend can actually draw. Keeping the two answers together matters
+        because an application reads "no size" as "I cannot show this": with the
+        header parse alone a WebP or a HEIC the machine can display perfectly
+        well would be reported unknown."""
+        if is_raster(source):
+            return source.size
+        try:
+            size = native.wic_image_size(self._factory(), str(source))
+        except Exception:
+            size = None
+        return size if size is not None else super().image_size(source)
+
+    def image_formats(self) -> frozenset[str]:
+        """The extensions the installed WIC decoders read.
+
+        Enumerated, not listed: on Windows the codec set is something the user
+        installs. HEIF, AVIF and camera RAW all arrive as Microsoft Store
+        extensions, so the same build of this backend genuinely answers
+        differently on two machines — and an application choosing between
+        handing over a path and decoding the file itself needs *this* machine's
+        answer."""
+        if self._formats_cache is None:
+            try:
+                self._formats_cache = native.wic_decoder_extensions(self._factory())
+            except Exception:
+                self._formats_cache = frozenset()
+        return self._formats_cache
+
+    def _render_image(self, x: int, y: int, source: Any, hints: dict[str, Any]) -> None:
+        cached = self._get_image(source)
         if cached is None:
             return
         bitmap, iw, ih = cached

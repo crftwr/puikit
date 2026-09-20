@@ -306,6 +306,15 @@ class DrawContext:
         """
         return self._caps.supports("colored_underlines")
 
+    def image_formats(self) -> frozenset[str]:
+        """The file extensions this backend draws from a path — see
+        :meth:`puikit.backend.Backend.image_formats`. Empty where the backend
+        cannot draw images at all, so a caller that decodes its own pictures
+        gets one consistent answer without branching on the capability first."""
+        if not self._caps.supports("images"):
+            return frozenset()
+        return self._backend.image_formats()
+
     @property
     def images(self) -> bool:
         """True when the backend can draw real pixel images, so ``draw_image``
@@ -769,10 +778,14 @@ class DrawContext:
         self.draw_text(x, y, fallback, style)
 
     def draw_image(
-        self, x: int, y: int, path: str, hints: dict[str, Any] | None = None
+        self, x: int, y: int, source: Any, hints: dict[str, Any] | None = None
     ) -> None:
+        """``source`` is a path the backend opens, or a
+        :class:`~puikit.image.RasterImage` of pixels the caller already decoded.
+        Both reach the fallback below identically — the alt glyph does not care
+        where the picture would have come from."""
         if self._caps.supports("images"):
-            self._backend.draw_image(self._rect.x + x, self._rect.y + y, path, hints)
+            self._backend.draw_image(self._rect.x + x, self._rect.y + y, source, hints)
             return
         # Fallback for backends without images (TUI): the picture is replaced
         # by a single glyph — the "alt" emoji — centered in the footprint, so
@@ -1712,6 +1725,30 @@ class Panel:
         """Advance focus to the next (direction > 0) or previous (< 0) focusable
         in the whole tree, wrapping at the ends."""
         return move_focus(self, direction, wrap=True)
+
+    @property
+    def images(self) -> bool:
+        """True when this Panel's backend draws real pixel images — the same
+        question ``DrawContext.images`` answers, asked before there is a draw.
+
+        An application that decodes its own pictures needs it there: deciding
+        whether to spend a decode belongs where the file is opened, and spending
+        one for a backend that is going to stamp an alt glyph over it is pure
+        waste."""
+        return self.backend.capabilities.supports("images")
+
+    def image_formats(self) -> frozenset[str]:
+        """The file extensions this Panel's backend draws from a path — see
+        :meth:`puikit.backend.Backend.image_formats`, and ``DrawContext`` for the
+        same question asked from inside a draw.
+
+        Here as well as there because the answer decides *how a picture is
+        loaded*, which an application settles when it opens a file, long before
+        anything is drawn — and asking it should not mean reaching past the Panel
+        for the backend and repeating the capability check it already makes."""
+        if not self.backend.capabilities.supports("images"):
+            return frozenset()
+        return self.backend.image_formats()
 
     @property
     def pointer(self) -> tuple[float, float] | None:
