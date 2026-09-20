@@ -172,46 +172,65 @@ def cell_pixels(fd: int | None = None) -> tuple[float, float] | None:
 
 
 def extensions() -> frozenset[str]:
-    """The file extensions :func:`render` can open — Pillow's own registry of
-    formats it has a *decoder* for, plugins included, so a ``pillow-heif`` or
-    ``pillow-jxl-plugin`` an application installed shows up here without this
-    module knowing either exists. Empty without Pillow, which is the truth: the
-    terminal backends draw nothing at all then.
+    """The file extensions :func:`render` can open.
 
-    This is what a terminal backend answers ``image_formats`` with, and it is
-    why the answer is asked of the running system rather than hardcoded."""
+    Two decoders, in the order :func:`_open` tries them. **Pillow's** own
+    registry of formats it has a decoder for, plugins included, so a
+    ``pillow-heif`` or ``pillow-jxl-plugin`` an application installed shows up
+    without this module knowing either exists. And **the operating system's**,
+    where there is one to borrow — which is what stops a terminal on macOS
+    reporting it cannot show a HEIC while ImageIO sits in the same process
+    reading HEIC perfectly well (see :mod:`puikit._platform_image`).
+
+    Empty without either, which is the truth: the terminal backends draw nothing
+    at all then. This is what a terminal backend answers ``image_formats`` with,
+    and it is why the answer is asked of the running system rather than
+    hardcoded."""
+    from .._platform_image import extensions as platform_extensions
+
     try:
         from PIL import Image
     except ImportError:
-        return frozenset()
-    # registered_extensions() only populates fully once the plugins have been
-    # imported, which init() is what does; without it the answer is whatever
-    # happens to have been imported already.
-    Image.init()
-    return frozenset(
-        ext.lower() for ext, fmt in Image.registered_extensions().items()
-        if fmt in Image.OPEN
-    )
+        pillow = frozenset()
+    else:
+        # registered_extensions() only populates fully once the plugins have
+        # been imported, which init() is what does; without it the answer is
+        # whatever happens to have been imported already.
+        Image.init()
+        pillow = frozenset(
+            ext.lower() for ext, fmt in Image.registered_extensions().items()
+            if fmt in Image.OPEN
+        )
+    return pillow | platform_extensions()
 
 
 def natural_size(path: Any) -> tuple[int, int] | None:
-    """``(width, height)`` from Pillow's header read, or ``None``.
+    """``(width, height)``, or ``None`` when nothing here can read the file.
 
-    ``Image.open`` is lazy — it parses the header and stops — so this costs a
-    read of the first few hundred bytes, not a decode. It is what a terminal
-    backend falls back to when the dependency-free parse in ``puikit.image``
-    does not recognize the format: that one knows four, and Pillow knows every
-    format the backend can actually draw. The two have to agree, because an
-    unknown size is what an application reads as "this cannot be shown"."""
+    Pillow's ``open`` is lazy — it parses the header and stops — so the common
+    answer costs a read of the first few hundred bytes rather than a decode.
+    This is what a terminal backend falls back to when the dependency-free parse
+    in ``puikit.image`` does not recognize the format: that one knows four, and
+    this knows every format the backend can actually draw. The two have to
+    agree, because an unknown size is what an application reads as "this cannot
+    be shown".
+
+    A format only the OS decoder reads has no cheap header answer, so it falls
+    through to :func:`_open` and is decoded — into the cache the very next
+    ``render`` of it will draw from, so the picture is decoded once either
+    way."""
     try:
         from PIL import Image
     except ImportError:
-        return None
-    try:
-        with Image.open(path) as image:
-            return image.size
-    except Exception:
-        return None
+        pass
+    else:
+        try:
+            with Image.open(path) as image:
+                return image.size
+        except Exception:
+            pass
+    image = _open(path)
+    return image.size if image is not None else None
 
 
 #: Decoded source images, by identity, under a byte budget.
@@ -321,6 +340,19 @@ def _open(source: Any):
             image.load()
         except Exception:
             image = None
+        if image is None:
+            # Pillow does not know this format. The operating system may — HEIC
+            # and JPEG XL are ordinary to ImageIO and to WIC — and borrowing it
+            # is what keeps a terminal from refusing a picture the GUI on the
+            # same machine shows without being asked twice.
+            from .._platform_image import decode as platform_decode
+
+            raster = platform_decode(source)
+            if raster is not None:
+                try:
+                    image = raster.to_pillow()
+                except Exception:
+                    image = None
     if image is not None and image.mode not in ("RGB", "RGBA"):
         try:
             image = image.convert(

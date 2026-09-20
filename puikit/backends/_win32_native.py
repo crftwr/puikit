@@ -29,6 +29,7 @@ themselves (see ``_premultiply_bgra``).
 from __future__ import annotations
 
 import ctypes
+import threading
 from ctypes import wintypes
 from typing import Any
 
@@ -985,14 +986,22 @@ _IDX_WIC_FORMAT_CONVERTER_INITIALIZE = 8
 _IDX_RT_CREATE_BITMAP = 4
 _IDX_RT_DRAW_BITMAP = 26
 
-_co_initialized = False
+#: COM apartment state is **per thread**, not per process, so the "have we done
+#: this yet" flag has to be too. It was a plain global while every COM call in
+#: the toolkit happened on the one UI thread, which made the distinction
+#: invisible; borrowing WIC as a general-purpose decoder
+#: (:mod:`puikit._platform_image`) broke that assumption, because an application
+#: may well ask what formats exist from a worker. A global flag then lets the
+#: first thread initialize and every later thread skip it, leaving those threads
+#: in no apartment at all — which is not an error anything reports, just calls
+#: that fail or misbehave later.
+_com_state = threading.local()
 
 
 def _ensure_com_initialized() -> None:
-    global _co_initialized
-    if not _co_initialized:
+    if not getattr(_com_state, "ready", False):
         ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)
-        _co_initialized = True
+        _com_state.ready = True
 
 
 def create_wic_factory() -> ComPtr:

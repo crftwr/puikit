@@ -259,9 +259,9 @@ macos = pytest.mark.skipif(
 @macos
 def test_appkit_reports_extensions_not_classic_type_codes():
     pytest.importorskip("AppKit")
-    from puikit.backends.macos_backend import _appkit_image_extensions
+    from puikit._platform_image import extensions as platform_extensions
 
-    extensions = _appkit_image_extensions()
+    extensions = platform_extensions()
     assert {".png", ".jpg", ".gif", ".tiff"} <= extensions
     # imageFileTypes() mixes in four-character OSType codes ("'jpeg'", "'bmp '");
     # a caller holding a filename can do nothing with those.
@@ -274,9 +274,9 @@ def test_appkit_reads_more_than_the_header_parse_knows():
     # on any current macOS, and is exactly what an application would otherwise
     # have had to find a decoder for.
     pytest.importorskip("AppKit")
-    from puikit.backends.macos_backend import _appkit_image_extensions
+    from puikit._platform_image import extensions as platform_extensions
 
-    assert ".heic" in _appkit_image_extensions()
+    assert ".heic" in platform_extensions()
 
 
 @macos

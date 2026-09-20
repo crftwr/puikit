@@ -740,35 +740,6 @@ def _fill_rect(rect, color) -> None:
 #: by the framework.
 _NS_ALPHA_NON_PREMULTIPLIED = 2
 
-#: Extensions ``NSImage`` reports it can read, resolved once. The list is fixed
-#: for the life of the process (it changes with the OS, not with the run), and
-#: the call walks every registered ImageIO type.
-_image_extensions_cache: frozenset[str] | None = None
-
-
-def _appkit_image_extensions() -> frozenset[str]:
-    """Lowercase, dotted file extensions AppKit's image loader reads.
-
-    ``NSImage.imageFileTypes()`` answers with a mixture: modern filename
-    extensions, and legacy four-character OSType codes left over from the
-    Classic days (``'jpeg'``, ``'bmp '`` — quotes and padding included). Only the
-    first kind means anything to a caller holding a filename, so the codes are
-    dropped: they are exactly the entries that are not alphanumeric."""
-    global _image_extensions_cache
-    if _image_extensions_cache is not None:
-        return _image_extensions_cache
-    try:
-        raw = NSImage.imageFileTypes()
-    except Exception:
-        raw = None
-    extensions = frozenset(
-        f".{str(entry).lower()}" for entry in (raw or [])
-        if entry and str(entry).isalnum()
-    )
-    _image_extensions_cache = extensions
-    return extensions
-
-
 def _imageio_pixel_size(path: Any) -> tuple[int, int] | None:
     """``(width, height)`` in stored pixels, from ImageIO's metadata alone — no
     frame is decoded. ``None`` when the file cannot be read or is not an image
@@ -3893,8 +3864,14 @@ class MacOSBackend(Backend):
         Asked of the system rather than written down here, because it *is* a
         property of the system: the same question on the same code answers
         differently on a newer macOS, and that is the answer an application
-        deciding whether it must decode a file itself needs."""
-        return _appkit_image_extensions()
+        deciding whether it must decode a file itself needs.
+
+        The same list :mod:`puikit._platform_image` answers with, because it is
+        the same decoder — here it happens to be the backend's own, and there it
+        is borrowed by a backend that has none of its own (a terminal)."""
+        from .._platform_image import extensions
+
+        return extensions()
 
     def _fit_rects(self, fit: str, target, iw: float, ih: float, src=None):
         """Destination and source rects for an object-fit. The geometry lives

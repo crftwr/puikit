@@ -188,7 +188,7 @@ nor changes costs nothing at all per frame — see `_emit_images`.
 | macOS | `NSImage` / ImageIO — `NSImage.size` reports **points**, not pixels (see §3), so `image_size` reads the stored pixel size from `CGImageSourceCopyPropertiesAtIndex` instead | `NSImage.imageFileTypes()`, minus the Classic OSType codes it mixes in |
 | Windows | WIC decode, then **manual alpha premultiply** with numpy — neither WIC's converter nor `CreateBitmap` will do it. See [`windows_backend.md`](windows_backend.md) §4 | the installed WIC decoders, enumerated (`CreateComponentEnumerator`) |
 | Web | The browser decodes; the replayer draws to canvas | a fixed list — the decoder is on the far end of the socket and cannot be asked |
-| VT / curses | `_terminal_graphics.py`, or the alt glyph | Pillow's own registry, plugins included |
+| VT / curses | `_terminal_graphics.py`, or the alt glyph | Pillow's own registry, plugins included, **plus the OS decoder** (§9) |
 
 `image_formats()` answers **"which extensions do you draw from a path?"** and is
 empty by default — which claims nothing, and must never be read as "nothing
@@ -293,3 +293,55 @@ admits a 24-megapixel photo as ~100MB of RGBA, so both now use
 used first, telling the backend so it can release a native handle, and never
 evicting an entry to make room for itself — an image larger than the whole budget
 is still drawn, and still cached, alone.
+
+---
+
+## 9. Borrowing the OS decoder (`_platform_image`)
+
+§5 says `image_formats()` is a property of the running system. That is true of a
+GUI backend and *not* true of a terminal, and the difference is a bug.
+
+A terminal's decoder is Pillow, because Pillow is what produces pixels for the
+sixel and kitty encoders. So a terminal on macOS reported it could not read a
+HEIC — while ImageIO sat in the same process reading HEIC perfectly well. Same
+machine, same file, and the answer depended on which backend happened to be
+drawing. `Backend.image_formats()` was being asked two questions at once:
+
+1. *which formats can you draw from a path?* — a backend question, and the one
+   the fast lane needs
+2. *which formats can this machine decode at all?* — never a backend question
+
+`puikit/_platform_image.py` is the second one asked separately. It is not a
+Backend, knows nothing about drawing, and hands back a `RasterImage`:
+
+| | decoder | needs |
+|---|---|---|
+| macOS | `NSBitmapImageRep`, i.e. ImageIO | AppKit only — no Quartz, so a terminal session pays one framework |
+| Windows | WIC — the same calls `WindowsBackend` makes | no render target, so it works with no window at all |
+| elsewhere | none | — |
+
+`_terminal_graphics` uses it in two places: `extensions()` unions it with
+Pillow's registry, and `_open()` falls through to it when Pillow refuses a file.
+Nothing above changes — a terminal simply reports, truthfully, that it can draw
+a HEIC, and the picture takes the ordinary path fast lane.
+
+**8-bit RGB and RGBA only.** A 16-bit or CMYK image is declined rather than
+converted. The cheap conversions do not exist: a `CGBitmapContext` refuses
+straight alpha outright, so the obvious macOS route returns premultiplied pixels
+and turns `(255, 255, 255, 8)` into `(8, 8, 8, 8)`. And the shape of a buffer
+does not say what is in it — a CMYK TIFF is also 8 bits per sample, also four
+samples, also 32 bits per pixel, and reading one as RGBX yields a picture in the
+wrong colours with nothing reporting a problem. The colour space is checked, not
+inferred.
+
+**COM apartments are per thread**, which this made matter for the first time.
+`_ensure_com_initialized` kept a process-global "done" flag, which was invisible
+while every COM call happened on the one UI thread; an application that asks
+which formats exist from a worker (a directory scan deciding what counts as an
+image) and decodes from the thread that draws would have left the second thread
+in no apartment at all. The flag and the WIC factory are both thread-local now.
+
+**Cost.** The enumeration imports a platform framework, so it is deferred to the
+first question rather than done at import. On macOS that is ~65ms once, and only
+for a terminal — a GUI backend has AppKit loaded already. On Linux it is one
+`sys.platform` test.
