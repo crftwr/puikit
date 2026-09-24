@@ -254,10 +254,16 @@ class VTBackend(Backend):
         self._clipboard = ""
         self._input_pos: tuple[int, int] | None = None
         self._frames = 0
-        # Inline-image placements for this frame and the last, keyed by draw
-        # order, so present() can tell which moved, changed or vanished and
-        # re-transmit only those — a payload can be hundreds of KB.
+        # Inline-image placements as draw_image recorded them, keyed by draw
+        # order, with the grid watcher that says what was later drawn over each.
         self._images: dict[int, tuple] = {}
+        self._image_watch: dict[int, int] = {}
+        # The same placements cut down to the parts nothing was drawn over —
+        # what actually reaches the screen, and therefore what this frame and
+        # the last compare, so present() can tell which moved, changed or
+        # vanished and re-transmit only those (a payload can be hundreds of KB).
+        # Filled by present(); see _resolve_images.
+        self._placements: dict[int, tuple] = {}
         self._prev_images: dict[int, tuple] = {}
         # Encoded payloads, keyed by picture + cell box (see _emit_images).
         self._encoded: dict[tuple, str] = {}
@@ -357,9 +363,13 @@ class VTBackend(Backend):
         assert self._grid is not None
         self._input_pos = None
         # Keep the previous frame's placements (a fresh dict, not .clear(), so
-        # the saved reference survives) so present() can diff against them.
-        self._prev_images = self._images
+        # the saved reference survives) so present() can diff against them. It
+        # is the RESOLVED set that is kept: what was actually put on screen is
+        # what the next frame has to compare itself against.
+        self._prev_images = self._placements
         self._images = {}
+        self._placements = {}
+        self._image_watch = {}
         self._grid.clear()
 
     def push_clip(self, x: float, y: float, w: float, h: float) -> None:
@@ -549,6 +559,11 @@ class VTBackend(Backend):
         own cells would paint over them. present() writes the grid first, then
         every recorded placement — the same ordering the curses backend uses, for
         the same reason, except that here the escape actually reaches the screen.
+
+        That ordering is also why the placement is only half of what is
+        recorded: emitting it whole would put the picture in front of everything
+        drawn after it. The rest of the rule is the watcher opened below — see
+        _resolve_images.
         """
         assert self._grid is not None
         if self._term_graphics is None:
@@ -617,6 +632,11 @@ class VTBackend(Backend):
         # bare object reference would not.
         self._images[image_id] = (x, y, cols, rows, source, src, full_box,
                                   _terminal_graphics.source_key(source))
+        # From here to the end of the frame, watch what is drawn over this
+        # footprint: whatever lands on it is in front of it, exactly as it would
+        # be on a backend that composites. present() cuts the placement down to
+        # what is left (see _resolve_images).
+        self._image_watch[image_id] = self._grid.watch_rect(x, y, cols, rows)
 
     def _sixel_rect(self, source: Any, key: tuple, full_box: tuple,
                     x: int, y: int, cols: int, rows: int,
@@ -678,6 +698,45 @@ class VTBackend(Backend):
             return frozenset()
         return _terminal_graphics.extensions()
 
+    def _resolve_images(self) -> dict[int, tuple]:
+        """This frame's placements, each cut down to the parts of it nothing was
+        drawn over.
+
+        A picture is painted out of band — after the whole grid, because the
+        text would otherwise land on top of it — so without this every image is
+        in front of everything, whatever layer it came from and whatever was
+        drawn later. A help overlay opened over a viewer then reads as being
+        *behind* the picture (xefm#458), and worse, the overlay's own cells make
+        the placement look overpainted, so it is re-sent and buries them again.
+
+        The rule restored here is the one a compositing backend gets for free:
+        whatever is drawn AFTER the image is in front of it. The grid records
+        that (see VTGrid.watch_rect) and hands back the rectangles that survive
+        — the whole footprint when nothing covers it, which is the common case
+        and stays byte-for-byte what it was before.
+        """
+        assert self._grid is not None
+        resolved: dict[int, tuple] = {}
+        for image_id, placement in self._images.items():
+            x, y, cols, rows, source, src, full_box, key = placement
+            token = self._image_watch.get(image_id)
+            rects = (self._grid.visible_rects(token) if token is not None
+                     else [(x, y, cols, rows)])
+            for rx, ry, rw, rh in rects:
+                part = src
+                if (rx, ry, rw, rh) != (x, y, cols, rows):
+                    # Crop the source to the part of the destination that
+                    # survived, so what shows is the matching piece of the
+                    # picture rather than the whole of it squashed into it.
+                    part = _crop_src(src, (rx - x) / cols, (ry - y) / rows,
+                                     rw / cols, rh / rows)
+                # Ids follow emission order, as they did when a placement was
+                # always one box: the same screen redrawn reuses them, so an
+                # unchanged part compares equal and one erase clears a stale one.
+                resolved[len(resolved) + 1] = (rx, ry, rw, rh, source, part,
+                                               full_box, key)
+        return resolved
+
     def _erase_stale_images(self) -> str:
         """Clear placements that moved, changed source, or vanished.
 
@@ -692,7 +751,8 @@ class VTBackend(Backend):
         protocol = self._term_graphics
         if protocol is None:
             return ""
-        stale = [k for k, v in self._prev_images.items() if self._images.get(k) != v]
+        stale = [k for k, v in self._prev_images.items()
+                 if self._placements.get(k) != v]
         if not stale:
             return ""
         erase = "".join(_terminal_graphics.clear(protocol, k) for k in stale)
@@ -718,9 +778,9 @@ class VTBackend(Backend):
         did not change: the text landed on top of the pixels and erased them.
         """
         protocol = self._term_graphics
-        if protocol is None or not self._images:
+        if protocol is None or not self._placements:
             return ""
-        fresh = {k: v for k, v in self._images.items()
+        fresh = {k: v for k, v in self._placements.items()
                  if k in overpainted or self._prev_images.get(k) != v}
         if not fresh:
             return ""
@@ -782,13 +842,19 @@ class VTBackend(Backend):
 
     def present(self) -> None:
         assert self._grid is not None
+        # Cut each placement down to what was not drawn over first of all: every
+        # step below — the erase, the overpaint test, the emission — is about
+        # what actually reaches the screen, and that is the resolved set.
+        self._placements = self._resolve_images()
         # Stale images first: on a protocol with no delete verb this marks the
         # covered cells dirty, so it has to run BEFORE the grid renders.
         erase = self._erase_stale_images()
         # Which placements this frame's text is about to paint over. Asked before
-        # render(), because render() is what consumes the diff.
+        # render(), because render() is what consumes the diff. A part hidden by
+        # an overlay is not in the resolved set at all, so the overlay's own
+        # cells can no longer ask for the picture to be re-sent over them.
         overpainted = frozenset(
-            k for k, (ix, iy, icols, irows, _obj, _s, _f, _k) in self._images.items()
+            k for k, (ix, iy, icols, irows, _obj, _s, _f, _k) in self._placements.items()
             if self._grid.rect_is_dirty(ix, iy, icols, irows)
         )
         out = erase + self._grid.render()

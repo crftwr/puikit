@@ -61,6 +61,11 @@ class VTGrid:
         self._buf: list[list[Cell]] = []
         self._prev: list[list[Cell]] = []
         self._clip_stack: list[tuple[int, int, int, int]] = []
+        # Overlay watchers: see watch_rect. Empty on all but the frames that
+        # draw an inline image, which is what keeps the cost of carrying them
+        # off every other frame.
+        self._watch: list[list] = []
+        self._watch_y0 = self._watch_y1 = 0
         self.reset()
 
     # --- geometry ------------------------------------------------------------
@@ -77,6 +82,7 @@ class VTGrid:
         # just-resized screen needs.
         self._prev = [[None] * self._w for _ in range(self._h)]
         self._clip_stack.clear()
+        self._drop_watches()
 
     def resize(self, width: int, height: int) -> bool:
         """Adopt a new size, repainting fully on the next render. Returns whether
@@ -119,9 +125,11 @@ class VTGrid:
     # --- drawing -------------------------------------------------------------
 
     def clear(self, fg=None, bg=None) -> None:
-        """Blank every cell to the given background. The clip stack is dropped:
-        a frame starts unclipped."""
+        """Blank every cell to the given background. The clip stack is dropped
+        and so are the overlay watchers: a frame starts unclipped and with
+        nothing drawn over anything."""
         self._clip_stack.clear()
+        self._drop_watches()
         cell = blank_cell(fg, bg)
         for row in self._buf:
             for x in range(self._w):
@@ -181,6 +189,15 @@ class VTGrid:
                 if w == 2 and col + 1 < self._w:
                     row[col + 1] = _TRAIL
             col += w
+        # What the overlay watchers need: the span this run actually wrote. It
+        # is read off the loop rather than tracked inside it — a run is
+        # contiguous, so it starts at the first column not clipped away and ends
+        # wherever the cursor stopped — which keeps the cost of watching out of
+        # the hot loop entirely, and off every frame that draws no picture.
+        if self._watch and self._watch_y0 <= y < self._watch_y1:
+            lo = max(x, cx0, 0)
+            if col > lo:
+                self._mark(y, lo, col)
 
     def fill_rect(self, x: float, y: float, w: float, h: float, fg=None, bg=None,
                   attr: int = 0, ul=None) -> None:
@@ -245,6 +262,99 @@ class VTGrid:
         out = []
         for row in self._buf:
             out.append("".join(c[0] for c in row if c is not _TRAIL))
+        return out
+
+    # --- overlay watching ----------------------------------------------------
+    #
+    # An inline image is painted OVER the grid, out of band, rather than into
+    # it — so the grid is the only thing that can say what landed on top of it
+    # afterwards. A watcher records exactly that: from the moment it is opened,
+    # every cell written inside its rect is marked, and visible_rects reports
+    # what is left. The backend then draws only those parts of the picture, and
+    # a dialog opened over an image occludes it the same way it would on a
+    # compositing backend — by being drawn later, not by carrying a z-order the
+    # backend would have to be told about.
+    #
+    # Only draw_text marks. set_cell does not: it re-tints a cell that is
+    # already there (a scrim, a fade) rather than putting new content in it, and
+    # a terminal cannot tint pixels — so a dimmed modal leaves the picture
+    # bright underneath instead of erasing it, which is the better of the two
+    # approximations available.
+
+    def _drop_watches(self) -> None:
+        self._watch = []
+        self._watch_y0 = self._watch_y1 = 0
+
+    def watch_rect(self, x: int, y: int, w: int, h: int) -> int:
+        """Start recording which cells are written inside this rect from here
+        on, and return the token that reads the result back."""
+        x, y, w, h = int(x), int(y), int(w), int(h)
+        # Mask rows are allocated on the first mark, so a picture nothing is
+        # drawn over costs one list entry and no per-row storage at all.
+        self._watch.append([x, y, w, h, None])
+        if len(self._watch) == 1:
+            self._watch_y0, self._watch_y1 = y, y + h
+        else:
+            self._watch_y0 = min(self._watch_y0, y)
+            self._watch_y1 = max(self._watch_y1, y + h)
+        return len(self._watch) - 1
+
+    def _mark(self, y: int, x0: int, x1: int) -> None:
+        for watch in self._watch:
+            wx, wy, ww, wh = watch[0], watch[1], watch[2], watch[3]
+            if not wy <= y < wy + wh:
+                continue
+            c0, c1 = max(x0, wx), min(x1, wx + ww)
+            if c0 >= c1:
+                continue
+            mask = watch[4]
+            if mask is None:
+                mask = watch[4] = [bytearray(ww) for _ in range(wh)]
+            mask[y - wy][c0 - wx:c1 - wx] = b"\x01" * (c1 - c0)
+
+    def visible_rects(self, token: int) -> list[tuple[int, int, int, int]]:
+        """The watched rect minus every cell written since it was opened, as
+        rectangles.
+
+        Nothing drawn over it gives back the rect itself — the same single box
+        the caller started with, so the untouched case costs nothing downstream
+        either. A dialog in the middle gives four: the bands above and below it,
+        and the columns either side.
+        """
+        if not 0 <= token < len(self._watch):
+            return []
+        x, y, w, h, mask = self._watch[token]
+        if w <= 0 or h <= 0:
+            return []
+        if mask is None:
+            return [(x, y, w, h)]
+        # Per row, the runs of columns still showing; then rows whose runs are
+        # identical merge into one band, which is what turns a hole in the
+        # middle into four rectangles rather than one per row.
+        rows: list[tuple[tuple[int, int], ...]] = []
+        for r in range(h):
+            bits = mask[r]
+            runs: list[tuple[int, int]] = []
+            col = 0
+            while col < w:
+                if bits[col]:
+                    col += 1
+                    continue
+                start = col
+                while col < w and not bits[col]:
+                    col += 1
+                runs.append((start, col))
+            rows.append(tuple(runs))
+        out: list[tuple[int, int, int, int]] = []
+        top = 0
+        while top < h:
+            runs = rows[top]
+            end = top + 1
+            while end < h and rows[end] == runs:
+                end += 1
+            for c0, c1 in runs:
+                out.append((x + c0, y + top, c1 - c0, end - top))
+            top = end
         return out
 
     # --- output --------------------------------------------------------------

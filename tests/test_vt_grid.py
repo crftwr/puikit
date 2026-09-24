@@ -321,3 +321,66 @@ def test_a_wide_glyph_broken_apart_keeps_the_rule_color():
     g.draw_text(0, 0, "日")
     g.draw_text(1, 0, "x", fg=(1, 2, 3), attr=_UL, ul=(9, 9, 9))
     assert g.cell_at(0, 0) == (" ", (1, 2, 3), None, _UL, (9, 9, 9))
+
+
+# --- overlay watching -------------------------------------------------------
+#
+# An inline image is painted over the grid rather than into it, so the grid is
+# the only thing that can say what was drawn on top of it afterwards.
+
+
+def test_a_watched_rect_nothing_touches_comes_back_whole():
+    g = VTGrid(20, 8)
+    token = g.watch_rect(2, 1, 16, 6)
+    g.draw_text(0, 0, "header")          # above it
+    g.draw_text(0, 7, "footer")          # below it
+    assert g.visible_rects(token) == [(2, 1, 16, 6)]
+
+
+def test_a_hole_in_the_middle_becomes_four_rectangles():
+    g = VTGrid(20, 8)
+    token = g.watch_rect(2, 1, 16, 6)
+    for row in (3, 4):
+        g.draw_text(6, row, "     ")     # columns 6..10
+    assert sorted(g.visible_rects(token)) == [
+        (2, 1, 16, 2),                   # the band above
+        (2, 3, 4, 2),                    # left of the hole
+        (2, 5, 16, 2),                   # the band below
+        (11, 3, 7, 2),                   # right of the hole
+    ]
+
+
+def test_what_was_drawn_before_the_watch_does_not_count():
+    # Draw order is the whole rule: a picture covers what came before it and is
+    # covered by what comes after, exactly as it would be on a GUI backend.
+    g = VTGrid(20, 4)
+    g.draw_text(0, 1, "x" * 20)
+    token = g.watch_rect(0, 0, 20, 4)
+    assert g.visible_rects(token) == [(0, 0, 20, 4)]
+
+
+def test_a_fully_covered_rect_leaves_nothing():
+    g = VTGrid(10, 3)
+    token = g.watch_rect(0, 0, 10, 3)
+    for row in range(3):
+        g.draw_text(0, row, " " * 10)
+    assert g.visible_rects(token) == []
+
+
+def test_a_scrim_recolors_without_covering():
+    # set_cell re-tints a cell that is already there; a terminal cannot tint
+    # pixels, so a dimmed modal leaves the picture bright rather than erasing
+    # it — the better of the two approximations available.
+    g = VTGrid(10, 2)
+    token = g.watch_rect(0, 0, 10, 2)
+    for row in range(2):
+        for col in range(10):
+            g.set_cell(col, row, (" ", None, (30, 30, 30), 0, None))
+    assert g.visible_rects(token) == [(0, 0, 10, 2)]
+
+
+def test_a_frame_starts_with_no_watchers():
+    g = VTGrid(10, 2)
+    token = g.watch_rect(0, 0, 10, 2)
+    g.clear()
+    assert g.visible_rects(token) == []
