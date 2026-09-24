@@ -501,3 +501,107 @@ def test_a_file_rewritten_under_the_same_name_is_re_emitted(backend, png, tmp_pa
     be.draw_image(0, 0, png, {"w": 4, "h": 2})
     be.present()
     assert "\x1b7" in "".join(con.written)
+
+
+# --- an overlay drawn over a picture ---------------------------------------
+#
+# The pixels go out after the whole grid, because the frame's own text would
+# otherwise land on top of them. Without a rule saying what is in front of
+# what, that puts every picture in front of everything: a help overlay opened
+# over the image viewer reads as being BEHIND the picture, and its own cells
+# then make the placement look overpainted, so it is re-sent and buries them
+# again (xefm#458). The rule is the one a compositing backend gets for free —
+# whatever is drawn after the image is in front of it.
+
+
+def _boxes(be):
+    return sorted(p[:4] for p in be._placements.values())
+
+
+def test_a_picture_nothing_covers_is_still_one_placement(backend, png):
+    be, _con = backend
+    be._term_graphics = "sixel"
+    be.clear()
+    be.draw_image(2, 1, png, {"w": 10, "h": 6})
+    be.present()
+    assert _boxes(be) == [(2, 1, 10, 6)]
+
+
+def test_an_overlay_drawn_after_the_picture_is_cut_out_of_it(backend, png):
+    be, _con = backend
+    be._term_graphics = "sixel"
+    be.clear()
+    be.draw_image(2, 1, png, {"w": 10, "h": 6})
+    for row in (3, 4):
+        be.draw_text(4, row, "    ")     # a dialog's own background fill
+    be.present()
+    assert _boxes(be) == [(2, 1, 10, 2), (2, 3, 2, 2), (2, 5, 10, 2), (8, 3, 4, 2)]
+
+
+def test_text_drawn_before_the_picture_stays_under_it(backend, png):
+    # The ImageButton case: the cells beneath the picture are painted first and
+    # stay beneath it, so the placement is still one box.
+    be, _con = backend
+    be._term_graphics = "sixel"
+    be.clear()
+    be.draw_text(2, 2, "button")
+    be.draw_image(2, 1, png, {"w": 10, "h": 6})
+    be.present()
+    assert _boxes(be) == [(2, 1, 10, 6)]
+
+
+def test_a_surviving_part_carries_the_matching_part_of_the_picture(backend, png):
+    be, _con = backend
+    be._term_graphics = "sixel"
+    be.clear()
+    be.draw_image(0, 0, png, {"w": 10, "h": 4})
+    be.draw_text(0, 2, "  ")             # the left two columns of one row
+    be.present()
+    src = {p[:4]: p[5] for p in be._placements.values()}
+    assert src[(0, 0, 10, 2)] == pytest.approx((0.0, 0.0, 1.0, 0.5))
+    assert src[(2, 2, 8, 1)] == pytest.approx((0.2, 0.5, 0.8, 0.25))
+
+
+def test_a_settled_overlay_does_not_ask_for_the_picture_back(backend, png):
+    # The second half of the bug. The covered cells are no longer part of any
+    # placement, so they cannot report the picture as overpainted.
+    be, con = backend
+    be._term_graphics = "sixel"
+    be.clear()
+    be.draw_image(0, 0, png, {"w": 12, "h": 6})
+    for row in (2, 3):
+        be.draw_text(3, row, "help")
+    be.present()
+    be.clear()
+    be.draw_image(0, 0, png, {"w": 12, "h": 6})
+    for row in (2, 3):
+        be.draw_text(3, row, "help")
+    con.written.clear()
+    be.present()
+    assert "\x1b7" not in "".join(con.written)
+
+
+def test_closing_the_overlay_brings_the_whole_picture_back(backend, png):
+    be, _con = backend
+    be._term_graphics = "sixel"
+    be.clear()
+    be.draw_image(0, 0, png, {"w": 12, "h": 6})
+    for row in (2, 3):
+        be.draw_text(3, row, "help")
+    be.present()
+    be.clear()
+    be.draw_image(0, 0, png, {"w": 12, "h": 6})
+    be.present()
+    assert _boxes(be) == [(0, 0, 12, 6)]
+
+
+def test_an_uncovered_picture_resolves_to_what_was_recorded(backend, png):
+    # The cost of the rule on the common case, stated as an identity: nothing
+    # drawn over the picture means the resolved placement IS the recorded one,
+    # down to the id — same cache key, same payload, same diff.
+    be, _con = backend
+    be._term_graphics = "sixel"
+    be.clear()
+    be.draw_image(1, 1, png, {"w": 8, "h": 4})
+    be.present()
+    assert be._placements == be._images
