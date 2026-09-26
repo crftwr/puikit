@@ -1012,7 +1012,11 @@ class VTBackend(Backend):
             # modifier on the character itself, which is why Shift+Space arrives
             # as a plain space. Named here rather than left to the arithmetic
             # above, which would make 0x00 the letter Ctrl+@ ("`").
-            if char == "\x00":
+            #
+            # Only for a record with no name of its own: NUL is also how a
+            # console reports a key that produced no character at all, and a
+            # key that HAS a name must never be reread as this chord.
+            if char == "\x00" and record.get("name") is None:
                 return Event(EventType.KEY, key="space",
                              modifiers=mods | {"ctrl"})
             if char.isprintable():
@@ -1151,8 +1155,21 @@ def _win_key_record(char: str, vk: int, control: int) -> dict:
     that _VK_KEYS (named keys only) cannot resolve — which would silently drop
     the menu accelerators (Alt+F). The VK *is* the letter, so name it. Not
     under Ctrl too (AltGr), where a suppressed char means the chord really
-    produced nothing."""
+    produced nothing.
+
+    A NUL char is no char. The console says "this key produced no character" by
+    setting UnicodeChar to 0, which ctypes hands over as a one-character string
+    holding NUL rather than as "" — so the reader's ``or ""``, the obvious place
+    for this, never caught it. EVERY non-character key reports that way (an
+    arrow, F5, Home, a bare Shift press), while NUL is separately what a POSIX
+    terminal sends for Ctrl+Space — so a NUL left in the record had the engine
+    read every one of those keys as that one chord. Here the virtual key names
+    the key and the control-key state carries its modifiers; there is nothing a
+    character could add.
+    """
     mods = _win_modifiers(control)
+    if char == "\x00":
+        char = ""
     name = _VK_KEYS.get(vk)
     if (name is None and not char and 0x41 <= vk <= 0x5A
             and "alt" in mods and "ctrl" not in mods):

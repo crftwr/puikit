@@ -128,6 +128,45 @@ def test_ctrl_space_from_the_windows_console(backend):
     assert (event.key, event.modifiers) == ("space", frozenset({"ctrl"}))
 
 
+@pytest.mark.parametrize("vk, name", [
+    (0x25, "left"), (0x26, "up"), (0x74, "f5"), (0x24, "home"),
+    (0x22, "pagedown"), (0x2E, "delete"),
+])
+def test_a_key_that_produced_no_character_keeps_its_own_name(backend, vk, name):
+    # The Windows console reports "this key produced no character" as UnicodeChar
+    # 0, which ctypes hands over as a one-character NUL string, not as "". NUL is
+    # separately Ctrl+Space's encoding in a POSIX terminal, so reading it as a
+    # character turned every arrow, function and edit key on Windows into that one
+    # chord. The virtual key names these; the character has nothing to say.
+    be, _ = backend
+    event = key(be, "\x00", vk)
+    assert (event.key, event.modifiers) == (name, frozenset())
+
+
+def test_a_modified_cursor_key_is_the_key_plus_its_modifier(backend):
+    # Ctrl+Left, the case where the dropped character and a real ctrl modifier
+    # arrive together: the chord that must NOT collapse into Ctrl+Space.
+    be, _ = backend
+    event = key(be, "\x00", 0x25, 0x0008)
+    assert (event.key, event.modifiers) == ("left", frozenset({"ctrl"}))
+
+
+def test_a_modifier_held_alone_is_still_no_key_at_all(backend):
+    # A bare Shift or Ctrl press: no character, and no name either, so there is
+    # nothing to deliver. It must not become a chord the app has bound.
+    be, _ = backend
+    assert key(be, "\x00", 0x10, 0x0010) is None
+    assert key(be, "\x00", 0x11, 0x0008) is None
+
+
+def test_alt_f_survives_the_console_eating_its_character(backend):
+    # The menu accelerator the Alt fallback in _win_key_record exists for: its
+    # "no char" test could never fire while the NUL counted as a character.
+    be, _ = backend
+    event = key(be, "\x00", 0x46, 0x0002)
+    assert (event.key, event.modifiers) == ("f", frozenset({"alt"}))
+
+
 def test_ime_commit_is_still_not_dropped(backend):
     # The routing change must not regress the reason this backend exists.
     be, _ = backend
