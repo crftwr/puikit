@@ -743,6 +743,82 @@ def test_textedit_scroll_into_view_work_is_bounded_by_field_width():
     assert _Ctx.chars < 51_000  # one full-span measure + a field-width walk
 
 
+def _long_field(backend, text):
+    # A 20-wide field: 18 text columns, the run from the window start may span
+    # 17 (the last column is the caret's at the text's end), a 3-column margin.
+    panel = Panel(backend)
+    field = TextEdit(text, width=20)
+    panel.add(field, x=0, y=0, w=20, h=1)
+    panel.render()
+    return panel, field
+
+
+def test_textedit_backspace_at_end_scrolls_hidden_start_back_in(backend):
+    # Shortening the text never leaves the right of the field empty while text
+    # is hidden off its left: the end stays at the right edge and each deleted
+    # character brings one hidden one back (xefm#480).
+    panel, field = _long_field(backend, "abcdefghijklmnopqrstuvwxyz0123")
+    assert field._view == 30 - 17
+    for n in range(29, 16, -1):
+        panel.dispatch_event(_key("backspace"))
+        panel.render()
+        assert len(field.text) == n and field._view == n - 17
+    for _ in range(3):
+        panel.dispatch_event(_key("backspace"))
+        panel.render()
+    assert field._view == 0  # the whole text fits again
+
+
+def test_textedit_shrink_mid_text_pulls_the_tail_to_the_right_edge(backend):
+    panel, field = _long_field(backend, "x" * 40)
+    field._anchor = 30
+    panel.dispatch_event(_key("backspace"))  # delete the selected tail
+    panel.render()
+    assert field.text == "x" * 30 and field._view == 30 - 17
+
+
+def test_textedit_caret_keeps_left_context_before_scrolling(backend):
+    # Moving left, the window follows before the caret reaches the edge, so
+    # three columns of what lies ahead stay visible.
+    panel, field = _long_field(backend, "x" * 40)
+    assert field._view == 23
+    while field.cursor > 26:
+        panel.dispatch_event(_key("left"))
+        panel.render()
+        assert field._view == 23  # still clear of the margin
+    panel.dispatch_event(_key("left"))
+    panel.render()
+    assert field.cursor == 25 and field._view == 22
+
+
+def test_textedit_caret_keeps_right_context_before_scrolling(backend):
+    panel, field = _long_field(backend, "x" * 40)
+    panel.dispatch_event(_key("home"))
+    panel.render()
+    while field.cursor < 14:
+        panel.dispatch_event(_key("right"))
+        panel.render()
+        assert field._view == 0
+    panel.dispatch_event(_key("right"))
+    panel.render()
+    # Caret at 15 with 3 columns after it: the run 0..18 no longer fits in 17.
+    assert field.cursor == 15 and field._view == 1
+
+
+def test_textedit_margin_shrinks_in_a_narrow_field(backend):
+    # A 6-wide field spans 3 columns: the margin caps at a quarter of that, so
+    # the caret still gets a column to move in rather than the window shifting
+    # on every keystroke.
+    panel = Panel(backend)
+    field = TextEdit("x" * 20, width=6)
+    panel.add(field, x=0, y=0, w=6, h=1)
+    panel.render()
+    assert field._view == 17
+    panel.dispatch_event(_key("left"))
+    panel.render()
+    assert field.cursor == 19 and field._view == 17
+
+
 def test_textedit_selection_renders_highlight(backend):
     panel = Panel(backend)
     field = TextEdit("hello", width=12)

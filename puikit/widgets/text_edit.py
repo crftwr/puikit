@@ -33,6 +33,11 @@ _FIELD_RADIUS = 4.0
 # (Ctrl / Alt-Option) is held: caret motion and forward/backward deletion.
 _WORD_KEYS = frozenset({"left", "right", "backspace", "delete"})
 
+# Text kept visible on either side of the caret before the field scrolls, in
+# base units (columns on a grid), so an edge never hides what the caret is
+# about to reach. Capped at a quarter of a narrow field (see _scroll_into_view).
+_EDGE_MARGIN = 3.0
+
 
 class TextEdit(Widget):
     focusable = True
@@ -362,23 +367,50 @@ class TextEdit(Widget):
     def _scroll_into_view(self, ctx: DrawContext, caret: int, field_w: int) -> None:
         # Keep the start (a character index) such that the caret stays inside the
         # field, measured in base units (proportional on GUI, columns on a grid)
-        # so the visible window matches how the run is laid out in draw.
+        # so the visible window matches how the run is laid out in draw. The run
+        # from the window start may span ``field_w - 1``: the last column is kept
+        # for a caret sitting at the text's end.
         mtext = self._display(self.text)
         disp = mtext[: self.cursor] + self._display(self._preedit) + mtext[self.cursor :]
-        if caret < self._view:
-            self._view = caret
-        elif self._view < caret and ctx.measure_text(disp[self._view : caret]) > field_w - 1:
-            # The caret ran off the right edge: re-find the window start from
-            # the caret backwards, keeping the longest suffix that still fits.
+        span = field_w - 1
+        measure = ctx.measure_text
+        # The caret keeps a few units of text visible on either side, so it never
+        # sits flush against an edge with the rest of the text hidden beyond it
+        # (xefm#480). Only text that exists counts: at the text's end there is
+        # nothing to show, so no blank reserve that would fight the fill below.
+        # A narrow field takes a proportionally smaller margin, leaving the caret
+        # room to move without the window chasing it on every keystroke.
+        margin = max(0.0, min(_EDGE_MARGIN, span / 4))
+        lo = caret
+        while lo > 0 and measure(disp[lo - 1 : caret]) <= margin:
+            lo -= 1
+        hi = caret
+        while hi < len(disp) and measure(disp[caret : hi + 1]) <= margin:
+            hi += 1
+        if lo < self._view:
+            self._view = lo
+        elif self._view < hi and measure(disp[self._view : hi]) > span:
+            # The caret's right margin ran off the right edge: re-find the window
+            # start from there backwards, keeping the longest run that still fits.
             # The walk (and each measured run) is bounded by the field width;
             # advancing one character from the left and re-measuring the whole
             # remainder each step is O(n^2) in the text length, which froze the
             # app when a large clipboard was pasted into a field (xefm#276).
-            view = caret
-            while view > 0 and ctx.measure_text(disp[view - 1 : caret]) <= field_w - 1:
+            view = hi
+            while view > 0 and measure(disp[view - 1 : hi]) <= span:
                 view -= 1
             self._view = view
-        self._view = max(0, min(self._view, len(disp)))
+        if self._view > 0:
+            # Never leave the right of the field empty while text is hidden off
+            # its left: once an edit shortens the text (or the field widens), pull
+            # the window back so the text's end sits at the right edge and the
+            # hidden start scrolls in (xefm#480). Walked back from the end, so
+            # bounded by the field width like the walk above.
+            start = len(disp)
+            while start > 0 and measure(disp[start - 1 :]) <= span:
+                start -= 1
+            self._view = min(self._view, start)
+        self._view = max(0, min(self._view, caret, len(disp)))
 
     # --- events --------------------------------------------------------------
 
