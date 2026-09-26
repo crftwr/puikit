@@ -108,6 +108,26 @@ def test_ctrl_letter_arrives_as_a_modified_letter(backend):
     assert "ctrl" in event.modifiers
 
 
+def test_ctrl_space_arrives_as_a_modified_space(backend):
+    # The NUL byte, which is what a POSIX terminal sends for Ctrl+Space and the
+    # only chord on a printable it can encode at all. Without this it fell past
+    # every branch (not a named control char, below the Ctrl+letter run, not
+    # printable) and was dropped, so a binding on it could never fire in a
+    # terminal while both GUI backends delivered it.
+    be, _ = backend
+    event = be._to_event(
+        {"type": "key", "char": "\x00", "name": None, "mods": frozenset()})
+    assert (event.key, event.modifiers) == ("space", frozenset({"ctrl"}))
+
+
+def test_ctrl_space_from_the_windows_console(backend):
+    # The same key through the Windows translation, which names it from the
+    # virtual key and reports the modifier itself.
+    be, _ = backend
+    event = key(be, "\x00", 0x20, 0x0008)
+    assert (event.key, event.modifiers) == ("space", frozenset({"ctrl"}))
+
+
 def test_ime_commit_is_still_not_dropped(backend):
     # The routing change must not regress the reason this backend exists.
     be, _ = backend

@@ -62,6 +62,17 @@ def test_ctrl_letter_becomes_ctrl_modified_key():
         assert ev.char is None  # a command chord, not text
 
 
+def test_ctrl_space_becomes_a_ctrl_modified_space():
+    # Ctrl+Space arrives as the NUL byte, one below the Ctrl+letter run; it is
+    # the only chord on a printable a terminal can encode (Shift+Space arrives
+    # as a plain space), so it must not be dropped.
+    be = CursesBackend()
+    ev = be._translate_char("\x00")
+    assert ev.type is EventType.KEY
+    assert ev.key == "space"
+    assert ev.modifiers == frozenset({"ctrl"})
+
+
 def test_ctrl_letter_does_not_shadow_named_control_keys():
     # Ctrl+I/J/M/H/[ collide with tab/enter/backspace/escape; the named key wins.
     be = CursesBackend()
