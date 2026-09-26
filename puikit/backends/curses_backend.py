@@ -2080,6 +2080,13 @@ class CursesBackend(Backend):
         if len(ch) == 1 and 0x01 <= ord(ch) <= 0x1A:
             letter = chr(ord(ch) + 0x60)
             return Event(type=EventType.KEY, key=letter, modifiers=frozenset({"ctrl"}))
+        # Ctrl+Space is the byte one below that run, and the only chord on a
+        # printable a terminal can encode at all (Shift+Space arrives as a plain
+        # space). Named rather than run through the arithmetic above, which would
+        # make 0x00 the letter Ctrl+@.
+        if ch == "\x00":
+            return Event(type=EventType.KEY, key="space",
+                         modifiers=frozenset({"ctrl"}))
         if ch.isprintable():
             # A terminal can't report Shift for a printable; an uppercase letter
             # implies it, so infer it and let the shared contract helper lowercase

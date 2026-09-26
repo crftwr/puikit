@@ -1007,6 +1007,14 @@ class VTBackend(Backend):
             if len(char) == 1 and 0x01 <= ord(char) <= 0x1A:
                 return Event(EventType.KEY, key=chr(ord(char) + 0x60),
                              modifiers=mods | {"ctrl"})
+            # Ctrl+Space is the byte one *below* that run, and the only chord on
+            # a printable a POSIX terminal can encode at all — it cannot report a
+            # modifier on the character itself, which is why Shift+Space arrives
+            # as a plain space. Named here rather than left to the arithmetic
+            # above, which would make 0x00 the letter Ctrl+@ ("`").
+            if char == "\x00":
+                return Event(EventType.KEY, key="space",
+                             modifiers=mods | {"ctrl"})
             if char.isprintable():
                 # The shared contract helper, not a hand-rolled Event: it is what
                 # makes SPACE the named key "space" (with char=" " kept) rather
