@@ -22,6 +22,8 @@ if sys.platform != "win32":
 from puikit import CRT, PostEffect, Rect  # noqa: E402
 from puikit.backend import Backend, Style, TextAttribute  # noqa: E402
 from puikit.font import Font, FontWeight  # noqa: E402
+from puikit.backends._image_cache import MISS  # noqa: E402
+from puikit.image import source_key  # noqa: E402
 from puikit.backends.windows_backend import (  # noqa: E402
     Animation, WindowsBackend, _SHADOW_KERNEL, _drop_shadow_params, _glow_matrix,
     _roll_band_top, _roll_falloff, _shadow_tap_alpha, _tint_matrix,
@@ -590,8 +592,14 @@ def test_image_missing_path_caches_as_failure(tmp_path):
     try:
         missing = str(tmp_path / "does_not_exist.png")
         assert backend._get_image(missing) is None
-        assert backend._image_cache.get(missing) is None
-        assert missing in backend._image_cache  # cached as a known failure
+        # Under the source's cache identity, not its bare path: a path names a
+        # location, and source_key pins the pixels that were at it (puikit#144).
+        # Membership is read in the cache's own vocabulary — MISS is "nothing is
+        # stored here", None is "stored, and what is stored is a failure" — which
+        # is the distinction the retry-once behavior rests on.
+        cached = backend._image_cache.get(source_key(missing))
+        assert cached is not MISS  # the attempt is remembered
+        assert cached is None      # and remembered as a failure
     finally:
         backend.close()
 

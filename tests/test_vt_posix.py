@@ -10,13 +10,10 @@ The console tests run against a real pty, because termios modes and the
 select loop are exactly the parts a fake would vouch for without testing.
 """
 
-import fcntl
 import os
-import pty
 import select
 import struct
 import sys
-import termios
 
 import pytest
 
@@ -24,6 +21,14 @@ from puikit.backends._vt_input import parse_vt_input
 from puikit.event import EventType
 
 if sys.platform != "win32":
+    # Under the same condition as the pytestmark below, and for a reason the mark
+    # cannot cover: a mark is consulted only after the module has been imported,
+    # so a bare `import termios` here fails at COLLECTION on Windows and takes
+    # the whole run down with it — including `make test`, and so `make tag`.
+    import fcntl
+    import pty
+    import termios
+
     from puikit.backends._vt_posix import PosixConsole
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32",

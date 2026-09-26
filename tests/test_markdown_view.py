@@ -1,5 +1,6 @@
 """MarkdownView tests run identically against the TUI and GUI capability profiles."""
 
+import os
 import struct
 
 import pytest
@@ -388,10 +389,13 @@ def test_image_relative_path_resolves_against_base_dir(tmp_path):
     panel.render()
     row = view._rows[0]
     assert row.image is not None
-    assert row.image[0] == str(png)
+    # Compared through normpath: os.path.join keeps the separators the markdown
+    # wrote, so on Windows the resolved path is "C:\...\docs/images/shot.png" —
+    # the same file, spelled with the slashes the document used.
+    assert os.path.normpath(row.image[0]) == str(png)
     # The aspect height proves the resolved file was really measured.
     assert abs(row.height - 10.0) < 0.01
-    assert [c[2] for c in backend.image_calls] == [str(png)]
+    assert [os.path.normpath(c[2]) for c in backend.image_calls] == [str(png)]
 
 
 def test_image_absolute_path_ignores_base_dir(tmp_path):
