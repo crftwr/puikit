@@ -317,7 +317,7 @@ puikit/
 │   ├── hello_world/          # minimal single-label app
 │   ├── demo_catalog/         # widget showcase (see its README.md)
 │   └── background_shader/    # GPU background feasibility demo
-├── scripts/              # Release tooling (version bump, preflight, fonts)
+├── scripts/              # Release tooling (version bump, preflight, fonts), Pages banner render
 ├── tests/
 ├── CLAUDE.md             # this file
 ├── README.md

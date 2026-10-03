@@ -61,7 +61,7 @@ VENV_STAMP := $(VENV)/.installed
 # stamp depends on this so `make venv` / any run target populates the fonts.
 FONTS := puikit/fonts/NotoSans-Regular.ttf
 
-.PHONY: help venv install test fonts hello demo demo-vt demo-curses layout bg3d hello-gui demo-gui layout-gui bg3d-gui hello-web demo-web build publish-testpypi tag release-github release-whl release-status clean
+.PHONY: help venv install test fonts banner hello demo demo-vt demo-curses layout bg3d hello-gui demo-gui layout-gui bg3d-gui hello-web demo-web build publish-testpypi tag release-github release-whl release-status clean
 
 help:
 	@echo "PuiKit utility commands:"
@@ -81,6 +81,7 @@ help:
 	@echo "  make demo-web  - run the demo_catalog example (web backend, in a browser)"
 	@echo "  make layout-gui - run the layout demo (native GUI, pixel layout)"
 	@echo "  make bg3d-gui  - run the background_3d example (native GUI: macOS or Windows)"
+	@echo "  make banner    - render docs/images/banner.svg to the GitHub Pages JPEGs (needs Chrome)"
 	@echo "  make clean     - remove build artifacts and caches"
 	@echo ""
 	@echo "Release (run in this order):"
@@ -105,6 +106,12 @@ $(FONTS): scripts/fetch_fonts.py
 	$(PYTHON) scripts/fetch_fonts.py
 
 fonts: $(FONTS)
+
+# GitHub Pages banner.  docs/images/banner.svg is the source; link previews
+# ignore SVG in og:image, so the site serves JPEGs rendered from it (headless
+# Chrome + sips, macOS).  The JPEGs are committed.
+banner:
+	python3 scripts/render_banner.py
 
 venv: $(VENV_STAMP)
 
