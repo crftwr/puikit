@@ -4564,6 +4564,14 @@ class MacOSBackend(Backend):
         # `responder` stays referenced here through the synchronous popup loop,
         # so its item callbacks survive the tracking session.
         point = NSMakePoint(x * self._base_w, y * self._base_h)
+        # Put the frame the app rendered for this menu on screen first. present()
+        # only marks the view dirty, and the tracking loop below holds the UI
+        # thread — so a right-click that moved the cursor onto the clicked row
+        # left the old frame up while the menu was open, and nothing showed
+        # which row the menu was for. One synchronous draw, once per menu.
+        view = self._target_view()
+        if view is not None:
+            view.displayIfNeeded()
         # popUpMenuPositioningItem_ runs its own tracking loop and returns when
         # the menu closes: the UI thread is held for as long as the user reads
         # the menu, which is theirs to spend, not a stall.
