@@ -3766,6 +3766,10 @@ class WindowsBackend(Backend):
         pt = wintypes.POINT(int(x * self._base_w), int(y * self._base_h))
         native.user32.ClientToScreen(self._hwnd, ctypes.byref(pt))
         native.user32.SetForegroundWindow(self._hwnd)
+        # Paint the frame the app rendered for this menu before the modal loop
+        # starts, so what the menu is about (the row a right-click moved the
+        # cursor to) is on screen while it is open — as on macOS.
+        native.user32.UpdateWindow(self._hwnd)
         # TrackPopupMenu pumps its own message loop until the menu closes: time
         # the user spends reading a menu, not a stall to report.
         with self._watchdog_paused():

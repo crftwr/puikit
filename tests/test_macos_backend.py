@@ -992,6 +992,29 @@ def test_popup_menu_is_never_gated(monkeypatch):
     assert activated == [True]
 
 
+def test_popup_menu_draws_the_pending_frame_before_it_opens(monkeypatch):
+    # present() only marks the view dirty, and the menu's tracking loop holds
+    # the UI thread: without a draw first, a right-click that moved the cursor
+    # left the old frame on screen for as long as the menu was open.
+    from puikit.backends import _macos_menu
+
+    calls = []
+
+    class _View:
+        def displayIfNeeded(self):
+            calls.append("draw")
+
+    class _Menu:
+        def popUpMenuPositioningItem_atLocation_inView_(self, item, point, view):
+            calls.append("popup")
+
+    monkeypatch.setattr(_macos_menu, "build_popup_menu", lambda menu: (_Menu(), None))
+    backend = MacOSBackend()
+    backend._view = _View()
+    backend.popup_menu(object(), 1.0, 2.0)
+    assert calls == ["draw", "popup"]
+
+
 # --- who gets the click that activates the application -----------------------
 
 
