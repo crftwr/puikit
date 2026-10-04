@@ -151,6 +151,11 @@ def test_translate_arrow_key():
     assert event.key == "up"
 
 
+def test_translate_context_menu_key():
+    # A PC keyboard's Menu key arrives as NSMenuFunctionKey.
+    assert translate_key("\uf735").key == "apps"
+
+
 def test_translate_printable_char():
     event = translate_key("q")
     assert event.key == "q"
