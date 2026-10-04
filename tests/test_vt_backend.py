@@ -101,6 +101,23 @@ def test_full_cjk_filename_arrives_intact(backend):
     assert got == text
 
 
+def test_ideographic_space_is_typed_not_dropped(backend):
+    # A Japanese IME types U+3000 for the space bar. isprintable() rejects every
+    # space separator but " ", so it used to vanish before reaching a rename
+    # field (xefm#508). It keeps its own identity: it is not the "space" key.
+    be, con = backend
+    text = "あいう\u3000お"
+    con.queue.append([wkey(ch, _VK_PROCESSKEY) for ch in text])
+    got = ""
+    for _ in range(len(text)):
+        for e in collect(be, con):
+            got += e.char or ""
+    assert got == text
+    con.queue.append([wkey("\u3000")])
+    [event] = collect(be, con)
+    assert (event.key, event.char) == ("\u3000", "\u3000")
+
+
 def test_plain_letters_still_dispatch_as_commands(backend):
     # The other half of the acceptance criterion: f and j must keep working as
     # command keys while a pane has focus.

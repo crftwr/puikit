@@ -163,6 +163,11 @@ def test_translate_key_named_and_modifiers():
     assert _key("c", ctrl=True) == ("c", "c", frozenset({"ctrl"}))
 
 
+def test_translate_key_ideographic_space_is_a_glyph():
+    # Not isprintable(), but typed text (xefm#508) — and not the "space" key.
+    assert _key("\u3000") == ("\u3000", "\u3000", frozenset())
+
+
 def test_translate_key_ignores_bare_modifiers():
     assert translate_key("Shift", {"shift": True}) is None
     assert translate_key("Meta", {"meta": True}) is None

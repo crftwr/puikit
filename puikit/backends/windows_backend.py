@@ -51,7 +51,7 @@ from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..image import is_raster, source_key
 from ._image_cache import MISS, ImageCache
 from ..easing import resolve as _resolve_easing
-from ..event import Event, EventType, char_key_event
+from ..event import Event, EventType, char_key_event, is_typed_char
 from ..font import Font, FontMetrics, grid_aligned
 from ..text import display_width, glyph_runs as _glyph_runs, is_cjk, cjk_segments, utf16_units
 
@@ -3901,7 +3901,7 @@ class WindowsBackend(Backend):
             return
         if code < 0x20:
             return  # other C0 controls (Ctrl+letter) already handled in _on_key_down
-        if ch.isprintable():
+        if is_typed_char(ch):
             # Shared contract helper: names space, lowercases letters (keeping
             # Shift so Shift+A stays distinct from 'a'), and drops the redundant
             # Shift from a shifted glyph so Shift+1 reads as ('!', {}) like every
