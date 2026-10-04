@@ -130,7 +130,7 @@ def test_ctrl_space_from_the_windows_console(backend):
 
 @pytest.mark.parametrize("vk, name", [
     (0x25, "left"), (0x26, "up"), (0x74, "f5"), (0x24, "home"),
-    (0x22, "pagedown"), (0x2E, "delete"),
+    (0x22, "pagedown"), (0x2E, "delete"), (0x5D, "apps"),
 ])
 def test_a_key_that_produced_no_character_keeps_its_own_name(backend, vk, name):
     # The Windows console reports "this key produced no character" as UnicodeChar
@@ -149,6 +149,14 @@ def test_a_modified_cursor_key_is_the_key_plus_its_modifier(backend):
     be, _ = backend
     event = key(be, "\x00", 0x25, 0x0008)
     assert (event.key, event.modifiers) == ("left", frozenset({"ctrl"}))
+
+
+def test_shift_apps_keeps_its_shift(backend):
+    # The context-menu key and its Shift chord are two bindings (an app opens
+    # the menu for the item with one and for the directory with the other).
+    be, _ = backend
+    event = key(be, "\x00", 0x5D, 0x0010)
+    assert (event.key, event.modifiers) == ("apps", frozenset({"shift"}))
 
 
 def test_a_modifier_held_alone_is_still_no_key_at_all(backend):

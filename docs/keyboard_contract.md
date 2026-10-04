@@ -24,7 +24,14 @@ parser adapts its own token spelling to these.
 ## 1. Named non-text keys
 
 `key` ∈ `enter, escape, tab, backspace, delete, insert, up, down, left, right,
-home, end, pageup, pagedown, f1…f12`; `char` is `None`; `modifiers` as detected.
+home, end, pageup, pagedown, f1…f12, apps`; `char` is `None`; `modifiers` as
+detected.
+
+> **APPS** is the PC keyboard's context-menu (Menu / Application) key —
+> `VK_APPS` on Windows. It reaches the Windows backend, the Windows console (VT
+> backend), the macOS backend from a PC keyboard (Apple keyboards have none) and
+> the web backend. A POSIX terminal sends nothing for it, so an app binds a
+> portable key alongside it, per §5 — as it does for the ALT tap below.
 
 > **SPACE** is also a named key (`key="space"`, `char=" "` retained), so
 > `Shift-SPACE` is distinguishable from `SPACE` — the same way `Shift-A` differs

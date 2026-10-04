@@ -157,6 +157,8 @@ def test_translate_key_named_and_modifiers():
     assert _key("ArrowUp") == ("up", None, frozenset())
     assert _key("Enter") == ("enter", None, frozenset())
     assert _key("F5") == ("f5", None, frozenset())
+    assert _key("ContextMenu") == ("apps", None, frozenset())
+    assert _key("ContextMenu", shift=True) == ("apps", None, frozenset({"shift"}))
     assert _key(" ") == ("space", " ", frozenset())
     # Meta maps to the "cmd" command modifier (matching the macOS backend).
     assert _key("c", meta=True) == ("c", "c", frozenset({"cmd"}))

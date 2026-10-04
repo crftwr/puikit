@@ -299,6 +299,7 @@ _VK_KEYS = {
     native.VK_NEXT: "pagedown",
     native.VK_DELETE: "delete",
     native.VK_INSERT: "insert",
+    native.VK_APPS: "apps",   # the context-menu key
     # Function keys F1-F12 (VK_F1 = 0x70 .. VK_F12 = 0x7B).
     **{0x70 + i: f"f{i + 1}" for i in range(12)},
 }

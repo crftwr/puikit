@@ -106,6 +106,7 @@ _DOM_KEYS = {
     "PageUp": "pageup",
     "PageDown": "pagedown",
     "Insert": "insert",
+    "ContextMenu": "apps",
     **{f"F{i}": f"f{i}" for i in range(1, 13)},
 }
 

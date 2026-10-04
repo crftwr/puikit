@@ -572,6 +572,7 @@ _FUNCTION_KEYS = {
     0xF72B: "end",
     0xF72C: "pageup",
     0xF72D: "pagedown",
+    0xF735: "apps",  # NSMenuFunctionKey: a PC keyboard's context-menu key
     # Function keys F1-F12 (NSF1FunctionKey = 0xF704 .. F12 = 0xF70F).
     **{0xF704 + i: f"f{i + 1}" for i in range(12)},
 }
