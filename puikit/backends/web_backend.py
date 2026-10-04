@@ -48,7 +48,7 @@ from ..backend import (
     is_transparent,
 )
 from ..capability import PROFILE_GUI_WEB, CapabilityProfile
-from ..event import Event, EventType, char_key_event
+from ..event import Event, EventType, char_key_event, is_typed_char
 from ..font import Font, FontMetrics, grid_aligned
 from . import _ttf
 from ._web_server import WebServer
@@ -131,7 +131,7 @@ def translate_key(key: str, mods: dict) -> Event | None:
         return Event(type=EventType.KEY, key=named, modifiers=modifiers)
     # A single produced character (letter, digit, punctuation, space): defer to
     # the shared contract helper for the lowercase-letter / shifted-glyph rules.
-    if len(key) == 1 and key.isprintable():
+    if len(key) == 1 and is_typed_char(key):
         return char_key_event(key, modifiers)
     return None
 

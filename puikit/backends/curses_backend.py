@@ -15,7 +15,7 @@ from typing import Any
 
 from ..backend import Backend, Color, DEFAULT_STYLE, EventHandler, Style, TextAttribute, _run_tick_callbacks
 from ..capability import CapabilityProfile, PROFILE_TUI
-from ..event import Event, EventType, char_key_event
+from ..event import Event, EventType, char_key_event, is_typed_char
 from ..image import CONTAIN, COVER, contain_box, cover_source
 from ..text import display_width as _display_width
 from ..text import glyph_runs as _glyph_runs
@@ -2050,7 +2050,7 @@ class CursesBackend(Backend):
             return self._translate_extended(ch)
         if 0 <= ch < 0x110000:
             char = chr(ch)
-            if char.isprintable():
+            if is_typed_char(char):
                 # Route through the same path so printable normalization
                 # (space, shift-letter) is applied in one place.
                 return self._translate_char(char)
@@ -2087,7 +2087,7 @@ class CursesBackend(Backend):
         if ch == "\x00":
             return Event(type=EventType.KEY, key="space",
                          modifiers=frozenset({"ctrl"}))
-        if ch.isprintable():
+        if is_typed_char(ch):
             # A terminal can't report Shift for a printable; an uppercase letter
             # implies it, so infer it and let the shared contract helper lowercase
             # the key (Rule 2). Space and other printables follow the contract too.

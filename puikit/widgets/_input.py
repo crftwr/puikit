@@ -15,7 +15,7 @@ import time
 from collections.abc import Callable
 from typing import Any, Generic, TypeVar
 
-from ..event import Event, EventType
+from ..event import Event, EventType, is_typed_char
 
 # How long after a press a second press at the same spot still counts as part of
 # the same click run. Matches the usual desktop double-click cadence.
@@ -212,6 +212,6 @@ def typed_char(event: Event) -> str | None:
     if event.type is not EventType.KEY:
         return None
     ch = event.char
-    if ch and len(ch) == 1 and ch.isprintable():
+    if ch and len(ch) == 1 and is_typed_char(ch):
         return ch
     return None

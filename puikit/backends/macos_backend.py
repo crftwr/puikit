@@ -140,7 +140,7 @@ from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..image import is_raster, source_key
 from ._image_cache import MISS, ImageCache
 from ..easing import resolve as _resolve_easing
-from ..event import Event, EventType, char_key_event
+from ..event import Event, EventType, char_key_event, is_typed_char
 from ..font import Font, FontMetrics, FontWeight
 from ..text import cjk_segments, display_width, glyph_runs as _glyph_runs, utf16_units
 
@@ -653,7 +653,7 @@ def translate_key(characters: str, modifier_flags: int = 0) -> Event | None:
         return Event(type=EventType.KEY, key=_FUNCTION_KEYS[code], modifiers=modifiers)
     if ch in _CONTROL_KEYS:
         return Event(type=EventType.KEY, key=_CONTROL_KEYS[ch], modifiers=modifiers)
-    if ch.isprintable():
+    if is_typed_char(ch):
         # The shared contract helper names space, lowercases letters (keeping
         # Shift), and drops the now-redundant Shift from a shifted glyph (Rule 3):
         # charactersIgnoringModifiers already baked Shift into ``ch`` while

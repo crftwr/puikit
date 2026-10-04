@@ -6,6 +6,7 @@ travel in ``hints`` so the core model stays uniform.
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -95,6 +96,18 @@ class Event:
             modifiers=self.modifiers,
             hints=hints,
         )
+
+
+def is_typed_char(char: str) -> bool:
+    """Whether ``char`` is a character a key can produce as text: what
+    ``str.isprintable()`` accepts, plus every space separator (category Zs).
+
+    ``isprintable()`` alone admits only the ASCII space among the Zs characters,
+    so the IDEOGRAPHIC SPACE (U+3000) that a Japanese IME types for the space
+    bar, and NO-BREAK SPACE (U+00A0), were dropped at every backend and never
+    reached a text field (xefm#508)."""
+    return char.isprintable() or (
+        len(char) == 1 and unicodedata.category(char) == "Zs")
 
 
 def char_key_event(char: str, modifiers: frozenset[str] = frozenset()) -> "Event":

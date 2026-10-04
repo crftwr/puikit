@@ -54,6 +54,13 @@ The shifted symbol *is* the identity — a consumer binds `"!"`, never `"Shift-1
 drops it, so `Shift+1` reports `("!", {})` everywhere). `alt` (Option) is **kept**
 (it does not change the base glyph); `ctrl` / `cmd` are **kept**.
 
+Which characters count as printable is `puikit.event.is_typed_char`, shared by
+every backend and by `typed_char`: what `str.isprintable()` accepts **plus every
+space separator** (Unicode Zs). `isprintable()` admits only the ASCII space among
+those, so on its own it dropped the ideographic space (U+3000) a Japanese IME
+types for the space bar (xefm#508). Only `" "` becomes the named `space` key of
+§1; U+3000 and the rest are glyphs under this rule (`key = char = "　"`).
+
 ## 4. Ctrl/Cmd + letter
 
 `key` = lowercase letter, `modifiers ⊇ {"ctrl"}` (or `{"cmd"}`).

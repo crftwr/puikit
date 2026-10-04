@@ -742,6 +742,19 @@ def test_lone_low_surrogate_without_pending_high_is_dropped():
         backend.close()
 
 
+def test_ideographic_space_wm_char_dispatches():
+    # A Japanese IME's full-width space arrives as WM_CHAR U+3000; it failed
+    # isprintable() and was dropped (xefm#508).
+    backend = WindowsBackend()
+    events = []
+    backend._handler = events.append
+    try:
+        backend._on_char(0x3000)
+        assert [(e.key, e.char) for e in events] == [("\u3000", "\u3000")]
+    finally:
+        backend.close()
+
+
 def test_ctrl_backspace_is_a_ctrl_modified_backspace(monkeypatch):
     # Windows delivers Ctrl+Backspace as WM_CHAR 0x7F (plain Backspace is 0x08);
     # it must reach the field as a ctrl-modified backspace so the widget deletes

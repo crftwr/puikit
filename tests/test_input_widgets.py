@@ -209,6 +209,16 @@ def test_textedit_space_inserts_not_activates(backend):
     assert field.text == "a "
 
 
+def test_textedit_inserts_ideographic_space(backend):
+    # U+3000 fails isprintable(); typed_char used to drop it (xefm#508).
+    panel = Panel(backend)
+    field = TextEdit("あいう")
+    panel.add(field, x=0, y=0, w=16, h=1)
+    panel.dispatch_event(_key("\u3000", char="\u3000"))
+    panel.dispatch_event(_key("お", char="お"))
+    assert field.text == "あいう\u3000お"
+
+
 def test_textedit_ime_composition_then_commit(backend):
     # Marked (preedit) text is shown without touching the buffer; a committed
     # character (the shape insertText: produces) clears it and inserts.

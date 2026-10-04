@@ -51,7 +51,7 @@ from typing import Any, Callable
 
 from ..backend import Backend, Color, DEFAULT_STYLE, EventHandler, Style, TextAttribute, _run_tick_callbacks
 from ..capability import CapabilityProfile, PROFILE_TUI
-from ..event import Event, EventType, char_key_event
+from ..event import Event, EventType, char_key_event, is_typed_char
 from ..image import CONTAIN, COVER, contain_box, cover_source
 from ..text import display_width
 from . import _terminal_graphics
@@ -1019,7 +1019,7 @@ class VTBackend(Backend):
             if char == "\x00" and record.get("name") is None:
                 return Event(EventType.KEY, key="space",
                              modifiers=mods | {"ctrl"})
-            if char.isprintable():
+            if is_typed_char(char):
                 # The shared contract helper, not a hand-rolled Event: it is what
                 # makes SPACE the named key "space" (with char=" " kept) rather
                 # than the literal " ", lowercases a shifted letter, and drops

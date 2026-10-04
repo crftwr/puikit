@@ -157,6 +157,12 @@ def test_translate_printable_char():
     assert event.char == "q"
 
 
+def test_translate_ideographic_space():
+    # Not isprintable(), but typed text (xefm#508).
+    event = translate_key("\u3000")
+    assert (event.key, event.char) == ("\u3000", "\u3000")
+
+
 def test_translate_control_keys():
     assert translate_key("\r").key == "enter"
     assert translate_key("\x1b").key == "escape"

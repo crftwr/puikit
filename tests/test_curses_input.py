@@ -34,6 +34,17 @@ def test_translate_char_ascii():
     assert ev.key == "a" and ev.char == "a"
 
 
+def test_translate_char_space_separators_are_character_events():
+    # U+3000 (the IME's full-width space) and U+00A0 fail isprintable() but are
+    # text (xefm#508). An int from get_wch below 256 takes the same gate;
+    # anything above is a keycode, so U+3000 only ever arrives as a str.
+    be = CursesBackend()
+    for ch in ("\u3000", "\u00a0"):
+        ev = be._translate_char(ch)
+        assert (ev.key, ev.char) == (ch, ch)
+    assert be._translate(0xA0).char == "\u00a0"
+
+
 def test_translate_char_control_keys():
     be = CursesBackend()
     assert be._translate_char("\t").key == "tab"
