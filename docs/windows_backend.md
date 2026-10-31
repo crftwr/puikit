@@ -106,8 +106,9 @@ CJK range, or whatever system font DirectWrite falls back to for a glyph the
 primary font lacks (Segoe UI Symbol / Emoji are 1.079 em tall, so with a named
 `MS Gothic` a name holding `⧸` dropped 9 px at 40 DIP — xefm#788).
 `_flow_baseline_fix` reads the laid-out line's `GetLineMetrics().baseline` and
-shifts the run up by its excess over the primary font's ascent, so it covers
-both without knowing which face fallback chose. The grid path's per-cell CJK
+moves the run so that baseline lands where it belongs (`_baseline_px`): the
+shared ascent for a default face (`docs/font_system.md` §3.1), the font's own
+ascent otherwise. It covers both without knowing which face fallback chose. The grid path's per-cell CJK
 nudge keeps its own `_cjk_baseline_dy`.
 
 `measure_line_height` has a related trap: `font=None` does **not** mean "one

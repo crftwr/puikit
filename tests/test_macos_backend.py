@@ -1446,3 +1446,64 @@ def test_set_tray_image_without_an_item_does_nothing(tmp_path):
 
 def test_main_window_active_needs_a_window():
     assert MacOSBackend().is_main_window_active() is False
+
+
+# --- one line box for the two default faces (docs/font_system.md §3.1) -------
+
+
+def _paired(mono, ui, size=40.0):
+    backend = MacOSBackend(base_font=Font(family=mono, size=size, monospace=True),
+                           ui_font=Font(family=ui))
+    backend._init_fonts()
+    return backend
+
+
+def _own_line(ns_font):
+    import math
+    return math.ceil(ns_font.ascender() - ns_font.descender() + ns_font.leading())
+
+
+@pytest.mark.parametrize("mono, ui", [
+    (None, None),                   # the bundled, metrics-matched Noto pair
+    ("Menlo", "Helvetica"),         # UI face shorter in both ascent and descent
+    ("Courier New", "Georgia"),     # UI face the taller one
+])
+def test_default_faces_share_one_baseline(mono, ui):
+    """The mono and UI default faces put their baselines on the same pixel row,
+    and the unit is tall enough for either face's own line."""
+    import macos_ink as ink
+
+    backend = _paired(mono, ui)
+    grid = ink.baseline_row(backend, "H", Style())
+    flow = ink.baseline_row(backend, "H", Style(font=Font()))
+    assert abs(grid - flow) <= 1, (grid, flow)
+    assert backend._base_h >= _own_line(backend._fonts[TextAttribute.NORMAL])
+    assert backend._base_h >= _own_line(backend.resolve_font(Font()))
+
+
+def test_matched_pair_keeps_the_mono_unit():
+    """For the bundled Noto pair the shared box is the mono face's own line:
+    nothing about the base unit or where the grid baseline sits changes."""
+    backend = _paired(None, None)
+    assert backend._base_h == _own_line(backend._fonts[TextAttribute.NORMAL])
+
+
+def test_default_faces_answer_the_shared_metrics():
+    backend = _paired("Courier New", "Georgia")
+    mono = backend.font_metrics(Style(font=Font(monospace=True)))
+    ui = backend.font_metrics(Style(font=Font()))
+    assert mono == ui
+    assert mono.ascent + mono.descent == pytest.approx(1.0)
+    assert backend.measure_line_height(Style(font=Font())) == 1.0
+    bold_ui = Style(attr=TextAttribute.BOLD, font=Font())
+    assert backend.measure_line_height(bold_ui) == 1.0
+    assert backend.font_metrics(bold_ui) == ui
+
+
+def test_a_face_of_its_own_keeps_its_metrics():
+    """A sized or named face is not part of the shared box: it measures its
+    own line."""
+    backend = _paired("Courier New", "Georgia")
+    assert backend.measure_line_height(Style(font=Font(size=80.0))) > 1.5
+    named = backend.font_metrics(Style(font=Font(family="Georgia")))
+    assert named != backend.font_metrics(Style(font=Font()))

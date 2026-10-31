@@ -144,7 +144,7 @@ from ..image import is_raster, source_key, upright_size
 from ._image_cache import MISS, ImageCache
 from ..easing import resolve as _resolve_easing
 from ..event import CONTROL_CHAR_KEYS, Event, EventType, char_key_event, is_typed_char
-from ..font import Font, FontMetrics, FontWeight
+from ..font import Font, FontMetrics, FontWeight, default_face
 from ..text import cjk_segments, display_width, glyph_runs as _glyph_runs, utf16_units
 
 try:
@@ -1946,6 +1946,9 @@ class MacOSBackend(Backend):
         self._ui_font = ui_font
         self._base_w = 1.0
         self._base_h = 1.0
+        # Pixels from a row's top to the baseline every default-face run shares
+        # (_init_fonts; docs/font_system.md §3.1).
+        self._line_ascent = 0.0
         self._window = None
         self._view = None
         self._delegate = None
@@ -2626,7 +2629,17 @@ class MacOSBackend(Backend):
         self._fonts = {TextAttribute.NORMAL: regular, TextAttribute.BOLD: bold}
         advance = _attr_string("M", {NSFontAttributeName: regular}).size().width
         self._base_w = math.ceil(advance)
-        self._base_h = math.ceil(regular.ascender() - regular.descender() + regular.leading())
+        # One line box for the two default faces (docs/font_system.md §3.1): the
+        # unit is as tall as the taller ascent over the deeper descent, and every
+        # default-face run puts its baseline on one line. The whole-pixel round-up
+        # goes above that line, where a pinned line height puts it (see
+        # _default_para), so a metrics-matched pair (the bundled Noto) draws
+        # exactly as the mono face alone did.
+        ui = self.resolve_font(Font())
+        descent = max(-regular.descender(), -ui.descender())
+        self._base_h = math.ceil(max(regular.ascender() + regular.leading(),
+                                     ui.ascender() + ui.leading()) + descent)
+        self._line_ascent = self._base_h - descent
         # Natural advance of the monospaced base font, before the base unit was
         # rounded up. A constant kern of (base_w - grid_advance) added after each
         # glyph makes a run advance exactly one base unit per glyph, so a whole
@@ -2648,21 +2661,29 @@ class MacOSBackend(Backend):
         # run uses the ~24pt typographic box, which drops the baseline and spills
         # descenders past the cell. A fixed line height keeps every row on the
         # grid regardless of context.
-        para = NSMutableParagraphStyle.alloc().init()
-        para.setMinimumLineHeight_(float(self._base_h))
-        para.setMaximumLineHeight_(float(self._base_h))
-        self._grid_para = para
-        # Per-line-height paragraph styles for the flow (proportional/sized) path,
-        # cached so a redraw does not allocate. Same purpose as _grid_para but the
-        # height tracks each font's own typographic box instead of the base unit.
-        self._flow_para_cache: dict[int, Any] = {}
+        # Per-line-height paragraph styles, cached so a redraw does not
+        # allocate: the grid path and the default faces pin to the shared line
+        # (_default_para), a face of its own to its own typographic box
+        # (_line_height_para).
+        self._flow_para_cache: dict[float, Any] = {}
+
+    def _default_para(self, ns_font: Any) -> Any:
+        """The paragraph style for a default face (docs/font_system.md §3.1):
+        drawAtPoint puts the baseline a pinned line height minus the face's
+        descent below the origin (the pinned height's slack goes above the
+        glyphs), so pinning to the shared ascent plus this face's own descent
+        puts every default face's baseline on the same line."""
+        return self._pinned_para(self._line_ascent - ns_font.descender())
 
     def _line_height_para(self, ns_font: Any) -> Any:
         """A paragraph style pinning the line box to ``ns_font``'s typographic
         height (ascent + descent + leading), so drawAtPoint places the baseline
         the same way regardless of the launch context's default line-height
         metric — see _init_fonts for why that default is unreliable for Noto."""
-        lh = math.ceil(ns_font.ascender() - ns_font.descender() + ns_font.leading())
+        return self._pinned_para(
+            math.ceil(ns_font.ascender() - ns_font.descender() + ns_font.leading()))
+
+    def _pinned_para(self, lh: float) -> Any:
         para = self._flow_para_cache.get(lh)
         if para is None:
             para = NSMutableParagraphStyle.alloc().init()
@@ -2860,7 +2881,8 @@ class MacOSBackend(Backend):
         if not self._base_h:
             return 1.0
         font = style.font if style.font is not None else Font()
-        if _is_grid_font(font):
+        # Both default faces share the one line box the unit was built from.
+        if _is_grid_font(font) or default_face(font):
             return 1.0
         ns_font = self._resolve_style_font(Style(attr=style.attr, font=font))
         line_px = ns_font.ascender() - ns_font.descender() + ns_font.leading()
@@ -2883,6 +2905,11 @@ class MacOSBackend(Backend):
         # it. ascent + descent matches measure_line_height's line box, split at
         # the baseline for mixed-font alignment (draw_text_baseline).
         font = style.font if style.font is not None else Font()
+        if default_face(font):
+            # The shared line box (§3.1): draw_text_baseline then agrees with
+            # draw_text for either default face.
+            ascent = self._line_ascent / self._base_h
+            return FontMetrics(ascent=ascent, descent=1.0 - ascent)
         ns_font = self._resolve_style_font(Style(attr=style.attr, font=font))
         ascent_px = ns_font.ascender() + ns_font.leading()
         descent_px = -ns_font.descender()
@@ -3686,7 +3713,7 @@ class MacOSBackend(Backend):
             NSRectFill(self._unit_rect(x, y, total, 1))
         kerned = dict(attrs)
         kerned[NSKernAttributeName] = self._grid_kern
-        kerned[NSParagraphStyleAttributeName] = self._grid_para
+        kerned[NSParagraphStyleAttributeName] = self._default_para(ns_font)
         # id(ns_font) keys the cache by the exact resolved face, covering both
         # the NORMAL/BOLD base faces and any grid-aligned per-Style monospace.
         # cjk_bold rides in the signature because it changes the cached object,
@@ -3759,7 +3786,9 @@ class MacOSBackend(Backend):
         attrs = {
             NSFontAttributeName: ns_font,
             NSForegroundColorAttributeName: _ns_color(fg, alpha),
-            NSParagraphStyleAttributeName: self._line_height_para(ns_font),
+            NSParagraphStyleAttributeName: (self._default_para(ns_font)
+                                            if default_face(style.font)
+                                            else self._line_height_para(ns_font)),
         }
         if underline:
             attrs[NSUnderlineStyleAttributeName] = (

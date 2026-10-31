@@ -120,11 +120,11 @@ def test_measure_text_proportional_is_not_column_count():
 
 def test_measure_line_height_default_font_measures_ui_font():
     # font=None is DRAWN as the UI font (Panel._resolve substitutes it), so it
-    # must be MEASURED as the UI font too — not the old 1.0 grid shortcut, which
-    # under-sized content panes and clipped the taller UI font's descenders.
-    # Use a deliberately mismatched pair (short mono base, taller proportional
-    # UI face) so the effect is observable; the bundled Noto default matches by
-    # design, which is exactly why it doesn't clip.
+    # must be MEASURED as the UI font too. Both default faces share one line box
+    # (docs/font_system.md §3.1): with a deliberately mismatched pair (short mono
+    # base, taller proportional UI face) the unit grows to hold the UI face, and
+    # both faces then measure exactly one row. The descenders that once clipped
+    # under a mono-sized row fit inside the unit itself.
     backend = WindowsBackend(
         base_font=Font(family="Consolas", size=30.0, monospace=True),
         ui_font=Font(family="Segoe UI"),
@@ -133,8 +133,13 @@ def test_measure_line_height_default_font_measures_ui_font():
     try:
         default_h = backend.measure_line_height(Style())  # font=None -> UI font
         grid_h = backend.measure_line_height(Style(font=Font(monospace=True)))
-        assert grid_h == 1.0  # a genuine grid font is still exactly one row
-        assert default_h > 1.0  # the taller UI font measures past one mono row
+        assert grid_h == 1.0 and default_h == 1.0
+        _, mono_line = native.measure_text_dwrite(
+            backend._dwrite_factory, "Mg", backend._fonts[TextAttribute.NORMAL])
+        _, ui_line = native.measure_text_dwrite(
+            backend._dwrite_factory, "Mg", backend._resolve_style_font(Style(font=Font())))
+        assert ui_line > mono_line  # the pair is mismatched the way the test needs
+        assert backend._base_h >= ui_line  # and the unit holds the taller face
     finally:
         backend.close()
 
@@ -1266,6 +1271,56 @@ def test_flow_run_keeps_the_primary_baseline_through_fallback(monkeypatch):
         assert max(drawn) - min(drawn) < 0.5, drawn
     finally:
         backend.close()
+
+
+@pytest.mark.parametrize("mono, ui", [
+    (None, None),                    # the bundled, metrics-matched Noto pair
+    ("Courier New", "MS Gothic"),    # UI face shorter in both ascent and descent
+    ("Consolas", "Segoe UI"),        # UI face the taller one
+])
+def test_default_faces_share_one_baseline(monkeypatch, mono, ui):
+    """docs/font_system.md §3.1: the mono (grid) and UI default faces put
+    their baselines on the same line, and the unit holds either face's line."""
+    backend = WindowsBackend(width=60, height=16, title="puikit-line-box-test",
+                             base_font=Font(family=mono, size=40, monospace=True),
+                             ui_font=Font(family=ui))
+    backend.open()
+    drawn = {}
+    real_text, real_layout = native.rt_draw_text, native.rt_draw_text_layout
+
+    def grid(rt, glyph, fmt, rect, brush):
+        ascent, _ = native.font_line_metrics_dwrite(backend._dwrite_factory, fmt)
+        drawn.setdefault("grid", rect.top + ascent)
+        real_text(rt, glyph, fmt, rect, brush)
+
+    def flow(rt, x, y, layout, brush):
+        drawn.setdefault("flow", y + native.text_layout_get_line_metrics(layout).baseline)
+        real_layout(rt, x, y, layout, brush)
+
+    monkeypatch.setattr(native, "rt_draw_text", grid)
+    monkeypatch.setattr(native, "rt_draw_text_layout", flow)
+    try:
+        backend.draw_text(1, 1, "H", style=Style())
+        backend.draw_text(4, 1, "H", style=Style(font=Font()))
+        backend.present()
+        backend._render()
+        assert abs(drawn["grid"] - drawn["flow"]) < 0.5, drawn
+        for fmt in (backend._fonts[TextAttribute.NORMAL], backend._resolve_style_font(Style(font=Font()))):
+            ascent, descent = native.font_line_metrics_dwrite(backend._dwrite_factory, fmt)
+            assert backend._base_h >= ascent + descent - 0.01
+        assert backend.measure_line_height(Style(font=Font())) == 1.0
+        assert backend.font_metrics(Style(font=Font())) == backend.font_metrics(Style(font=Font(monospace=True)))
+    finally:
+        backend.close()
+
+
+def test_matched_pair_keeps_the_mono_unit():
+    """For the bundled Noto pair the shared box is the mono face's own line."""
+    import math
+    backend = WindowsBackend()
+    backend._init_fonts()
+    _, line_h = native.measure_text_dwrite(backend._dwrite_factory, "M", backend._fonts[TextAttribute.NORMAL])
+    assert backend._base_h == max(1.0, math.ceil(line_h))
 
 
 # --- DPI scale vs. cached text formats -------------------------------------
