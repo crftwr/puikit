@@ -1239,6 +1239,35 @@ def test_render_with_drop_shadow_effect():
         backend.close()
 
 
+def test_flow_run_keeps_the_primary_baseline_through_fallback(monkeypatch):
+    """xefm#788: DirectWrite gives a line the baseline of its tallest run, so
+    a glyph the named font lacks (⧸, taken from Segoe UI Symbol, 1.079 em tall)
+    used to drop the whole name ~10 px at 40 DIP in Courier New. Every flow run
+    must land its baseline where a run of the primary font alone does,
+    whichever face fallback (or the CJK override) picked."""
+    backend = WindowsBackend(width=60, height=16, title="puikit-fallback-baseline-test")
+    backend.open()
+    drawn = []
+    real_draw = native.rt_draw_text_layout
+
+    def record(rt, x, y, layout, brush):
+        drawn.append(y + native.text_layout_get_line_metrics(layout).baseline)
+        real_draw(rt, x, y, layout, brush)
+
+    monkeypatch.setattr(native, "rt_draw_text_layout", record)
+    try:
+        style = Style(font=Font(family="Courier New", size=40))
+        names = ["plain.txt", "a\u29f8b.txt", "us \U0001f1fa\U0001f1f8.txt", "\u65e5\u672c.txt"]
+        for name in names:
+            backend.draw_text(1, 1, name, style=style)
+        backend.present()
+        backend._render()
+        assert len(drawn) == len(names)
+        assert max(drawn) - min(drawn) < 0.5, drawn
+    finally:
+        backend.close()
+
+
 # --- DPI scale vs. cached text formats -------------------------------------
 
 

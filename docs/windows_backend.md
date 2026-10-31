@@ -100,10 +100,15 @@ DirectWrite then shapes the whole run in a single pass, handling font fallback
 agree **by construction** — no per-segment summation, no reconciliation.
 
 DirectWrite takes a line's baseline from its **tallest** run, so a run
-containing CJK (Noto CJK's ascent exceeds the Latin face's) has every glyph,
-Latin included, pushed down by `cjk_ascent − primary_ascent`.
-`_flow_baseline_fix` shifts it back up; the flow re-anchor and the grid path's
-per-cell nudge share the one `_cjk_baseline_dy` metric.
+containing a taller face has every glyph, the primary font's included, pushed
+down by `that face's ascent − primary_ascent`. The taller face is Noto CJK on a
+CJK range, or whatever system font DirectWrite falls back to for a glyph the
+primary font lacks (Segoe UI Symbol / Emoji are 1.079 em tall, so with a named
+`MS Gothic` a name holding `⧸` dropped 9 px at 40 DIP — xefm#788).
+`_flow_baseline_fix` reads the laid-out line's `GetLineMetrics().baseline` and
+shifts the run up by its excess over the primary font's ascent, so it covers
+both without knowing which face fallback chose. The grid path's per-cell CJK
+nudge keeps its own `_cjk_baseline_dy`.
 
 `measure_line_height` has a related trap: `font=None` does **not** mean "one
 grid row". `Panel._resolve()` substitutes the proportional UI font before

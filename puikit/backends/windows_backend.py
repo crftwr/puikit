@@ -1616,7 +1616,8 @@ class WindowsBackend(Backend):
         bundled Noto CJK JP family from the custom collection. DirectWrite then
         shapes the whole run in one pass — font fallback AND baseline alignment —
         so ``GetMetrics`` (measure) and ``DrawTextLayout`` (draw) agree by
-        construction, with no per-segment reconciliation and no baseline nudge.
+        construction, with no per-segment reconciliation; the drawer re-anchors the
+        line's baseline (``_flow_baseline_fix``).
 
         A Latin-only run (or one with no CJK, or when the CJK faces are absent)
         gets no overrides: it is already a single-format single-pass layout. The
@@ -1643,15 +1644,18 @@ class WindowsBackend(Backend):
                 u16 += seg_len
         return layout
 
-    def _flow_baseline_fix(self, style: Style) -> float:
-        """Pixels to shift a CJK-containing flow run UP so its Latin baseline
-        lands where a pure-Latin run's would. DirectWrite gives a line its
-        baseline from the *tallest* run on it, so a run with a CJK range (Noto
-        CJK's ascent exceeds the Latin face's) has its baseline — and therefore
-        every glyph, Latin included — pushed down by exactly (cjk ascent −
-        primary ascent). That is ``-_cjk_baseline_dy`` (which is primary − cjk),
-        so the flow re-anchor and the grid per-cell nudge share one metric."""
-        return -self._cjk_baseline_dy(self._resolve_style_font(style), self._resolve_style_cjk_font(style))
+    def _flow_baseline_fix(self, layout: Any, style: Style) -> float:
+        """Pixels to shift a laid-out flow run UP so its baseline lands where a
+        run of the primary font alone would. DirectWrite gives a line its
+        baseline from the *tallest* run on it, so any range drawn in a taller
+        face — a CJK range overridden onto Noto CJK, or a glyph DirectWrite
+        falls back to a system font for (Segoe UI Symbol / Emoji for ⧸ or 🇺🇸)
+        — pushes every glyph, the primary font's included, down by (that face's
+        ascent − primary ascent). The line's own
+        ``baseline`` already holds that maximum, so read it rather than guess
+        which faces fallback picked (xefm#788)."""
+        line_baseline = native.text_layout_get_line_metrics(layout).baseline
+        return line_baseline - self._font_line_metrics(self._resolve_style_font(style))[0]
 
     def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
         # A grid-aligned font (an unsized/unnamed monospace request) tiles one
@@ -1729,7 +1733,12 @@ class WindowsBackend(Backend):
         # measure_line_height returns (both are one line's box), just split at
         # the baseline so a caller can align mixed fonts (draw_text_baseline).
         measured = style if style.font is not None else Style(attr=style.attr, font=Font())
-        text_format = self._resolve_style_font(measured)
+        ascent_px, descent_px = self._font_line_metrics(self._resolve_style_font(measured))
+        return FontMetrics(ascent=ascent_px / self._base_h, descent=descent_px / self._base_h)
+
+    def _font_line_metrics(self, text_format: Any) -> tuple[float, float]:
+        """(ascent, descent) in pixels of ``text_format``'s own font, cached
+        per format."""
         key = id(text_format)
         cached = self._font_metrics_cache.get(key)
         if cached is None:
@@ -1737,8 +1746,7 @@ class WindowsBackend(Backend):
                 self._dwrite_factory = native.create_dwrite_factory()
             cached = native.font_line_metrics_dwrite(self._dwrite_factory, text_format)
             self._font_metrics_cache[key] = cached
-        ascent_px, descent_px = cached
-        return FontMetrics(ascent=ascent_px / self._base_h, descent=descent_px / self._base_h)
+        return cached
 
     # --- geometry ----------------------------------------------------------
 
@@ -2852,11 +2860,11 @@ class WindowsBackend(Backend):
         # overrides); its own NO_WRAP single line is bounded by the outer pane
         # clip, so it only needs to avoid wrapping.
         layout = self._build_flow_layout(text, style)
-        # Re-anchor to the Latin baseline: a CJK range would otherwise raise the
-        # line's baseline (DirectWrite uses the tallest run's), dropping the whole
-        # run — Latin included — below a pure-Latin run like an adjacent column.
-        if self._cjk_available and any(is_cjk(c) for c in text):
-            origin_y -= self._flow_baseline_fix(style)
+        # Re-anchor to the primary font's baseline: a CJK range or a fallback
+        # glyph would otherwise lower the line's baseline (DirectWrite uses the
+        # tallest run's), dropping the whole run below a run of the primary font
+        # alone, like an adjacent column.
+        origin_y -= self._flow_baseline_fix(layout, style)
         try:
             # Drop-shadow ink pass under the real run (see _render_text): the run's
             # ink re-drawn as the same soft kernel of translucent-black copies.
@@ -3801,11 +3809,9 @@ class WindowsBackend(Backend):
         for line in spec["lines"]:
             layout = self._build_flow_layout(line, style)
             try:
-                # The same re-anchor _render_flow_text does: a CJK range would
-                # otherwise take the line's baseline down with it.
-                dy = (self._flow_baseline_fix(style)
-                      if self._cjk_available and any(is_cjk(c) for c in line)
-                      else 0.0)
+                # The same re-anchor _render_flow_text does: a CJK range or a
+                # fallback glyph would otherwise take the line's baseline down.
+                dy = self._flow_baseline_fix(layout, style)
                 native.rt_draw_text_layout(
                     rt, _screen_mark.PADDING, y - dy, layout, brush)
             finally:
