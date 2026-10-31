@@ -94,3 +94,17 @@ def test_draw_text_baseline_default_delegates_to_draw_text():
     rows = backend.snapshot()
     assert rows[2].startswith("Ag")  # box top at baseline_y(3) - ascent(1.0)
     assert rows[3].strip() == ""
+
+
+def test_default_face_is_the_two_backend_faces_at_the_base_size():
+    """docs/font_system.md §3.1: the base grid font and the default UI font, in
+    any weight or slant, share the line box; a named or sized face does not."""
+    from puikit.font import default_face
+
+    assert default_face(None)
+    assert default_face(Font())
+    assert default_face(Font(monospace=True))
+    assert default_face(Font(weight=FontWeight.BOLD, slant=FontSlant.ITALIC))
+    assert not default_face(Font(family="Georgia"))
+    assert not default_face(Font(size=18.0))
+    assert not default_face(Font(size=18.0, monospace=True))

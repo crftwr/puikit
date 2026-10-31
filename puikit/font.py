@@ -90,3 +90,15 @@ def grid_aligned(font: "Font | None") -> bool:
     grid-aligned run. On a proportional one both must measure instead.
     """
     return font is None or (font.monospace and font.family is None and font.size is None)
+
+
+def default_face(font: "Font | None") -> bool:
+    """Whether ``font`` is one of the backend's two **default faces** — the
+    base grid font or the default UI font, at the base size, in any weight or
+    slant — as opposed to a face of its own (a named family, or a size).
+
+    The two default faces share one line box on GUI (docs/font_system.md §3.1):
+    the base unit is tall enough for both, and both put their baseline on the
+    same line, so text in either face lines up on a row whatever pair is
+    configured. A face of its own keeps its own metrics."""
+    return font is None or (font.family is None and font.size is None)

@@ -61,6 +61,41 @@ def coverage(backend: MacOSBackend, text: str, style: Style) -> float:
     return sum(data[i] for i in range(0, len(data), 4)) / 255.0
 
 
+def baseline_row(backend: MacOSBackend, text: str, style: Style, *, row: int = 1) -> int:
+    """The bitmap row the bottom of ``text``'s ink lands on when the backend draws
+    it at base-unit row ``row`` — its baseline, for a specimen with no descenders
+    (``"H"``). The context is **flipped** like the backend's own view
+    (``_PuiKitView.isFlipped``): where a pinned line box puts the baseline depends
+    on which way is down."""
+    import Quartz
+
+    w = _W
+    h = int(backend._base_h * (row + 2))
+    rep = (
+        NSBitmapImageRep.alloc()
+        .initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(
+            None, w, h, 8, 4, True, False, NSDeviceRGBColorSpace, 0, 0
+        )
+    )
+    plain = NSGraphicsContext.graphicsContextWithBitmapImageRep_(rep)
+    ctx = NSGraphicsContext.graphicsContextWithCGContext_flipped_(plain.CGContext(), True)
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.setCurrentContext_(ctx)
+    try:
+        cg = ctx.CGContext()
+        Quartz.CGContextTranslateCTM(cg, 0, h)
+        Quartz.CGContextScaleCTM(cg, 1, -1)
+        NSColor.blackColor().setFill()
+        NSRectFill(NSMakeRect(0, 0, w, h))
+        backend._render_text(0, row, text, _white(style))
+    finally:
+        NSGraphicsContext.restoreGraphicsState()
+    plain.flushGraphics()
+    data = bytes(rep.bitmapData()[: w * h * 4])
+    inked = [y for y in range(h) if any(data[(y * w + x) * 4] > 127 for x in range(w))]
+    return max(inked)
+
+
 def _white(style: Style) -> Style:
     """``style`` forced to white ink, so coverage is comparable across cases and
     a theme default can never make one specimen darker than another."""

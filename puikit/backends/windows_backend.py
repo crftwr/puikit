@@ -52,7 +52,7 @@ from ..image import is_raster, source_key
 from ._image_cache import MISS, ImageCache
 from ..easing import resolve as _resolve_easing
 from ..event import CONTROL_CHAR_KEYS, Event, EventType, char_key_event, is_typed_char
-from ..font import Font, FontMetrics, grid_aligned
+from ..font import Font, FontMetrics, default_face, grid_aligned
 from ..text import display_width, glyph_runs as _glyph_runs, is_cjk, cjk_segments, utf16_units
 
 # Bundled default fonts (puikit/fonts): Noto Sans + Noto Sans Mono, a
@@ -1010,6 +1010,9 @@ class WindowsBackend(Backend):
         self._ui_font = ui_font
         self._base_w = 1.0
         self._base_h = 1.0
+        # Pixels from a row's top to the baseline every default-face run shares
+        # (_init_fonts; docs/font_system.md §3.1).
+        self._line_ascent = 0.0
         # Physical pixels per DIP for the window's current monitor (1.0 == 96
         # DPI / 100% scaling). Set from the real monitor DPI on open() and on
         # WM_DPICHANGED. Font point sizes are multiplied by it (see
@@ -1548,9 +1551,24 @@ class WindowsBackend(Backend):
         # actual pane width.
         if self._dwrite_factory is None:
             self._dwrite_factory = native.create_dwrite_factory()
-        adv_w, line_h = native.measure_text_dwrite(self._dwrite_factory, "M", self._fonts[TextAttribute.NORMAL])
+        adv_w, _ = native.measure_text_dwrite(self._dwrite_factory, "M", self._fonts[TextAttribute.NORMAL])
         self._base_w = max(1.0, math.ceil(adv_w))
-        self._base_h = max(1.0, math.ceil(line_h))
+        # One line box for the two default faces (docs/font_system.md §3.1):
+        # the unit is as tall as the taller ascent over the deeper descent, and
+        # every default-face run puts its baseline at the taller ascent. For a
+        # metrics-matched pair (the bundled Noto) this is the mono face's own
+        # line, as before. DirectWrite's descent here holds the line gap.
+        mono_ascent, mono_descent = native.font_line_metrics_dwrite(
+            self._dwrite_factory, self._fonts[TextAttribute.NORMAL])
+        # A format of its own, released here: _style_fonts must hold nothing
+        # this early (open() checks it, so no pre-DPI format can survive).
+        ui_format = self._create_text_format(Font())
+        try:
+            ui_ascent, ui_descent = native.font_line_metrics_dwrite(self._dwrite_factory, ui_format)
+        finally:
+            ui_format.release()
+        self._line_ascent = max(mono_ascent, ui_ascent)
+        self._base_h = max(1.0, math.ceil(self._line_ascent + max(mono_descent, ui_descent)))
 
     def _resolve_style_font(self, style: Style) -> Any:
         font = style.font
@@ -1653,9 +1671,21 @@ class WindowsBackend(Backend):
         — pushes every glyph, the primary font's included, down by (that face's
         ascent − primary ascent). The line's own
         ``baseline`` already holds that maximum, so read it rather than guess
-        which faces fallback picked (xefm#788)."""
+        which faces fallback picked (xefm#788).
+
+        A default face aims at the shared baseline of the row (§3.1), so the
+        answer is negative when that face is the shorter of the pair: the run
+        moves *down* onto the line it shares with the other face."""
         line_baseline = native.text_layout_get_line_metrics(layout).baseline
-        return line_baseline - self._font_line_metrics(self._resolve_style_font(style))[0]
+        return line_baseline - self._baseline_px(style)
+
+    def _baseline_px(self, style: Style) -> float:
+        """Pixels from a run's top to where its baseline belongs: the row's
+        shared baseline for the two default faces, the font's own ascent for a
+        face of its own (a named family or a size)."""
+        if default_face(style.font):
+            return self._line_ascent
+        return self._font_line_metrics(self._resolve_style_font(style))[0]
 
     def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
         # A grid-aligned font (an unsized/unnamed monospace request) tiles one
@@ -1706,6 +1736,9 @@ class WindowsBackend(Backend):
         # (An explicit font measures itself; the base grid font naturally
         # measures to exactly 1.0, since base_h was derived from it.)
         measured = style if style.font is not None else Style(attr=style.attr, font=Font())
+        # Both default faces share the one line box the unit was built from.
+        if default_face(measured.font):
+            return 1.0
         # Same DirectWrite-vs-GDI mismatch as measure_text (above): probe a
         # representative string ("Mg", ascender+descender) through the actual
         # renderer rather than GDI's (disagreeing) line metrics.
@@ -1733,6 +1766,11 @@ class WindowsBackend(Backend):
         # measure_line_height returns (both are one line's box), just split at
         # the baseline so a caller can align mixed fonts (draw_text_baseline).
         measured = style if style.font is not None else Style(attr=style.attr, font=Font())
+        if default_face(measured.font):
+            # The shared line box (§3.1): draw_text_baseline then agrees with
+            # draw_text for either default face.
+            ascent = self._line_ascent / self._base_h
+            return FontMetrics(ascent=ascent, descent=1.0 - ascent)
         ascent_px, descent_px = self._font_line_metrics(self._resolve_style_font(measured))
         return FontMetrics(ascent=ascent_px / self._base_h, descent=descent_px / self._base_h)
 
@@ -2746,9 +2784,13 @@ class WindowsBackend(Backend):
         else:
             text_format = self._resolve_style_font(style)
             cjk_format = self._resolve_style_cjk_font(style) if self._cjk_available else None
+        # A grid face is a default face: drop it onto the row's shared baseline
+        # (0 for a metrics-matched pair; docs/font_system.md §3.1).
+        line_dy = self._line_ascent - self._font_line_metrics(text_format)[0]
         # Baseline shift for CJK cells so they sit on the primary font's baseline
         # (Noto CJK's ascent is taller); 0 for Latin cells and when CJK is absent.
-        cjk_dy = self._cjk_baseline_dy(text_format, cjk_format) if cjk_format is not None else 0.0
+        cjk_dy = line_dy + (self._cjk_baseline_dy(text_format, cjk_format)
+                            if cjk_format is not None else 0.0)
 
         def _glyph_fmt(glyph: str) -> tuple[Any, float]:
             # A CJK cell draws with the embedded CJK format (same size/weight),
@@ -2758,7 +2800,7 @@ class WindowsBackend(Backend):
             # horizontal layout, and needs no measurement change.
             if cjk_format is not None and is_cjk(glyph[0]):
                 return cjk_format, cjk_dy
-            return text_format, 0.0
+            return text_format, line_dy
 
         # Grid-locked text: each glyph gets its own DrawText call clipped to
         # its own (base-unit) cell, so neighboring glyphs cannot drift off the
@@ -2860,10 +2902,12 @@ class WindowsBackend(Backend):
         # overrides); its own NO_WRAP single line is bounded by the outer pane
         # clip, so it only needs to avoid wrapping.
         layout = self._build_flow_layout(text, style)
-        # Re-anchor to the primary font's baseline: a CJK range or a fallback
-        # glyph would otherwise lower the line's baseline (DirectWrite uses the
-        # tallest run's), dropping the whole run below a run of the primary font
-        # alone, like an adjacent column.
+        row_top = origin_y
+        # Re-anchor to where the baseline belongs (_baseline_px): a CJK range or
+        # a fallback glyph would otherwise lower the line's baseline (DirectWrite
+        # uses the tallest run's), dropping the whole run below a run of the
+        # primary font alone, like an adjacent column; and a default face sits on
+        # the row's shared baseline, not its own.
         origin_y -= self._flow_baseline_fix(layout, style)
         try:
             # Drop-shadow ink pass under the real run (see _render_text): the run's
@@ -2880,8 +2924,11 @@ class WindowsBackend(Backend):
             native.rt_draw_text_layout(self._render_target, origin_x, origin_y, layout, self._brush)
         finally:
             layout.release()
+        # A default face's rules belong to the row (its line box is the unit),
+        # wherever the baseline put its glyphs.
+        rule_top = row_top if default_face(style.font) else origin_y
         for ly, rule_fg in _rules(style, underline, strike,
-                                  origin_y + line_h - 2.0, origin_y + line_h / 2.0):
+                                  rule_top + line_h - 2.0, rule_top + line_h / 2.0):
             if rule_fg is not None:
                 self._set_brush(rule_fg, alpha)
             native.rt_draw_line(

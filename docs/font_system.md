@@ -93,6 +93,64 @@ that must never ground the unit is a *per-Style proportional* font: those flex
 and have no canonical metric, and they never do — a widget's font only ever
 affects the glyphs inside its already-resolved pane, never the base unit.
 
+### 3.1 One line box for the two default faces
+
+A GUI backend has **two default faces**: the base grid font (`base_font`) and
+the default UI font (`ui_font`), each at the base size, in any weight or slant
+(`puikit.font.default_face`). A row commonly holds both — a file name in the UI
+face beside its size and date in the mono face — so their vertical metrics are
+**combined into one line box**:
+
+- **Height.** The base unit is as tall as the taller of the two ascents over
+  the deeper of the two descents, rounded up to whole pixels.
+- **Baseline.** Every run in either default face puts its baseline on that
+  box's ascent line, not on its own ascent. `draw_text` stays top-anchored; what
+  it anchors to is the unit box.
+- **Width.** Unchanged: the mono face's advance.
+
+`font_metrics` and `measure_line_height` answer the shared box for both faces,
+so `draw_text_baseline` agrees with `draw_text`.
+
+Before this, the unit came from the mono face alone and each face drew from its
+own ascent. Text in the two faces only lined up when their metrics happened to
+match, and a box sized from the mono face held UI text off-centre. The bundled
+Noto pair matched by design (Noto Sans and Noto Sans Mono share 1069 / −293), so
+the defaults looked right, but any named pair did not (crftwr/xefm#788, puikit
+Discussion #182).
+
+This does not reopen the rule above. The UI face that joins the box is a single,
+constructor-level face, as canonical as `base_font`, not a per-Style font. A
+face of its own (a named family, or a size) keeps its own metrics and its own
+`measure_line_height`, and never touches the unit.
+
+What it costs:
+
+- **Matched pair: nothing.** The box is the mono face's own line, and every
+  baseline lands where it did. The bundled Noto pair renders pixel-identical.
+- **UI face shorter in both** (MS Gothic beside Noto Sans Mono): the unit is
+  unchanged and the UI runs move down onto the mono baseline.
+- **UI face taller** (Georgia beside Courier New, Hiragino Sans beside Menlo):
+  the unit grows to hold it, so fewer rows fit. Hiragino Sans at 40 pt takes a
+  Menlo unit from 47 px to 65 px. The UI face no longer overflows its row.
+- **Box-drawing and block glyphs drawn as text** (`│ ├─ █ ░`) are sized to the
+  mono face's own line. When the unit is taller than that line, they leave a
+  gap between rows. Frames, dividers, tables and the cursor are vector shapes on
+  GUI and are unaffected.
+
+How each backend realizes it:
+
+- **Windows** offsets each run's draw origin. The grid path moves each glyph
+  rect by (shared ascent − the face's ascent). The flow path re-anchors the
+  laid-out line's `GetLineMetrics().baseline` onto the shared ascent, which also
+  removes DirectWrite's tallest-run baseline (§9.1). The pixel round-up goes
+  below the baseline.
+- **macOS** pins each default-face run's line height to (shared ascent + that
+  face's descent). A pinned line height puts its slack above the glyphs, so the
+  baseline lands on the shared ascent with no origin shift. The pixel round-up
+  goes above the baseline, matching how the grid path pinned the unit before.
+- **Web** always draws its default faces from the bundled Noto pair (`ui_font`
+  names no family there), so its box is already shared.
+
 ---
 
 ## 4. The Font descriptor
@@ -293,9 +351,9 @@ LayoutContext.measure_line_height(style=DEFAULT_STYLE) -> float
 Backend.measure_line_height(style=DEFAULT_STYLE) -> float
 ```
 
-- Default / whole-unit backends and the base grid font (`font=None`): `1.0` —
-  the base unit *is* the grid font's line height (§3), so ordinary text is
-  unchanged.
+- Default / whole-unit backends, and both default faces on GUI (the base grid
+  font and the default UI font at the base size): `1.0` — the base unit *is*
+  their shared line box (§3.1), so ordinary text is unchanged.
 - GUI with a real per-Style font: the font's line height (ascender − descender
   + leading), rounded up to whole device pixels, divided by the base unit
   height. A multi-line widget advances each row by this pitch in `draw` and
@@ -395,7 +453,7 @@ governs where mixed-script text sits vertically, and every GUI backend must
 honor it:
 
 > **A run's baseline is `y + (primary font's ascent)`, independent of the run's
-> content.** Fallback (CJK) glyphs align to that baseline; being taller, they
+> content** — or, for a default face, `y + (the shared ascent)` (§3.1). Fallback (CJK) glyphs align to that baseline; being taller, they
 > extend *above* the primary font's line-box top and slightly below its
 > baseline — exactly the CSS "strut" model, where the line box comes from the
 > element's own font and taller inline glyphs overflow it.
@@ -413,9 +471,12 @@ The backends realize it differently:
 - **Windows** must correct for a DirectWrite quirk. `DrawTextLayout` sizes a
   line to the **tallest run actually present**, so a run with a CJK range would
   get `baseline = y + cjk_ascent` — dropping the *whole* run (Latin included)
-  below a pure-Latin run by `cjk_ascent − primary_ascent`. The backend cancels
-  exactly that by shifting the draw origin up by that difference (a no-op for a
-  run with no CJK). The result is the same content-independent baseline the
+  below a pure-Latin run by `cjk_ascent − primary_ascent`. The same happens for
+  any glyph DirectWrite takes from a system fallback face (Segoe UI Symbol /
+  Emoji for `⧸` or `🇺🇸`, crftwr/xefm#788). The backend reads the laid-out
+  line's own `GetLineMetrics().baseline` and moves the run so that baseline lands
+  where the run's baseline belongs. It does not need to know which face
+  fallback picked. The result is the same content-independent baseline the
   other backends produce; the shift is *removing* DirectWrite's content
   dependence, not adding one. (`SetLineSpacing(UNIFORM)` would be the direct
   "strut" knob, but it only partially overrides the tallest-run baseline, so the
@@ -474,7 +535,7 @@ synthesizing on top of would double-embolden.
 ## 10. Public API surface (additions only)
 
 ```
-puikit.font:    Font, FontWeight, FontSlant
+puikit.font:    Font, FontWeight, FontSlant, grid_aligned, default_face (§3.1)
 puikit.Style:   + font: Font | None
 puikit.Backend: + measure_text(text, style) -> float
 DrawContext:    + measure_text(text, style) -> float
