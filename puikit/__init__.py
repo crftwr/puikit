@@ -21,7 +21,7 @@ from .capability import (
 from .easing import EASINGS, Easing, resolve as resolve_easing
 from .event import Event, EventType
 from .font import Font, FontSlant, FontWeight
-from .background import Shader, Wallpaper
+from .background import Lens, LensCycle, Shader, ShaderTexture, Wallpaper
 from .layout import HSplit, Item, VSplit
 from .menu import SEPARATOR, Menu, MenuItem, MenuSeparator
 from .panel import DrawContext, Panel, Rect
@@ -38,7 +38,10 @@ __version__ = "1.17.0"
 __all__ = [
     "Backend",
     "ClipboardFiles",
+    "Lens",
+    "LensCycle",
     "Shader",
+    "ShaderTexture",
     "Wallpaper",
     "CapabilityNotSupported",
     "CapabilityProfile",

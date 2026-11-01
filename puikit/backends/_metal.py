@@ -17,7 +17,11 @@ false and the backend falls back to reporting the capability as unsupported.
 from __future__ import annotations
 
 import ctypes
+import sys
 from typing import Any
+
+from . import _bg_lens
+from ._bg_textures import TextureLoad
 
 try:
     import Metal
@@ -26,14 +30,26 @@ except ImportError:  # pragma: no cover - depends on the PyObjC install
     Metal = None
     HAVE_METAL = False
 
-#: Uniform buffer size in bytes. Twelve floats are used; the buffer is padded to
-#: 64 so the struct's trailing ``float4`` lands on its natural 16-byte alignment,
-#: matching ``BackgroundUniforms`` in the prelude. Change one, change the other.
+#: Uniform buffer size in bytes. Fifteen floats are used (the ``seed`` trio is
+#: the last three); the struct is padded to 64 by its 16-byte alignment, matching
+#: ``BackgroundUniforms`` in the prelude. Change one, change the other.
 UNIFORM_BYTES = 64
 
 #: Layer/texture pixel format. BGRA8 is what CAMetalLayer uses by default and what
 #: the offscreen test target uses, so one pipeline serves both paths.
 PIXEL_FORMAT = 80  # MTLPixelFormatBGRA8Unorm
+
+#: Where a scene with a :class:`~puikit.background.Lens` renders: half-float, so
+#: its linear HDR survives to the tone map (a sun is thousands of times brighter
+#: than the ground, and 8 bits would clip it to the ground's white).
+HDR_FORMAT = 115  # MTLPixelFormatRGBA16Float
+
+#: Texture upload formats: the decoder hands over RGBA8; the sRGB variant makes
+#: the sampler return linear values for a colour photograph.
+_TEX_FORMAT = 70        # MTLPixelFormatRGBA8Unorm
+_TEX_FORMAT_SRGB = 71   # MTLPixelFormatRGBA8Unorm_sRGB
+
+_ADDRESS = {"repeat": 2, "clamp": 0}   # MTLSamplerAddressModeRepeat / ClampToEdge
 
 
 def _rgba(color: "tuple[int, int, int] | None", default: float = 0.0
@@ -59,6 +75,19 @@ class MetalBackground:
         self._pipeline = None
         self._shader = None
         self._error: str | None = None
+        # Textures: the decode in flight (or done), what it was for, and the GPU
+        # objects once uploaded. Kept across set_shader calls that name the same
+        # textures, so re-applying a theme neither re-decodes nor re-uploads.
+        self._load: TextureLoad | None = None
+        self._texture_key: tuple = ()
+        self._textures: "list[Any] | None" = []
+        self._samplers: "list[Any]" = []
+        self._texture_failed = False
+        # Lens chain: its pipelines (built once, on the first lensed scene) and
+        # the intermediate targets (rebuilt when the frame size changes).
+        self._lens_pipes: "dict[str, Any] | None" = None
+        self._targets: "dict[str, Any] | None" = None
+        self._target_size: tuple[int, int] = (0, 0)
 
     @property
     def available(self) -> bool:
@@ -87,38 +116,148 @@ class MetalBackground:
         if not self.available or shader is None:
             self._pipeline = None
             return False
-        if self._shader is not None and shader.source == self._shader.source:
+        lensed = getattr(shader, "lens", None) is not None
+        if (self._shader is not None and shader.source == self._shader.source
+                and lensed == (self._shader.lens is not None)):
             self._shader = shader          # params may differ; pipeline is reusable
+            self._sync_textures(shader)
             return self._pipeline is not None
         self._shader = shader
         self._pipeline = None
         self._error = None
 
-        library, err = self._device.newLibraryWithSource_options_error_(
-            shader.program, None, None)
-        if library is None:
-            self._error = str(err)
-            return False
         from ..background import SHADER_ENTRY
-        fragment = library.newFunctionWithName_(SHADER_ENTRY)
-        vertex = library.newFunctionWithName_("puikit_bg_vertex")
-        if fragment is None or vertex is None:
-            self._error = f"shader does not define {SHADER_ENTRY}()"
+        # A lensed scene writes HDR into the half-float target, so its pipeline is
+        # built for that format rather than the layer's.
+        pipeline = self._build_pipeline(shader.program, "puikit_bg_vertex", SHADER_ENTRY,
+                                        HDR_FORMAT if lensed else PIXEL_FORMAT)
+        if pipeline is None:
             return False
+        if lensed and self._lens_pipes is None and not self._build_lens_pipelines():
+            return False
+        self._pipeline = pipeline
+        self._sync_textures(shader)
+        return True
 
+    def _build_pipeline(self, program: str, vertex_name: str, fragment_name: str,
+                        pixel_format: int, library: Any = None) -> Any:
+        """Compile ``program`` (unless ``library`` is given) and build one pipeline
+        state, or record the error and return ``None``."""
+        if library is None:
+            library, err = self._device.newLibraryWithSource_options_error_(
+                program, None, None)
+            if library is None:
+                self._error = str(err)
+                return None
+        fragment = library.newFunctionWithName_(fragment_name)
+        vertex = library.newFunctionWithName_(vertex_name)
+        if fragment is None or vertex is None:
+            self._error = f"shader does not define {fragment_name}()"
+            return None
         desc = Metal.MTLRenderPipelineDescriptor.alloc().init()
         desc.setVertexFunction_(vertex)
         desc.setFragmentFunction_(fragment)
-        desc.colorAttachments().objectAtIndexedSubscript_(0).setPixelFormat_(PIXEL_FORMAT)
+        desc.colorAttachments().objectAtIndexedSubscript_(0).setPixelFormat_(pixel_format)
         pipeline, err = self._device.newRenderPipelineStateWithDescriptor_error_(desc, None)
         if pipeline is None:
             self._error = str(err)
+        return pipeline
+
+    def _build_lens_pipelines(self) -> bool:
+        """Compile the lens chain's passes (``_bg_lens.LENS_MSL``) once."""
+        library, err = self._device.newLibraryWithSource_options_error_(
+            _bg_lens.LENS_MSL, None, None)
+        if library is None:
+            self._error = f"lens chain: {err}"
             return False
-        self._pipeline = pipeline
+        pipes = {}
+        for name, fmt in (("down", HDR_FORMAT), ("up", HDR_FORMAT),
+                          ("streak", HDR_FORMAT), ("lens", PIXEL_FORMAT)):
+            pipe = self._build_pipeline("", "puikit_pass_vertex", f"puikit_{name}", fmt,
+                                        library)
+            if pipe is None:
+                return False
+            pipes[name] = pipe
+        self._lens_pipes = pipes
         return True
 
+    # --- textures --------------------------------------------------------------
+
+    def _sync_textures(self, shader: Any) -> None:
+        """Start decoding ``shader``'s textures unless they are the ones already
+        loaded (or loading)."""
+        key = tuple(getattr(shader, "textures", ()) or ())
+        if key == self._texture_key:
+            return
+        self._texture_key = key
+        self._texture_failed = False
+        self._samplers = []
+        if key:
+            self._load = TextureLoad(key)
+            self._textures = None
+        else:
+            self._load = None
+            self._textures = []
+
+    def _textures_ready(self, block: bool = False) -> bool:
+        """True once every texture is on the GPU. Uploads a finished decode here,
+        on the thread that draws; ``block`` waits for the decode first (the
+        window-free path). A failed load stays failed — the frame shows the
+        backdrop — until a different texture set is applied."""
+        if self._textures is not None:
+            return True
+        if self._texture_failed or self._load is None:
+            return False
+        if block:
+            self._load.wait()
+        if not self._load.done:
+            return False
+        if self._load.failed:
+            self._texture_failed = True
+            self._error = self._load.error
+            sys.stderr.write(f"[puikit] background texture failed: {self._load.error}\n")
+            self._load = None
+            return False
+        textures, samplers = [], []
+        for desc, raster in zip(self._load.textures, self._load.rasters):
+            textures.append(self._upload(desc, raster))
+            samplers.append(self._sampler(desc))
+        self._textures, self._samplers = textures, samplers
+        self._load = None          # drop the decoded copies; the GPU has them now
+        return True
+
+    def _upload(self, desc: Any, raster: Any) -> Any:
+        """One decoded image as a GPU texture, with its mip chain built on the GPU."""
+        width, height = raster.width, raster.height
+        tdesc = (Metal.MTLTextureDescriptor
+                 .texture2DDescriptorWithPixelFormat_width_height_mipmapped_(
+                     _TEX_FORMAT_SRGB if desc.srgb else _TEX_FORMAT, width, height,
+                     bool(desc.mipmaps)))
+        tdesc.setUsage_(Metal.MTLTextureUsageShaderRead)
+        texture = self._device.newTextureWithDescriptor_(tdesc)
+        texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow_(
+            Metal.MTLRegionMake2D(0, 0, width, height), 0, bytes(raster.data), width * 4)
+        if desc.mipmaps:
+            command = self._queue.commandBuffer()
+            blit = command.blitCommandEncoder()
+            blit.generateMipmapsForTexture_(texture)
+            blit.endEncoding()
+            command.commit()
+        return texture
+
+    def _sampler(self, desc: Any) -> Any:
+        sdesc = Metal.MTLSamplerDescriptor.alloc().init()
+        sdesc.setMinFilter_(Metal.MTLSamplerMinMagFilterLinear)
+        sdesc.setMagFilter_(Metal.MTLSamplerMinMagFilterLinear)
+        sdesc.setMipFilter_(Metal.MTLSamplerMipFilterLinear if desc.mipmaps
+                            else Metal.MTLSamplerMipFilterNotMipmapped)
+        sdesc.setSAddressMode_(_ADDRESS[desc.wrap_u])
+        sdesc.setTAddressMode_(_ADDRESS[desc.wrap_v])
+        return self._device.newSamplerStateWithDescriptor_(sdesc)
+
     def _uniforms(self, width: float, height: float, elapsed: float,
-                  fade: float = 1.0) -> Any:
+                  fade: float = 1.0, seed: float = 0.0, seed_prev: float | None = None,
+                  seed_mix: float = 1.0) -> bytes:
         """Pack ``BackgroundUniforms`` for this frame — see UNIFORM_BYTES.
 
         ``fade`` scales the descriptor's own opacity, which is how an idle scene
@@ -133,32 +272,133 @@ class MetalBackground:
         f[3] = float(getattr(shader, "opacity", 1.0)) * float(fade)
         f[4:8] = _rgba(getattr(shader, "ink", None), 0.85)
         f[8:12] = _rgba(getattr(shader, "backdrop", None), 0.08)
-        return self._device.newBufferWithBytes_length_options_(
-            bytes(buf), UNIFORM_BYTES, 0)
+        f[12] = float(seed)
+        f[13] = float(seed if seed_prev is None else seed_prev)
+        f[14] = float(seed_mix)
+        return bytes(buf)
 
-    def _encode(self, texture: Any, width: float, height: float,
-                elapsed: float, fade: float = 1.0) -> Any:
-        """Encode the single fullscreen draw into a command buffer (not committed)."""
-        clear = _rgba(getattr(self._shader, "backdrop", None), 0.08)
+    def _pass(self, command: Any, target: Any, clear: "tuple | None" = None) -> Any:
+        """Open a render pass onto ``target``: cleared to ``clear``, or — for the
+        fullscreen passes that write every pixel — not loaded at all."""
         descriptor = Metal.MTLRenderPassDescriptor.renderPassDescriptor()
         attachment = descriptor.colorAttachments().objectAtIndexedSubscript_(0)
-        attachment.setTexture_(texture)
-        attachment.setLoadAction_(Metal.MTLLoadActionClear)
+        attachment.setTexture_(target)
+        if clear is None:
+            attachment.setLoadAction_(Metal.MTLLoadActionDontCare)
+        else:
+            attachment.setLoadAction_(Metal.MTLLoadActionClear)
+            attachment.setClearColor_(Metal.MTLClearColorMake(*clear))
         attachment.setStoreAction_(Metal.MTLStoreActionStore)
-        attachment.setClearColor_(Metal.MTLClearColorMake(*clear))
+        return command.renderCommandEncoderWithDescriptor_(descriptor)
 
-        command = self._queue.commandBuffer()
-        encoder = command.renderCommandEncoderWithDescriptor_(descriptor)
-        encoder.setRenderPipelineState_(self._pipeline)
+    def _draw(self, encoder: Any, pipeline: Any, uniforms: bytes,
+              textures: "list[Any]" = (), samplers: "list[Any]" = ()) -> None:
+        encoder.setRenderPipelineState_(pipeline)
         encoder.setFragmentBuffer_offset_atIndex_(
-            self._uniforms(width, height, elapsed, fade), 0, 0)
+            self._device.newBufferWithBytes_length_options_(uniforms, len(uniforms), 0), 0, 0)
+        for i, texture in enumerate(textures):
+            encoder.setFragmentTexture_atIndex_(texture, i)
+        for i, sampler in enumerate(samplers):
+            encoder.setFragmentSamplerState_atIndex_(sampler, i)
         encoder.drawPrimitives_vertexStart_vertexCount_(
             Metal.MTLPrimitiveTypeTriangle, 0, 3)
         encoder.endEncoding()
+
+    def _encode(self, texture: Any, width: float, height: float,
+                elapsed: float, fade: float = 1.0, block: bool = False,
+                seed: float = 0.0, seed_prev: float | None = None,
+                seed_mix: float = 1.0) -> Any:
+        """Encode one frame into a command buffer (not committed): the single
+        fullscreen draw, or for a lensed scene the whole chain. Until the scene's
+        textures are on the GPU — or for good if they failed — the frame is the
+        bare backdrop."""
+        clear = _rgba(getattr(self._shader, "backdrop", None), 0.08)
+        command = self._queue.commandBuffer()
+        if not self._textures_ready(block):
+            self._pass(command, texture, clear).endEncoding()
+            return command
+        uniforms = self._uniforms(width, height, elapsed, fade, seed, seed_prev, seed_mix)
+        lens = getattr(self._shader, "lens", None)
+        if lens is None:
+            self._draw(self._pass(command, texture, clear), self._pipeline, uniforms,
+                       self._textures, self._samplers)
+            return command
+        speed = float(getattr(self._shader, "speed", 1.0))
+        lens = _bg_lens.current_lens(lens, elapsed * speed, seed, seed_prev, seed_mix)
+        self._encode_lens(command, texture, int(width), int(height), uniforms, lens,
+                          elapsed, fade, clear)
         return command
 
+    def _encode_lens(self, command: Any, output: Any, width: int, height: int,
+                     uniforms: bytes, lens: Any, elapsed: float, fade: float,
+                     backdrop: tuple) -> None:
+        """The scene into the HDR target, then bloom, streak and the composite
+        into ``output`` — see ``_bg_lens`` for the chain."""
+        t = self._ensure_targets(width, height)
+        pipes = self._lens_pipes
+        self._draw(self._pass(command, t["scene"]), self._pipeline, uniforms,
+                   self._textures, self._samplers)
+        sizes = t["sizes"]
+        src, src_size = t["scene"], (width, height)
+        for i, size in enumerate(sizes):
+            self._draw(self._pass(command, t["down"][i]), pipes["down"],
+                       _bg_lens.down_uniforms(src_size, size, i == 0, lens.threshold),
+                       [src])
+            src, src_size = t["down"][i], size
+        low, low_size = t["down"][-1], sizes[-1]
+        for i in range(len(sizes) - 2, -1, -1):
+            self._draw(self._pass(command, t["up"][i]), pipes["up"],
+                       _bg_lens.up_uniforms(low_size, sizes[i]), [low, t["down"][i]])
+            low, low_size = t["up"][i], sizes[i]
+        streak_on = _bg_lens.streak_wanted(lens)
+        # With no streak the composite still samples slot 2 (at zero weight), and
+        # an unwritten half-float target can hold NaN, which zero does not cancel.
+        streak = t["down"][1]
+        if streak_on:
+            src = t["down"][1]
+            for i, step in enumerate(_bg_lens.STREAK_STEPS):
+                dst = t["streak"][i % 2]
+                self._draw(self._pass(command, dst), pipes["streak"],
+                           _bg_lens.streak_uniforms(step, sizes[1]), [src])
+                src = dst
+            streak = src
+        speed = float(getattr(self._shader, "speed", 1.0))
+        opacity = float(getattr(self._shader, "opacity", 1.0)) * float(fade)
+        self._draw(self._pass(command, output), pipes["lens"],
+                   _bg_lens.lens_uniforms(lens, width, height, elapsed * speed, opacity,
+                                          backdrop, streak_on),
+                   [t["scene"], t["up"][0], streak])
+
+    def _ensure_targets(self, width: int, height: int) -> "dict[str, Any]":
+        """The chain's intermediate targets for a ``width`` x ``height`` frame,
+        rebuilt only when the size changes."""
+        if self._targets is not None and self._target_size == (width, height):
+            return self._targets
+
+        def target(size: "tuple[int, int]") -> Any:
+            desc = (Metal.MTLTextureDescriptor
+                    .texture2DDescriptorWithPixelFormat_width_height_mipmapped_(
+                        HDR_FORMAT, size[0], size[1], False))
+            desc.setUsage_(Metal.MTLTextureUsageRenderTarget
+                           | Metal.MTLTextureUsageShaderRead)
+            desc.setStorageMode_(Metal.MTLStorageModePrivate)
+            return self._device.newTextureWithDescriptor_(desc)
+
+        sizes = _bg_lens.level_sizes(width, height)
+        self._targets = {
+            "sizes": sizes,
+            "scene": target((width, height)),
+            "down": [target(s) for s in sizes],
+            # up[i] pairs with down[i]; the coarsest level has no up of its own.
+            "up": [target(s) for s in sizes[:-1]],
+            "streak": [target(sizes[1]), target(sizes[1])],
+        }
+        self._target_size = (width, height)
+        return self._targets
+
     def render_to_layer(self, layer: Any, elapsed: float, fade: float = 1.0,
-                        wait: bool = False) -> bool:
+                        wait: bool = False, seed: float = 0.0,
+                        seed_prev: float | None = None, seed_mix: float = 1.0) -> bool:
         """Draw one frame into ``layer``'s next drawable and present it.
 
         Returns False when there is nothing to draw or the layer has no drawable
@@ -179,7 +419,8 @@ class MetalBackground:
             return False
         size = layer.drawableSize()
         command = self._encode(drawable.texture(), size.width, size.height,
-                               elapsed, fade)
+                               elapsed, fade, seed=seed, seed_prev=seed_prev,
+                               seed_mix=seed_mix)
         if wait:
             command.commit()
             command.waitUntilScheduled()
@@ -190,7 +431,8 @@ class MetalBackground:
         return True
 
     def render_to_texture(self, width: int, height: int, elapsed: float,
-                          fade: float = 1.0) -> Any:
+                          fade: float = 1.0, seed: float = 0.0,
+                          seed_prev: float | None = None, seed_mix: float = 1.0) -> Any:
         """Draw one frame into a fresh offscreen texture and return it, or ``None``.
 
         The window-free path: same pipeline, same uniforms, a texture instead of a
@@ -205,7 +447,10 @@ class MetalBackground:
         descriptor.setUsage_(Metal.MTLTextureUsageRenderTarget
                              | Metal.MTLTextureUsageShaderRead)
         texture = self._device.newTextureWithDescriptor_(descriptor)
-        command = self._encode(texture, width, height, elapsed, fade)
+        # Window-free means synchronous: wait for the textures rather than hand
+        # back a backdrop-only frame the caller cannot tell from a real one.
+        command = self._encode(texture, width, height, elapsed, fade, block=True,
+                               seed=seed, seed_prev=seed_prev, seed_mix=seed_mix)
         command.commit()
         command.waitUntilCompleted()
         return texture

@@ -65,7 +65,21 @@ fragment float4 puikit_bg_fragment(
 
 Uniforms, shared by all three dialects: `resolution` (drawable pixels), `time`
 (seconds since the background was set, scaled by `speed`), `opacity`, `ink`,
-`backdrop`.
+`backdrop`, `seed`.
+
+**`seed`** is for a scene that moves *between* compositions rather than through
+one. It is a whole number 0..65535 the backend draws at random when the
+background is set, and again **once** when the user comes back to a background
+that parked — on the first tick at which the app is really in use (focused,
+recent input, not reduced motion), not on every wake: a mouse crossing an
+unfocused window re-arms the tick on each move without anyone coming back
+(`backends/_bg_seed.py`). On that return `seed_prev` keeps the old seed and
+`seed_mix` eases 0 → 1 over six seconds of wall time, so a scene can blend the
+old composition into the new one instead of cutting. Every prelude also defines
+`uint puikit_slot_hash(int slot, float seed)`, a 32-bit integer hash; hashing
+`floor(time / period)` with the seed picks what each period shows.
+`puikit.background.slot_hash` is the same hash in Python, bit for bit. The web
+client does not set the seed uniforms yet (they read 0).
 
 | Field | Meaning |
 |---|---|
@@ -78,12 +92,100 @@ Uniforms, shared by all three dialects: `resolution` (drawable pixels), `time`
 | `backdrop` | Clear color under the shader, also a uniform. |
 | `resolution_scale` | Fraction of native drawable size to render at, `0.1`..`1`, upscaled by the compositor. |
 | `idle` | What the scene comes to rest as when the backend parks it: `"freeze"` (default) holds the last frame, `"fade"` dissolves it to `backdrop` first. See §4.1. An unrecognized value falls back to `"freeze"`. |
+| `textures` | Images the scene samples, bound by position (§3.1). A plain path is shorthand for `ShaderTexture(path)`. |
+| `lens` | A camera look applied to the scene alone, under the UI (§3.2) — a `Lens`, or a `LensCycle` that changes it over time. Turns the scene's output into linear HDR. |
 
 > **`resolution_scale` is the knob that matters on a Retina display.** Cost is
 > per pixel, so `0.5` is a quarter of the work. Crisp geometry wants `1`; a
 > soft, diffuse scene — glow, particles, gradients — is usually
 > indistinguishable at `0.5`. It is floored at `0.1` rather than `0`, since a
 > zero-sized drawable is an error, not a cheap frame.
+
+### 3.1 Textures
+
+A scene that needs real imagery — a map of the world, a photographed sky —
+names it in `textures`, a tuple of `ShaderTexture`:
+
+| Field | Meaning |
+|---|---|
+| `path` | The image file (`~` expanded). Decoded by the OS decoder (ImageIO / WIC) as 8-bit RGBA, so a greyscale map is saved as RGB. |
+| `srgb` | `True` for a colour photograph: the sampler returns linear values. `False` (default) for data — masks, heights, normals. |
+| `wrap_u` / `wrap_v` | `"repeat"` or `"clamp"` per axis; the defaults (`repeat`, `clamp`) suit an equirectangular map. |
+| `mipmaps` | Build a mip chain on upload (default on), so a minified map can be sampled at an explicit level. |
+
+Binding is **by position**: entry *i* is slot *i* in every dialect, with a
+sampler in the same slot that carries that entry's filtering and wrap modes.
+
+```metal
+fragment float4 puikit_bg_fragment(float4 pos [[position]],
+                                   constant BackgroundUniforms &u [[buffer(0)]],
+                                   texture2d<float> map [[texture(0)]],
+                                   sampler s [[sampler(0)]]) { ... }
+```
+
+```hlsl
+Texture2D map : register(t0);
+SamplerState s : register(s0);
+```
+
+**Loading is off the UI thread.** `set_background` runs when a theme is
+applied, and a large photograph takes a couple of hundred milliseconds to
+decode, so the decode runs on a worker (`_bg_textures.TextureLoad`) and the
+renderer uploads the result on the thread that draws. Until then the frame is
+the bare `backdrop`. **A failed load fails the background**: the backdrop stays
+and the error is reported, the same outcome as a compile error. Re-applying a
+shader with the same textures keeps them on the GPU. The window-free
+`render_to_texture` paths wait for the decode instead, so a test sees the real
+frame.
+
+Sample at an explicit level (`level(l)` / `SampleLevel`) where the scene can:
+screen derivatives jump wherever a map's `u` wraps, which picks the smallest mip
+along a visible seam, and HLSL rejects implicit-derivative samples in loops.
+
+The web backend binds no textures yet; it draws the backdrop for a textured
+scene rather than run it without its inputs.
+
+### 3.2 `Lens` — a look for the background only
+
+A `Lens` is a camera look — bloom, halation, an anamorphic streak, flare
+ghosts, chromatic aberration, barrel distortion, a colour matrix, tone mapping,
+grading, vignette, CRT and scope masks, scanlines, grain, letterbox — applied
+**to the scene alone, before the UI is drawn over it**.
+
+That scope is why it is not `PostEffect`. A post effect is a property of the
+output surface and covers the whole frame, UI included (macOS realizes it as a
+Core Image content filter on the view; Windows as Direct2D effects over the
+composed frame); grain and distortion over file names would ruin them. A lens
+sits between the scene and its `backdrop`, so the two compose: a theme can have
+a lens on its background and a post effect on everything.
+
+A lens also changes what the scene returns. With one, the scene renders
+**linear HDR** into a half-float target, and the lens tone-maps (ACES fit),
+applies gamma, grades, and mixes over `backdrop` by `opacity` × the idle fade.
+Without one, the scene returns display colour and does that mix itself.
+
+The chain (`_bg_lens.py`, shared by Metal and D3D11): a six-level bloom pyramid
+(13-tap downsample with a soft threshold on the first level, tent upsample), an
+optional four-pass horizontal streak, and one composite pass that does
+everything else — so every look is pure data and costs the same as any other.
+Its targets are sized to the scene's (`resolution_scale` applies), rebuilt on
+resize, and the chain runs only when a frame is drawn: a parked background
+costs nothing.
+
+`lens` may also be a **`LensCycle`**: a tuple of looks, a `period` and a
+`transition`. Each period of the scene clock shows
+`looks[slot_hash(period_index, seed) % len(looks)]`, blended into the next look
+over the period's last `transition` seconds. The backend evaluates it on the CPU
+each frame (a few dozen floats), from the same clock and seed the scene sees —
+so a scene can hash the same slot and use the bits the look did not
+(`h / len(looks)`) to choose a composition that changes with it. While
+`seed_mix` is below 1 the backend blends the look for `seed_prev` into the look
+for `seed`, as the scene does with its compositions.
+
+`Lens.level` (default 1) is the ceiling of the result: the final display
+colour is multiplied by it before the mix over the backdrop, so `0.5` keeps
+every pixel at or below half white whatever the scene, exposure and grade did —
+for a background that text sits on.
 
 ### Shader source is the one genuinely backend-specific thing
 

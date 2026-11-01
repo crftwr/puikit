@@ -129,6 +129,7 @@ import objc
 from PyObjCTools import AppHelper
 
 from ..background import Shader, Wallpaper
+from ._bg_seed import SceneSeed
 from . import _screen_mark
 from ._drop_policy import drop_operation_macos
 from ._metal import HAVE_METAL as _HAS_METAL, MetalBackground, PIXEL_FORMAT as _METAL_PIXEL_FORMAT
@@ -1999,6 +2000,9 @@ class MacOSBackend(Backend):
         # _BG_PARK_RETRIES).
         self._bg_park_retries: int = 0
         self._bg_running: bool = False
+        # The ``seed`` uniforms (see puikit.background.SHADER_PRELUDE and
+        # _bg_seed): a fresh composition per background, and one per return.
+        self._bg_seeds = SceneSeed()
         self._bg_last_tick: float = 0.0
         # Loaded NSImage per wallpaper path, so the file is decoded once (not every
         # frame); keyed by the expanded path.
@@ -3427,7 +3431,10 @@ class MacOSBackend(Backend):
         mark = time.perf_counter() if _BG_PROFILE else 0.0
         drawn = self._metal.render_to_layer(self._metal_layer, self._bg_clock,
                                             _smoothstep(self._bg_fade),
-                                            wait=self._in_live_resize)
+                                            wait=self._in_live_resize,
+                                            seed=self._bg_seeds.seed,
+                                            seed_prev=self._bg_seeds.prev,
+                                            seed_mix=self._bg_seeds.mix)
         if _BG_PROFILE:
             self._bg_profile_tick(time.perf_counter() - mark)
         return drawn
@@ -4372,6 +4379,7 @@ class MacOSBackend(Backend):
             self._bg_clock = 0.0
             self._bg_rate = 1.0
             self._bg_fade = 1.0
+            self._bg_seeds.background_set()
             self._bg_park_retries = 0
             self._bg_running = False
             self._ensure_background_ticker()
@@ -4534,6 +4542,9 @@ class MacOSBackend(Backend):
         # never jumps: park for ten minutes and it resumes exactly where it
         # stopped, rather than teleporting ten minutes into the scene.
         self._bg_clock += dt * eased
+        # A reseed owed since parking is paid once the app is really in use again
+        # — not on a wake the tick is about to park from (see _bg_seed).
+        self._bg_seeds.tick(dt, self._bg_user_active(now) and not self.reduced_motion)
 
         # A shader owns its own layer *behind* the UI, so advancing it does not
         # touch a single UI pixel — draw straight into that layer and leave the
@@ -4560,6 +4571,7 @@ class MacOSBackend(Backend):
             # timer open forever — the point of parking is the battery.
             if drawn or self._bg_park_retries >= _BG_PARK_RETRIES:
                 self._bg_running = False
+                self._bg_seeds.parked()
                 return False
             self._bg_park_retries += 1
             return True

@@ -221,7 +221,8 @@ drives, and each no-ops safely where the capability is absent:
 
 - **Backgrounds** ([`docs/backgrounds.md`](docs/backgrounds.md)) — what sits
   behind the UI: a GPU `Shader` (MSL / HLSL / GLSL, one dialect per backend) or
-  a static `Wallpaper`. `set_surface_opacity` is the theme's one "how
+  a static `Wallpaper`. A shader may sample `ShaderTexture`s and carry a `Lens`
+  — a camera look for the background only, unlike a post effect. `set_surface_opacity` is the theme's one "how
   see-through is the UI" knob.
 - **Post effects** ([`docs/post_effects.md`](docs/post_effects.md)) — what
   composites over the frame: the CRT / phosphor `PostEffect`.

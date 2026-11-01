@@ -41,6 +41,7 @@ from typing import Any
 
 from . import _screen_mark, _win32_dragdrop, _win32_ime
 from . import _win32_native as native
+from ._bg_seed import SceneSeed
 from ._d3d_shader import HAVE_D3D_SHADER, D3DShaderBackground
 from ..background import Shader, Wallpaper
 from ..backend import (
@@ -1182,6 +1183,9 @@ class WindowsBackend(Backend):
         # backdrop instead of freezing (see MacOSBackend._bg_fade).
         self._bg_fade: float = 1.0
         self._bg_running: bool = False
+        # The ``seed`` uniforms (see puikit.background.SHADER_PRELUDE and
+        # _bg_seed): a fresh composition per background, and one per return.
+        self._bg_seeds = SceneSeed()
         self._bg_last_tick: float = 0.0
         # Opacity of UI surface fills (1 = opaque UI); lower composites them
         # translucently so a background behind them shows through. Backend-wide and
@@ -2142,6 +2146,7 @@ class WindowsBackend(Backend):
             self._bg_clock = 0.0
             self._bg_rate = 1.0
             self._bg_fade = 1.0
+            self._bg_seeds.background_set()
             self._bg_running = False
             self._ensure_background_ticker()
         self._sync_shader_layer()
@@ -2257,6 +2262,9 @@ class WindowsBackend(Backend):
                                       _BG_RAMP_UP, _BG_RAMP_DOWN)
         eased = _smoothstep(self._bg_rate)
         self._bg_clock += dt * eased
+        # A reseed owed since parking is paid once the app is really in use again
+        # — not on a wake the tick is about to park from (see _bg_seed).
+        self._bg_seeds.tick(dt, self._bg_user_active(now) and not self.reduced_motion)
         if self._bg_rate <= 0.0 and self._bg_fade == fade_target:
             # Fully coasted and fully resolved: drop the callback. The frame left on
             # screen is the settled one — the frozen scene, or the bare backdrop for
@@ -2264,6 +2272,7 @@ class WindowsBackend(Backend):
             # callback retires, so ask for that last frame here or a faded-out scene
             # would park one frame short of gone.
             self._bg_running = False
+            self._bg_seeds.parked()
             if self._hwnd:
                 native.user32.InvalidateRect(self._hwnd, None, False)
             return False
@@ -2643,7 +2652,8 @@ class WindowsBackend(Backend):
             scale = getattr(self._background, "resolution_scale", 1.0)
             shader_tex = self._d3d_shader.render_to_texture(
                 max(1, int(cw * scale)), max(1, int(ch * scale)), self._bg_clock,
-                _smoothstep(self._bg_fade))
+                _smoothstep(self._bg_fade), seed=self._bg_seeds.seed,
+                seed_prev=self._bg_seeds.prev, seed_mix=self._bg_seeds.mix)
         # Both passes below (the recording and the frame itself) may draw shadows,
         # and neither may retarget the device context once its batch is open.
         self._prepare_shadows()

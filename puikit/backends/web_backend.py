@@ -914,11 +914,15 @@ class WebBackend(Backend):
 
     def _shader_program(self) -> str | None:
         """The active shader's GLSL program, or None when nothing renders on web
-        (no background, not a Shader, no ``source_glsl``, or a no-op)."""
+        (no background, not a Shader, no ``source_glsl``, or a no-op).
+
+        Nor for a scene that needs textures or a lens: the web client binds
+        neither yet, and a scene run without its inputs would draw garbage (an
+        unbound sampler, un-tone-mapped HDR) rather than the plain backdrop."""
         from ..background import Shader
 
         bg = self._background
-        if isinstance(bg, Shader) and not bg.is_noop:
+        if isinstance(bg, Shader) and not bg.is_noop and not bg.textures and bg.lens is None:
             return bg.program_glsl
         return None
 

@@ -184,3 +184,98 @@ class TestBackendGate:
         # (background_3d was the non-shader 3D feature, removed in 9fe7538.)
         assert b.capabilities.supports("background")
         assert b.capabilities.supports("background_shader") == HAVE_D3D_SHADER
+
+
+# --- textures and the lens ------------------------------------------------------
+
+#: Samples texture 0 at the frame's centre — the twin of test_background_lens.
+SAMPLE_HLSL = """
+Texture2D t : register(t0);
+SamplerState s : register(s0);
+float4 puikit_bg_fragment(float4 pos : SV_Position) : SV_Target {
+    return float4(t.SampleLevel(s, float2(0.5, 0.5), 0).rgb, 1.0);
+}
+"""
+
+#: Linear HDR: a tiny, very bright disc on a dim field.
+SUN_HLSL = """
+float4 puikit_bg_fragment(float4 pos : SV_Position) : SV_Target {
+    float2 c = pos.xy - resolution * 0.5;
+    float v = length(c) < 2.0 ? 400.0 : 0.05;
+    return float4(v, v, v, 1.0);
+}
+"""
+
+
+def _png(tmp_path, name, rgb):
+    Image = pytest.importorskip("PIL.Image")
+    path = tmp_path / name
+    Image.new("RGB", (8, 8), rgb).save(path)
+    return str(path)
+
+
+def _rgb(px, width, x, y):
+    i = (y * width + x) * 4
+    return (px[i + 2], px[i + 1], px[i])
+
+
+class TestTextures:
+
+    def test_a_texture_is_sampled(self, tmp_path):
+        r = D3DShaderBackground()
+        assert r.set_shader(Shader(source="", source_hlsl=SAMPLE_HLSL,
+                                   textures=[_png(tmp_path, "red.png", (200, 0, 0))])), r.error
+        assert _rgb(r.render_pixels(16, 16, 0.0), 16, 8, 8) == (200, 0, 0)
+        r.close()
+
+    def test_an_srgb_texture_samples_linear(self, tmp_path):
+        from puikit.background import ShaderTexture
+        r = D3DShaderBackground()
+        tex = ShaderTexture(_png(tmp_path, "grey.png", (128, 128, 128)), srgb=True)
+        assert r.set_shader(Shader(source="", source_hlsl=SAMPLE_HLSL, textures=[tex])), r.error
+        assert abs(_rgb(r.render_pixels(16, 16, 0.0), 16, 8, 8)[0] - 55) <= 2
+        r.close()
+
+    def test_a_missing_texture_leaves_the_backdrop(self, tmp_path):
+        r = D3DShaderBackground()
+        assert r.set_shader(Shader(source="", source_hlsl=SAMPLE_HLSL, backdrop=(10, 20, 30),
+                                   textures=[str(tmp_path / "missing.png")]))
+        px = r.render_pixels(16, 16, 0.0)
+        assert {_rgb(px, 16, x, y) for x in range(16) for y in range(16)} == {(10, 20, 30)}
+        r.close()
+
+
+class TestLens:
+
+    def _render(self, lens, fade=1.0):
+        r = D3DShaderBackground()
+        assert r.set_shader(Shader(source="", source_hlsl=SUN_HLSL, lens=lens,
+                                   backdrop=(10, 20, 30))), r.error
+        px = r.render_pixels(200, 120, 1.0, fade)
+        r.close()
+        return px
+
+    def test_hdr_is_tone_mapped(self):
+        from puikit.background import Lens
+        px = self._render(Lens(bloom=0.0, vignette=0.0))
+        assert _rgb(px, 200, 100, 60) == (255, 255, 255)
+        assert 30 < _rgb(px, 200, 10, 10)[0] < 90
+
+    def test_bloom_spreads_the_sun(self):
+        from puikit.background import Lens
+        plain = self._render(Lens(bloom=0.0, vignette=0.0))
+        bloomed = self._render(Lens(bloom=1.0, vignette=0.0))
+        assert _rgb(bloomed, 200, 115, 60)[0] > _rgb(plain, 200, 115, 60)[0] + 5
+
+    def test_every_feature_draws_without_nan(self):
+        from puikit.background import Lens
+        px = self._render(Lens(streak=1, ghosts=1, scanlines=1, grain=0.5, distortion=0.2,
+                               aberration=0.01, halation=1))
+        assert sum(_rgb(px, 200, 100, 60)) > 600
+        assert sum(_rgb(px, 200, 120, 60)) > 0
+
+    def test_zero_fade_is_the_bare_backdrop(self):
+        from puikit.background import Lens
+        px = self._render(Lens(), fade=0.0)
+        assert {_rgb(px, 200, x, y) for x in range(0, 200, 7) for y in range(0, 120, 7)} \
+            == {(10, 20, 30)}
