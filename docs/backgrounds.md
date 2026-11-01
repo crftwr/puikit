@@ -75,10 +75,8 @@ recent input, not reduced motion), not on every wake: a mouse crossing an
 unfocused window re-arms the tick on each move without anyone coming back
 (`backends/_bg_seed.py`). On that return `seed_prev` keeps the old seed and
 `seed_mix` eases 0 → 1 over six seconds of wall time, so a scene can blend the
-old composition into the new one instead of cutting. Every prelude also defines
-`uint puikit_slot_hash(int slot, float seed)`, a 32-bit integer hash; hashing
-`floor(time / period)` with the seed picks what each period shows.
-`puikit.background.slot_hash` is the same hash in Python, bit for bit. The web
+old composition into the new one instead of cutting — hashing `floor(time /
+period)` with the seed is how a scene picks what each period shows. The web
 client does not set the seed uniforms yet (they read 0).
 
 | Field | Meaning |
@@ -92,10 +90,10 @@ client does not set the seed uniforms yet (they read 0).
 | `backdrop` | Clear color under the shader, also a uniform. |
 | `resolution_scale` | Fraction of native drawable size to render at, `0.1`..`1`, upscaled by the compositor. |
 | `idle` | What the scene comes to rest as when the backend parks it: `"freeze"` (default) holds the last frame, `"fade"` dissolves it to `backdrop` first. See §4.1. An unrecognized value falls back to `"freeze"`. |
-| `textures` | Images the scene samples, bound by position (§3.1). A plain path is shorthand for `ShaderTexture(path)`. |
-| `lens` | A camera look applied to the scene alone, under the UI (§3.2) — a `Lens`, or a `LensCycle` that changes it over time. Turns the scene's output into linear HDR. |
-| `volumes` | 3D textures the scene bakes for itself (§3.3). |
+| `textures` | Images the scene samples (§3.1). A plain path is shorthand for `ShaderTexture(path)`. |
 | `frame_rate` | The most frames a second the scene is rendered at; `0` = every frame (§3.3). |
+| `targets` | Offscreen textures the passes write and read (§3.2). |
+| `passes` | The scene as a sequence of draws (§3.2). Empty = the single-pass form. |
 
 > **`resolution_scale` is the knob that matters on a Retina display.** Cost is
 > per pixel, so `0.5` is a quarter of the work. Crisp geometry wants `1`; a
@@ -115,8 +113,11 @@ names it in `textures`, a tuple of `ShaderTexture`:
 | `wrap_u` / `wrap_v` | `"repeat"` or `"clamp"` per axis; the defaults (`repeat`, `clamp`) suit an equirectangular map. |
 | `mipmaps` | Build a mip chain on upload (default on), so a minified map can be sampled at an explicit level. |
 
-Binding is **by position**: entry *i* is slot *i* in every dialect, with a
-sampler in the same slot that carries that entry's filtering and wrap modes.
+| `name` | How a pass names it among its inputs (§3.2); unused by a single-pass scene. |
+
+A single-pass scene binds them **by position**: entry *i* is slot *i* in every
+dialect, with a sampler in the same slot that carries that entry's filtering and
+wrap modes.
 
 ```metal
 fragment float4 puikit_bg_fragment(float4 pos [[position]],
@@ -144,73 +145,84 @@ Sample at an explicit level (`level(l)` / `SampleLevel`) where the scene can:
 screen derivatives jump wherever a map's `u` wraps, which picks the smallest mip
 along a visible seam, and HLSL rejects implicit-derivative samples in loops.
 
-The web backend binds no textures yet; it draws the backdrop for a textured
-scene rather than run it without its inputs.
+The web backend binds no textures and runs no passes yet; it draws the
+backdrop for a textured or multi-pass scene rather than run it without its
+inputs.
 
-### 3.2 `Lens` — a look for the background only
+### 3.2 Passes and targets
 
-A `Lens` is a camera look — bloom, halation, an anamorphic streak, flare
-ghosts, chromatic aberration, barrel distortion, a colour matrix, tone mapping,
-grading, vignette, CRT and scope masks, scanlines, grain, letterbox — applied
-**to the scene alone, before the UI is drawn over it**.
+A scene that is more than one fullscreen draw — bloom, a blur, a tone map over
+HDR, a field baked once and sampled every frame — describes itself as
+`passes` through `targets`. **What the passes compute is the app's**; PuiKit
+allocates the targets, runs the passes in order and binds their inputs, and
+that is all it knows. A new kind of scene therefore needs no PuiKit change:
+the boundary is the GPU primitives the platforms share (offscreen textures,
+fullscreen draws, sampled inputs), with their differences — Metal's
+`depthPlane` vs a D3D11 `Texture3D` slice view, pixel formats, register
+binding, read/write hazards — absorbed here.
 
-That scope is why it is not `PostEffect`. A post effect is a property of the
-output surface and covers the whole frame, UI included (macOS realizes it as a
-Core Image content filter on the view; Windows as Direct2D effects over the
-composed frame); grain and distortion over file names would ruin them. A lens
-sits between the scene and its `backdrop`, so the two compose: a theme can have
-a lens on its background and a post effect on everything.
+`Target(name, scale=1.0, size=None, format="rgba16f")`:
 
-A lens also changes what the scene returns. With one, the scene renders
-**linear HDR** into a half-float target, and the lens tone-maps (ACES fit),
-applies gamma, grades, and mixes over `backdrop` by `opacity` × the idle fade.
-Without one, the scene returns display colour and does that mix itself.
+| Field | Meaning |
+|---|---|
+| `name` | How passes refer to it; unique, and not a texture's name. |
+| `scale` | Fraction of the drawable (`resolution_scale` already applied), rounded down, at least one texel. Reallocated when the drawable resizes. |
+| `size` | An absolute `(w, h)`, or `(w, h, d)` for a **3D** target (each ≤ 4096, depth ≤ 512). Lives as long as the shader. |
+| `format` | `"rgba16f"` (half float: linear HDR, depths) or `"rgba8"`. |
 
-The chain (`_bg_lens.py`, shared by Metal and D3D11): a six-level bloom pyramid
-(13-tap downsample with a soft threshold on the first level, tent upsample), an
-optional four-pass horizontal streak, and one composite pass that does
-everything else — so every look is pure data and costs the same as any other.
-Its targets are sized to the scene's (`resolution_scale` applies), rebuilt on
-resize, and the chain runs only when a frame is drawn: a parked background
-costs nothing.
+A target is sampled through a linear, clamp-to-edge sampler with no mips.
 
-`lens` may also be a **`LensCycle`**: a tuple of looks, a `period` and a
-`transition`. Each period of the scene clock shows
-`looks[slot_hash(period_index, seed) % len(looks)]`, blended into the next look
-over the period's last `transition` seconds. The backend evaluates it on the CPU
-each frame (a few dozen floats), from the same clock and seed the scene sees —
-so a scene can hash the same slot and use the bits the look did not
-(`h / len(looks)`) to choose a composition that changes with it. While
-`seed_mix` is below 1 the backend blends the look for `seed_prev` into the look
-for `seed`, as the scene does with its compositions.
+`Pass(entry, output=None, inputs=(), params=(), once=False)`:
 
-`Lens.dof` (with `focus_range`) adds depth of field to the composite. The scene
-then writes its **inverse** depth (`1 / distance`, `0` for nothing hit) into
-alpha: the blur size `|1 − focus/depth| · range` is linear in it, so filtering
-blends blur sizes across a silhouette instead of inventing a depth there. Focus
-is the depth at the middle of the frame (a centre tap and four close round it,
-averaged in 1/depth) — no state and no extra pass. The 40-tap gather averages in
-`(x/(1+x))^(1/2.2)` and expands after, so a hairline HDR glint cannot break a
-clean edge into teeth.
+| Field | Meaning |
+|---|---|
+| `entry` | A fragment function of the shader's source. |
+| `output` | The target it writes; `None` for the screen. |
+| `inputs` | Names of textures and targets it reads, at most 8, bound from slot 0 in order. |
+| `params` | Up to four floats, so one entry can serve several passes (a blur's step, a pyramid level). |
+| `once` | Run when the background is set rather than every frame — a bake (below). |
 
-`Lens.level` (default 1) is the ceiling of the result: the final display
-colour is multiplied by it before the mix over the backdrop, so `0.5` keeps
-every pixel at or below half white whatever the scene, exposure and grade did —
-for a background that text sits on.
+The passes run in order every frame; **the last draws to the screen and is the
+only one that may**. It does what a single-pass shader does: returns display
+colour mixed over `backdrop` by `opacity` (which carries the idle fade). Each
+pass receives the usual `BackgroundUniforms` at `buffer(0)` / `b0`, and
+`PassUniforms` at `buffer(1)` / `b1` (HLSL: `pass_params`, `pass_target`,
+`pass_inputs[8]`):
 
-### 3.3 Volumes, and a frame-rate cap
+```metal
+struct PassUniforms {
+    float4 params;      // Pass.params
+    float4 target;      // the output's width, height, depth (1 if 2D), slice written
+    float4 inputs[8];   // each input's width, height, depth (1 if 2D), 0
+};
 
-`Shader.volumes` is a tuple of `ShaderVolume(size=(w, h, d))`: 3D textures the
-scene bakes for itself on the GPU — a distance field, a noise volume — so a ray
-marcher reads one texel per step instead of evaluating the field. The source
-defines a second entry, `puikit_bg_bake`, which receives `BakeUniforms` (`size.xyz`,
-`size.w` = the slice, `index` = the volume; HLSL `bake_size` / `bake_index` in
-cbuffer `b1`) and returns the texel, stored as half-float. The bake runs a few
-slices a frame after `set_background` (the backdrop shows until it is done) and
-is kept when the same shader is applied again. The scene samples volume *i* in
-the slot after its textures, with a linear clamped sampler. Metal renders each
-slice through `depthPlane`, D3D11 through a `Texture3D` render-target view with
-`FirstWSlice`.
+fragment float4 blur(float4 pos [[position]],
+                     constant BackgroundUniforms &u [[buffer(0)]],
+                     constant PassUniforms &p [[buffer(1)]],
+                     texture2d<float> src [[texture(0)]], sampler s [[sampler(0)]]) {
+    float2 uv = pos.xy / p.target.xy, step = float2(p.params.x / p.inputs[0].x, 0.0);
+    return (src.sample(s, uv - step, level(0)) + src.sample(s, uv + step, level(0))) * 0.5;
+}
+```
+
+In HLSL every pass of one source declares its own inputs, and several may share
+a register: fxc binds per entry point, so `Texture2D a : register(t0)` in one
+pass and `Texture3D v : register(t0)` in another is fine.
+
+**A `once` pass is a bake.** Its output must have an absolute `size`, and it
+reads only textures and earlier bakes. Writing a 3D target, it runs once per
+slice (`target.w` says which). Bakes run a few slices a frame after
+`set_background` — the backdrop shows until they are done — and are kept when
+the same shader is applied again (and re-run when its textures change).
+
+**A graph that does not hold together** — an unknown name, a pass that reads
+what nothing wrote earlier (this frame or in a bake), a pass reading its own
+output, a frame pass overwriting a bake, a screen pass that is not last — draws
+the bare backdrop and reports why, as a compile error does. Every pass is
+checked before anything is compiled (`backends/_bg_graph.py`, which both GPU
+backends share).
+
+### 3.3 A frame-rate cap
 
 `Shader.frame_rate` caps how often the GPU renders the scene (`0` = every
 frame). The clock still advances every frame and the last frame stays up in

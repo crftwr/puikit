@@ -106,7 +106,7 @@ class TestDescriptor:
         assert not isinstance(Shader(source="x"), Wallpaper)
         assert {f.name for f in dataclasses.fields(Shader)} == {
             "source", "speed", "opacity", "ink", "backdrop", "resolution_scale",
-            "source_hlsl", "source_glsl", "idle", "textures", "lens", "volumes", "frame_rate"}
+            "source_hlsl", "source_glsl", "idle", "textures", "frame_rate", "targets", "passes"}
 
     def test_resolution_scale_is_clamped_above_zero(self):
         # Zero would ask for a zero-sized drawable, which is an error rather than
@@ -255,12 +255,12 @@ fragment float4 wrongly_named(float4 pos [[position]],
         # compiler again; only new source does.
         r = MetalBackground()
         assert r.set_shader(Shader(source=FLAT_INK, ink=(10, 20, 30)))
-        first = r._pipeline
+        first = r._pipes[(SHADER_ENTRY, None)]
         assert r.set_shader(Shader(source=FLAT_INK, ink=(200, 100, 50)))
-        assert r._pipeline is first          # same source: pipeline reused
+        assert r._pipes[(SHADER_ENTRY, None)] is first   # same source: pipeline reused
         assert _pixel(r.render_to_texture(8, 8, 0.0))[:3] == (200, 100, 50)
         assert r.set_shader(Shader(source=GRADIENT))
-        assert r._pipeline is not first      # new source: recompiled
+        assert r._pipes[(SHADER_ENTRY, None)] is not first   # new source: recompiled
 
     def test_render_without_a_shader_is_a_noop(self):
         assert MetalBackground().render_to_texture(8, 8, 0.0) is None

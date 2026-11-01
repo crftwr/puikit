@@ -13,9 +13,8 @@ bookkeeping for that, shared by the macOS and Windows backends:
   re-arms the tick on every move, the tick finds nobody using the app and parks
   again, and each of those wakes cut to another scene.
 * **How.** ``seed_prev`` keeps the old seed, and ``seed_mix`` eases from 0 to 1
-  over :data:`BLEND_SECONDS` of wall time, so a scene (and a
-  :class:`~puikit.background.LensCycle`) can blend the old composition into the
-  new one. Wall time rather than the scene clock: on resume the clock itself is
+  over :data:`BLEND_SECONDS` of wall time, so a scene can blend the old
+  composition into the new one. Wall time rather than the scene clock: on resume the clock itself is
   still ramping up from a stop, and the change would otherwise take as long as
   that ramp.
 """

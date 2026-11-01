@@ -42,7 +42,7 @@ import time
 from ctypes import wintypes
 from typing import Any
 
-from . import _bg_lens
+from . import _bg_graph
 from . import _win32_native as native
 from ._bg_textures import TextureLoad
 from ._win32_native import ComPtr, hresult_ok
@@ -82,16 +82,11 @@ cbuffer BackgroundUniforms : register(b0) {
     float  seed_mix;
 };
 
-cbuffer BakeUniforms : register(b1) {
-    float4 bake_size;    // see puikit.background.ShaderVolume
-    float  bake_index;
+cbuffer PassUniforms : register(b1) {
+    float4 pass_params;      // see puikit.background.Pass
+    float4 pass_target;      // the output's width, height, depth, slice written
+    float4 pass_inputs[8];   // each input's width, height, depth, 0
 };
-
-uint puikit_slot_hash(int slot, float seed) {
-    uint x = uint(slot) * 0x9E3779B9u + uint(seed);
-    x ^= x >> 16; x *= 0x7FEB352Du; x ^= x >> 15; x *= 0x846CA68Bu; x ^= x >> 16;
-    return x;
-}
 
 struct PuikitBgVSOut { float4 pos : SV_Position; };
 
@@ -103,12 +98,14 @@ PuikitBgVSOut puikit_bg_vertex(uint vid : SV_VertexID) {
 }
 """
 
-#: The pixel-shader entry point a :class:`Shader`'s ``source_hlsl`` must define,
-#: mirroring ``puikit.background.SHADER_ENTRY``. Its HLSL signature is::
+#: The pixel-shader entry point a single-pass :class:`Shader`'s ``source_hlsl``
+#: must define, mirroring ``puikit.background.SHADER_ENTRY``. Its HLSL signature
+#: is::
 #:
 #:     float4 puikit_bg_fragment(float4 pos : SV_Position) : SV_Target
 #:
 #: (the uniforms come from the ``BackgroundUniforms`` cbuffer, not a parameter).
+#: Every :class:`~puikit.background.Pass` entry has the same signature.
 SHADER_ENTRY = "puikit_bg_fragment"
 
 #: Constant-buffer size in bytes: 15 floats (see :data:`HLSL_PRELUDE`; the seed
@@ -121,9 +118,8 @@ UNIFORM_BYTES = 64
 #: bitmap with no format conversion (and the readback path returns BGRA bytes).
 PIXEL_FORMAT = native.DXGI_FORMAT_B8G8R8A8_UNORM
 
-#: Where a scene with a :class:`~puikit.background.Lens` renders: half-float, so
-#: its linear HDR survives to the tone map (see ``_metal.HDR_FORMAT``).
-HDR_FORMAT = 10              # DXGI_FORMAT_R16G16B16A16_FLOAT
+#: ``Target.format`` as DXGI formats.
+TARGET_FORMATS = {"rgba16f": 10, "rgba8": 28}   # R16G16B16A16_FLOAT, R8G8B8A8_UNORM
 _TEX_FORMAT = 28             # DXGI_FORMAT_R8G8B8A8_UNORM
 _TEX_FORMAT_SRGB = 29        # DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
 
@@ -179,12 +175,6 @@ _ADDRESS = {"repeat": 1, "clamp": 3}   # D3D11_TEXTURE_ADDRESS_WRAP / _CLAMP
 _COMPARISON_NEVER = 1
 _FLOAT32_MAX = 3.402823466e38
 _RTV_DIMENSION_TEXTURE3D = 8
-
-#: The pixel function a shader with volumes bakes them with (see ShaderVolume).
-BAKE_ENTRY = "puikit_bg_bake"
-
-#: Volume slices baked per frame after a background is set (see _metal).
-BAKE_SLICES_PER_FRAME = 8
 
 
 class _D3D11_BUFFER_DESC(ctypes.Structure):
@@ -346,7 +336,6 @@ class D3DShaderBackground:
         self._cbuffer: ComPtr | None = None
         self._raster: ComPtr | None = None
         self._vs: ComPtr | None = None
-        self._ps: ComPtr | None = None
         self._shader: Any = None
         self._error: str | None = None
         # Offscreen render target, recreated on size change.
@@ -359,22 +348,23 @@ class D3DShaderBackground:
         self._load: TextureLoad | None = None
         self._texture_key: tuple = ()
         self._textures: "list[tuple[ComPtr, ComPtr, ComPtr]] | None" = []
+        self._texture_sizes: "list[tuple[int, int, int]]" = []
         self._texture_failed = False
-        # Lens chain: pass shaders, their constant buffers and clamp sampler
-        # (built on the first lensed scene), and the HDR targets (per size).
-        self._lens: "dict[str, ComPtr] | None" = None
-        self._targets: "dict[str, Any] | None" = None
-        self._target_size: tuple[int, int] = (0, 0)
-        self._lensed = False
-        # Volumes: (texture, srv) per ShaderVolume, the bake pixel shader and its
-        # constant buffer, a clamp sampler for them, and the bake's progress.
-        self._volumes: "list[tuple[ComPtr, ComPtr]]" = []
-        self._bake_ps: ComPtr | None = None
-        self._bake_cb: ComPtr | None = None
-        self._volume_sampler: ComPtr | None = None
-        self._volume_key: tuple = ()
+        # The resolved graph, a pixel shader per pass entry, and the pass
+        # constant buffer; None when there is nothing to draw.
+        self._plan: "_bg_graph.Plan | None" = None
+        self._pixel: "dict[str, ComPtr]" = {}
+        self._pass_cb: ComPtr | None = None
+        # Targets as (texture, rtv-or-None, srv, extent): absolute ones live as
+        # long as the graph, drawable-sized ones are rebuilt on resize. A 3D
+        # target has no whole-texture rtv; each slice gets one as it is baked.
+        self._fixed: "dict[int, tuple]" = {}
+        self._sized: "dict[int, tuple]" = {}
+        self._sized_for: tuple[int, int] = (0, 0)
+        self._target_sampler: ComPtr | None = None
+        # The bake: every (step, slice) of the once passes, and how far it got.
+        self._bake_work: list = []
         self._bake_next = 0
-        self._bake_total = 0
         # What the last complete frame was rendered from (see render_to_texture).
         self._last_frame: tuple | None = None
         self._last_render = 0.0
@@ -413,19 +403,14 @@ class D3DShaderBackground:
 
     def close(self) -> None:
         """Release every COM object owned here (safe to call more than once)."""
-        self._release_volumes()
-        for attr in ("_bake_ps", "_bake_cb", "_volume_sampler"):
+        self._release_graph()
+        self._release_textures()
+        for attr in ("_target_sampler", "_pass_cb"):
             obj = getattr(self, attr)
             if obj is not None:
                 obj.release()
                 setattr(self, attr, None)
-        self._release_targets()
-        self._release_textures()
-        if self._lens is not None:
-            for obj in self._lens.values():
-                obj.release()
-            self._lens = None
-        for attr in ("_rtv", "_tex", "_ps", "_vs", "_raster", "_cbuffer"):
+        for attr in ("_rtv", "_tex", "_vs", "_raster", "_cbuffer"):
             obj = getattr(self, attr)
             if obj is not None:
                 obj.release()
@@ -441,175 +426,210 @@ class D3DShaderBackground:
 
     def set_shader(self, shader: Any) -> bool:
         """Compile ``shader``'s HLSL (:data:`HLSL_PRELUDE` + its ``source_hlsl``)
-        and build the vertex/pixel shaders. Returns success.
+        into the vertex shader and a pixel shader per pass. Returns success.
 
-        A failure leaves the renderer with no pixel shader, so :meth:`render`
+        A failure leaves the renderer with nothing to draw, so :meth:`render`
         becomes a no-op and the frame shows the backdrop alone — a shader with a
-        typo (or one that ships no ``source_hlsl``) costs a blank background and an
-        error string, not a crash. Re-setting the same source is a no-op, so a
-        theme switch that keeps the background does not recompile.
+        typo, a graph that does not hold together, or one that ships no
+        ``source_hlsl`` costs a blank background and an error string, not a
+        crash. Re-setting the same source and graph is a no-op (baked targets
+        included), so a theme switch that keeps the background does not
+        recompile.
         """
         self._last_frame = None
         if not self.available or shader is None:
-            self._ps = None
+            self._plan = None
             return False
         source = getattr(shader, "source_hlsl", None)
-        if not source:
-            self._shader = shader
-            self._ps = None
-            self._error = "shader has no source_hlsl for the Windows backend"
-            return False
-        lensed = getattr(shader, "lens", None) is not None
-        if lensed and self._lens is None and not self._build_lens():
-            self._shader = shader
-            self._ps = None
-            return False
-        self._lensed = lensed
-        volumes = tuple(getattr(shader, "volumes", ()) or ())
-        if (self._shader is not None and getattr(self._shader, "source_hlsl", None) == source
-                and self._ps is not None and volumes == self._volume_key):
+        old = self._shader
+        if (old is not None and self._plan is not None and source
+                and getattr(old, "source_hlsl", None) == source
+                and shader.targets == old.targets and shader.passes == old.passes):
             self._shader = shader          # params may differ; shaders are reusable
             self._sync_textures(shader)
             return True
         self._shader = shader
+        self._release_graph()
         self._error = None
-        self._sync_textures(shader)
+        if not source:
+            self._error = "shader has no source_hlsl for the Windows backend"
+            return False
+        plan = _bg_graph.plan(shader)
+        if plan.error:
+            self._error = plan.error
+            return False
         program = HLSL_PRELUDE + "\n" + source
-
-        vs_code, err = _compile(program, "puikit_bg_vertex", "vs_4_0")
-        if vs_code is None:
-            self._error = err
-            self._ps = None
-            return False
-        ps_code, err = _compile(program, SHADER_ENTRY, "ps_4_0")
-        if ps_code is None:
-            self._error = err
-            self._ps = None
-            return False
-
-        vs = self._create_shader(_IDX_DEV_CREATE_VERTEX_SHADER, vs_code)
-        ps = self._create_shader(_IDX_DEV_CREATE_PIXEL_SHADER, ps_code)
-        if vs is None or ps is None:
-            self._error = "CreateVertex/PixelShader failed"
-            self._ps = None
-            return False
-        bake = None
-        if volumes:
-            bake_code, err = _compile(program, BAKE_ENTRY, "ps_4_0")
-            bake = self._create_shader(_IDX_DEV_CREATE_PIXEL_SHADER, bake_code) if bake_code else None
-            if bake is None:
-                self._error = err or "CreatePixelShader failed for the bake"
-                vs.release()
-                ps.release()
-                self._ps = None
+        if self._vs is None:
+            vs_code, err = _compile(HLSL_PRELUDE, "puikit_bg_vertex", "vs_4_0")
+            self._vs = self._create_shader(_IDX_DEV_CREATE_VERTEX_SHADER, vs_code) if vs_code else None
+            if self._vs is None:
+                self._error = err or "CreateVertexShader failed"
                 return False
-        if self._vs is not None:
-            self._vs.release()
-        if self._ps is not None:
-            self._ps.release()
-        if self._bake_ps is not None:
-            self._bake_ps.release()
-        self._vs, self._ps, self._bake_ps = vs, ps, bake
-        if not self._make_volumes(volumes):
-            self._ps = None
+        for entry in sorted({e for e, _fmt in plan.entries}):
+            code, err = _compile(program, entry, "ps_4_0")
+            ps = self._create_shader(_IDX_DEV_CREATE_PIXEL_SHADER, code) if code else None
+            if ps is None:
+                self._error = err or f"CreatePixelShader failed for {entry}"
+                self._release_graph()
+                return False
+            self._pixel[entry] = ps
+        if self._pass_cb is None:
+            self._pass_cb = self._create_cbuffer(_bg_graph.PASS_UNIFORM_BYTES)
+        if plan.targets and self._target_sampler is None:
+            self._target_sampler = self._create_sampler("clamp", "clamp", mipmaps=False)
+        if self._pass_cb is None or (plan.targets and self._target_sampler is None):
+            self._error = "could not create the passes' GPU objects"
+            self._release_graph()
             return False
+        for j, target in enumerate(plan.targets):
+            if target.size is not None:
+                made = self._make_target(target, *target.extent(0, 0))
+                if made is None:
+                    self._error = f"could not create target {target.name!r}"
+                    self._release_graph()
+                    return False
+                self._fixed[j] = made
+        self._plan = plan
+        self._sync_textures(shader)
+        self._bake_work = _bg_graph.once_work(plan)
+        self._bake_next = 0
         return True
 
-    # --- volumes -----------------------------------------------------------
+    def _release_graph(self) -> None:
+        """Drop the pixel shaders and targets of the current graph."""
+        for ps in self._pixel.values():
+            ps.release()
+        self._pixel = {}
+        for targets in (self._fixed, self._sized):
+            for entry in targets.values():
+                for obj in entry[:3]:
+                    if obj is not None:
+                        obj.release()
+        self._fixed, self._sized, self._sized_for = {}, {}, (0, 0)
+        self._plan = None
+        self._bake_work, self._bake_next = [], 0
 
-    def _make_volumes(self, volumes: tuple) -> bool:
-        """Allocate the shader's 3D textures, baked over the next frames."""
-        self._release_volumes()
-        self._volume_key = volumes
-        for vol in volumes:
-            w, h, d = vol.size
-            desc = _D3D11_TEXTURE3D_DESC(
-                Width=w, Height=h, Depth=d, MipLevels=1, Format=HDR_FORMAT,
+    # --- targets -----------------------------------------------------------
+
+    def _make_target(self, target: Any, width: int, height: int, depth: int) -> "tuple | None":
+        """A render target that is also read: (texture, rtv, srv, extent); a 3D
+        one has no rtv of its own (see _slice_view)."""
+        fmt = TARGET_FORMATS[target.format]
+        if target.is_3d:
+            desc3 = _D3D11_TEXTURE3D_DESC(
+                Width=width, Height=height, Depth=depth, MipLevels=1, Format=fmt,
                 Usage=_USAGE_DEFAULT, BindFlags=_BIND_RENDER_TARGET | _BIND_SHADER_RESOURCE,
                 CPUAccessFlags=0, MiscFlags=0)
             out = ctypes.c_void_p()
             hr = self._device.call(_IDX_DEV_CREATE_TEXTURE3D, ctypes.c_int32,
                                    [ctypes.POINTER(_D3D11_TEXTURE3D_DESC), ctypes.c_void_p,
                                     ctypes.POINTER(ctypes.c_void_p)],
-                                   ctypes.byref(desc), None, ctypes.byref(out))
+                                   ctypes.byref(desc3), None, ctypes.byref(out))
             if not hresult_ok(hr):
-                self._error = "CreateTexture3D failed"
-                return False
-            tex = ComPtr(out.value or 0)
-            srv = self._create_view(_IDX_DEV_CREATE_SHADER_RESOURCE_VIEW, tex)
-            if srv is None:
+                return None
+            tex, rtv = ComPtr(out.value or 0), None
+        else:
+            desc = _D3D11_TEXTURE2D_DESC(
+                Width=width, Height=height, MipLevels=1, ArraySize=1, Format=fmt,
+                SampleDesc=native.DXGI_SAMPLE_DESC(1, 0), Usage=_USAGE_DEFAULT,
+                BindFlags=_BIND_RENDER_TARGET | _BIND_SHADER_RESOURCE, CPUAccessFlags=0,
+                MiscFlags=0,
+            )
+            tex = self._create_texture(desc)
+            if tex is None:
+                return None
+            rtv = self._create_view(_IDX_DEV_CREATE_RENDER_TARGET_VIEW, tex)
+            if rtv is None:
                 tex.release()
-                self._error = "a volume's shader-resource view failed"
-                return False
-            self._volumes.append((tex, srv))
-        if volumes:
-            if self._bake_cb is None:
-                self._bake_cb = self._create_cbuffer(32)
-            if self._volume_sampler is None:
-                self._volume_sampler = self._create_sampler("clamp", "clamp", mipmaps=False)
-            if self._bake_cb is None or self._volume_sampler is None:
-                self._error = "could not create the bake's GPU objects"
-                return False
-        self._bake_next = 0
-        self._bake_total = sum(v.size[2] for v in volumes)
+                return None
+        srv = self._create_view(_IDX_DEV_CREATE_SHADER_RESOURCE_VIEW, tex)
+        if srv is None:
+            for obj in (rtv, tex):
+                if obj is not None:
+                    obj.release()
+            return None
+        return (tex, rtv, srv, (width, height, depth))
+
+    def _slice_view(self, tex: ComPtr, fmt: str, z: int) -> "ComPtr | None":
+        """A render-target view of slice ``z`` of a 3D target."""
+        desc = _D3D11_TEX3D_RTV_DESC(Format=TARGET_FORMATS[fmt],
+                                     ViewDimension=_RTV_DIMENSION_TEXTURE3D,
+                                     MipSlice=0, FirstWSlice=z, WSize=1)
+        out = ctypes.c_void_p()
+        hr = self._device.call(_IDX_DEV_CREATE_RENDER_TARGET_VIEW, ctypes.c_int32,
+                               [ctypes.c_void_p, ctypes.POINTER(_D3D11_TEX3D_RTV_DESC),
+                                ctypes.POINTER(ctypes.c_void_p)],
+                               tex.addr, ctypes.byref(desc), ctypes.byref(out))
+        return ComPtr(out.value or 0) if hresult_ok(hr) else None
+
+    def _ensure_targets(self, width: int, height: int) -> bool:
+        """The targets sized from the drawable, rebuilt only when it changes."""
+        if self._sized_for == (width, height):
+            return True
+        for entry in self._sized.values():
+            for obj in entry[:3]:
+                if obj is not None:
+                    obj.release()
+        self._sized = {}
+        for j, target in enumerate(self._plan.targets):
+            if target.size is None:
+                made = self._make_target(target, *target.extent(width, height))
+                if made is None:
+                    self._error = f"could not create target {target.name!r}"
+                    return False
+                self._sized[j] = made
+        self._sized_for = (width, height)
         return True
 
-    def _release_volumes(self) -> None:
-        for tex, srv in self._volumes:
-            srv.release()
-            tex.release()
-        self._volumes = []
-        self._volume_key = ()
-        self._bake_next = self._bake_total = 0
+    def _target_entry(self, j: int) -> tuple:
+        return self._fixed[j] if j in self._fixed else self._sized[j]
+
+    # --- passes ------------------------------------------------------------
 
     def _bake(self, block: bool) -> bool:
-        """Bake the next slices of the volumes; True once all are done (see
+        """Run the next slices of the once passes; True once all are done (see
         _metal.MetalBackground._bake)."""
-        if self._bake_next >= self._bake_total:
-            return True
-        volumes = self._volume_key
-        budget = self._bake_total if block else BAKE_SLICES_PER_FRAME
-        ctx = self._ctx
-        ctx.call(_IDX_CTX_RS_SET_STATE, None, [ctypes.c_void_p], self._raster.addr)
-        ctx.call(_IDX_CTX_IA_SET_INPUT_LAYOUT, None, [ctypes.c_void_p], None)
-        ctx.call(_IDX_CTX_IA_SET_PRIMITIVE_TOPOLOGY, None, [ctypes.c_uint32], _TRIANGLELIST)
-        while budget > 0 and self._bake_next < self._bake_total:
-            vi, z = 0, self._bake_next
-            while z >= volumes[vi].size[2]:
-                z -= volumes[vi].size[2]
-                vi += 1
-            w, h, d = volumes[vi].size
-            desc = _D3D11_TEX3D_RTV_DESC(Format=HDR_FORMAT, ViewDimension=_RTV_DIMENSION_TEXTURE3D,
-                                         MipSlice=0, FirstWSlice=z, WSize=1)
-            out = ctypes.c_void_p()
-            hr = self._device.call(_IDX_DEV_CREATE_RENDER_TARGET_VIEW, ctypes.c_int32,
-                                   [ctypes.c_void_p, ctypes.POINTER(_D3D11_TEX3D_RTV_DESC),
-                                    ctypes.POINTER(ctypes.c_void_p)],
-                                   self._volumes[vi][0].addr, ctypes.byref(desc), ctypes.byref(out))
-            if not hresult_ok(hr):
-                self._error = "a volume slice's render-target view failed"
-                self._bake_total = 0
+        budget = len(self._bake_work) if block else _bg_graph.BAKE_SLICES_PER_FRAME
+        while budget > 0 and self._bake_next < len(self._bake_work):
+            step, z = self._bake_work[self._bake_next]
+            target = self._fixed[step.output]
+            fmt = self._plan.targets[step.output].format
+            rtv = self._slice_view(target[0], fmt, z) if target[1] is None else target[1]
+            if rtv is None:
+                self._error = "a target slice's render-target view failed"
+                self._bake_work = []
                 return False
-            rtv = ComPtr(out.value or 0)
-            self._write(self._bake_cb, struct.pack("8f", w, h, d, z, vi, 0.0, 0.0, 0.0))
-            self._target(rtv, w, h)
-            self._draw(self._vs, self._bake_ps, self._cbuffer, 0, self._bake_cb)
-            ctx.call(_IDX_CTX_OM_SET_RENDER_TARGETS, None,
-                     [ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p],
-                     0, None, None)
-            rtv.release()
+            self._run(step, rtv, target[3], z)
+            if target[1] is None:
+                rtv.release()
             self._bake_next += 1
             budget -= 1
-        return self._bake_next >= self._bake_total
+        return self._bake_next >= len(self._bake_work)
 
-    def _scene_inputs(self) -> "tuple[list, list]":
-        """Views and samplers for the scene: its textures, then its volumes."""
-        views = [view for _t, view, _s in self._textures or []]
-        samplers = [smp for _t, _v, smp in self._textures or []]
-        for _tex, srv in self._volumes:
-            views.append(srv)
-            samplers.append(self._volume_sampler)
-        return views, samplers
+    def _run(self, step: Any, rtv: ComPtr, size: "tuple[int, int, int]", slice_: int) -> None:
+        """One pass: ``step``'s pixel shader over ``rtv``, its inputs bound from
+        slot 0 and released after (D3D11 refuses to bind a texture for writing
+        while it is still bound for reading)."""
+        views, samplers, extents = [], [], []
+        for kind, i in step.inputs:
+            if kind == "texture":
+                _tex, view, sampler = self._textures[i]
+                views.append(view)
+                samplers.append(sampler)
+                extents.append(self._texture_sizes[i])
+            else:
+                entry = self._target_entry(i)
+                views.append(entry[2])
+                samplers.append(self._target_sampler)
+                extents.append(entry[3])
+        self._write(self._pass_cb, _bg_graph.pass_uniforms(step, size, slice_, extents))
+        self._target(rtv, size[0], size[1])
+        self._bind_textures(views, samplers)
+        self._draw(self._vs, self._pixel[step.entry], self._cbuffer, 0, self._pass_cb)
+        self._unbind_textures(len(views))
+        self._ctx.call(_IDX_CTX_OM_SET_RENDER_TARGETS, None,
+                       [ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p],
+                       0, None, None)
 
     # --- rendering ---------------------------------------------------------
 
@@ -629,7 +649,7 @@ class D3DShaderBackground:
         Until the scene's textures are on the GPU (and for good if they failed to
         load) the frame is the bare backdrop; ``block`` waits for the decode
         instead, for the window-free path."""
-        if self._ps is None or not self.available:
+        if self._plan is None or not self.available:
             return None
         width, height = max(1, int(width)), max(1, int(height))
         if not self._ensure_texture(width, height):
@@ -656,25 +676,19 @@ class D3DShaderBackground:
         clear_arr = (ctypes.c_float * 4)(*clear)
         ctx.call(_IDX_CTX_CLEAR_RENDER_TARGET_VIEW, None,
                  [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float)], self._rtv.addr, clear_arr)
-        if not self._textures_ready(block) or not self._bake(block):
-            return self._tex
         self._write_uniforms(width, height, elapsed, fade, seed, seed_prev, seed_mix)
-
         ctx.call(_IDX_CTX_RS_SET_STATE, None, [ctypes.c_void_p], self._raster.addr)
         ctx.call(_IDX_CTX_IA_SET_INPUT_LAYOUT, None, [ctypes.c_void_p], None)
         ctx.call(_IDX_CTX_IA_SET_PRIMITIVE_TOPOLOGY, None, [ctypes.c_uint32], _TRIANGLELIST)
-        lens = getattr(self._shader, "lens", None) if self._lensed else None
-        if lens is None:
-            self._target(self._rtv, width, height)
-            views, samplers = self._scene_inputs()
-            self._bind_textures(views, samplers)
-            self._draw(self._vs, self._ps, self._cbuffer, 0)
-            self._unbind_textures(len(views))
-            self._last_frame = key
+        if (not self._textures_ready(block) or not self._bake(block)
+                or not self._ensure_targets(width, height)):
             return self._tex
-        speed = float(getattr(self._shader, "speed", 1.0))
-        lens = _bg_lens.current_lens(lens, elapsed * speed, seed, seed_prev, seed_mix)
-        self._render_lens(lens, width, height, elapsed, fade, clear)
+        for step in self._plan.frame:
+            if step.output is None:
+                self._run(step, self._rtv, (width, height, 1), 0)
+            else:
+                entry = self._target_entry(step.output)
+                self._run(step, entry[1], entry[3], 0)
         self._last_frame = key
         return self._tex
 
@@ -782,139 +796,6 @@ class D3DShaderBackground:
                         ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32],
                        cbuffer.addr, 0, None, buf, 0, 0)
 
-    def _blur_pass(self, name: str, dst: "tuple", sources: "list[tuple]",
-                   uniforms: bytes) -> None:
-        """One pass of the chain: ``sources`` (target tuples) read, ``dst`` written."""
-        lens = self._lens
-        self._write(lens["pass_cb"], uniforms)
-        self._target(dst[1], dst[3][0], dst[3][1])
-        self._bind_textures([s[2] for s in sources], [lens["sampler"]])
-        self._draw(lens["vs"], lens[name], lens["pass_cb"], 0, lens["lens_cb"])
-        self._unbind_textures(len(sources))
-
-    def _render_lens(self, lens: Any, width: int, height: int, elapsed: float,
-                     fade: float, backdrop: tuple) -> None:
-        """The scene into the HDR target, then bloom, streak and the composite
-        into the output texture — the chain is described in ``_bg_lens``."""
-        t = self._ensure_targets(width, height)
-        if t is None:
-            return
-        scene = t["scene"]
-        self._target(scene[1], width, height)
-        views, samplers = self._scene_inputs()
-        self._bind_textures(views, samplers)
-        self._draw(self._vs, self._ps, self._cbuffer, 0)
-        self._unbind_textures(len(views))
-
-        sizes = t["sizes"]
-        src = scene
-        for i, size in enumerate(sizes):
-            self._blur_pass("down", t["down"][i], [src],
-                            _bg_lens.down_uniforms(src[3], size, i == 0, lens.threshold))
-            src = t["down"][i]
-        low = t["down"][-1]
-        for i in range(len(sizes) - 2, -1, -1):
-            self._blur_pass("up", t["up"][i], [low, t["down"][i]],
-                            _bg_lens.up_uniforms(low[3], sizes[i]))
-            low = t["up"][i]
-        streak_on = _bg_lens.streak_wanted(lens)
-        streak = t["down"][1]       # never an unwritten target: see _metal
-        if streak_on:
-            src = t["down"][1]
-            for i, step in enumerate(_bg_lens.STREAK_STEPS):
-                dst = t["streak"][i % 2]
-                self._blur_pass("streak", dst, [src],
-                                _bg_lens.streak_uniforms(step, sizes[1]))
-                src = dst
-            streak = src
-        speed = float(getattr(self._shader, "speed", 1.0))
-        opacity = float(getattr(self._shader, "opacity", 1.0)) * float(fade)
-        self._write(self._lens["lens_cb"], _bg_lens.lens_uniforms(
-            lens, width, height, elapsed * speed, opacity, backdrop, streak_on))
-        out = (self._tex, self._rtv, None, (width, height))
-        self._blur_pass("lens", out, [scene, t["up"][0], streak], bytes(_bg_lens.PASS_UNIFORM_BYTES))
-
-    def _build_lens(self) -> bool:
-        """Compile the lens chain's passes (``_bg_lens.LENS_HLSL``) once, with
-        their constant buffers and the clamp sampler they share."""
-        lens: dict = {}
-        vs_code, err = _compile(_bg_lens.LENS_HLSL, "puikit_pass_vertex", "vs_4_0")
-        if vs_code is None:
-            self._error = f"lens chain: {err}"
-            return False
-        lens["vs"] = self._create_shader(_IDX_DEV_CREATE_VERTEX_SHADER, vs_code)
-        for name in ("down", "up", "streak", "lens"):
-            code, err = _compile(_bg_lens.LENS_HLSL, f"puikit_{name}", "ps_4_0")
-            if code is None:
-                self._error = f"lens chain ({name}): {err}"
-                return False
-            lens[name] = self._create_shader(_IDX_DEV_CREATE_PIXEL_SHADER, code)
-        lens["pass_cb"] = self._create_cbuffer(_bg_lens.PASS_UNIFORM_BYTES)
-        lens["lens_cb"] = self._create_cbuffer(_bg_lens.LENS_UNIFORM_BYTES)
-        lens["sampler"] = self._create_sampler("clamp", "clamp", mipmaps=False)
-        if any(v is None for v in lens.values()):
-            for v in lens.values():
-                if v is not None:
-                    v.release()
-            self._error = "lens chain: could not create its GPU objects"
-            return False
-        self._lens = lens
-        return True
-
-    def _make_target(self, fmt: int, width: int, height: int) -> "tuple | None":
-        """A render target that is also read: (texture, rtv, srv, size)."""
-        desc = _D3D11_TEXTURE2D_DESC(
-            Width=width, Height=height, MipLevels=1, ArraySize=1, Format=fmt,
-            SampleDesc=native.DXGI_SAMPLE_DESC(1, 0), Usage=_USAGE_DEFAULT,
-            BindFlags=_BIND_RENDER_TARGET | _BIND_SHADER_RESOURCE, CPUAccessFlags=0, MiscFlags=0,
-        )
-        tex = self._create_texture(desc)
-        if tex is None:
-            return None
-        rtv = self._create_view(_IDX_DEV_CREATE_RENDER_TARGET_VIEW, tex)
-        srv = self._create_view(_IDX_DEV_CREATE_SHADER_RESOURCE_VIEW, tex)
-        if rtv is None or srv is None:
-            for obj in (srv, rtv, tex):
-                if obj is not None:
-                    obj.release()
-            return None
-        return (tex, rtv, srv, (width, height))
-
-    def _ensure_targets(self, width: int, height: int) -> "dict[str, Any] | None":
-        """The chain's HDR targets for a ``width`` x ``height`` frame, rebuilt only
-        when the size changes."""
-        if self._targets is not None and self._target_size == (width, height):
-            return self._targets
-        self._release_targets()
-        sizes = _bg_lens.level_sizes(width, height)
-        targets = {
-            "sizes": sizes,
-            "scene": self._make_target(HDR_FORMAT, width, height),
-            "down": [self._make_target(HDR_FORMAT, *s) for s in sizes],
-            "up": [self._make_target(HDR_FORMAT, *s) for s in sizes[:-1]],
-            "streak": [self._make_target(HDR_FORMAT, *sizes[1]) for _ in range(2)],
-        }
-        self._targets = targets
-        self._target_size = (width, height)
-        if any(t is None for t in self._all_targets()):
-            self._release_targets()
-            return None
-        return targets
-
-    def _all_targets(self) -> "list[tuple | None]":
-        t = self._targets
-        if t is None:
-            return []
-        return [t["scene"], *t["down"], *t["up"], *t["streak"]]
-
-    def _release_targets(self) -> None:
-        for target in self._all_targets():
-            if target is not None:
-                for obj in target[:3]:
-                    obj.release()
-        self._targets = None
-        self._target_size = (0, 0)
-
     # --- textures ----------------------------------------------------------
 
     def _sync_textures(self, shader: Any) -> None:
@@ -926,6 +807,7 @@ class D3DShaderBackground:
         self._release_textures()
         self._texture_key = key
         self._texture_failed = False
+        self._bake_next = 0                # a bake may read the textures
         if key:
             self._load = TextureLoad(key)
             self._textures = None
@@ -965,6 +847,7 @@ class D3DShaderBackground:
                 return False
             uploaded.append(entry)
         self._textures = uploaded
+        self._texture_sizes = [(r.width, r.height, 1) for r in self._load.rasters]
         self._load = None
         return True
 
@@ -1005,6 +888,7 @@ class D3DShaderBackground:
             for obj in (sampler, view, tex):
                 obj.release()
         self._textures = []
+        self._texture_sizes = []
         self._texture_key = ()
         self._load = None
 

@@ -13,9 +13,12 @@ Two kinds, plus ``None`` for a plain solid color:
 * :class:`Wallpaper` — a single static image scaled to fill the window.
   Capability ``background``.
 
-A shader may also sample images (:class:`ShaderTexture`) and carry a
-:class:`Lens` — a camera look applied to the scene alone, under the UI, which is
-what sets it apart from :class:`~puikit.posteffect.PostEffect`.
+A shader may also sample images (:class:`ShaderTexture`) and run as several
+passes through offscreen targets (:class:`Target`, :class:`Pass`) — bloom, a
+blur, a baked 3D field — all of it under the UI, which is what sets it apart
+from :class:`~puikit.posteffect.PostEffect`. What the passes compute is the
+app's; PuiKit allocates the targets, runs the passes and binds their inputs on
+each GPU API.
 
 A background sits *under* everything the UI paints, so it shows through only
 where the UI does not paint an opaque fill — most visible under a sparse layout,
@@ -33,7 +36,6 @@ you need the old implementation.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 from .backend import Color
@@ -89,19 +91,20 @@ class Wallpaper:
 #: the buffer to match, and the two must be changed together. ``seed`` came later
 #: and so sits after the colours, alone in the fourth slot.
 #:
-#: **``seed`` and ``puikit_slot_hash``** are for a scene that moves between
-#: compositions — shots, layouts, palettes — rather than through one. ``seed`` is a
-#: whole number the backend draws at random when the background is set, and again
-#: once each time the user comes back to a background that parked (see
-#: ``backends/_bg_seed``; never under reduced motion, where the still frame must
-#: not change). Hashing ``floor(time / period)`` with it picks the composition for
-#: each period, so a scene starts somewhere different every launch and moves to a
-#: fresh one when the user returns — while staying a pure function of its
-#: uniforms. On a return ``seed_prev`` holds the old seed and ``seed_mix`` eases
-#: 0 → 1 over a few seconds, so a scene that composes both can blend the old
-#: composition into the new one rather than cut. :func:`slot_hash` is the same hash in
-#: Python, bit for bit, which is how a :class:`LensCycle` agrees with the scene on
-#: what each period shows.
+#: **``seed``** is for a scene that moves between compositions — shots, layouts,
+#: palettes — rather than through one. It is a whole number the backend draws at
+#: random when the background is set, and again once each time the user comes
+#: back to a background that parked (see ``backends/_bg_seed``; never under
+#: reduced motion, where the still frame must not change). Hashing ``floor(time /
+#: period)`` with it picks the composition for each period, so a scene starts
+#: somewhere different every launch and moves to a fresh one when the user
+#: returns — while staying a pure function of its uniforms. On a return
+#: ``seed_prev`` holds the old seed and ``seed_mix`` eases 0 → 1 over a few
+#: seconds, so a scene that composes both can blend the old composition into the
+#: new one rather than cut.
+#:
+#: **``PassUniforms``** is what each :class:`Pass` is told about its own output
+#: and inputs, at ``buffer(1)``; the single-pass form never needs it.
 SHADER_PRELUDE = """\
 #include <metal_stdlib>
 using namespace metal;
@@ -117,22 +120,16 @@ struct BackgroundUniforms {
     float  seed_mix;     // 0..1, eased: how far from seed_prev to seed
 };
 
+// What one Pass is told about itself (see Pass), at buffer(1).
+struct PassUniforms {
+    float4 params;       // Pass.params
+    float4 target;       // the output's width, height, depth (1 if 2D), slice written
+    float4 inputs[8];    // each input's width, height, depth (1 if 2D), 0
+};
+
 vertex float4 puikit_bg_vertex(uint vid [[vertex_id]]) {
     float2 p = float2((vid << 1) & 2, vid & 2) * 2.0 - 1.0;
     return float4(p, 0.0, 1.0);
-}
-
-// What a bake pass of a ShaderVolume receives (see ShaderVolume).
-struct BakeUniforms {
-    float4 size;         // the volume's width, height, depth in texels; w = the slice
-    float  index;        // which of Shader.volumes is being baked
-};
-
-// A well-mixed 32-bit hash of a time slot and the seed -- see slot_hash().
-static inline uint puikit_slot_hash(int slot, float seed) {
-    uint x = uint(slot) * 0x9E3779B9u + uint(seed);
-    x ^= x >> 16; x *= 0x7FEB352Du; x ^= x >> 15; x *= 0x846CA68Bu; x ^= x >> 16;
-    return x;
 }
 """
 
@@ -168,12 +165,6 @@ out vec4 fragColor;
 
 vec4 puikit_bg_fragment(vec2 pos);
 
-uint puikit_slot_hash(int slot, float seed) {
-    uint x = uint(slot) * 0x9E3779B9u + uint(seed);
-    x ^= x >> 16; x *= 0x7FEB352Du; x ^= x >> 15; x *= 0x846CA68Bu; x ^= x >> 16;
-    return x;
-}
-
 void main() {
     vec2 pos = vec2(gl_FragCoord.x, resolution.y - gl_FragCoord.y);
     fragColor = puikit_bg_fragment(pos);
@@ -190,13 +181,17 @@ class ShaderTexture:
     """One image a :class:`Shader` samples — a map of the world, a noise tile,
     anything a scene cannot generate per pixel for free.
 
-    A texture is bound by **position**: the ``i``-th entry of
-    :attr:`Shader.textures` is slot ``i`` in every dialect, paired with a sampler
-    in the same slot that carries this descriptor's filtering and wrap modes::
+    A single-pass shader binds its textures by **position**: the ``i``-th entry
+    of :attr:`Shader.textures` is slot ``i`` in every dialect, paired with a
+    sampler in the same slot that carries this descriptor's filtering and wrap
+    modes::
 
         MSL   texture2d<float> name [[texture(i)]], sampler s [[sampler(i)]]
               (extra parameters of puikit_bg_fragment)
         HLSL  Texture2D name : register(ti);  SamplerState s : register(si);
+
+    With :attr:`Shader.passes`, a pass names the textures it reads instead (see
+    :class:`Pass`), which is what ``name`` is for.
 
     Fields:
       path     Filesystem path (``~`` expanded). Decoded by the operating system's
@@ -216,6 +211,8 @@ class ShaderTexture:
                with an explicit level without aliasing. On by default; a texture
                only ever sampled at full size can turn it off and save a third of
                its memory.
+      name     How a :class:`Pass` names it among its inputs; unused by a
+               single-pass shader.
     """
 
     path: str
@@ -223,6 +220,7 @@ class ShaderTexture:
     wrap_u: str = "repeat"
     wrap_v: str = "clamp"
     mipmaps: bool = True
+    name: str = ""
 
     def __post_init__(self) -> None:
         for axis in ("wrap_u", "wrap_v"):
@@ -230,224 +228,120 @@ class ShaderTexture:
                 object.__setattr__(self, axis, "clamp")
 
 
+#: Pixel formats a :class:`Target` may name: 8-bit unorm, or half-float for
+#: values outside 0..1 (linear HDR, depths, distances).
+TARGET_FORMATS = ("rgba16f", "rgba8")
+
+#: The most inputs one :class:`Pass` may read (``PassUniforms.inputs``).
+MAX_PASS_INPUTS = 8
+
+
 @dataclass(frozen=True)
-class ShaderVolume:
-    """A 3D texture a :class:`Shader` bakes for itself on the GPU — a precomputed
-    field (a distance field, a noise volume) that the scene then samples instead
-    of evaluating it per pixel, many times a frame.
+class Target:
+    """An offscreen texture the passes of a :class:`Shader` write and read — an
+    HDR scene, the levels of a bloom pyramid, a baked 3D field.
 
-    The scene's source defines the bake as a second fragment function,
-    ``puikit_bg_bake``, run once per slice of every volume when the background
-    is set. It receives :data:`SHADER_PRELUDE`'s ``BakeUniforms`` (``size.xyz``
-    the volume's texels, ``size.w`` the slice, ``index`` which volume) and
-    returns the texel's RGBA, stored at half-float precision::
+    Sized either relative to the background's drawable (``scale``: ``0.5`` is
+    half the width and half the height, rounded down, at least one texel) or
+    absolutely (``size``: ``(width, height)``, or ``(width, height, depth)`` for a
+    **3D** target, each 1..4096, depth 1..512). A relative target is reallocated
+    when the drawable changes size; an absolute one lives as long as the shader.
 
-        fragment float4 puikit_bg_bake(float4 pos [[position]],
-                                       constant BakeUniforms &b [[buffer(0)]])
-        HLSL: float4 puikit_bg_bake(float4 pos : SV_Position) : SV_Target,
-              reading bake_size / bake_index from the BakeUniforms cbuffer (b1)
-
-    The scene samples volume ``i`` in the slot after the textures (``len(
-    textures) + i``), with a linear, clamped sampler there. Baking is spread over
-    the first frames; until it is done the backend draws the bare backdrop, as
-    it does while textures load. Re-applying the same shader keeps the volumes.
+    Sampled through a linear, clamp-to-edge sampler with no mips. A pass reads a
+    target as an input only after an earlier pass has written it — this frame,
+    or, for the output of a ``once`` pass, when the background was set.
 
     Fields:
-      size     (width, height, depth) in texels, each 1..512.
+      name     How passes refer to it. Must not repeat, nor clash with a
+               :class:`ShaderTexture` name.
+      scale    Fraction of the drawable, when ``size`` is unset (default 1).
+      size     Absolute size; overrides ``scale``.
+      format   One of :data:`TARGET_FORMATS` (default ``"rgba16f"``).
     """
 
-    size: "tuple[int, int, int]"
+    name: str
+    scale: float = 1.0
+    size: "tuple[int, ...] | None" = None
+    format: str = "rgba16f"
 
     def __post_init__(self) -> None:
-        dims = tuple(int(v) for v in tuple(self.size)[:3]) + (1, 1, 1)
-        object.__setattr__(self, "size", tuple(max(1, min(512, v)) for v in dims[:3]))
-
-
-def _floats(value: "tuple[float, ...] | list[float]", n: int,
-            default: float) -> "tuple[float, ...]":
-    """``value`` as exactly ``n`` floats, padding with ``default``."""
-    out = [float(v) for v in tuple(value)[:n]]
-    return tuple(out + [default] * (n - len(out)))
-
-
-@dataclass(frozen=True)
-class Lens:
-    """A camera look for a :class:`Shader` background: bloom, flare, film, a CRT
-    tube — applied to the **background only**, before the UI is composited over
-    it.
-
-    That scope is the reason it is not :class:`~puikit.posteffect.PostEffect`.
-    A post effect is a property of the output surface and runs over the whole
-    frame, UI included, which is right for a phosphor screen and wrong for a lens:
-    barrel distortion, chromatic aberration and grain over file names would wreck
-    them. A lens instead sits between the scene and the backdrop it is shown as.
-
-    It also changes what the scene *returns*. With a lens, the scene renders
-    **linear HDR radiance** into a half-float target (values far above 1 are the
-    point — a sun is thousands of times brighter than the ground), and the lens
-    pass tone-maps it, applies gamma, grades it and mixes it over the
-    ``backdrop`` by ``opacity``. Without a lens the scene returns display colour
-    and does that mix itself, as before.
-
-    The chain: a 6-level bloom pyramid (13-tap downsample with a soft threshold
-    on the first level, tent upsample), an optional horizontal streak, then one
-    composite pass that does everything else. Every field below is a parameter of
-    that one pass, so a look is pure data and costs the same as any other.
-
-    Fields (``0`` = off unless noted):
-      bloom            Glow from everything above ``threshold``.
-      threshold        Scene radiance above which light blooms (default 1.6).
-      halation         Red-orange fringe around highlights, as film shows.
-      streak           Anamorphic horizontal streak through bright points.
-      streak_tint      RGB of the streak.
-      ghosts           Lens-flare ghosts and halo mirrored through the centre.
-      aberration       Radial chromatic aberration.
-      distortion       Barrel distortion (``1.4`` is a fisheye).
-      color_matrix     Nine floats, row-major: ``out.r = m[0]*r + m[1]*g +
-                       m[2]*b`` and so on, applied before tone mapping. ``None``
-                       is the identity.
-      gain             Linear multiplier before tone mapping (default 1).
-      saturation       ``1`` is unchanged, ``0`` is monochrome in ``mono_tint``.
-      mono_tint        RGB a desaturated image is tinted toward.
-      shadow_tint / highlight_tint
-                       RGB split-tone multipliers for the darks and lights.
-      contrast         ``1`` is unchanged.
-      vignette         Edge darkening (default 0.15).
-      curvature        Rounded CRT corners.
-      scope            A single round eyepiece mask.
-      scanlines        CRT scanlines and an aperture grille.
-      grain            Film grain, strongest in the mid-tones.
-      letterbox        Bars that crop the frame to 2.39:1.
-      level            The ceiling of the result, 0..1 (default 1).
-      dof / focus_range
-                       Depth of field — see the fields.
-    """
-
-    bloom: float = 0.3
-    threshold: float = 1.6
-    halation: float = 0.0
-    streak: float = 0.0
-    streak_tint: "tuple[float, float, float]" = (0.45, 0.7, 1.3)
-    ghosts: float = 0.0
-    aberration: float = 0.0
-    distortion: float = 0.0
-    color_matrix: "tuple[float, ...] | None" = None
-    gain: float = 1.0
-    saturation: float = 1.0
-    mono_tint: "tuple[float, float, float]" = (1.0, 1.0, 1.0)
-    shadow_tint: "tuple[float, float, float]" = (1.0, 1.0, 1.0)
-    highlight_tint: "tuple[float, float, float]" = (1.0, 1.0, 1.0)
-    contrast: float = 1.0
-    vignette: float = 0.15
-    curvature: float = 0.0
-    scope: float = 0.0
-    scanlines: float = 0.0
-    grain: float = 0.0
-    letterbox: float = 0.0
-    #: The brightest the look may be, 0..1, as a multiplier on its final display
-    #: colour: ``0.5`` keeps every pixel at or below half white, whatever the
-    #: scene, exposure and grade did. For a background that text sits on.
-    level: float = 1.0
-    #: Depth of field: the largest blur radius, as a fraction of the frame's
-    #: height (``0`` = off). The scene then writes its **inverse** depth, ``1 /
-    #: distance`` along the view ray (``0`` for nothing hit), into alpha — inverse
-    #: because the blur size is linear in it, so filtering blends blur sizes
-    #: across a silhouette instead of inventing a depth there. Focus is pulled to
-    #: what the middle of the frame is looking at, from a few taps there —
-    #: stateless, so it is a function of the frame alone.
-    dof: float = 0.0
-    #: How quickly the blur grows away from the focus distance: the circle of
-    #: confusion is ``|depth - focus| / depth * focus_range``, clamped to 1.
-    focus_range: float = 2.6
-
-    def __post_init__(self) -> None:
-        for name in ("streak_tint", "mono_tint", "shadow_tint", "highlight_tint"):
-            object.__setattr__(self, name, _floats(getattr(self, name), 3, 1.0))
-        if self.color_matrix is not None:
-            object.__setattr__(self, "color_matrix", _floats(self.color_matrix, 9, 0.0))
-        # A threshold at or below zero would bloom the whole frame, black included.
-        object.__setattr__(self, "threshold", max(0.05, float(self.threshold)))
-        object.__setattr__(self, "level", min(1.0, max(0.0, float(self.level))))
-        object.__setattr__(self, "dof", min(0.1, max(0.0, float(self.dof))))
+        object.__setattr__(self, "scale", min(1.0, max(1.0 / 4096, float(self.scale))))
+        if self.size is not None:
+            dims = [max(1, min(4096, int(v))) for v in tuple(self.size)[:3]]
+            dims += [1] * (2 - len(dims))
+            if len(dims) == 3:
+                dims[2] = min(512, dims[2])
+            object.__setattr__(self, "size", tuple(dims))
+        if self.format not in TARGET_FORMATS:
+            object.__setattr__(self, "format", "rgba16f")
 
     @property
-    def matrix_rows(self) -> "tuple[tuple[float, float, float], ...]":
-        """The colour matrix as three rows, the identity when unset."""
-        m = self.color_matrix or (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
-        return (m[0:3], m[3:6], m[6:9])
+    def is_3d(self) -> bool:
+        return self.size is not None and len(self.size) == 3
 
-
-def slot_hash(slot: int, seed: float) -> int:
-    """``puikit_slot_hash`` from the shader preludes, in Python: the same 32-bit
-    result for the same slot and seed, so CPU-side choices (a :class:`LensCycle`)
-    line up with what the scene picked on the GPU."""
-    m = 0xFFFFFFFF
-    x = (int(slot) * 0x9E3779B9 + int(seed)) & m
-    x ^= x >> 16
-    x = (x * 0x7FEB352D) & m
-    x ^= x >> 15
-    x = (x * 0x846CA68B) & m
-    x ^= x >> 16
-    return x
-
-
-def _lerp_lens(a: Lens, b: Lens, w: float) -> Lens:
-    if w <= 0.0 or a is b:
-        return a
-    if w >= 1.0:
-        return b
-
-    def mix(x, y):
-        if isinstance(x, tuple):
-            return tuple(p + (q - p) * w for p, q in zip(x, y))
-        return x + (y - x) * w
-
-    fields = {f: mix(getattr(a, f), getattr(b, f)) for f in _LENS_FIELDS}
-    fields["color_matrix"] = mix(sum(a.matrix_rows, ()), sum(b.matrix_rows, ()))
-    return Lens(**fields)
-
-
-_LENS_FIELDS = tuple(f for f in Lens.__dataclass_fields__ if f != "color_matrix")
+    def extent(self, width: int, height: int) -> "tuple[int, int, int]":
+        """(width, height, depth) in texels for a ``width`` x ``height`` drawable."""
+        if self.size is not None:
+            return (self.size[0], self.size[1], self.size[2] if self.is_3d else 1)
+        return (max(1, int(width * self.scale)), max(1, int(height * self.scale)), 1)
 
 
 @dataclass(frozen=True)
-class LensCycle:
-    """A background lens that changes look over time: one of ``looks`` per
-    ``period`` seconds of the scene's clock, blended into the next over its last
-    ``transition`` seconds. Which look a period gets is
-    ``looks[slot_hash(period_index, seed) % len(looks)]`` — random, different
-    every launch and after every wake (see ``seed`` in :data:`SHADER_PRELUDE`),
-    and reproducible by the scene, which can hash the same slot to choose a
-    composition to go with it (``puikit_slot_hash(slot, u.seed) / len(looks)``
-    leaves bits the look did not use).
+class Pass:
+    """One fullscreen draw of a :class:`Shader`: a fragment function of the
+    shader's source, run over every texel of ``output`` with ``inputs`` bound.
 
-    Evaluated by the backend each frame from the same clock as the scene — still
-    a pure function of time, so a parked background holds whatever was showing.
+    The passes run in order, every frame. The last one draws to the screen
+    (``output=None``) and is the only one that may; it does what a single-pass
+    shader does — returns display colour, mixed over ``backdrop`` by
+    ``opacity``. The others write targets.
+
+    Inputs bind by position, the ``i``-th name at slot ``i`` with its sampler::
+
+        MSL   fragment float4 entry(float4 pos [[position]],
+                                    constant BackgroundUniforms &u [[buffer(0)]],
+                                    constant PassUniforms &p [[buffer(1)]],
+                                    texture2d<float> a [[texture(0)]],
+                                    sampler sa [[sampler(0)]], ...)
+        HLSL  float4 entry(float4 pos : SV_Position) : SV_Target, reading
+              Texture2D a : register(t0); SamplerState sa : register(s0);
+              and the PassUniforms cbuffer (b1: pass_params, pass_target,
+              pass_inputs[8])
+
+    A 3D input is a ``texture3d<float>`` / ``Texture3D``. Several passes' inputs
+    may share a register in HLSL: each entry point binds only what it uses.
+
+    A pass writing a **3D** target runs once per slice, ``target.w`` telling it
+    which; ``pos.xy`` is the texel within the slice either way.
+
+    Fields:
+      entry    The fragment function's name.
+      output   The target it writes, or ``None`` for the screen.
+      inputs   Names of the :class:`ShaderTexture` and :class:`Target` objects it reads,
+               at most :data:`MAX_PASS_INPUTS`.
+      params   Up to four floats, as ``PassUniforms.params`` — so one entry can
+               serve several passes (a blur's step, a pyramid level).
+      once     Run when the background is set rather than every frame: a bake.
+               Its output must have an absolute ``size``, and it reads only
+               textures and the outputs of earlier ``once`` passes. Baking is
+               spread over the first frames, a few slices a frame, with the
+               backdrop shown until it is done; re-applying the same shader
+               keeps the result.
     """
 
-    looks: "tuple[Lens, ...]"
-    period: float = 40.0
-    transition: float = 9.0
+    entry: str
+    output: "str | None" = None
+    inputs: "tuple[str, ...]" = ()
+    params: "tuple[float, ...]" = ()
+    once: bool = False
 
     def __post_init__(self) -> None:
-        looks = tuple(l if isinstance(l, Lens) else Lens(**l) for l in (self.looks or ()))
-        object.__setattr__(self, "looks", looks or (Lens(),))
-        object.__setattr__(self, "period", max(1.0, float(self.period)))
-        object.__setattr__(self, "transition",
-                           min(self.period, max(0.0, float(self.transition))))
-
-    def at(self, time: float, seed: float) -> Lens:
-        """The look at ``time`` (the scene's clock, speed applied)."""
-        n = len(self.looks)
-        k = math.floor(time / self.period)
-        a = self.looks[slot_hash(k, seed) % n]
-        b = self.looks[slot_hash(k + 1, seed) % n]
-        into = time - k * self.period
-        start = self.period - self.transition
-        if into <= start or self.transition <= 0.0:
-            return a
-        x = min(1.0, (into - start) / self.transition)
-        return _lerp_lens(a, b, x * x * (3.0 - 2.0 * x))
+        inputs = (self.inputs,) if isinstance(self.inputs, str) else tuple(self.inputs or ())
+        object.__setattr__(self, "inputs", tuple(str(i) for i in inputs))
+        values = [float(v) for v in tuple(self.params or ())[:4]]
+        object.__setattr__(self, "params", tuple(values + [0.0] * (4 - len(values))))
+        object.__setattr__(self, "output", self.output or None)
+        object.__setattr__(self, "once", bool(self.once))
 
 
 @dataclass(frozen=True)
@@ -561,34 +455,35 @@ class Shader:
     #: that cannot bind textures (the web backend, today) draws the backdrop for a
     #: textured scene rather than running it without its inputs.
     textures: "tuple[ShaderTexture, ...]" = ()
-    #: A camera look applied to the scene alone, under the UI — see :class:`Lens`.
-    #: Setting one turns the scene's output into linear HDR that the lens tone-maps.
-    #: A :class:`LensCycle` changes the look over time.
-    lens: "Lens | LensCycle | None" = None
-    #: 3D textures the scene bakes for itself when set — see :class:`ShaderVolume`.
-    volumes: "tuple[ShaderVolume, ...]" = ()
     #: The most frames a second the scene is rendered at; ``0`` (the default) is
     #: every display frame. For a dear scene that moves slowly: its clock still
     #: advances every frame, but the GPU draws it at most this often and the last
     #: frame stays up in between — at 30 a slow camera looks the same and costs
     #: half. Ignored while the scene is fading, so a dissolve stays smooth.
     frame_rate: float = 0.0
+    #: Offscreen textures for :attr:`passes` — see :class:`Target`.
+    targets: "tuple[Target, ...]" = ()
+    #: The scene as a sequence of draws — see :class:`Pass`. Empty (the default)
+    #: is the single-pass form: ``puikit_bg_fragment`` to the screen, with every
+    #: texture bound by position. A graph that does not hold together (an unknown
+    #: name, a pass reading what nothing wrote, no final pass to the screen) draws
+    #: the bare backdrop and reports why, as a shader that fails to compile does.
+    #: A backend that cannot run passes (the web backend, today) draws the
+    #: backdrop for a multi-pass scene.
+    passes: "tuple[Pass, ...]" = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "frame_rate", max(0.0, float(self.frame_rate or 0.0)))
-        object.__setattr__(self, "volumes", tuple(
-            v if isinstance(v, ShaderVolume)
-            else ShaderVolume(**v) if isinstance(v, dict) else ShaderVolume(tuple(v))
-            for v in (self.volumes or ())))
-        # A dict is what dataclasses.asdict() turns a ShaderTexture or Lens into,
-        # so accepting one keeps ``Shader(**asdict(s)) == s`` true.
+        # A dict is what dataclasses.asdict() turns a ShaderTexture, Target or
+        # Pass into, so accepting one keeps ``Shader(**asdict(s)) == s`` true.
         object.__setattr__(self, "textures", tuple(
             t if isinstance(t, ShaderTexture)
             else ShaderTexture(**t) if isinstance(t, dict) else ShaderTexture(str(t))
             for t in (self.textures or ())))
-        if isinstance(self.lens, dict):
-            lens = LensCycle(**self.lens) if "looks" in self.lens else Lens(**self.lens)
-            object.__setattr__(self, "lens", lens)
+        object.__setattr__(self, "targets", tuple(
+            t if isinstance(t, Target) else Target(**t) for t in (self.targets or ())))
+        object.__setattr__(self, "passes", tuple(
+            p if isinstance(p, Pass) else Pass(**p) for p in (self.passes or ())))
         v = self.opacity
         object.__setattr__(self, "opacity", 0.0 if v < 0.0 else 1.0 if v > 1.0 else float(v))
         # Floored at 0.1 rather than 0: a scale of zero would ask for a zero-sized

@@ -186,9 +186,10 @@ class TestBackendGate:
         assert b.capabilities.supports("background_shader") == HAVE_D3D_SHADER
 
 
-# --- textures and the lens ------------------------------------------------------
 
-#: Samples texture 0 at the frame's centre — the twin of test_background_lens.
+# --- textures, passes, the bake, frame reuse -------------------------------------
+
+#: Samples texture 0 at the frame's centre — the twin of test_background_passes.
 SAMPLE_HLSL = """
 Texture2D t : register(t0);
 SamplerState s : register(s0);
@@ -197,12 +198,34 @@ float4 puikit_bg_fragment(float4 pos : SV_Position) : SV_Target {
 }
 """
 
-#: Linear HDR: a tiny, very bright disc on a dim field.
-SUN_HLSL = """
-float4 puikit_bg_fragment(float4 pos : SV_Position) : SV_Target {
-    float2 c = pos.xy - resolution * 0.5;
-    float v = length(c) < 2.0 ? 400.0 : 0.05;
-    return float4(v, v, v, 1.0);
+#: The twin of CHAIN_MSL: split into a half-size target, scale by params, show.
+#: The two inputs share t0/s0, as passes may.
+CHAIN_HLSL = """
+Texture2D half_in : register(t0);
+Texture2D scaled_in : register(t0);
+SamplerState s : register(s0);
+float4 split(float4 pos : SV_Position) : SV_Target {
+    return float4(pos.x < pass_target.x * 0.5 ? 0.25 : 0.75, pass_target.x / 255.0, 0.0, 1.0);
+}
+float4 scale(float4 pos : SV_Position) : SV_Target {
+    float4 c = half_in.SampleLevel(s, pos.xy / pass_target.xy, 0);
+    return float4(c.r * pass_params.x, c.g, pass_inputs[0].x / 255.0, 1.0);
+}
+float4 show(float4 pos : SV_Position) : SV_Target {
+    return scaled_in.SampleLevel(s, pos.xy / pass_target.xy, 0);
+}
+"""
+
+VOLUME_HLSL = """
+Texture3D v : register(t0);
+SamplerState s : register(s0);
+float4 bake(float4 pos : SV_Position) : SV_Target {
+    return float4(pos.x / pass_target.x, pos.y / pass_target.y,
+                  (pass_target.w + 0.5) / pass_target.z, 1.0);
+}
+float4 show(float4 pos : SV_Position) : SV_Target {
+    float2 uv = pos.xy / resolution;
+    return float4(v.SampleLevel(s, float3(uv, uv.x), 0).rgb, 1.0);
 }
 """
 
@@ -245,93 +268,56 @@ class TestTextures:
         r.close()
 
 
-class TestLens:
+class TestPasses:
 
-    def _render(self, lens, fade=1.0):
+    def _chain(self):
+        from puikit.background import Pass, Target
+        return Shader(source="", source_hlsl=CHAIN_HLSL,
+                      targets=(Target("half", scale=0.5),
+                               Target("scaled", scale=0.5, format="rgba8")),
+                      passes=(Pass("split", "half"),
+                              Pass("scale", "scaled", inputs=("half",), params=(2.0,)),
+                              Pass("show", inputs=("scaled",))))
+
+    def test_passes_run_in_order_through_their_targets(self):
         r = D3DShaderBackground()
-        assert r.set_shader(Shader(source="", source_hlsl=SUN_HLSL, lens=lens,
-                                   backdrop=(10, 20, 30))), r.error
-        px = r.render_pixels(200, 120, 1.0, fade)
+        assert r.set_shader(self._chain()), r.error
+        px = r.render_pixels(100, 40, 1.0)
+        assert abs(_rgb(px, 100, 10, 20)[0] - 128) <= 2
+        assert _rgb(px, 100, 90, 20)[0] == 255
+        assert _rgb(px, 100, 10, 20)[1:] == (50, 50)
+        assert _rgb(r.render_pixels(60, 40, 1.0), 60, 10, 20)[1] == 30   # follows a resize
         r.close()
-        return px
 
-    def test_hdr_is_tone_mapped(self):
-        from puikit.background import Lens
-        px = self._render(Lens(bloom=0.0, vignette=0.0))
-        assert _rgb(px, 200, 100, 60) == (255, 255, 255)
-        assert 30 < _rgb(px, 200, 10, 10)[0] < 90
-
-    def test_bloom_spreads_the_sun(self):
-        from puikit.background import Lens
-        plain = self._render(Lens(bloom=0.0, vignette=0.0))
-        bloomed = self._render(Lens(bloom=1.0, vignette=0.0))
-        assert _rgb(bloomed, 200, 115, 60)[0] > _rgb(plain, 200, 115, 60)[0] + 5
-
-    def test_every_feature_draws_without_nan(self):
-        from puikit.background import Lens
-        px = self._render(Lens(streak=1, ghosts=1, scanlines=1, grain=0.5, distortion=0.2,
-                               aberration=0.01, halation=1))
-        assert sum(_rgb(px, 200, 100, 60)) > 600
-        assert sum(_rgb(px, 200, 120, 60)) > 0
-
-    def test_zero_fade_is_the_bare_backdrop(self):
-        from puikit.background import Lens
-        px = self._render(Lens(), fade=0.0)
-        assert {_rgb(px, 200, x, y) for x in range(0, 200, 7) for y in range(0, 120, 7)} \
-            == {(10, 20, 30)}
-
-
-# --- volumes, depth of field, frame reuse ----------------------------------------
-
-VOLUME_HLSL = """
-Texture3D v : register(t0);
-SamplerState s : register(s0);
-float4 puikit_bg_bake(float4 pos : SV_Position) : SV_Target {
-    return float4(pos.x / bake_size.x, pos.y / bake_size.y, (bake_size.w + 0.5) / bake_size.z, 1.0);
-}
-float4 puikit_bg_fragment(float4 pos : SV_Position) : SV_Target {
-    float2 uv = pos.xy / resolution;
-    return float4(v.SampleLevel(s, float3(uv, uv.x), 0).rgb, 1.0);
-}
-"""
-
-DEPTH_HLSL = """
-float4 puikit_bg_fragment(float4 pos : SV_Position) : SV_Target {
-    float stripe = fmod(floor(pos.y / 2.0), 2.0);
-    float near = pos.x < resolution.x * 0.5 ? 1.0 : 0.0;
-    return float4(stripe * 0.6, stripe * 0.6, stripe * 0.6, lerp(1.0 / 20.0, 1.0, near));
-}
-"""
-
-
-class TestVolumes:
-
-    def test_a_volume_is_baked_and_sampled(self):
-        from puikit.background import ShaderVolume
+    def test_a_3d_target_is_baked_and_sampled(self):
+        from puikit.background import Pass, Target
         r = D3DShaderBackground()
         assert r.set_shader(Shader(source="", source_hlsl=VOLUME_HLSL,
-                                   volumes=[ShaderVolume((16, 8, 4))])), r.error
+                                   targets=(Target("vol", size=(16, 8, 4)),),
+                                   passes=(Pass("bake", "vol", once=True),
+                                           Pass("show", inputs=("vol",))))), r.error
         px = r.render_pixels(32, 32, 0.0)
         assert abs(_rgb(px, 32, 16, 16)[0] - 128) < 12
         assert _rgb(px, 32, 1, 1)[0] < 40 and _rgb(px, 32, 30, 30)[0] > 200
         r.close()
 
-
-class TestDepthOfFieldAndReuse:
-
-    def test_depth_of_field_draws_without_nan(self):
-        from puikit.background import Lens
+    def test_a_broken_graph_draws_nothing(self):
+        from puikit.background import Pass
         r = D3DShaderBackground()
-        assert r.set_shader(Shader(source="", source_hlsl=DEPTH_HLSL, backdrop=(0, 0, 0),
-                                   lens=Lens(dof=0.05, bloom=0.0, vignette=0.0))), r.error
-        px = r.render_pixels(120, 80, 1.0)
-        assert max(px[i] for i in range(0, len(px), 4)) > 60     # NaN would be black
+        assert not r.set_shader(Shader(source="", source_hlsl=CHAIN_HLSL,
+                                       passes=(Pass("show", inputs=("x",)),)))
+        assert "'x'" in r.error
+        assert r.render_to_texture(8, 8, 0.0) is None
         r.close()
 
-    def test_an_unchanged_frame_is_reused(self):
+
+class TestFrameReuse:
+
+    def test_an_unchanged_frame_is_reused(self, tmp_path):
         r = D3DShaderBackground()
-        assert r.set_shader(Shader(source="", source_hlsl=SUN_HLSL))
-        r.render_to_texture(64, 40, 1.0)
+        assert r.set_shader(Shader(source="", source_hlsl=SAMPLE_HLSL,
+                                   textures=[_png(tmp_path, "red.png", (200, 0, 0))]))
+        r.render_pixels(64, 40, 1.0)
         key = r._last_frame
         assert key is not None
         r.render_to_texture(64, 40, 1.0)

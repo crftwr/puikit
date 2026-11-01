@@ -221,9 +221,10 @@ drives, and each no-ops safely where the capability is absent:
 
 - **Backgrounds** ([`docs/backgrounds.md`](docs/backgrounds.md)) — what sits
   behind the UI: a GPU `Shader` (MSL / HLSL / GLSL, one dialect per backend) or
-  a static `Wallpaper`. A shader may sample `ShaderTexture`s, bake `ShaderVolume`s, cap its
-  `frame_rate`, and carry a `Lens` — a camera look (with depth of field) for the
-  background only, unlike a post effect. `set_surface_opacity` is the theme's one "how
+  a static `Wallpaper`. A shader may sample `ShaderTexture`s, cap its `frame_rate`,
+  and run as `Pass`es through `Target`s (2D or 3D, per frame or baked once) — the
+  app's own bloom, lens or bake, with PuiKit only allocating, binding and drawing.
+  `set_surface_opacity` is the theme's one "how
   see-through is the UI" knob.
 - **Post effects** ([`docs/post_effects.md`](docs/post_effects.md)) — what
   composites over the frame: the CRT / phosphor `PostEffect`.
