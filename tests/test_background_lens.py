@@ -7,7 +7,7 @@ an offscreen texture — and skip where Metal is unavailable.
 
 import pytest
 
-from puikit.background import Lens, LensCycle, Shader, ShaderTexture, slot_hash
+from puikit.background import Lens, LensCycle, Shader, ShaderTexture, ShaderVolume, slot_hash
 from puikit.backends import _bg_lens
 from puikit.backends._metal import HAVE_METAL, MetalBackground
 
@@ -258,3 +258,121 @@ class TestLevelAndSeedBlend:
         assert current_lens(cycle, 5.0, b, a, 0.0).bloom == 0.0
         assert 0.0 < current_lens(cycle, 5.0, b, a, 0.5).bloom < 1.0
         assert current_lens(cycle, 5.0, b, a, 1.0).bloom == 1.0
+
+
+# --- volumes, depth of field, frame rate ----------------------------------------
+
+#: Bakes a volume whose texels are their own coordinates, and shows one slice.
+VOLUME_MSL = """
+fragment float4 puikit_bg_bake(float4 pos [[position]], constant BakeUniforms &b [[buffer(0)]]) {
+    return float4(pos.x / b.size.x, pos.y / b.size.y, (b.size.w + 0.5) / b.size.z, 1.0);
+}
+fragment float4 puikit_bg_fragment(float4 pos [[position]],
+                                   constant BackgroundUniforms &u [[buffer(0)]],
+                                   texture3d<float> v [[texture(0)]], sampler s [[sampler(0)]]) {
+    float2 uv = pos.xy / u.resolution;
+    return float4(v.sample(s, float3(uv, uv.x), level(0)).rgb, 1.0);
+}
+"""
+
+#: Two flat halves at different depths (inverse depth in alpha): left near, right far.
+DEPTH_MSL = """
+fragment float4 puikit_bg_fragment(float4 pos [[position]],
+                                   constant BackgroundUniforms &u [[buffer(0)]]) {
+    float stripe = fmod(floor(pos.y / 2.0), 2.0);
+    float near = pos.x < u.resolution.x * 0.5 ? 1.0 : 0.0;
+    return float4(float3(stripe * 0.6), mix(1.0 / 20.0, 1.0, near));
+}
+"""
+
+
+class TestVolumesDescriptor:
+
+    def test_sizes_are_clamped(self):
+        assert ShaderVolume((0, 9999, 7)).size == (1, 512, 7)
+
+    def test_a_shader_round_trips_its_volumes(self):
+        import dataclasses
+        s = Shader(source="x", volumes=[ShaderVolume((4, 4, 4))], frame_rate=30)
+        assert Shader(**dataclasses.asdict(s)) == s
+
+    def test_frame_rate_is_never_negative(self):
+        assert Shader(source="x", frame_rate=-3).frame_rate == 0.0
+
+
+@metal_only
+class TestMetalVolumes:
+
+    def test_a_volume_is_baked_and_sampled(self):
+        r = MetalBackground()
+        assert r.set_shader(Shader(source=VOLUME_MSL, volumes=[ShaderVolume((16, 8, 4))])), r.error
+        px = MetalBackground.texture_pixels(r.render_to_texture(32, 32, 0.0))
+        # The texel coordinates come back: the corners differ, the middle is mid-grey.
+        assert abs(_rgb(px, 32, 16, 16)[0] - 128) < 12
+        assert _rgb(px, 32, 1, 1)[0] < 40 and _rgb(px, 32, 30, 30)[0] > 200
+
+    def test_the_bake_is_spread_over_frames_showing_the_backdrop(self):
+        import Metal
+        from puikit.backends._metal import BAKE_SLICES_PER_FRAME, PIXEL_FORMAT
+        r = MetalBackground()
+        depth = BAKE_SLICES_PER_FRAME * 3
+        assert r.set_shader(Shader(source=VOLUME_MSL, backdrop=_BACKDROP,
+                                   volumes=[ShaderVolume((8, 8, depth))]))
+        d = Metal.MTLTextureDescriptor.texture2DDescriptorWithPixelFormat_width_height_mipmapped_(
+            PIXEL_FORMAT, 8, 8, False)
+        d.setUsage_(Metal.MTLTextureUsageRenderTarget | Metal.MTLTextureUsageShaderRead)
+        tex = r._device.newTextureWithDescriptor_(d)
+        frames = []
+        for _ in range(4):
+            c = r._encode(tex, 8, 8, 0.0)
+            c.commit()
+            c.waitUntilCompleted()
+            frames.append(_rgb(MetalBackground.texture_pixels(tex), 8, 0, 0))
+        # Two frames of backdrop; the third bakes the last slices and draws.
+        assert frames[:2] == [_BACKDROP] * 2 and frames[2] != _BACKDROP
+
+    def test_reapplying_the_same_shader_does_not_rebake(self):
+        r = MetalBackground()
+        shader = Shader(source=VOLUME_MSL, volumes=[ShaderVolume((8, 8, 4))])
+        assert r.set_shader(shader)
+        r.render_to_texture(8, 8, 0.0)
+        assert r.set_shader(Shader(source=VOLUME_MSL, volumes=[ShaderVolume((8, 8, 4))], speed=2.0))
+        assert r._bake_next == r._bake_total
+
+
+@metal_only
+class TestMetalDepthOfField:
+
+    def _render(self, dof):
+        r = MetalBackground()
+        assert r.set_shader(Shader(source=DEPTH_MSL, lens=Lens(dof=dof, bloom=0.0, vignette=0.0),
+                                   backdrop=(0, 0, 0))), r.error
+        return MetalBackground.texture_pixels(r.render_to_texture(120, 80, 1.0))
+
+    def test_what_is_in_focus_stays_sharp_and_the_rest_blurs(self):
+        # Focus is pulled to the middle of the frame, which sits on the boundary;
+        # sample well inside each half: the stripes survive where the depth matches
+        # the focus and wash out where it does not.
+        sharp, blurred = self._render(0.0), self._render(0.05)
+        def contrast(px, x):
+            col = [_rgb(px, 120, x, y)[0] for y in range(20, 60)]
+            return max(col) - min(col)
+        assert contrast(sharp, 100) > 60
+        assert contrast(blurred, 100) < contrast(sharp, 100) / 2 or \
+            contrast(blurred, 20) < contrast(sharp, 20) / 2
+
+
+@metal_only
+class TestFrameRate:
+
+    def test_a_capped_scene_skips_frames_inside_its_interval(self):
+        r = MetalBackground()
+        assert r.set_shader(Shader(source=SUN_MSL, frame_rate=10.0))
+        assert r._too_soon(1.0) is False          # the first frame always goes
+        assert r._too_soon(1.0) is True           # the next, a moment later, waits
+        assert r._too_soon(0.5) is False          # unless the scene is fading
+
+    def test_an_uncapped_scene_never_skips(self):
+        r = MetalBackground()
+        assert r.set_shader(Shader(source=SUN_MSL))
+        assert not r._too_soon(1.0) and not r._too_soon(1.0)

@@ -94,6 +94,8 @@ client does not set the seed uniforms yet (they read 0).
 | `idle` | What the scene comes to rest as when the backend parks it: `"freeze"` (default) holds the last frame, `"fade"` dissolves it to `backdrop` first. See §4.1. An unrecognized value falls back to `"freeze"`. |
 | `textures` | Images the scene samples, bound by position (§3.1). A plain path is shorthand for `ShaderTexture(path)`. |
 | `lens` | A camera look applied to the scene alone, under the UI (§3.2) — a `Lens`, or a `LensCycle` that changes it over time. Turns the scene's output into linear HDR. |
+| `volumes` | 3D textures the scene bakes for itself (§3.3). |
+| `frame_rate` | The most frames a second the scene is rendered at; `0` = every frame (§3.3). |
 
 > **`resolution_scale` is the knob that matters on a Retina display.** Cost is
 > per pixel, so `0.5` is a quarter of the work. Crisp geometry wants `1`; a
@@ -182,10 +184,43 @@ so a scene can hash the same slot and use the bits the look did not
 `seed_mix` is below 1 the backend blends the look for `seed_prev` into the look
 for `seed`, as the scene does with its compositions.
 
+`Lens.dof` (with `focus_range`) adds depth of field to the composite. The scene
+then writes its **inverse** depth (`1 / distance`, `0` for nothing hit) into
+alpha: the blur size `|1 − focus/depth| · range` is linear in it, so filtering
+blends blur sizes across a silhouette instead of inventing a depth there. Focus
+is the depth at the middle of the frame (a centre tap and four close round it,
+averaged in 1/depth) — no state and no extra pass. The 40-tap gather averages in
+`(x/(1+x))^(1/2.2)` and expands after, so a hairline HDR glint cannot break a
+clean edge into teeth.
+
 `Lens.level` (default 1) is the ceiling of the result: the final display
 colour is multiplied by it before the mix over the backdrop, so `0.5` keeps
 every pixel at or below half white whatever the scene, exposure and grade did —
 for a background that text sits on.
+
+### 3.3 Volumes, and a frame-rate cap
+
+`Shader.volumes` is a tuple of `ShaderVolume(size=(w, h, d))`: 3D textures the
+scene bakes for itself on the GPU — a distance field, a noise volume — so a ray
+marcher reads one texel per step instead of evaluating the field. The source
+defines a second entry, `puikit_bg_bake`, which receives `BakeUniforms` (`size.xyz`,
+`size.w` = the slice, `index` = the volume; HLSL `bake_size` / `bake_index` in
+cbuffer `b1`) and returns the texel, stored as half-float. The bake runs a few
+slices a frame after `set_background` (the backdrop shows until it is done) and
+is kept when the same shader is applied again. The scene samples volume *i* in
+the slot after its textures, with a linear clamped sampler. Metal renders each
+slice through `depthPlane`, D3D11 through a `Texture3D` render-target view with
+`FirstWSlice`.
+
+`Shader.frame_rate` caps how often the GPU renders the scene (`0` = every
+frame). The clock still advances every frame and the last frame stays up in
+between; a fading scene is never skipped. For a dear scene with a slow camera,
+30 looks the same as 60 at half the cost.
+
+On Windows, where the background is rendered inside the UI's own frame, the
+renderer also reuses its last texture whenever nothing the shader sees has
+changed (the clock, the fade, the seeds, the size) — so a key press or a scroll
+over a parked or capped background does not pay for a scene.
 
 ### Shader source is the one genuinely backend-specific thing
 

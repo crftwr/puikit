@@ -122,6 +122,12 @@ vertex float4 puikit_bg_vertex(uint vid [[vertex_id]]) {
     return float4(p, 0.0, 1.0);
 }
 
+// What a bake pass of a ShaderVolume receives (see ShaderVolume).
+struct BakeUniforms {
+    float4 size;         // the volume's width, height, depth in texels; w = the slice
+    float  index;        // which of Shader.volumes is being baked
+};
+
 // A well-mixed 32-bit hash of a time slot and the seed -- see slot_hash().
 static inline uint puikit_slot_hash(int slot, float seed) {
     uint x = uint(slot) * 0x9E3779B9u + uint(seed);
@@ -224,6 +230,39 @@ class ShaderTexture:
                 object.__setattr__(self, axis, "clamp")
 
 
+@dataclass(frozen=True)
+class ShaderVolume:
+    """A 3D texture a :class:`Shader` bakes for itself on the GPU — a precomputed
+    field (a distance field, a noise volume) that the scene then samples instead
+    of evaluating it per pixel, many times a frame.
+
+    The scene's source defines the bake as a second fragment function,
+    ``puikit_bg_bake``, run once per slice of every volume when the background
+    is set. It receives :data:`SHADER_PRELUDE`'s ``BakeUniforms`` (``size.xyz``
+    the volume's texels, ``size.w`` the slice, ``index`` which volume) and
+    returns the texel's RGBA, stored at half-float precision::
+
+        fragment float4 puikit_bg_bake(float4 pos [[position]],
+                                       constant BakeUniforms &b [[buffer(0)]])
+        HLSL: float4 puikit_bg_bake(float4 pos : SV_Position) : SV_Target,
+              reading bake_size / bake_index from the BakeUniforms cbuffer (b1)
+
+    The scene samples volume ``i`` in the slot after the textures (``len(
+    textures) + i``), with a linear, clamped sampler there. Baking is spread over
+    the first frames; until it is done the backend draws the bare backdrop, as
+    it does while textures load. Re-applying the same shader keeps the volumes.
+
+    Fields:
+      size     (width, height, depth) in texels, each 1..512.
+    """
+
+    size: "tuple[int, int, int]"
+
+    def __post_init__(self) -> None:
+        dims = tuple(int(v) for v in tuple(self.size)[:3]) + (1, 1, 1)
+        object.__setattr__(self, "size", tuple(max(1, min(512, v)) for v in dims[:3]))
+
+
 def _floats(value: "tuple[float, ...] | list[float]", n: int,
             default: float) -> "tuple[float, ...]":
     """``value`` as exactly ``n`` floats, padding with ``default``."""
@@ -280,6 +319,8 @@ class Lens:
       grain            Film grain, strongest in the mid-tones.
       letterbox        Bars that crop the frame to 2.39:1.
       level            The ceiling of the result, 0..1 (default 1).
+      dof / focus_range
+                       Depth of field — see the fields.
     """
 
     bloom: float = 0.3
@@ -307,6 +348,17 @@ class Lens:
     #: colour: ``0.5`` keeps every pixel at or below half white, whatever the
     #: scene, exposure and grade did. For a background that text sits on.
     level: float = 1.0
+    #: Depth of field: the largest blur radius, as a fraction of the frame's
+    #: height (``0`` = off). The scene then writes its **inverse** depth, ``1 /
+    #: distance`` along the view ray (``0`` for nothing hit), into alpha — inverse
+    #: because the blur size is linear in it, so filtering blends blur sizes
+    #: across a silhouette instead of inventing a depth there. Focus is pulled to
+    #: what the middle of the frame is looking at, from a few taps there —
+    #: stateless, so it is a function of the frame alone.
+    dof: float = 0.0
+    #: How quickly the blur grows away from the focus distance: the circle of
+    #: confusion is ``|depth - focus| / depth * focus_range``, clamped to 1.
+    focus_range: float = 2.6
 
     def __post_init__(self) -> None:
         for name in ("streak_tint", "mono_tint", "shadow_tint", "highlight_tint"):
@@ -316,6 +368,7 @@ class Lens:
         # A threshold at or below zero would bloom the whole frame, black included.
         object.__setattr__(self, "threshold", max(0.05, float(self.threshold)))
         object.__setattr__(self, "level", min(1.0, max(0.0, float(self.level))))
+        object.__setattr__(self, "dof", min(0.1, max(0.0, float(self.dof))))
 
     @property
     def matrix_rows(self) -> "tuple[tuple[float, float, float], ...]":
@@ -512,8 +565,21 @@ class Shader:
     #: Setting one turns the scene's output into linear HDR that the lens tone-maps.
     #: A :class:`LensCycle` changes the look over time.
     lens: "Lens | LensCycle | None" = None
+    #: 3D textures the scene bakes for itself when set — see :class:`ShaderVolume`.
+    volumes: "tuple[ShaderVolume, ...]" = ()
+    #: The most frames a second the scene is rendered at; ``0`` (the default) is
+    #: every display frame. For a dear scene that moves slowly: its clock still
+    #: advances every frame, but the GPU draws it at most this often and the last
+    #: frame stays up in between — at 30 a slow camera looks the same and costs
+    #: half. Ignored while the scene is fading, so a dissolve stays smooth.
+    frame_rate: float = 0.0
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "frame_rate", max(0.0, float(self.frame_rate or 0.0)))
+        object.__setattr__(self, "volumes", tuple(
+            v if isinstance(v, ShaderVolume)
+            else ShaderVolume(**v) if isinstance(v, dict) else ShaderVolume(tuple(v))
+            for v in (self.volumes or ())))
         # A dict is what dataclasses.asdict() turns a ShaderTexture or Lens into,
         # so accepting one keeps ``Shader(**asdict(s)) == s`` true.
         object.__setattr__(self, "textures", tuple(

@@ -106,7 +106,7 @@ class TestDescriptor:
         assert not isinstance(Shader(source="x"), Wallpaper)
         assert {f.name for f in dataclasses.fields(Shader)} == {
             "source", "speed", "opacity", "ink", "backdrop", "resolution_scale",
-            "source_hlsl", "source_glsl", "idle", "textures", "lens"}
+            "source_hlsl", "source_glsl", "idle", "textures", "lens", "volumes", "frame_rate"}
 
     def test_resolution_scale_is_clamped_above_zero(self):
         # Zero would ask for a zero-sized drawable, which is an error rather than

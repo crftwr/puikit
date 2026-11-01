@@ -279,3 +279,63 @@ class TestLens:
         px = self._render(Lens(), fade=0.0)
         assert {_rgb(px, 200, x, y) for x in range(0, 200, 7) for y in range(0, 120, 7)} \
             == {(10, 20, 30)}
+
+
+# --- volumes, depth of field, frame reuse ----------------------------------------
+
+VOLUME_HLSL = """
+Texture3D v : register(t0);
+SamplerState s : register(s0);
+float4 puikit_bg_bake(float4 pos : SV_Position) : SV_Target {
+    return float4(pos.x / bake_size.x, pos.y / bake_size.y, (bake_size.w + 0.5) / bake_size.z, 1.0);
+}
+float4 puikit_bg_fragment(float4 pos : SV_Position) : SV_Target {
+    float2 uv = pos.xy / resolution;
+    return float4(v.SampleLevel(s, float3(uv, uv.x), 0).rgb, 1.0);
+}
+"""
+
+DEPTH_HLSL = """
+float4 puikit_bg_fragment(float4 pos : SV_Position) : SV_Target {
+    float stripe = fmod(floor(pos.y / 2.0), 2.0);
+    float near = pos.x < resolution.x * 0.5 ? 1.0 : 0.0;
+    return float4(stripe * 0.6, stripe * 0.6, stripe * 0.6, lerp(1.0 / 20.0, 1.0, near));
+}
+"""
+
+
+class TestVolumes:
+
+    def test_a_volume_is_baked_and_sampled(self):
+        from puikit.background import ShaderVolume
+        r = D3DShaderBackground()
+        assert r.set_shader(Shader(source="", source_hlsl=VOLUME_HLSL,
+                                   volumes=[ShaderVolume((16, 8, 4))])), r.error
+        px = r.render_pixels(32, 32, 0.0)
+        assert abs(_rgb(px, 32, 16, 16)[0] - 128) < 12
+        assert _rgb(px, 32, 1, 1)[0] < 40 and _rgb(px, 32, 30, 30)[0] > 200
+        r.close()
+
+
+class TestDepthOfFieldAndReuse:
+
+    def test_depth_of_field_draws_without_nan(self):
+        from puikit.background import Lens
+        r = D3DShaderBackground()
+        assert r.set_shader(Shader(source="", source_hlsl=DEPTH_HLSL, backdrop=(0, 0, 0),
+                                   lens=Lens(dof=0.05, bloom=0.0, vignette=0.0))), r.error
+        px = r.render_pixels(120, 80, 1.0)
+        assert max(px[i] for i in range(0, len(px), 4)) > 60     # NaN would be black
+        r.close()
+
+    def test_an_unchanged_frame_is_reused(self):
+        r = D3DShaderBackground()
+        assert r.set_shader(Shader(source="", source_hlsl=SUN_HLSL))
+        r.render_to_texture(64, 40, 1.0)
+        key = r._last_frame
+        assert key is not None
+        r.render_to_texture(64, 40, 1.0)
+        assert r._last_frame is key                               # not re-rendered
+        r.render_to_texture(64, 40, 2.0)
+        assert r._last_frame is not key
+        r.close()

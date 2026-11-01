@@ -45,8 +45,12 @@ STREAK_EPSILON = 0.003
 #: Bytes in a blur pass's uniform block: two float4.
 PASS_UNIFORM_BYTES = 32
 
-#: Bytes in the composite's uniform block: thirteen float4 (see LensUniforms).
-LENS_UNIFORM_BYTES = 208
+#: Bytes in the composite's uniform block: fourteen float4 (see LensUniforms).
+LENS_UNIFORM_BYTES = 224
+
+#: Depth-of-field gather taps. The scene's blur is a disc of up to ``Lens.dof``
+#: of the frame height; this many golden-angle taps cover it.
+DOF_TAPS = 40
 
 
 def level_sizes(width: int, height: int) -> "list[tuple[int, int]]":
@@ -87,6 +91,7 @@ def lens_uniforms(lens, width: int, height: int, time: float, opacity: float,
         *lens.highlight_tint, 0.0,
         *lens.streak_tint, 0.0,
         *m[0], 0.0, *m[1], 0.0, *m[2], 0.0,
+        lens.dof, lens.focus_range, 0.0, 0.0,
     ]
     return struct.pack(f"{len(values)}f", *values)
 
@@ -130,9 +135,12 @@ struct LensUniforms {
     float4 d;            // halation, gain, scope, level
     float4 mono; float4 shadow; float4 high; float4 streak_tint;
     float4 m0; float4 m1; float4 m2;
+    float4 e;            // dof, focus_range, -, -
 };
 
 constexpr sampler lin(filter::linear, address::clamp_to_edge);
+
+constant float FOCUS_SPREAD = 0.012;   // the autofocus taps' distance from the middle
 
 vertex float4 puikit_pass_vertex(uint vid [[vertex_id]]) {
     float2 p = float2((vid << 1) & 2, vid & 2) * 2.0 - 1.0;
@@ -208,6 +216,66 @@ static inline float in_frame(float2 uv) {
     return step(0.0, min(e.x, e.y));
 }
 
+// Depth of field: the scene carries its *inverse* depth in alpha. The circle of
+// confusion, |1 - focus / depth| * range, is linear in 1 / depth, so a bilinear
+// tap blends blur sizes across a silhouette rather than inventing a depth there
+// (which can land on the focus distance and draw the edge's stair steps sharp).
+// Focus is what the middle
+// of the frame is looking at -- the centre tap and four close round it, averaged
+// as 1/depth so a near subject wins over the distance behind it. Close, because a
+// macro's depth of field is shallow enough that a tap landing on the rock behind
+// the subject would pull focus off it; spread a little, so focus moves across a
+// short band rather than jumping as an edge crosses the middle. Each pixel
+// gathers a golden-angle disc sized by its circle of confusion. A tap counts
+// only if its own blur disc reaches this pixel, so sharp detail never smears
+// over a blurred background.
+static inline float3 dof_encode(float3 x) {
+    return pow(x / (1.0 + max(x, 0.0)), float3(1.0 / 2.2));
+}
+
+static inline float3 dof_decode(float3 m) {
+    float3 y = min(pow(m, float3(2.2)), float3(0.999));
+    return y / (1.0 - y);
+}
+
+static inline float3 depth_of_field(texture2d<float> scene, float2 uv, float2 px, float2 res,
+                                    float dof, float range) {
+    float asp = res.x / res.y;
+    float inv = 0.0, wsum = 0.0;
+    for (int i = 0; i < 5; i++) {
+        float a = float(i) * 1.5708;
+        float2 o = i == 0 ? float2(0.0) : float2(cos(a) / asp, sin(a)) * FOCUS_SPREAD;
+        float w = i == 0 ? 2.0 : 1.0;
+        inv += w * scene.sample(lin, float2(0.5) + o, level(0)).a;
+        wsum += w;
+    }
+    float focus = wsum / max(inv, 1e-4);
+    float maxr = dof * res.y;
+    float4 c0 = scene.sample(lin, uv, level(0));
+    float r0 = clamp(abs(1.0 - focus * c0.a) * range, 0.0, 1.0) * maxr;
+    // The taps are averaged in a squashed, gamma-encoded space -- (x / (1 + x))
+    // ^ (1/2.2) -- and the mean expanded again. This gather runs on HDR, and a
+    // hairline glint many times white would otherwise land in some pixels' taps
+    // and not their neighbours', breaking a clean edge into teeth. Squashed, no
+    // tap weighs more than white; encoded, the dark around it is not so dark
+    // that one glint doubles it -- as if the blur ran on the finished picture,
+    // without losing the HDR the tone map comes after.
+    float3 acc = dof_encode(c0.rgb);
+    float tot = 1.0;
+    float rot = hash12(px) * 6.2831;
+    for (int i = 1; i < 40; i++) {
+        float fi = float(i);
+        float rr = sqrt(fi / 40.0) * r0;
+        float a = fi * 2.39996 + rot;
+        float4 s = scene.sample(lin, uv + float2(cos(a), sin(a)) * rr / res, level(0));
+        float rs = clamp(abs(1.0 - focus * s.a) * range, 0.0, 1.0) * maxr;
+        float w = clamp(rs - rr + 1.0, 0.0, 1.0);
+        acc += dof_encode(s.rgb) * w;
+        tot += w;
+    }
+    return dof_decode(acc / tot);
+}
+
 fragment float4 puikit_lens(float4 pos [[position]],
                             constant LensUniforms &u [[buffer(0)]],
                             texture2d<float> scene [[texture(0)]],
@@ -225,8 +293,13 @@ fragment float4 puikit_lens(float4 pos [[position]],
     float2 uvR = (d * (1.0 + ca)) / float2(asp, 1.0) + 0.5;
     float2 uvB = (d * (1.0 - ca)) / float2(asp, 1.0) + 0.5;
 
-    float3 col = float3(tap(scene, uvR).r * in_frame(uvR), tap(scene, uvG).g * in_frame(uvG),
-                        tap(scene, uvB).b * in_frame(uvB));
+    float3 col;
+    if (u.e.x > 0.0) {
+        col = depth_of_field(scene, uvG, pos.xy, u.resolution, u.e.x, u.e.y) * in_frame(uvG);
+    } else {
+        col = float3(tap(scene, uvR).r * in_frame(uvR), tap(scene, uvG).g * in_frame(uvG),
+                     tap(scene, uvB).b * in_frame(uvB));
+    }
     float3 bl = float3(tap(bloom, uvR).r * in_frame(uvR), tap(bloom, uvG).g * in_frame(uvG),
                        tap(bloom, uvB).b * in_frame(uvB));
     col += bl * u.a.z * 0.07;
@@ -312,12 +385,14 @@ cbuffer LensUniforms : register(b1) {
     float4 ld;           // halation, gain, scope, level
     float4 mono; float4 shadow; float4 high; float4 streak_tint;
     float4 m0; float4 m1; float4 m2;
+    float4 le;           // dof, focus_range, -, -
 };
 
 Texture2D tex0 : register(t0);
 Texture2D tex1 : register(t1);
 Texture2D tex2 : register(t2);
 SamplerState lin : register(s0);
+static const float FOCUS_SPREAD = 0.012;
 
 struct PuikitPassVSOut { float4 pos : SV_Position; };
 
@@ -386,6 +461,45 @@ float in_frame(float2 uv) {
     return step(0.0, min(e.x, e.y));
 }
 
+float3 dof_encode(float3 x) {
+    return pow(x / (1.0 + max(x, 0.0)), 1.0 / 2.2);
+}
+
+float3 dof_decode(float3 m) {
+    float3 y = min(pow(m, 2.2), float3(0.999, 0.999, 0.999));
+    return y / (1.0 - y);
+}
+
+float3 depth_of_field(float2 uv, float2 px, float dof, float range) {
+    float asp = resolution.x / resolution.y;
+    float inv = 0.0, wsum = 0.0;
+    [unroll] for (int i = 0; i < 5; i++) {
+        float a = float(i) * 1.5708;
+        float2 o = i == 0 ? float2(0.0, 0.0) : float2(cos(a) / asp, sin(a)) * FOCUS_SPREAD;
+        float w = i == 0 ? 2.0 : 1.0;
+        inv += w * tex0.SampleLevel(lin, float2(0.5, 0.5) + o, 0).a;
+        wsum += w;
+    }
+    float focus = wsum / max(inv, 1e-4);
+    float maxr = dof * resolution.y;
+    float4 c0 = tex0.SampleLevel(lin, uv, 0);
+    float r0 = clamp(abs(1.0 - focus * c0.a) * range, 0.0, 1.0) * maxr;
+    float3 acc = dof_encode(c0.rgb);
+    float tot = 1.0;
+    float rot = hash12(px) * 6.2831;
+    [loop] for (int j = 1; j < 40; j++) {
+        float fi = float(j);
+        float rr = sqrt(fi / 40.0) * r0;
+        float a = fi * 2.39996 + rot;
+        float4 s = tex0.SampleLevel(lin, uv + float2(cos(a), sin(a)) * rr / resolution, 0);
+        float rs = clamp(abs(1.0 - focus * s.a) * range, 0.0, 1.0) * maxr;
+        float w = clamp(rs - rr + 1.0, 0.0, 1.0);
+        acc += dof_encode(s.rgb) * w;
+        tot += w;
+    }
+    return dof_decode(acc / tot);
+}
+
 float4 puikit_lens(float4 pos : SV_Position) : SV_Target {
     const float PI = 3.14159265;
     float2 uv = pos.xy / resolution;
@@ -398,8 +512,13 @@ float4 puikit_lens(float4 pos : SV_Position) : SV_Target {
     float2 uvR = (d * (1.0 + ca)) / float2(asp, 1.0) + 0.5;
     float2 uvB = (d * (1.0 - ca)) / float2(asp, 1.0) + 0.5;
 
-    float3 col = float3(tap0(uvR).r * in_frame(uvR), tap0(uvG).g * in_frame(uvG),
-                        tap0(uvB).b * in_frame(uvB));
+    float3 col;
+    if (le.x > 0.0) {
+        col = depth_of_field(uvG, pos.xy, le.x, le.y) * in_frame(uvG);
+    } else {
+        col = float3(tap0(uvR).r * in_frame(uvR), tap0(uvG).g * in_frame(uvG),
+                     tap0(uvB).b * in_frame(uvB));
+    }
     float3 bl = float3(tap1(uvR).r * in_frame(uvR), tap1(uvG).g * in_frame(uvG),
                        tap1(uvB).b * in_frame(uvB));
     col += bl * la.z * 0.07;
