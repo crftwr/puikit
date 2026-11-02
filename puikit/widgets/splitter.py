@@ -242,14 +242,18 @@ class Splitter(FocusContainer, Widget):
 
     def _is_hovered(self, ctx: DrawContext) -> bool:
         """True when the pointer is within the handle's grab zone, so the divider
-        can light up before the drag. Reads the Panel pointer (screen coords) and
-        tests it against the handle in widget-local space, the same zone a press
-        grabs."""
-        p = ctx.panel.pointer if ctx.panel is not None else None
-        if p is None:
-            return False
-        sx, sy, _sw, _sh = ctx.screen_rect
-        return self._near_handle(p[0] - sx, p[1] - sy)
+        can light up before the drag — the same zone a press grabs (see
+        _near_handle), asked as a sub-rect so only the pointer crossing it
+        redraws, not every move over the panes the splitter holds."""
+        h = self._handle_rect
+        if self._has_band():
+            g1, g2 = self._grab_first, self._grab_second
+        else:
+            g1 = g2 = self._grab
+        w, hh = ctx.size_units
+        if self._horizontal:
+            return ctx.pointer_in(h.x - g1, 0, h.w + g1 + g2, hh)
+        return ctx.pointer_in(0, h.y - g1, w, h.h + g1 + g2)
 
     def _draw_handle(self, ctx: DrawContext, handle: Rect, active: bool) -> None:
         # The divider line is the whole affordance (no grip mark). At rest it is a

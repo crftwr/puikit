@@ -73,6 +73,15 @@ whole-context shadow would also shadow background and selection *fills*, whose
 rectangular shadows read as ugly boxes. A grid backend (no sub-pixel offset)
 ignores it.
 
+macOS draws it with the glyphs (an `NSShadow` attribute). Direct2D has no
+per-draw shadow, so the Windows backend records each run of consecutive text
+commands as a silhouette — offset, in the shadow's colour — before the frame,
+and draws it through a Gaussian blur (σ = half the `NSShadow` blur radius)
+under the run's first command. A silhouette is kept while its run is
+unchanged, so a repaint costs one extra glyph draw only for the rows that
+changed. A text command with its own background starts a new run, so the
+shadow lands on that background, not under it.
+
 **`without_motion()` defines what "motion" means, once.** Under reduced motion a
 backend composites `effect.without_motion()`, which drops only `flicker` and
 `roll` — the two self-driven fields. `bloom` / `scanline` / `vignette` /

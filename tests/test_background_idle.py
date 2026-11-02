@@ -24,6 +24,7 @@ _FADING = Shader(source=_SRC, idle="fade")
 
 mb = pytest.importorskip("puikit.backends.macos_backend")
 
+from puikit.backends import _bg_seed  # noqa: E402
 from puikit.backends.macos_backend import (  # noqa: E402
     _BG_IDLE_TIMEOUT, _BG_RAMP_DOWN, _BG_RAMP_UP, _approach, _smoothstep,
 )
@@ -353,6 +354,64 @@ class TestParking:
         be._last_input_time = clock.now               # user comes back
         be._ensure_background_ticker()
         assert be._bg_running is True
+
+    def _park(self, be, clock):
+        clock.advance(_BG_IDLE_TIMEOUT + 1)
+        _run(be, clock, _BG_RAMP_DOWN + 2)
+        assert be._bg_running is False
+
+    def test_a_return_brings_one_new_seed_blended_in(self, monkeypatch):
+        # A scene that composes from ``seed`` moves to a fresh composition when
+        # the user comes back — once, and eased from the old one, not cut.
+        clock = FakeClock()
+        be = _backend(monkeypatch, _SHADER, clock)
+        before = be._bg_seeds.seed
+        self._park(be, clock)
+        be._last_input_time = clock.now               # the user comes back
+        be._ensure_background_ticker()
+        _run(be, clock, FRAME)
+        seeds = be._bg_seeds
+        after = seeds.seed
+        assert seeds.prev == before and 0.0 <= seeds.mix < 0.1
+        _run(be, clock, _bg_seed.BLEND_SECONDS + 1)
+        assert seeds.mix == 1.0 and seeds.seed == after   # one reseed, then it holds
+
+    def test_a_wake_that_parks_again_keeps_the_seed(self, monkeypatch):
+        # A mouse crossing an unfocused window re-arms the tick on every move; the
+        # tick finds nobody using the app and parks again. None of that may change
+        # the scene — that was a scene cut per mouse move.
+        clock = FakeClock()
+        be = _backend(monkeypatch, _SHADER, clock)
+        self._park(be, clock)
+        seed = be._bg_seeds.seed
+        monkeypatch.setattr(be, "_bg_user_active", lambda now: False)
+        for _ in range(5):
+            be._last_input_time = clock.now
+            be._ensure_background_ticker()
+            _run(be, clock, 1.0)
+        assert be._bg_seeds.seed == seed
+
+    def test_reduced_motion_never_reseeds(self, monkeypatch):
+        # There every key press re-arms the tick; the still frame must not change.
+        clock = FakeClock()
+        be = _backend(monkeypatch, _SHADER, clock)
+        self._park(be, clock)
+        seed = be._bg_seeds.seed
+        monkeypatch.setattr(type(be), "reduced_motion", property(lambda self: True),
+                            raising=False)
+        be._last_input_time = clock.now
+        be._ensure_background_ticker()
+        _run(be, clock, 2.0)
+        assert be._bg_seeds.seed == seed
+
+    def test_a_new_background_starts_on_a_random_seed_at_once(self, monkeypatch):
+        seeds = set()
+        for _ in range(6):
+            s = _bg_seed.SceneSeed()
+            s.background_set()
+            assert s.mix == 1.0 and s.prev == s.seed
+            seeds.add(s.seed)
+        assert len(seeds) > 1
 
     def test_re_arming_is_idempotent(self, monkeypatch):
         clock = FakeClock()

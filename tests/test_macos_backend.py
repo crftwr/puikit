@@ -145,6 +145,26 @@ def test_measure_text_proportional_is_not_column_count():
     assert width > 5.0
 
 
+def test_measure_text_answers_a_repeat_from_its_memo(monkeypatch):
+    # A frame measures the same strings in the same styles over and over; the
+    # second ask is answered by (text, style) without resolving the font again,
+    # and with the same width.
+    backend = MacOSBackend()
+    backend._init_fonts()
+    style = Style(font=Font(size=13))
+    first = backend.measure_text("file0001.txt", style)
+    calls = []
+    real = backend._measure_text_uncached
+    monkeypatch.setattr(backend, "_measure_text_uncached",
+                        lambda *a: (calls.append(a), real(*a))[1])
+    assert backend.measure_text("file0001.txt", style) == first and calls == []
+    assert backend.measure_text("file0001.txt", Style(font=Font(size=20))) > first
+    assert len(calls) == 1
+    backend._init_fonts()                       # a new base unit forgets them
+    backend.measure_text("file0001.txt", style)
+    assert len(calls) == 2
+
+
 def test_translate_arrow_key():
     event = translate_key("\uf700")  # NSUpArrowFunctionKey
     assert event.type is EventType.KEY

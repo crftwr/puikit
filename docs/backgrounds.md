@@ -65,7 +65,27 @@ fragment float4 puikit_bg_fragment(
 
 Uniforms, shared by all three dialects: `resolution` (drawable pixels), `time`
 (seconds since the background was set, scaled by `speed`), `opacity`, `ink`,
-`backdrop`.
+`backdrop`, `seed`, `pixel_scale`.
+
+**`pixel_scale`** is how many render pixels make one point (the UI's unit, a
+CSS pixel on the web): the display's density times the scene's render scale —
+2 on a Retina display at full scale, 1 at half, 0.5 on a standard display at
+half. A scene that sizes something in points (a gap, a speed, a stroke) uses it
+to look the same on every display; without it, a scene tuned in a Retina
+display's pixels draws everything twice as large, and moves it twice as fast,
+on a standard one.
+
+**`seed`** is for a scene that moves *between* compositions rather than through
+one. It is a whole number 0..65535 the backend draws at random when the
+background is set, and again **once** when the user comes back to a background
+that parked — on the first tick at which the app is really in use (focused,
+recent input, not reduced motion), not on every wake: a mouse crossing an
+unfocused window re-arms the tick on each move without anyone coming back
+(`backends/_bg_seed.py`). On that return `seed_prev` keeps the old seed and
+`seed_mix` eases 0 → 1 over six seconds of wall time, so a scene can blend the
+old composition into the new one instead of cutting — hashing `floor(time /
+period)` with the seed is how a scene picks what each period shows. The web
+client does not set the seed uniforms yet (they read 0).
 
 | Field | Meaning |
 |---|---|
@@ -78,12 +98,169 @@ Uniforms, shared by all three dialects: `resolution` (drawable pixels), `time`
 | `backdrop` | Clear color under the shader, also a uniform. |
 | `resolution_scale` | Fraction of native drawable size to render at, `0.1`..`1`, upscaled by the compositor. |
 | `idle` | What the scene comes to rest as when the backend parks it: `"freeze"` (default) holds the last frame, `"fade"` dissolves it to `backdrop` first. See §4.1. An unrecognized value falls back to `"freeze"`. |
+| `textures` | Images the scene samples (§3.1). A plain path is shorthand for `ShaderTexture(path)`. |
+| `frame_rate` | The most frames a second the scene is rendered at; `0` = every frame (§3.3). |
+| `pixel_density` | Render pixels per point, at most the display's own; `0` (default) leaves the scale to `resolution_scale`. `resolution_scale` is a fraction of the *display's* pixels, so a half-scale scene renders twice as coarsely on a standard display as on Retina; a density renders it the same wherever the display can show it (`1.0` = half scale on Retina, full on a standard display). |
+| `targets` | Offscreen textures the passes write and read (§3.2). |
+| `passes` | The scene as a sequence of draws (§3.2). Empty = the single-pass form. |
 
 > **`resolution_scale` is the knob that matters on a Retina display.** Cost is
 > per pixel, so `0.5` is a quarter of the work. Crisp geometry wants `1`; a
 > soft, diffuse scene — glow, particles, gradients — is usually
 > indistinguishable at `0.5`. It is floored at `0.1` rather than `0`, since a
 > zero-sized drawable is an error, not a cheap frame.
+
+### 3.1 Textures
+
+A scene that needs real imagery — a map of the world, a photographed sky —
+names it in `textures`, a tuple of `ShaderTexture`:
+
+| Field | Meaning |
+|---|---|
+| `path` | The image file (`~` expanded). Decoded by the OS decoder (ImageIO / WIC) as 8-bit RGBA, so a greyscale map is saved as RGB. |
+| `srgb` | `True` for a colour photograph: the sampler returns linear values. `False` (default) for data — masks, heights, normals. |
+| `wrap_u` / `wrap_v` | `"repeat"` or `"clamp"` per axis; the defaults (`repeat`, `clamp`) suit an equirectangular map. |
+| `mipmaps` | Build a mip chain on upload (default on), so a minified map can be sampled at an explicit level. |
+
+| `name` | How a pass names it among its inputs (§3.2); unused by a single-pass scene. |
+
+A single-pass scene binds them **by position**: entry *i* is slot *i* in every
+dialect, with a sampler in the same slot that carries that entry's filtering and
+wrap modes.
+
+```metal
+fragment float4 puikit_bg_fragment(float4 pos [[position]],
+                                   constant BackgroundUniforms &u [[buffer(0)]],
+                                   texture2d<float> map [[texture(0)]],
+                                   sampler s [[sampler(0)]]) { ... }
+```
+
+```hlsl
+Texture2D map : register(t0);
+SamplerState s : register(s0);
+```
+
+**Loading is off the UI thread.** `set_background` runs when a theme is
+applied, and a large photograph takes a couple of hundred milliseconds to
+decode, so the decode runs on a worker (`_bg_textures.TextureLoad`) and the
+renderer uploads the result on the thread that draws. Until then the frame is
+the bare `backdrop`. **A failed load fails the background**: the backdrop stays
+and the error is reported, the same outcome as a compile error. Re-applying a
+shader with the same textures keeps them on the GPU. The window-free
+`render_to_texture` paths wait for the decode instead, so a test sees the real
+frame.
+
+Sample at an explicit level (`level(l)` / `SampleLevel`) where the scene can:
+screen derivatives jump wherever a map's `u` wraps, which picks the smallest mip
+along a visible seam, and HLSL rejects implicit-derivative samples in loops.
+
+The web backend binds no textures and runs no passes yet; it draws the
+backdrop for a textured or multi-pass scene rather than run it without its
+inputs.
+
+### 3.2 Passes and targets
+
+A scene that is more than one fullscreen draw — bloom, a blur, a tone map over
+HDR, a field baked once and sampled every frame — describes itself as
+`passes` through `targets`. **What the passes compute is the app's**; PuiKit
+allocates the targets, runs the passes in order and binds their inputs, and
+that is all it knows. A new kind of scene therefore needs no PuiKit change:
+the boundary is the GPU primitives the platforms share (offscreen textures,
+fullscreen draws, sampled inputs), with their differences — Metal's
+`depthPlane` vs a D3D11 `Texture3D` slice view, pixel formats, register
+binding, read/write hazards — absorbed here.
+
+`Target(name, scale=1.0, size=None, format="rgba16f")`:
+
+| Field | Meaning |
+|---|---|
+| `name` | How passes refer to it; unique, and not a texture's name. |
+| `scale` | Fraction of the drawable (`resolution_scale` already applied), rounded down, at least one texel. Reallocated when the drawable resizes. |
+| `size` | An absolute `(w, h)`, or `(w, h, d)` for a **3D** target (each ≤ 4096, depth ≤ 512). Lives as long as the shader. |
+| `format` | `"rgba16f"` (half float: linear HDR, depths) or `"rgba8"`. |
+
+A target is sampled through a linear, clamp-to-edge sampler with no mips.
+
+`Pass(entry, output=None, inputs=(), params=(), once=False)`:
+
+| Field | Meaning |
+|---|---|
+| `entry` | A fragment function of the shader's source. |
+| `output` | The target it writes; `None` for the screen. |
+| `inputs` | Names of textures and targets it reads, at most 8, bound from slot 0 in order. |
+| `params` | Up to four floats, so one entry can serve several passes (a blur's step, a pyramid level). |
+| `once` | Run when the background is set rather than every frame — a bake (below). |
+
+The passes run in order every frame; **the last draws to the screen and is the
+only one that may**. It does what a single-pass shader does: returns display
+colour mixed over `backdrop` by `opacity` (which carries the idle fade). Each
+pass receives the usual `BackgroundUniforms` at `buffer(0)` / `b0`, and
+`PassUniforms` at `buffer(1)` / `b1` (HLSL: `pass_params`, `pass_target`,
+`pass_inputs[8]`):
+
+```metal
+struct PassUniforms {
+    float4 params;      // Pass.params
+    float4 target;      // the output's width, height, depth (1 if 2D), slice written
+    float4 inputs[8];   // each input's width, height, depth (1 if 2D), 0
+};
+
+fragment float4 blur(float4 pos [[position]],
+                     constant BackgroundUniforms &u [[buffer(0)]],
+                     constant PassUniforms &p [[buffer(1)]],
+                     texture2d<float> src [[texture(0)]], sampler s [[sampler(0)]]) {
+    float2 uv = pos.xy / p.target.xy, step = float2(p.params.x / p.inputs[0].x, 0.0);
+    return (src.sample(s, uv - step, level(0)) + src.sample(s, uv + step, level(0))) * 0.5;
+}
+```
+
+In HLSL every pass of one source declares its own inputs, and several may share
+a register: fxc binds per entry point, so `Texture2D a : register(t0)` in one
+pass and `Texture3D v : register(t0)` in another is fine.
+
+**A `once` pass is a bake.** Its output must have an absolute `size`, and it
+reads only textures and earlier bakes. Writing a 3D target, it runs once per
+slice (`target.w` says which). Bakes run a few slices a frame after
+`set_background` — the backdrop shows until they are done — and are kept when
+the same shader is applied again (and re-run when its textures change).
+
+**A graph that does not hold together** — an unknown name, a pass that reads
+what nothing wrote earlier (this frame or in a bake), a pass reading its own
+output, a frame pass overwriting a bake, a screen pass that is not last — draws
+the bare backdrop and reports why, as a compile error does. Every pass is
+checked before anything is compiled (`backends/_bg_graph.py`, which both GPU
+backends share).
+
+### 3.3 A frame-rate cap
+
+`Shader.frame_rate` caps how often the GPU renders the scene (`0` = every
+frame). The clock still advances every frame and the last frame stays up in
+between; a fading scene is never skipped. For a dear scene with a slow camera,
+30 looks the same as 60 at half the cost.
+
+On Windows, where the background is rendered inside the UI's own frame, the
+renderer also reuses its last texture whenever nothing the shader sees has
+changed (the clock, the fade, the seeds, the size) — so a key press or a scroll
+over a parked or capped background does not pay for a scene.
+
+### 3.4 Compiling on Windows
+
+fxc (`d3dcompiler_47`) inlines every call, so a ray-marched scene takes it
+seconds to compile — twelve for one measured in a VM — where Metal takes
+milliseconds. Two things keep that off the user:
+
+- **A compile cache.** Compiled bytecode is kept in memory and on disk, keyed
+  by the source, entry point and target, so a scene this machine has compiled
+  before is ready in milliseconds, across launches. The folder is the app's to
+  choose: `puikit.background.set_shader_cache_dir(path)` (its own data folder,
+  say), else `%LOCALAPPDATA%\PuiKit\shader-cache`; `PUIKIT_SHADER_CACHE`
+  overrides both, and `0`/`off` disables the disk cache.
+- **A background compile.** The window path sets a shader with
+  `set_shader(..., wait=False)`: what is not cached compiles on worker threads
+  (in parallel — D3DCompile releases the GIL), the frame is the bare backdrop
+  meanwhile, as while textures load, and the next frame after it finishes
+  adopts it. The UI thread never waits for fxc. A compile error is reported when
+  the compile ends. The window-free `set_shader()` still compiles in place.
 
 ### Shader source is the one genuinely backend-specific thing
 

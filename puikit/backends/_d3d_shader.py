@@ -36,11 +36,22 @@ capability unsupported, so the app falls back to a segment background or a solid
 from __future__ import annotations
 
 import ctypes
+import hashlib
+import os
+import struct
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from ctypes import wintypes
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 
+from . import _bg_graph
 from . import _win32_native as native
+from ._bg_textures import TextureLoad
 from ._win32_native import ComPtr, hresult_ok
+from ..background import shader_cache_dir
 
 try:
     _d3dcompiler = ctypes.WinDLL("d3dcompiler_47")
@@ -72,6 +83,16 @@ cbuffer BackgroundUniforms : register(b0) {
     float  opacity;      // the descriptor's opacity, 0..1
     float4 ink;          // theme foreground, rgba 0..1
     float4 backdrop;     // theme background, rgba 0..1
+    float  seed;         // see puikit.background.SHADER_PRELUDE
+    float  seed_prev;
+    float  seed_mix;
+    float  pixel_scale;  // render pixels per point
+};
+
+cbuffer PassUniforms : register(b1) {
+    float4 pass_params;      // see puikit.background.Pass
+    float4 pass_target;      // the output's width, height, depth, slice written
+    float4 pass_inputs[8];   // each input's width, height, depth, 0
 };
 
 struct PuikitBgVSOut { float4 pos : SV_Position; };
@@ -84,35 +105,48 @@ PuikitBgVSOut puikit_bg_vertex(uint vid : SV_VertexID) {
 }
 """
 
-#: The pixel-shader entry point a :class:`Shader`'s ``source_hlsl`` must define,
-#: mirroring ``puikit.background.SHADER_ENTRY``. Its HLSL signature is::
+#: The pixel-shader entry point a single-pass :class:`Shader`'s ``source_hlsl``
+#: must define, mirroring ``puikit.background.SHADER_ENTRY``. Its HLSL signature
+#: is::
 #:
 #:     float4 puikit_bg_fragment(float4 pos : SV_Position) : SV_Target
 #:
 #: (the uniforms come from the ``BackgroundUniforms`` cbuffer, not a parameter).
+#: Every :class:`~puikit.background.Pass` entry has the same signature.
 SHADER_ENTRY = "puikit_bg_fragment"
 
-#: Constant-buffer size in bytes: 12 floats (see :data:`HLSL_PRELUDE`), which is
-#: already a multiple of 16 as ``CreateBuffer`` requires.
-UNIFORM_BYTES = 48
+#: Constant-buffer size in bytes: 15 floats (see :data:`HLSL_PRELUDE`; the seed
+#: trio takes a register of its own), rounded up to the multiple of 16
+#: ``CreateBuffer`` requires.
+UNIFORM_BYTES = 64
 
 #: Render-target / texture pixel format. BGRA8 matches what the Direct2D device
 #: context uses for its bitmaps, so the offscreen texture can be wrapped as a D2D
 #: bitmap with no format conversion (and the readback path returns BGRA bytes).
 PIXEL_FORMAT = native.DXGI_FORMAT_B8G8R8A8_UNORM
 
+#: ``Target.format`` as DXGI formats.
+TARGET_FORMATS = {"rgba16f": 10, "rgba8": 28}   # R16G16B16A16_FLOAT, R8G8B8A8_UNORM
+_TEX_FORMAT = 28             # DXGI_FORMAT_R8G8B8A8_UNORM
+_TEX_FORMAT_SRGB = 29        # DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
+
 # --- D3D11 vtable indices (verified live via the offscreen readback test) ------
 # ID3D11Device (IUnknown[0-2], then):
 _IDX_DEV_CREATE_BUFFER = 3
 _IDX_DEV_CREATE_TEXTURE2D = 5
+_IDX_DEV_CREATE_TEXTURE3D = 6
+_IDX_DEV_CREATE_SHADER_RESOURCE_VIEW = 7
 _IDX_DEV_CREATE_RENDER_TARGET_VIEW = 9
 _IDX_DEV_CREATE_VERTEX_SHADER = 12
 _IDX_DEV_CREATE_PIXEL_SHADER = 15
 _IDX_DEV_CREATE_RASTERIZER_STATE = 22
+_IDX_DEV_CREATE_SAMPLER_STATE = 23
 _IDX_DEV_GET_IMMEDIATE_CONTEXT = 40
 # ID3D11DeviceContext (ID3D11DeviceChild[0-6], then):
 _IDX_CTX_VS_SET_CONSTANT_BUFFERS = 7
+_IDX_CTX_PS_SET_SHADER_RESOURCES = 8
 _IDX_CTX_PS_SET_SHADER = 9
+_IDX_CTX_PS_SET_SAMPLERS = 10
 _IDX_CTX_VS_SET_SHADER = 11
 _IDX_CTX_DRAW = 13
 _IDX_CTX_MAP = 14
@@ -126,6 +160,7 @@ _IDX_CTX_RS_SET_VIEWPORTS = 44
 _IDX_CTX_COPY_RESOURCE = 47
 _IDX_CTX_UPDATE_SUBRESOURCE = 48
 _IDX_CTX_CLEAR_RENDER_TARGET_VIEW = 50
+_IDX_CTX_GENERATE_MIPS = 54
 # ID3DBlob (IUnknown[0-2], then):
 _IDX_BLOB_GET_BUFFER_POINTER = 3
 _IDX_BLOB_GET_BUFFER_SIZE = 4
@@ -141,6 +176,12 @@ _MAP_READ = 1
 _TRIANGLELIST = 4
 _FILL_SOLID = 3
 _CULL_NONE = 1
+_RESOURCE_MISC_GENERATE_MIPS = 0x1
+_FILTER_MIN_MAG_MIP_LINEAR = 0x15
+_ADDRESS = {"repeat": 1, "clamp": 3}   # D3D11_TEXTURE_ADDRESS_WRAP / _CLAMP
+_COMPARISON_NEVER = 1
+_FLOAT32_MAX = 3.402823466e38
+_RTV_DIMENSION_TEXTURE3D = 8
 
 
 class _D3D11_BUFFER_DESC(ctypes.Structure):
@@ -195,6 +236,47 @@ class _D3D11_VIEWPORT(ctypes.Structure):
     ]
 
 
+class _D3D11_TEXTURE3D_DESC(ctypes.Structure):
+    _fields_ = [
+        ("Width", ctypes.c_uint32),
+        ("Height", ctypes.c_uint32),
+        ("Depth", ctypes.c_uint32),
+        ("MipLevels", ctypes.c_uint32),
+        ("Format", ctypes.c_uint32),
+        ("Usage", ctypes.c_uint32),
+        ("BindFlags", ctypes.c_uint32),
+        ("CPUAccessFlags", ctypes.c_uint32),
+        ("MiscFlags", ctypes.c_uint32),
+    ]
+
+
+class _D3D11_TEX3D_RTV_DESC(ctypes.Structure):
+    """D3D11_RENDER_TARGET_VIEW_DESC with its union as the Texture3D member —
+    the largest member is three UINTs, so the layout is exact."""
+    _fields_ = [
+        ("Format", ctypes.c_uint32),
+        ("ViewDimension", ctypes.c_uint32),
+        ("MipSlice", ctypes.c_uint32),
+        ("FirstWSlice", ctypes.c_uint32),
+        ("WSize", ctypes.c_uint32),
+    ]
+
+
+class _D3D11_SAMPLER_DESC(ctypes.Structure):
+    _fields_ = [
+        ("Filter", ctypes.c_uint32),
+        ("AddressU", ctypes.c_uint32),
+        ("AddressV", ctypes.c_uint32),
+        ("AddressW", ctypes.c_uint32),
+        ("MipLODBias", ctypes.c_float),
+        ("MaxAnisotropy", ctypes.c_uint32),
+        ("ComparisonFunc", ctypes.c_uint32),
+        ("BorderColor", ctypes.c_float * 4),
+        ("MinLOD", ctypes.c_float),
+        ("MaxLOD", ctypes.c_float),
+    ]
+
+
 class _D3D11_MAPPED_SUBRESOURCE(ctypes.Structure):
     _fields_ = [
         ("pData", ctypes.c_void_p),
@@ -240,6 +322,99 @@ def _compile(source: str, entry: str, target: str) -> "tuple[bytes | None, str]"
     return data, ""
 
 
+#: Bumped when what a cache entry holds, or how its key is made, changes.
+_SHADER_CACHE_VERSION = "1"
+
+#: Entries the on-disk cache keeps before it drops its oldest.
+_SHADER_CACHE_MAX = 512
+
+#: Compiled bytecode by cache key, for this process (see compile_cached).
+_compiled: "dict[str, bytes]" = {}
+_compiled_lock = threading.Lock()
+
+
+def _cache_key(source: str, entry: str, target: str) -> str:
+    h = hashlib.sha256()
+    for part in (_SHADER_CACHE_VERSION, "d3dcompiler_47", target, entry):
+        h.update(part.encode("utf-8") + b"\0")
+    h.update(source.encode("utf-8"))
+    return h.hexdigest()
+
+
+def cached_bytecode(source: str, entry: str, target: str) -> "bytes | None":
+    """``source``'s ``entry`` compiled for ``target`` if this process or an
+    earlier run already compiled it, else None — never compiles."""
+    key = _cache_key(source, entry, target)
+    with _compiled_lock:
+        code = _compiled.get(key)
+    if code is not None:
+        return code
+    folder = shader_cache_dir()
+    if folder is None:
+        return None
+    try:
+        code = (folder / f"{key}.cso").read_bytes()
+    except OSError:
+        return None
+    if not code:
+        return None
+    with _compiled_lock:
+        _compiled[key] = code
+    return code
+
+
+def compile_cached(source: str, entry: str, target: str) -> "tuple[bytes | None, str]":
+    """:func:`_compile` behind the cache: the bytecode an earlier compile of the
+    same source, entry and target produced, or a fresh compile that is then kept
+    in memory and on disk. Safe to call from any thread — D3DCompile is, and the
+    process cache is locked.
+
+    fxc inlines every call, so a ray-marched scene takes it seconds — twelve for
+    XeFM's Crystal on the VM it was measured in — every time the background is
+    set, launch after launch. Kept, it is a file read."""
+    code = cached_bytecode(source, entry, target)
+    if code is not None:
+        return code, ""
+    code, err = _compile(source, entry, target)
+    if code is None:
+        return None, err
+    key = _cache_key(source, entry, target)
+    with _compiled_lock:
+        _compiled[key] = code
+    folder = shader_cache_dir()
+    if folder is not None:
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            tmp = folder / f"{key}.{os.getpid()}.{threading.get_ident()}.tmp"
+            tmp.write_bytes(code)
+            os.replace(tmp, folder / f"{key}.cso")
+            _prune_cache(folder)
+        except OSError:
+            pass                         # a cache that cannot be written is only slower
+    return code, ""
+
+
+def _prune_cache(folder: Path) -> None:
+    entries = list(folder.glob("*.cso"))
+    if len(entries) <= _SHADER_CACHE_MAX:
+        return
+    entries.sort(key=lambda p: p.stat().st_mtime)
+    for old in entries[: len(entries) - _SHADER_CACHE_MAX * 3 // 4]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+
+def _compile_all(jobs: list) -> "list[tuple[bytes | None, str]]":
+    """compile_cached over ``jobs`` ((source, entry, target) each), in parallel:
+    D3DCompile runs with the GIL released, and a scene's entries are independent."""
+    if len(jobs) == 1:
+        return [compile_cached(*jobs[0])]
+    with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as pool:
+        return list(pool.map(lambda job: compile_cached(*job), jobs))
+
+
 class D3DShaderBackground:
     """Compiles one HLSL shader and draws it into an offscreen texture.
 
@@ -261,13 +436,46 @@ class D3DShaderBackground:
         self._cbuffer: ComPtr | None = None
         self._raster: ComPtr | None = None
         self._vs: ComPtr | None = None
-        self._ps: ComPtr | None = None
         self._shader: Any = None
         self._error: str | None = None
         # Offscreen render target, recreated on size change.
         self._tex: ComPtr | None = None
         self._rtv: ComPtr | None = None
         self._tex_size: tuple[int, int] = (0, 0)
+        # Scene textures (see _metal.MetalBackground for the life cycle): the
+        # decode in flight, what it is for, and the uploaded (texture, view,
+        # sampler) triples once on the GPU.
+        self._load: TextureLoad | None = None
+        self._texture_key: tuple = ()
+        self._textures: "list[tuple[ComPtr, ComPtr, ComPtr]] | None" = []
+        self._texture_sizes: "list[tuple[int, int, int]]" = []
+        self._texture_failed = False
+        # The resolved graph, a pixel shader per pass entry, and the pass
+        # constant buffer; None when there is nothing to draw.
+        self._plan: "_bg_graph.Plan | None" = None
+        self._pixel: "dict[str, ComPtr]" = {}
+        self._pass_cb: ComPtr | None = None
+        # Targets as (texture, rtv-or-None, srv, extent): absolute ones live as
+        # long as the graph, drawable-sized ones are rebuilt on resize. A 3D
+        # target has no whole-texture rtv; each slice gets one as it is baked.
+        self._fixed: "dict[int, tuple]" = {}
+        self._sized: "dict[int, tuple]" = {}
+        self._sized_for: tuple[int, int] = (0, 0)
+        self._target_sampler: ComPtr | None = None
+        # The bake: every (step, slice) of the once passes, and how far it got.
+        self._bake_work: list = []
+        self._bake_next = 0
+        # What the last complete frame was rendered from (see render_to_texture).
+        self._last_frame: tuple | None = None
+        self._last_render = 0.0
+        # A compile running in the background (set_shader(wait=False)): which
+        # set_shader it belongs to, and what it produced once done.
+        self._generation = 0
+        self._pending: "tuple | None" = None
+        self._compiled_result: "tuple | None" = None
+        #: Called from the compiling thread when a background compile finishes,
+        #: so the owner can repaint (the next render_to_texture adopts it).
+        self.on_ready: "Callable[[], None] | None" = None
         if not HAVE_D3D_SHADER:
             return
         try:
@@ -303,7 +511,14 @@ class D3DShaderBackground:
 
     def close(self) -> None:
         """Release every COM object owned here (safe to call more than once)."""
-        for attr in ("_rtv", "_tex", "_ps", "_vs", "_raster", "_cbuffer"):
+        self._release_graph()
+        self._release_textures()
+        for attr in ("_target_sampler", "_pass_cb"):
+            obj = getattr(self, attr)
+            if obj is not None:
+                obj.release()
+                setattr(self, attr, None)
+        for attr in ("_rtv", "_tex", "_vs", "_raster", "_cbuffer"):
             obj = getattr(self, attr)
             if obj is not None:
                 obj.release()
@@ -317,60 +532,279 @@ class D3DShaderBackground:
 
     # --- shader compile ----------------------------------------------------
 
-    def set_shader(self, shader: Any) -> bool:
+    def set_shader(self, shader: Any, wait: bool = True) -> bool:
         """Compile ``shader``'s HLSL (:data:`HLSL_PRELUDE` + its ``source_hlsl``)
-        and build the vertex/pixel shaders. Returns success.
+        into the vertex shader and a pixel shader per pass. Returns success.
 
-        A failure leaves the renderer with no pixel shader, so :meth:`render`
+        A failure leaves the renderer with nothing to draw, so :meth:`render`
         becomes a no-op and the frame shows the backdrop alone — a shader with a
-        typo (or one that ships no ``source_hlsl``) costs a blank background and an
-        error string, not a crash. Re-setting the same source is a no-op, so a
-        theme switch that keeps the background does not recompile.
+        typo, a graph that does not hold together, or one that ships no
+        ``source_hlsl`` costs a blank background and an error string, not a
+        crash. Re-setting the same source and graph is a no-op (baked targets
+        included), so a theme switch that keeps the background does not
+        recompile.
+
+        Compiled bytecode is kept (see :func:`compile_cached`), so a scene this
+        machine has compiled before is ready at once. With ``wait`` False, the
+        entries it has not are compiled on worker threads instead of here: the
+        call returns True for a graph that holds together, the frame is the bare
+        backdrop until they are done, :attr:`on_ready` is called, and the next
+        :meth:`render_to_texture` adopts them — or reports the compile error
+        then. The window path passes False: a scene can take fxc seconds, and
+        the UI thread must not stop for them.
         """
+        self._last_frame = None
+        self._generation += 1
+        self._pending = self._compiled_result = None
         if not self.available or shader is None:
-            self._ps = None
+            self._plan = None
             return False
         source = getattr(shader, "source_hlsl", None)
-        if not source:
-            self._shader = shader
-            self._ps = None
-            self._error = "shader has no source_hlsl for the Windows backend"
-            return False
-        if self._shader is not None and getattr(self._shader, "source_hlsl", None) == source and self._ps is not None:
+        old = self._shader
+        if (old is not None and self._plan is not None and source
+                and getattr(old, "source_hlsl", None) == source
+                and shader.targets == old.targets and shader.passes == old.passes):
             self._shader = shader          # params may differ; shaders are reusable
+            self._sync_textures(shader)
             return True
         self._shader = shader
+        self._release_graph()
         self._error = None
+        if not source:
+            self._error = "shader has no source_hlsl for the Windows backend"
+            return False
+        plan = _bg_graph.plan(shader)
+        if plan.error:
+            self._error = plan.error
+            return False
         program = HLSL_PRELUDE + "\n" + source
+        jobs = [(HLSL_PRELUDE, "puikit_bg_vertex", "vs_4_0")] + [
+            (program, entry, "ps_4_0") for entry in sorted({e for e, _f in plan.entries})]
+        codes = [cached_bytecode(*job) for job in jobs]
+        if all(c is not None for c in codes):
+            return self._adopt(shader, plan, jobs, [(c, "") for c in codes])
+        if wait:
+            return self._adopt(shader, plan, jobs, _compile_all(jobs))
+        generation = self._generation
+        self._pending = (generation, shader, plan, jobs)
 
-        vs_code, err = _compile(program, "puikit_bg_vertex", "vs_4_0")
-        if vs_code is None:
-            self._error = err
-            self._ps = None
-            return False
-        ps_code, err = _compile(program, SHADER_ENTRY, "ps_4_0")
-        if ps_code is None:
-            self._error = err
-            self._ps = None
-            return False
-
-        vs = self._create_shader(_IDX_DEV_CREATE_VERTEX_SHADER, vs_code)
-        ps = self._create_shader(_IDX_DEV_CREATE_PIXEL_SHADER, ps_code)
-        if vs is None or ps is None:
-            self._error = "CreateVertex/PixelShader failed"
-            self._ps = None
-            return False
-        if self._vs is not None:
-            self._vs.release()
-        if self._ps is not None:
-            self._ps.release()
-        self._vs, self._ps = vs, ps
+        def run() -> None:
+            results = _compile_all(jobs)
+            if generation != self._generation:
+                return                     # superseded while compiling
+            self._compiled_result = (generation, results)
+            callback = self.on_ready
+            if callback is not None:
+                try:
+                    callback()
+                except Exception:
+                    pass
+        threading.Thread(target=run, name="puikit-shader-compile", daemon=True).start()
         return True
+
+    @property
+    def compiling(self) -> bool:
+        """True while a background compile (``set_shader(wait=False)``) runs."""
+        return self._pending is not None
+
+    def _adopt_pending(self) -> None:
+        """On the drawing thread: take a finished background compile, if any."""
+        if self._pending is None or self._compiled_result is None:
+            return
+        generation, shader, plan, jobs = self._pending
+        done_generation, results = self._compiled_result
+        self._pending = self._compiled_result = None
+        if done_generation != generation:
+            return
+        if not self._adopt(shader, plan, jobs, results):
+            sys.stderr.write(f"[puikit] background shader failed to compile: {self._error}\n")
+
+    def _adopt(self, shader: Any, plan: Any, jobs: list,
+               results: "list[tuple[bytes | None, str]]") -> bool:
+        """Create the GPU objects for compiled ``results`` (one per job: the
+        vertex shader, then a pixel shader per entry) and make ``plan`` current."""
+        for (_src, entry, _target), (code, err) in zip(jobs, results):
+            if code is None:
+                self._error = err or f"could not compile {entry}"
+                self._release_graph()
+                return False
+        vs_code = results[0][0]
+        if self._vs is None:
+            self._vs = self._create_shader(_IDX_DEV_CREATE_VERTEX_SHADER, vs_code)
+            if self._vs is None:
+                self._error = "CreateVertexShader failed"
+                return False
+        for (_src, entry, _target), (code, _err) in zip(jobs[1:], results[1:]):
+            ps = self._create_shader(_IDX_DEV_CREATE_PIXEL_SHADER, code)
+            if ps is None:
+                self._error = f"CreatePixelShader failed for {entry}"
+                self._release_graph()
+                return False
+            self._pixel[entry] = ps
+        if self._pass_cb is None:
+            self._pass_cb = self._create_cbuffer(_bg_graph.PASS_UNIFORM_BYTES)
+        if plan.targets and self._target_sampler is None:
+            self._target_sampler = self._create_sampler("clamp", "clamp", mipmaps=False)
+        if self._pass_cb is None or (plan.targets and self._target_sampler is None):
+            self._error = "could not create the passes' GPU objects"
+            self._release_graph()
+            return False
+        for j, target in enumerate(plan.targets):
+            if target.size is not None:
+                made = self._make_target(target, *target.extent(0, 0))
+                if made is None:
+                    self._error = f"could not create target {target.name!r}"
+                    self._release_graph()
+                    return False
+                self._fixed[j] = made
+        self._plan = plan
+        self._sync_textures(shader)
+        self._bake_work = _bg_graph.once_work(plan)
+        self._bake_next = 0
+        return True
+
+    def _release_graph(self) -> None:
+        """Drop the pixel shaders and targets of the current graph."""
+        for ps in self._pixel.values():
+            ps.release()
+        self._pixel = {}
+        for targets in (self._fixed, self._sized):
+            for entry in targets.values():
+                for obj in entry[:3]:
+                    if obj is not None:
+                        obj.release()
+        self._fixed, self._sized, self._sized_for = {}, {}, (0, 0)
+        self._plan = None
+        self._bake_work, self._bake_next = [], 0
+
+    # --- targets -----------------------------------------------------------
+
+    def _make_target(self, target: Any, width: int, height: int, depth: int) -> "tuple | None":
+        """A render target that is also read: (texture, rtv, srv, extent); a 3D
+        one has no rtv of its own (see _slice_view)."""
+        fmt = TARGET_FORMATS[target.format]
+        if target.is_3d:
+            desc3 = _D3D11_TEXTURE3D_DESC(
+                Width=width, Height=height, Depth=depth, MipLevels=1, Format=fmt,
+                Usage=_USAGE_DEFAULT, BindFlags=_BIND_RENDER_TARGET | _BIND_SHADER_RESOURCE,
+                CPUAccessFlags=0, MiscFlags=0)
+            out = ctypes.c_void_p()
+            hr = self._device.call(_IDX_DEV_CREATE_TEXTURE3D, ctypes.c_int32,
+                                   [ctypes.POINTER(_D3D11_TEXTURE3D_DESC), ctypes.c_void_p,
+                                    ctypes.POINTER(ctypes.c_void_p)],
+                                   ctypes.byref(desc3), None, ctypes.byref(out))
+            if not hresult_ok(hr):
+                return None
+            tex, rtv = ComPtr(out.value or 0), None
+        else:
+            desc = _D3D11_TEXTURE2D_DESC(
+                Width=width, Height=height, MipLevels=1, ArraySize=1, Format=fmt,
+                SampleDesc=native.DXGI_SAMPLE_DESC(1, 0), Usage=_USAGE_DEFAULT,
+                BindFlags=_BIND_RENDER_TARGET | _BIND_SHADER_RESOURCE, CPUAccessFlags=0,
+                MiscFlags=0,
+            )
+            tex = self._create_texture(desc)
+            if tex is None:
+                return None
+            rtv = self._create_view(_IDX_DEV_CREATE_RENDER_TARGET_VIEW, tex)
+            if rtv is None:
+                tex.release()
+                return None
+        srv = self._create_view(_IDX_DEV_CREATE_SHADER_RESOURCE_VIEW, tex)
+        if srv is None:
+            for obj in (rtv, tex):
+                if obj is not None:
+                    obj.release()
+            return None
+        return (tex, rtv, srv, (width, height, depth))
+
+    def _slice_view(self, tex: ComPtr, fmt: str, z: int) -> "ComPtr | None":
+        """A render-target view of slice ``z`` of a 3D target."""
+        desc = _D3D11_TEX3D_RTV_DESC(Format=TARGET_FORMATS[fmt],
+                                     ViewDimension=_RTV_DIMENSION_TEXTURE3D,
+                                     MipSlice=0, FirstWSlice=z, WSize=1)
+        out = ctypes.c_void_p()
+        hr = self._device.call(_IDX_DEV_CREATE_RENDER_TARGET_VIEW, ctypes.c_int32,
+                               [ctypes.c_void_p, ctypes.POINTER(_D3D11_TEX3D_RTV_DESC),
+                                ctypes.POINTER(ctypes.c_void_p)],
+                               tex.addr, ctypes.byref(desc), ctypes.byref(out))
+        return ComPtr(out.value or 0) if hresult_ok(hr) else None
+
+    def _ensure_targets(self, width: int, height: int) -> bool:
+        """The targets sized from the drawable, rebuilt only when it changes."""
+        if self._sized_for == (width, height):
+            return True
+        for entry in self._sized.values():
+            for obj in entry[:3]:
+                if obj is not None:
+                    obj.release()
+        self._sized = {}
+        for j, target in enumerate(self._plan.targets):
+            if target.size is None:
+                made = self._make_target(target, *target.extent(width, height))
+                if made is None:
+                    self._error = f"could not create target {target.name!r}"
+                    return False
+                self._sized[j] = made
+        self._sized_for = (width, height)
+        return True
+
+    def _target_entry(self, j: int) -> tuple:
+        return self._fixed[j] if j in self._fixed else self._sized[j]
+
+    # --- passes ------------------------------------------------------------
+
+    def _bake(self, block: bool) -> bool:
+        """Run the next slices of the once passes; True once all are done (see
+        _metal.MetalBackground._bake)."""
+        budget = len(self._bake_work) if block else _bg_graph.BAKE_SLICES_PER_FRAME
+        while budget > 0 and self._bake_next < len(self._bake_work):
+            step, z = self._bake_work[self._bake_next]
+            target = self._fixed[step.output]
+            fmt = self._plan.targets[step.output].format
+            rtv = self._slice_view(target[0], fmt, z) if target[1] is None else target[1]
+            if rtv is None:
+                self._error = "a target slice's render-target view failed"
+                self._bake_work = []
+                return False
+            self._run(step, rtv, target[3], z)
+            if target[1] is None:
+                rtv.release()
+            self._bake_next += 1
+            budget -= 1
+        return self._bake_next >= len(self._bake_work)
+
+    def _run(self, step: Any, rtv: ComPtr, size: "tuple[int, int, int]", slice_: int) -> None:
+        """One pass: ``step``'s pixel shader over ``rtv``, its inputs bound from
+        slot 0 and released after (D3D11 refuses to bind a texture for writing
+        while it is still bound for reading)."""
+        views, samplers, extents = [], [], []
+        for kind, i in step.inputs:
+            if kind == "texture":
+                _tex, view, sampler = self._textures[i]
+                views.append(view)
+                samplers.append(sampler)
+                extents.append(self._texture_sizes[i])
+            else:
+                entry = self._target_entry(i)
+                views.append(entry[2])
+                samplers.append(self._target_sampler)
+                extents.append(entry[3])
+        self._write(self._pass_cb, _bg_graph.pass_uniforms(step, size, slice_, extents))
+        self._target(rtv, size[0], size[1])
+        self._bind_textures(views, samplers)
+        self._draw(self._vs, self._pixel[step.entry], self._cbuffer, 0, self._pass_cb)
+        self._unbind_textures(len(views))
+        self._ctx.call(_IDX_CTX_OM_SET_RENDER_TARGETS, None,
+                       [ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p],
+                       0, None, None)
 
     # --- rendering ---------------------------------------------------------
 
     def render_to_texture(self, width: int, height: int, elapsed: float,
-                          fade: float = 1.0) -> Any:
+                          fade: float = 1.0, block: bool = False,
+                          seed: float = 0.0, seed_prev: float | None = None,
+                          seed_mix: float = 1.0, pixel_scale: float = 1.0) -> Any:
         """Draw one frame into the (recreated-on-resize) offscreen texture and
         return its ``ComPtr``, or ``None`` when there is nothing to draw. The
         texture is owned by this object and reused across frames — the caller must
@@ -378,49 +812,67 @@ class D3DShaderBackground:
 
         ``fade`` scales the descriptor's opacity (see ``_write_uniforms``), which
         is how a scene declaring ``idle="fade"`` dissolves away when the app parks
-        it."""
-        if self._ps is None or not self.available:
+        it.
+
+        Until the scene's textures are on the GPU (and for good if they failed to
+        load) the frame is the bare backdrop; ``block`` waits for the decode
+        instead, for the window-free path."""
+        self._adopt_pending()
+        if self._plan is None or not self.available:
             return None
         width, height = max(1, int(width)), max(1, int(height))
         if not self._ensure_texture(width, height):
             return None
+        # This backend renders the background inside the UI's own frame, so every
+        # repaint -- a key press, a scroll -- would pay for a whole scene. When
+        # nothing the shader sees has changed since the last complete frame, that
+        # frame is still right: reuse it.
+        key = (id(self._shader), width, height, float(elapsed), float(fade), float(seed),
+               None if seed_prev is None else float(seed_prev), float(seed_mix),
+               float(pixel_scale))
+        if key == self._last_frame:
+            return self._tex
+        # Shader.frame_rate: within the interval, the last frame stands.
+        rate = float(getattr(self._shader, "frame_rate", 0.0) or 0.0)
+        now = time.monotonic()
+        if (rate > 0.0 and fade >= 1.0 and self._last_frame is not None
+                and self._last_frame[1:3] == (width, height)
+                and now - self._last_render < 1.0 / rate):
+            return self._tex
+        self._last_render = now
+        self._last_frame = None
         ctx = self._ctx
-        self._write_uniforms(width, height, elapsed, fade)
-
         clear = _rgba(getattr(self._shader, "backdrop", None), 0.08)
         clear_arr = (ctypes.c_float * 4)(*clear)
         ctx.call(_IDX_CTX_CLEAR_RENDER_TARGET_VIEW, None,
                  [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float)], self._rtv.addr, clear_arr)
-
-        rtvs = (ctypes.c_void_p * 1)(self._rtv.addr)
-        ctx.call(_IDX_CTX_OM_SET_RENDER_TARGETS, None,
-                 [ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p], 1, rtvs, None)
-        vp = _D3D11_VIEWPORT(0.0, 0.0, float(width), float(height), 0.0, 1.0)
-        ctx.call(_IDX_CTX_RS_SET_VIEWPORTS, None,
-                 [ctypes.c_uint32, ctypes.POINTER(_D3D11_VIEWPORT)], 1, ctypes.byref(vp))
+        self._write_uniforms(width, height, elapsed, fade, seed, seed_prev, seed_mix,
+                             pixel_scale)
         ctx.call(_IDX_CTX_RS_SET_STATE, None, [ctypes.c_void_p], self._raster.addr)
-
         ctx.call(_IDX_CTX_IA_SET_INPUT_LAYOUT, None, [ctypes.c_void_p], None)
         ctx.call(_IDX_CTX_IA_SET_PRIMITIVE_TOPOLOGY, None, [ctypes.c_uint32], _TRIANGLELIST)
-        ctx.call(_IDX_CTX_VS_SET_SHADER, None,
-                 [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32], self._vs.addr, None, 0)
-        ctx.call(_IDX_CTX_PS_SET_SHADER, None,
-                 [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32], self._ps.addr, None, 0)
-        cbs = (ctypes.c_void_p * 1)(self._cbuffer.addr)
-        ctx.call(_IDX_CTX_VS_SET_CONSTANT_BUFFERS, None,
-                 [ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)], 0, 1, cbs)
-        ctx.call(_IDX_CTX_PS_SET_CONSTANT_BUFFERS, None,
-                 [ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)], 0, 1, cbs)
-        ctx.call(_IDX_CTX_DRAW, None, [ctypes.c_uint32, ctypes.c_uint32], 3, 0)
+        if (not self._textures_ready(block) or not self._bake(block)
+                or not self._ensure_targets(width, height)):
+            return self._tex
+        for step in self._plan.frame:
+            if step.output is None:
+                self._run(step, self._rtv, (width, height, 1), 0)
+            else:
+                entry = self._target_entry(step.output)
+                self._run(step, entry[1], entry[3], 0)
+        self._last_frame = key
         return self._tex
 
     def render_pixels(self, width: int, height: int, elapsed: float,
-                      fade: float = 1.0) -> "bytearray | None":
+                      fade: float = 1.0, seed: float = 0.0, seed_prev: float | None = None,
+                      seed_mix: float = 1.0, pixel_scale: float = 1.0) -> "bytearray | None":
         """Render one frame and read it back as BGRA bytes (top row first). The
         window-free path used by the tests; copies the render texture into a
         staging texture, maps it, and returns a tightly-packed ``width*height*4``
         buffer."""
-        tex = self.render_to_texture(width, height, elapsed, fade)
+        tex = self.render_to_texture(width, height, elapsed, fade, block=True, seed=seed,
+                                     seed_prev=seed_prev, seed_mix=seed_mix,
+                                     pixel_scale=pixel_scale)
         if tex is None:
             return None
         width, height = max(1, int(width)), max(1, int(height))
@@ -459,10 +911,194 @@ class D3DShaderBackground:
         finally:
             staging.release()
 
+    # --- passes ------------------------------------------------------------
+
+    def _target(self, rtv: ComPtr, width: int, height: int) -> None:
+        rtvs = (ctypes.c_void_p * 1)(rtv.addr)
+        self._ctx.call(_IDX_CTX_OM_SET_RENDER_TARGETS, None,
+                       [ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p],
+                       1, rtvs, None)
+        vp = _D3D11_VIEWPORT(0.0, 0.0, float(width), float(height), 0.0, 1.0)
+        self._ctx.call(_IDX_CTX_RS_SET_VIEWPORTS, None,
+                       [ctypes.c_uint32, ctypes.POINTER(_D3D11_VIEWPORT)], 1, ctypes.byref(vp))
+
+    def _bind_textures(self, views: "list[ComPtr]", samplers: "list[ComPtr]") -> None:
+        if views:
+            arr = (ctypes.c_void_p * len(views))(*[v.addr for v in views])
+            self._ctx.call(_IDX_CTX_PS_SET_SHADER_RESOURCES, None,
+                           [ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)],
+                           0, len(views), arr)
+        if samplers:
+            arr = (ctypes.c_void_p * len(samplers))(*[s.addr for s in samplers])
+            self._ctx.call(_IDX_CTX_PS_SET_SAMPLERS, None,
+                           [ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)],
+                           0, len(samplers), arr)
+
+    def _unbind_textures(self, count: int) -> None:
+        """Clear the shader-resource slots a pass used. D3D11 refuses to bind a
+        texture as a render target while it is still bound for reading, so a
+        target read by one pass must be released before the next writes it."""
+        if count:
+            arr = (ctypes.c_void_p * count)()
+            self._ctx.call(_IDX_CTX_PS_SET_SHADER_RESOURCES, None,
+                           [ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)],
+                           0, count, arr)
+
+    def _draw(self, vs: ComPtr, ps: ComPtr, cbuffer: ComPtr, slot: int,
+              extra: "ComPtr | None" = None) -> None:
+        ctx = self._ctx
+        ctx.call(_IDX_CTX_VS_SET_SHADER, None,
+                 [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32], vs.addr, None, 0)
+        ctx.call(_IDX_CTX_PS_SET_SHADER, None,
+                 [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32], ps.addr, None, 0)
+        bufs = [cbuffer.addr] + ([extra.addr] if extra is not None else [])
+        cbs = (ctypes.c_void_p * len(bufs))(*bufs)
+        ctx.call(_IDX_CTX_VS_SET_CONSTANT_BUFFERS, None,
+                 [ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)],
+                 slot, 1, cbs)
+        ctx.call(_IDX_CTX_PS_SET_CONSTANT_BUFFERS, None,
+                 [ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)],
+                 slot, len(bufs), cbs)
+        ctx.call(_IDX_CTX_DRAW, None, [ctypes.c_uint32, ctypes.c_uint32], 3, 0)
+
+    def _write(self, cbuffer: ComPtr, data: bytes) -> None:
+        buf = ctypes.create_string_buffer(data, len(data))
+        self._ctx.call(_IDX_CTX_UPDATE_SUBRESOURCE, None,
+                       [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p,
+                        ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32],
+                       cbuffer.addr, 0, None, buf, 0, 0)
+
+    # --- textures ----------------------------------------------------------
+
+    def _sync_textures(self, shader: Any) -> None:
+        """Start decoding ``shader``'s textures unless they are the ones already
+        loaded (or loading)."""
+        key = tuple(getattr(shader, "textures", ()) or ())
+        if key == self._texture_key:
+            return
+        self._release_textures()
+        self._texture_key = key
+        self._texture_failed = False
+        self._bake_next = 0                # a bake may read the textures
+        if key:
+            self._load = TextureLoad(key)
+            self._textures = None
+        else:
+            self._load = None
+            self._textures = []
+
+    def _textures_ready(self, block: bool = False) -> bool:
+        """True once every texture is on the GPU; uploads a finished decode here,
+        on the thread that owns the device context. A failed load stays failed
+        (the frame shows the backdrop) until a different texture set is set."""
+        if self._textures is not None:
+            return True
+        if self._texture_failed or self._load is None:
+            return False
+        if block:
+            self._load.wait()
+        if not self._load.done:
+            return False
+        if self._load.failed:
+            self._texture_failed = True
+            self._error = self._load.error
+            sys.stderr.write(f"[puikit] background texture failed: {self._load.error}\n")
+            self._load = None
+            return False
+        uploaded = []
+        for desc, raster in zip(self._load.textures, self._load.rasters):
+            entry = self._upload(desc, raster)
+            if entry is None:
+                for tex, view, sampler in uploaded:
+                    for obj in (sampler, view, tex):
+                        obj.release()
+                self._texture_failed = True
+                self._error = f"texture upload failed: {desc.path}"
+                sys.stderr.write(f"[puikit] background texture failed: {self._error}\n")
+                self._load = None
+                return False
+            uploaded.append(entry)
+        self._textures = uploaded
+        self._texture_sizes = [(r.width, r.height, 1) for r in self._load.rasters]
+        self._load = None
+        return True
+
+    def _upload(self, desc: Any, raster: Any) -> "tuple | None":
+        """One decoded image as (texture, view, sampler). A mipmapped texture is
+        created with the full chain and filled by ``GenerateMips`` on the GPU,
+        which needs it bindable as a render target too."""
+        width, height = raster.width, raster.height
+        mips = bool(desc.mipmaps)
+        tdesc = _D3D11_TEXTURE2D_DESC(
+            Width=width, Height=height, MipLevels=0 if mips else 1, ArraySize=1,
+            Format=_TEX_FORMAT_SRGB if desc.srgb else _TEX_FORMAT,
+            SampleDesc=native.DXGI_SAMPLE_DESC(1, 0), Usage=_USAGE_DEFAULT,
+            BindFlags=_BIND_SHADER_RESOURCE | (_BIND_RENDER_TARGET if mips else 0),
+            CPUAccessFlags=0, MiscFlags=_RESOURCE_MISC_GENERATE_MIPS if mips else 0,
+        )
+        tex = self._create_texture(tdesc)
+        if tex is None:
+            return None
+        data = bytes(raster.data)
+        self._ctx.call(_IDX_CTX_UPDATE_SUBRESOURCE, None,
+                       [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p,
+                        ctypes.c_char_p, ctypes.c_uint32, ctypes.c_uint32],
+                       tex.addr, 0, None, data, width * 4, 0)
+        view = self._create_view(_IDX_DEV_CREATE_SHADER_RESOURCE_VIEW, tex)
+        sampler = self._create_sampler(desc.wrap_u, desc.wrap_v, mips)
+        if view is None or sampler is None:
+            for obj in (sampler, view, tex):
+                if obj is not None:
+                    obj.release()
+            return None
+        if mips:
+            self._ctx.call(_IDX_CTX_GENERATE_MIPS, None, [ctypes.c_void_p], view.addr)
+        return (tex, view, sampler)
+
+    def _release_textures(self) -> None:
+        for tex, view, sampler in self._textures or ():
+            for obj in (sampler, view, tex):
+                obj.release()
+        self._textures = []
+        self._texture_sizes = []
+        self._texture_key = ()
+        self._load = None
+
+    def _create_sampler(self, wrap_u: str, wrap_v: str, mipmaps: bool) -> "ComPtr | None":
+        desc = _D3D11_SAMPLER_DESC(
+            Filter=_FILTER_MIN_MAG_MIP_LINEAR, AddressU=_ADDRESS[wrap_u],
+            AddressV=_ADDRESS[wrap_v], AddressW=_ADDRESS["clamp"], MipLODBias=0.0,
+            MaxAnisotropy=1, ComparisonFunc=_COMPARISON_NEVER,
+            BorderColor=(ctypes.c_float * 4)(0.0, 0.0, 0.0, 0.0), MinLOD=0.0,
+            MaxLOD=_FLOAT32_MAX if mipmaps else 0.0,
+        )
+        out = ctypes.c_void_p()
+        hr = self._device.call(_IDX_DEV_CREATE_SAMPLER_STATE, ctypes.c_int32,
+                               [ctypes.POINTER(_D3D11_SAMPLER_DESC), ctypes.POINTER(ctypes.c_void_p)],
+                               ctypes.byref(desc), ctypes.byref(out))
+        return ComPtr(out.value or 0) if hresult_ok(hr) else None
+
+    def _create_texture(self, desc: _D3D11_TEXTURE2D_DESC) -> "ComPtr | None":
+        out = ctypes.c_void_p()
+        hr = self._device.call(_IDX_DEV_CREATE_TEXTURE2D, ctypes.c_int32,
+                               [ctypes.POINTER(_D3D11_TEXTURE2D_DESC), ctypes.c_void_p,
+                                ctypes.POINTER(ctypes.c_void_p)],
+                               ctypes.byref(desc), None, ctypes.byref(out))
+        return ComPtr(out.value or 0) if hresult_ok(hr) else None
+
+    def _create_view(self, index: int, tex: ComPtr) -> "ComPtr | None":
+        """A render-target or shader-resource view of ``tex`` covering all of it
+        (a null description takes the whole resource, every mip included)."""
+        out = ctypes.c_void_p()
+        hr = self._device.call(index, ctypes.c_int32,
+                               [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)],
+                               tex.addr, None, ctypes.byref(out))
+        return ComPtr(out.value or 0) if hresult_ok(hr) else None
+
     # --- internals ---------------------------------------------------------
 
-    def _create_cbuffer(self) -> "ComPtr | None":
-        desc = _D3D11_BUFFER_DESC(UNIFORM_BYTES, _USAGE_DEFAULT, _BIND_CONSTANT_BUFFER, 0, 0, 0)
+    def _create_cbuffer(self, size: int = UNIFORM_BYTES) -> "ComPtr | None":
+        desc = _D3D11_BUFFER_DESC(size, _USAGE_DEFAULT, _BIND_CONSTANT_BUFFER, 0, 0, 0)
         out = ctypes.c_void_p()
         hr = self._device.call(_IDX_DEV_CREATE_BUFFER, ctypes.c_int32,
                                [ctypes.POINTER(_D3D11_BUFFER_DESC), ctypes.c_void_p,
@@ -531,7 +1167,8 @@ class D3DShaderBackground:
         return True
 
     def _write_uniforms(self, width: float, height: float, elapsed: float,
-                        fade: float = 1.0) -> None:
+                        fade: float = 1.0, seed: float = 0.0, seed_prev: float | None = None,
+                        seed_mix: float = 1.0, pixel_scale: float = 1.0) -> None:
         shader = self._shader
         buf = (ctypes.c_float * (UNIFORM_BYTES // 4))()
         buf[0], buf[1] = float(width), float(height)
@@ -541,6 +1178,10 @@ class D3DShaderBackground:
         buf[3] = float(getattr(shader, "opacity", 1.0)) * float(fade)
         buf[4:8] = _rgba(getattr(shader, "ink", None), 0.85)
         buf[8:12] = _rgba(getattr(shader, "backdrop", None), 0.08)
+        buf[12] = float(seed)
+        buf[13] = float(seed if seed_prev is None else seed_prev)
+        buf[14] = float(seed_mix)
+        buf[15] = float(pixel_scale)
         # UpdateSubresource writes the whole buffer (no box), the simplest of the
         # constant-buffer update paths and fine at 48 bytes once per frame.
         self._ctx.call(_IDX_CTX_UPDATE_SUBRESOURCE, None,

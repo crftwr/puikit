@@ -184,3 +184,259 @@ class TestBackendGate:
         # (background_3d was the non-shader 3D feature, removed in 9fe7538.)
         assert b.capabilities.supports("background")
         assert b.capabilities.supports("background_shader") == HAVE_D3D_SHADER
+
+
+
+# --- textures, passes, the bake, frame reuse -------------------------------------
+
+#: Samples texture 0 at the frame's centre — the twin of test_background_passes.
+SAMPLE_HLSL = """
+Texture2D t : register(t0);
+SamplerState s : register(s0);
+float4 puikit_bg_fragment(float4 pos : SV_Position) : SV_Target {
+    return float4(t.SampleLevel(s, float2(0.5, 0.5), 0).rgb, 1.0);
+}
+"""
+
+#: The twin of CHAIN_MSL: split into a half-size target, scale by params, show.
+#: The two inputs share t0/s0, as passes may.
+CHAIN_HLSL = """
+Texture2D half_in : register(t0);
+Texture2D scaled_in : register(t0);
+SamplerState s : register(s0);
+float4 split(float4 pos : SV_Position) : SV_Target {
+    return float4(pos.x < pass_target.x * 0.5 ? 0.25 : 0.75, pass_target.x / 255.0, 0.0, 1.0);
+}
+float4 scale(float4 pos : SV_Position) : SV_Target {
+    float4 c = half_in.SampleLevel(s, pos.xy / pass_target.xy, 0);
+    return float4(c.r * pass_params.x, c.g, pass_inputs[0].x / 255.0, 1.0);
+}
+float4 show(float4 pos : SV_Position) : SV_Target {
+    return scaled_in.SampleLevel(s, pos.xy / pass_target.xy, 0);
+}
+"""
+
+VOLUME_HLSL = """
+Texture3D v : register(t0);
+SamplerState s : register(s0);
+float4 bake(float4 pos : SV_Position) : SV_Target {
+    return float4(pos.x / pass_target.x, pos.y / pass_target.y,
+                  (pass_target.w + 0.5) / pass_target.z, 1.0);
+}
+float4 show(float4 pos : SV_Position) : SV_Target {
+    float2 uv = pos.xy / resolution;
+    return float4(v.SampleLevel(s, float3(uv, uv.x), 0).rgb, 1.0);
+}
+"""
+
+
+def _png(tmp_path, name, rgb):
+    Image = pytest.importorskip("PIL.Image")
+    path = tmp_path / name
+    Image.new("RGB", (8, 8), rgb).save(path)
+    return str(path)
+
+
+def _rgb(px, width, x, y):
+    i = (y * width + x) * 4
+    return (px[i + 2], px[i + 1], px[i])
+
+
+class TestTextures:
+
+    def test_a_texture_is_sampled(self, tmp_path):
+        r = D3DShaderBackground()
+        assert r.set_shader(Shader(source="", source_hlsl=SAMPLE_HLSL,
+                                   textures=[_png(tmp_path, "red.png", (200, 0, 0))])), r.error
+        assert _rgb(r.render_pixels(16, 16, 0.0), 16, 8, 8) == (200, 0, 0)
+        r.close()
+
+    def test_an_srgb_texture_samples_linear(self, tmp_path):
+        from puikit.background import ShaderTexture
+        r = D3DShaderBackground()
+        tex = ShaderTexture(_png(tmp_path, "grey.png", (128, 128, 128)), srgb=True)
+        assert r.set_shader(Shader(source="", source_hlsl=SAMPLE_HLSL, textures=[tex])), r.error
+        assert abs(_rgb(r.render_pixels(16, 16, 0.0), 16, 8, 8)[0] - 55) <= 2
+        r.close()
+
+    def test_a_missing_texture_leaves_the_backdrop(self, tmp_path):
+        r = D3DShaderBackground()
+        assert r.set_shader(Shader(source="", source_hlsl=SAMPLE_HLSL, backdrop=(10, 20, 30),
+                                   textures=[str(tmp_path / "missing.png")]))
+        px = r.render_pixels(16, 16, 0.0)
+        assert {_rgb(px, 16, x, y) for x in range(16) for y in range(16)} == {(10, 20, 30)}
+        r.close()
+
+
+class TestPasses:
+
+    def _chain(self):
+        from puikit.background import Pass, Target
+        return Shader(source="", source_hlsl=CHAIN_HLSL,
+                      targets=(Target("half", scale=0.5),
+                               Target("scaled", scale=0.5, format="rgba8")),
+                      passes=(Pass("split", "half"),
+                              Pass("scale", "scaled", inputs=("half",), params=(2.0,)),
+                              Pass("show", inputs=("scaled",))))
+
+    def test_passes_run_in_order_through_their_targets(self):
+        r = D3DShaderBackground()
+        assert r.set_shader(self._chain()), r.error
+        px = r.render_pixels(100, 40, 1.0)
+        assert abs(_rgb(px, 100, 10, 20)[0] - 128) <= 2
+        assert _rgb(px, 100, 90, 20)[0] == 255
+        assert _rgb(px, 100, 10, 20)[1:] == (50, 50)
+        assert _rgb(r.render_pixels(60, 40, 1.0), 60, 10, 20)[1] == 30   # follows a resize
+        r.close()
+
+    def test_a_3d_target_is_baked_and_sampled(self):
+        from puikit.background import Pass, Target
+        r = D3DShaderBackground()
+        assert r.set_shader(Shader(source="", source_hlsl=VOLUME_HLSL,
+                                   targets=(Target("vol", size=(16, 8, 4)),),
+                                   passes=(Pass("bake", "vol", once=True),
+                                           Pass("show", inputs=("vol",))))), r.error
+        px = r.render_pixels(32, 32, 0.0)
+        assert abs(_rgb(px, 32, 16, 16)[0] - 128) < 12
+        assert _rgb(px, 32, 1, 1)[0] < 40 and _rgb(px, 32, 30, 30)[0] > 200
+        r.close()
+
+    def test_a_broken_graph_draws_nothing(self):
+        from puikit.background import Pass
+        r = D3DShaderBackground()
+        assert not r.set_shader(Shader(source="", source_hlsl=CHAIN_HLSL,
+                                       passes=(Pass("show", inputs=("x",)),)))
+        assert "'x'" in r.error
+        assert r.render_to_texture(8, 8, 0.0) is None
+        r.close()
+
+
+class TestFrameReuse:
+
+    def test_an_unchanged_frame_is_reused(self, tmp_path):
+        r = D3DShaderBackground()
+        assert r.set_shader(Shader(source="", source_hlsl=SAMPLE_HLSL,
+                                   textures=[_png(tmp_path, "red.png", (200, 0, 0))]))
+        r.render_pixels(64, 40, 1.0)
+        key = r._last_frame
+        assert key is not None
+        r.render_to_texture(64, 40, 1.0)
+        assert r._last_frame is key                               # not re-rendered
+        r.render_to_texture(64, 40, 2.0)
+        assert r._last_frame is not key
+        r.close()
+
+
+# --- the compile cache and the background compile ---------------------------------
+
+
+@pytest.fixture
+def shader_cache(tmp_path, monkeypatch):
+    """A cache folder of the test's own, and an empty process cache."""
+    from puikit.backends import _d3d_shader as d3d
+    monkeypatch.setenv("PUIKIT_SHADER_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setattr(d3d, "_compiled", {})
+    return tmp_path / "cache"
+
+
+def _unique(body: str) -> str:
+    """``body`` made a source no earlier test compiled."""
+    import uuid
+    return f"// {uuid.uuid4()}\n" + body
+
+
+class TestCompileCache:
+
+    def test_a_compile_is_kept_on_disk_and_read_back(self, shader_cache, monkeypatch):
+        from puikit.backends import _d3d_shader as d3d
+        src = d3d.HLSL_PRELUDE + _unique(FLAT_INK)
+        code, err = d3d.compile_cached(src, "puikit_bg_fragment", "ps_4_0")
+        assert code and not err
+        assert len(list(shader_cache.glob("*.cso"))) == 1
+        monkeypatch.setattr(d3d, "_compiled", {})          # a new process...
+        monkeypatch.setattr(d3d, "_compile", lambda *a: pytest.fail("compiled again"))
+        assert d3d.cached_bytecode(src, "puikit_bg_fragment", "ps_4_0") == code
+
+    def test_the_key_covers_the_source_entry_and_target(self, shader_cache):
+        from puikit.backends import _d3d_shader as d3d
+        keys = {d3d._cache_key("a", "e", "ps_4_0"), d3d._cache_key("b", "e", "ps_4_0"),
+                d3d._cache_key("a", "f", "ps_4_0"), d3d._cache_key("a", "e", "vs_4_0")}
+        assert len(keys) == 4
+
+    def test_a_scene_compiled_before_is_ready_at_once(self, shader_cache, monkeypatch):
+        from puikit.backends import _d3d_shader as d3d
+        shader = Shader(source="", source_hlsl=_unique(FLAT_INK), ink=(200, 100, 50))
+        r = D3DShaderBackground()
+        assert r.set_shader(shader)
+        r.close()
+        monkeypatch.setattr(d3d, "_compile", lambda *a: pytest.fail("compiled again"))
+        r = D3DShaderBackground()
+        assert r.set_shader(shader, wait=False) and not r.compiling
+        assert r.render_pixels(8, 8, 0.0)[:3] == bytes((50, 100, 200))
+        r.close()
+
+    def test_disabled_by_the_environment(self, monkeypatch):
+        from puikit.backends import _d3d_shader as d3d
+        monkeypatch.setenv("PUIKIT_SHADER_CACHE", "off")
+        assert d3d.shader_cache_dir() is None
+
+
+def _settle(r, timeout=60.0):
+    """Wait until a background compile has handed its result over."""
+    import time as _time
+    end = _time.monotonic() + timeout
+    while r.compiling and r._compiled_result is None:
+        assert _time.monotonic() < end, "the background compile never finished"
+        _time.sleep(0.01)
+
+
+class TestBackgroundCompile:
+
+    def test_the_backdrop_shows_until_the_scene_is_ready(self, shader_cache, monkeypatch):
+        import threading
+        from puikit.backends import _d3d_shader as d3d
+        gate, ready = threading.Event(), threading.Event()
+        real = d3d._compile
+        monkeypatch.setattr(d3d, "_compile", lambda *a: (gate.wait(60), real(*a))[1])
+        r = D3DShaderBackground()
+        r.on_ready = ready.set
+        shader = Shader(source="", source_hlsl=_unique(FLAT_INK), ink=(200, 100, 50))
+        assert r.set_shader(shader, wait=False) and r.compiling
+        assert r.render_to_texture(8, 8, 0.0) is None          # nothing to draw yet
+        gate.set()
+        assert ready.wait(60)
+        _settle(r)
+        assert r.render_pixels(8, 8, 0.0)[:3] == bytes((50, 100, 200))
+        assert not r.compiling
+        r.close()
+
+    def test_a_superseded_compile_is_dropped(self, shader_cache):
+        r = D3DShaderBackground()
+        assert r.set_shader(Shader(source="", source_hlsl=_unique(FLAT_INK), ink=(200, 0, 0)),
+                            wait=False)
+        assert r.set_shader(Shader(source="", source_hlsl=_unique(FLAT_INK), ink=(0, 0, 200)),
+                            wait=False)
+        _settle(r)
+        assert r.render_pixels(8, 8, 0.0)[:3] == bytes((200, 0, 0))   # BGRA: blue wins
+        r.close()
+
+    def test_a_compile_error_surfaces_when_the_compile_ends(self, shader_cache):
+        r = D3DShaderBackground()
+        assert r.set_shader(Shader(source="", source_hlsl=_unique("this is not hlsl")),
+                            wait=False)
+        _settle(r)
+        assert r.render_to_texture(8, 8, 0.0) is None
+        assert r.error and not r.compiling
+        r.close()
+
+
+def test_the_pixel_scale_uniform_reaches_the_shader():
+    r = D3DShaderBackground()
+    assert r.set_shader(Shader(source="", source_hlsl="""
+float4 puikit_bg_fragment(float4 pos : SV_Position) : SV_Target {
+    return float4(pixel_scale / 4.0, 0.0, 0.0, 1.0);
+}
+"""))
+    px = r.render_pixels(4, 4, 0.0, pixel_scale=2.0)
+    assert abs(px[2] - 128) <= 1                     # BGRA: red is byte 2
+    r.close()

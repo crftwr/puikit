@@ -1760,12 +1760,13 @@ class MarkdownView(Widget):
                 self._draw_selection_row(ctx, y, index, row, theme)
 
         # A pointing hand over a link, so it reads as clickable. The pointer is
-        # taken in widget-local coords (panel pointer minus this widget's screen
-        # origin, as the splitter does) and tested against the visible link
-        # spans gathered above. One intent; resolved per backend.
-        if ctx.panel is not None and ctx.panel.pointer is not None:
+        # taken in widget-local coords (the pointer minus this widget's screen
+        # origin) and tested against the visible link spans gathered above.
+        # One intent; resolved per backend.
+        pointer = ctx.pointer
+        if pointer is not None:
             sx, sy, _sw, _sh = ctx.screen_rect
-            lx, ly = ctx.panel.pointer[0] - sx, ctx.panel.pointer[1] - sy
+            lx, ly = pointer[0] - sx, pointer[1] - sy
             if any(x0 <= lx < x1 and y0 <= ly < y1 for x0, y0, x1, y1, _ in self._link_hits):
                 ctx.set_cursor("pointer")
 

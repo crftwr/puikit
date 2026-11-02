@@ -129,6 +129,7 @@ import objc
 from PyObjCTools import AppHelper
 
 from ..background import Shader, Wallpaper
+from ._bg_seed import SceneSeed
 from . import _screen_mark
 from ._drop_policy import drop_operation_macos
 from ._metal import HAVE_METAL as _HAS_METAL, MetalBackground, PIXEL_FORMAT as _METAL_PIXEL_FORMAT
@@ -540,6 +541,8 @@ def _with_cjk_faux_bold(ns_text: Any, text: str) -> Any:
 # above the run count of any single frame so steady-state UIs never evict, yet
 # small enough that a flood of unique text stays a bounded blip.
 _ATTR_CACHE_MAX = 8192
+#: measure_text answers kept by (text, style) (see measure_text).
+_MEASURE_MEMO_MAX = 8192
 
 # Formal NSTextInputClient conformance: adopting the protocol makes PyObjC
 # apply Apple's own method signatures (NSRange struct args, the CGRect return
@@ -1984,6 +1987,8 @@ class MacOSBackend(Backend):
         # wall-clock: it advances only by what was actually drawn (dt x the current
         # rate), so a background that coasted to a stop and parked resumes exactly
         # where it left off instead of jumping ahead by the idle stretch.
+        # Render pixels per point the shader layer is drawn at (see _fit_shader_layer).
+        self._shader_pixel_scale: float = 1.0
         self._bg_clock: float = 0.0
         # Current speed, 0..1, eased between by _background_tick; and whether the
         # tick is registered (False once parked, until _dispatch re-arms it).
@@ -1999,6 +2004,9 @@ class MacOSBackend(Backend):
         # _BG_PARK_RETRIES).
         self._bg_park_retries: int = 0
         self._bg_running: bool = False
+        # The ``seed`` uniforms (see puikit.background.SHADER_PRELUDE and
+        # _bg_seed): a fresh composition per background, and one per return.
+        self._bg_seeds = SceneSeed()
         self._bg_last_tick: float = 0.0
         # Loaded NSImage per wallpaper path, so the file is decoded once (not every
         # frame); keyed by the expanded path.
@@ -2045,6 +2053,9 @@ class MacOSBackend(Backend):
         # stream of unique text (a busy log) can never grow them without bound.
         self._attr_cache: dict[tuple, Any] = {}
         self._width_cache: dict[tuple, float] = {}
+        # measure_text's answers by (text, style), in front of the font lookup
+        # it would otherwise repeat per call; dropped whenever fonts change.
+        self._measure_memo: dict[tuple, float] = {}
         # Per-face memo of (advance, ink_x, ink_width) per glyph — what the grid
         # path needs to decide whether it may batch a glyph into a kerned run
         # and, when it may not, how to seat it in its cell (see _grid_batchable
@@ -2624,6 +2635,7 @@ class MacOSBackend(Backend):
         # Build the base font from its Font descriptor, then DERIVE the base
         # unit from its glyph box (base font -> base unit). The base font is
         # monospaced, so its advance and line height are canonical.
+        self._measure_memo.clear()   # widths are in the base unit derived below
         regular = self.resolve_font(self._base_font)
         bold = self.resolve_font(self._base_font, bold=True)
         self._fonts = {TextAttribute.NORMAL: regular, TextAttribute.BOLD: bold}
@@ -2840,6 +2852,19 @@ class MacOSBackend(Backend):
         return bool(bold) and _ensure_cjk_fonts()
 
     def measure_text(self, text: str, style: Style = DEFAULT_STYLE) -> float:
+        """Displayed width of ``text`` in base units — see _measure_text_uncached.
+        A frame measures the same strings in the same few styles many times (a
+        file list elides every name), so the answer is kept by (text, style)."""
+        key = (text, style)
+        width = self._measure_memo.get(key)
+        if width is None:
+            width = self._measure_text_uncached(text, style)
+            if len(self._measure_memo) >= _MEASURE_MEMO_MAX:
+                self._measure_memo.clear()
+            self._measure_memo[key] = width
+        return width
+
+    def _measure_text_uncached(self, text: str, style: Style = DEFAULT_STYLE) -> float:
         """Displayed width in base units. A grid font (an unsized, unnamed
         monospace face) tiles the grid one column per glyph; a real per-Style
         font is measured natively and divided by the base unit width, so the
@@ -3427,7 +3452,11 @@ class MacOSBackend(Backend):
         mark = time.perf_counter() if _BG_PROFILE else 0.0
         drawn = self._metal.render_to_layer(self._metal_layer, self._bg_clock,
                                             _smoothstep(self._bg_fade),
-                                            wait=self._in_live_resize)
+                                            wait=self._in_live_resize,
+                                            seed=self._bg_seeds.seed,
+                                            seed_prev=self._bg_seeds.prev,
+                                            seed_mix=self._bg_seeds.mix,
+                                            pixel_scale=self._shader_pixel_scale)
         if _BG_PROFILE:
             self._bg_profile_tick(time.perf_counter() - mark)
         return drawn
@@ -4372,6 +4401,7 @@ class MacOSBackend(Backend):
             self._bg_clock = 0.0
             self._bg_rate = 1.0
             self._bg_fade = 1.0
+            self._bg_seeds.background_set()
             self._bg_park_retries = 0
             self._bg_running = False
             self._ensure_background_ticker()
@@ -4458,7 +4488,11 @@ class MacOSBackend(Backend):
         # A shader's cost is per pixel, so a scene that declares itself soft enough
         # renders below native resolution and lets the compositor scale it up — on a
         # Retina display that is the difference between affordable and not.
-        shader_scale = getattr(self._background, "resolution_scale", 1.0)
+        background = self._background
+        shader_scale = (background.render_scale(scale) if isinstance(background, Shader)
+                        else getattr(background, "resolution_scale", 1.0))
+        # What the scene is told one point is worth (BackgroundUniforms.pixel_scale).
+        self._shader_pixel_scale = scale * shader_scale
         # Implicit actions off: this layer is app-managed (not view-managed), so a
         # bare setFrame_ would be animated over CA's default quarter second — a
         # layer chasing the window edge through a resize, blank behind it. The
@@ -4534,6 +4568,9 @@ class MacOSBackend(Backend):
         # never jumps: park for ten minutes and it resumes exactly where it
         # stopped, rather than teleporting ten minutes into the scene.
         self._bg_clock += dt * eased
+        # A reseed owed since parking is paid once the app is really in use again
+        # — not on a wake the tick is about to park from (see _bg_seed).
+        self._bg_seeds.tick(dt, self._bg_user_active(now) and not self.reduced_motion)
 
         # A shader owns its own layer *behind* the UI, so advancing it does not
         # touch a single UI pixel — draw straight into that layer and leave the
@@ -4560,6 +4597,7 @@ class MacOSBackend(Backend):
             # timer open forever — the point of parking is the battery.
             if drawn or self._bg_park_retries >= _BG_PARK_RETRIES:
                 self._bg_running = False
+                self._bg_seeds.parked()
                 return False
             self._bg_park_retries += 1
             return True

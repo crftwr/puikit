@@ -199,10 +199,10 @@ class _DropDownPopup(Widget):
         self._row_h = 1.0  # row height in base units, captured at draw
 
     def _hover_row(self, ctx: DrawContext) -> int | None:
-        panel = ctx.panel
-        if panel is None or panel.pointer is None:
+        pointer = ctx.pointer
+        if pointer is None:
             return None
-        px, py = panel.pointer
+        px, py = pointer
         rx, ry, rw, rh = ctx.screen_rect
         if not (rx <= px < rx + rw and ry <= py < ry + rh):
             return None

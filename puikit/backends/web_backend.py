@@ -909,16 +909,21 @@ class WebBackend(Backend):
             "ink": _rgba01(bg.ink, (255, 255, 255)),
             "backdrop": _rgba01(bg.backdrop, (10, 10, 14)),
             "resolution_scale": float(bg.resolution_scale),
+            "pixel_density": float(bg.pixel_density),
             "reduced_motion": self.reduced_motion,
         }))
 
     def _shader_program(self) -> str | None:
         """The active shader's GLSL program, or None when nothing renders on web
-        (no background, not a Shader, no ``source_glsl``, or a no-op)."""
+        (no background, not a Shader, no ``source_glsl``, or a no-op).
+
+        Nor for a scene that needs textures or passes: the web client binds
+        neither yet, and a scene run without its inputs would draw garbage (an
+        unbound sampler, a pass's output missing) rather than the plain backdrop."""
         from ..background import Shader
 
         bg = self._background
-        if isinstance(bg, Shader) and not bg.is_noop:
+        if isinstance(bg, Shader) and not bg.is_noop and not bg.textures and not bg.passes:
             return bg.program_glsl
         return None
 

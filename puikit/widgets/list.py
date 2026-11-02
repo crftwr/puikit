@@ -192,9 +192,10 @@ class ListView(Widget):
         # A pointing hand over a selectable row (within the content, not the
         # scrollbar column), matching the click hit-test below. One intent;
         # resolved per backend.
-        if ctx.panel is not None and ctx.panel.pointer is not None and self.items:
+        pointer = ctx.pointer
+        if pointer is not None and self.items:
             sx, sy, _sw, _sh = ctx.screen_rect
-            lx, ly = ctx.panel.pointer[0] - sx, ctx.panel.pointer[1] - sy
+            lx, ly = pointer[0] - sx, pointer[1] - sy
             row_index = int((self.offset + ly) / self._row_h)
             if 0 <= lx < fill_w and 0 <= ly < view_h and 0 <= row_index < len(self.items):
                 ctx.set_cursor("pointer")
