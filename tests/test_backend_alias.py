@@ -19,13 +19,22 @@ def test_tui_is_the_vt_backend_everywhere(monkeypatch, platform):
     assert isinstance(create_backend("tui"), VTBackend)
 
 
-def test_curses_stays_reachable_as_the_escape_hatch(monkeypatch):
+def test_curses_stays_reachable_as_the_escape_hatch_until_2_0(monkeypatch):
     # For the terminals the VT console's xterm-dialect assumption mishandles
-    # (TERM=linux consoles, serial lines).
-    monkeypatch.setattr("sys.platform", "win32")
-    assert isinstance(create_backend("curses"), CursesBackend)
+    # (TERM=linux consoles, serial lines) -- deprecated, naming the VT backend
+    # and the release that removes it.
     monkeypatch.setattr("sys.platform", "linux")
-    assert isinstance(create_backend("curses"), CursesBackend)
+    with pytest.warns(DeprecationWarning, match=r'curses backend.*PuiKit 2\.0.*"tui"'):
+        assert isinstance(create_backend("curses"), CursesBackend)
+
+
+def test_curses_is_not_supported_on_windows(monkeypatch):
+    # windows-curses is no longer installed, so _curses is missing there; the
+    # error says what to use instead of a bare "No module named '_curses'".
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setitem(sys.modules, "puikit.backends.curses_backend", None)
+    with pytest.warns(DeprecationWarning), pytest.raises(ImportError, match=r"not supported on Windows.*tui"):
+        create_backend("curses")
 
 
 def test_gui_alias_is_unchanged():

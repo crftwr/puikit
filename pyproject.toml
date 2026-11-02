@@ -49,10 +49,12 @@ dependencies = [
     # only on Windows, so the win32 marker keeps numpy off macOS/Linux base
     # installs, which would never touch it.
     "numpy>=1.21; sys_platform == 'win32'",
-    # windows-curses backports the _curses C extension CPython omits on Windows,
-    # so the curses (TUI) backend runs there out of the box. The marker keeps it
-    # off macOS/Linux, which already ship _curses.
-    "windows-curses>=2.4; sys_platform == 'win32'",
+    # windows-curses is no longer a dependency (1.19.0). It backported _curses
+    # for the curses backend on Windows, which "tui" has not chosen since the
+    # VT backend took over there (PDCurses mis-sizes wide glyphs and swallows
+    # inline images), and it publishes no arm64 wheel and no sdist, so it made
+    # PuiKit uninstallable on native ARM64 Python. The curses backend is not
+    # supported on Windows, and is deprecated everywhere (removed in 2.0).
     # PyObjC powers the macOS native GUI backend. The darwin marker installs it
     # automatically on macOS, so `pip install puikit` yields a working native
     # window out of the box, and keeps it off other platforms (where it cannot

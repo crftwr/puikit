@@ -22,6 +22,12 @@ def _dependencies():
     return {r.name.lower(): r for r in map(requirements.Requirement, deps)}
 
 
+def test_windows_curses_is_not_a_dependency():
+    # It has no arm64 wheel and no sdist, so requiring it made PuiKit
+    # uninstallable on native ARM64 Python on Windows.
+    assert "windows-curses" not in _dependencies()
+
+
 def _env(sys_platform, machine):
     return {"sys_platform": sys_platform, "platform_machine": machine}
 

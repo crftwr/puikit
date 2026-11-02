@@ -8,7 +8,7 @@ did: bump_version.py rewrote pyproject.toml only, which is how 1.0.2 shipped
 with ``__version__`` left behind at 1.0.1.
 
 The literal is read statically (regex, no ``import puikit``) so the release
-tooling never needs the runtime deps — pillow, pyobjc, windows-curses — merely
+tooling never needs the runtime deps — pillow, pyobjc, numpy — merely
 to learn the version. That is the same static approach setuptools itself uses
 to resolve the ``attr`` at build time.
 """
