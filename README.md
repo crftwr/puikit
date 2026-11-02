@@ -53,7 +53,9 @@ Stable release (1.0). Implemented:
   on a parent cascade to all descendants, while children stay individually
   animatable
 - Backends:
-  - `CursesBackend` — TUI, all platforms
+  - `VTBackend` — TUI, all platforms (`"tui"`); owns the terminal directly
+  - `CursesBackend` — TUI escape hatch (`"curses"`) for terminals off the
+    xterm dialect; macOS and Linux only, deprecated, removed in 2.0
   - `MacOSBackend` — macOS native GUI (PyObjC, installed automatically on macOS)
   - `WindowsBackend` — Windows native GUI (raw ctypes; Direct2D/DirectWrite)
   - `WebBackend` — runs in a web browser, launched with `webbrowser` over a
@@ -68,8 +70,8 @@ pip install puikit
 ```
 
 That's all you need — the base install ships a working TUI on every platform,
-and a native window on macOS (PyObjC installs automatically; on Windows the
-curses backport installs automatically). The minimal app below then runs as-is,
+and a native window on macOS (PyObjC installs automatically). The minimal app
+below then runs as-is,
 with no repository checkout required.
 
 Want to see it move right away? The hello-world example is a single

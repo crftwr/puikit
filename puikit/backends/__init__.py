@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sys
 
+from .._deprecation import warn_deprecated
+
 from ..backend import Backend
 
 # PyObjC ships each macOS framework as its own top-level module, and the macOS
@@ -78,11 +80,20 @@ def create_backend(name: str, **kwargs) -> Backend:
         #
         # "curses" remains reachable by name as the escape hatch for the
         # terminals that dialect assumption mishandles (TERM=linux consoles,
-        # serial lines, museum-piece xterms).
+        # serial lines, museum-piece xterms) -- deprecated, and gone in 2.0.
         name = "vt"
     if name == "curses":
-        from .curses_backend import CursesBackend
-
+        warn_deprecated('The curses backend (create_backend("curses"))', use='the VT backend ("tui")',
+                        removed_in="2.0")
+        try:
+            from .curses_backend import CursesBackend
+        except ImportError as e:
+            if sys.platform == "win32":
+                # PuiKit no longer installs windows-curses (see pyproject.toml).
+                raise ImportError(
+                    'The curses backend is not supported on Windows; use the VT backend: '
+                    'create_backend("tui").') from e
+            raise
         return CursesBackend(**kwargs)
     if name == "vt":
         from .vt_backend import VTBackend
