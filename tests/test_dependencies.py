@@ -23,8 +23,7 @@ def _dependencies():
 
 
 def _env(sys_platform, machine):
-    return {"sys_platform": sys_platform, "platform_machine": machine,
-            "platform_system": {"darwin": "Darwin", "linux": "Linux", "win32": "Windows"}[sys_platform]}
+    return {"sys_platform": sys_platform, "platform_machine": machine}
 
 
 @pytest.mark.parametrize("sys_platform, machine", [
@@ -36,6 +35,11 @@ def test_pillow_is_installed_where_it_has_wheels(sys_platform, machine):
     assert _dependencies()["pillow"].marker.evaluate(_env(sys_platform, machine))
 
 
-@pytest.mark.parametrize("machine", ["armv7l", "armv6l", "i686", "ppc64le", "s390x", "riscv64"])
-def test_pillow_is_left_out_where_pip_would_build_it(machine):
-    assert not _dependencies()["pillow"].marker.evaluate(_env("linux", machine))
+@pytest.mark.parametrize("sys_platform, machine", [
+    *[("linux", m) for m in ("armv7l", "armv6l", "i686", "ppc64le", "s390x", "riscv64")],
+    # A machine name with wheels elsewhere, on an OS without them.
+    ("cygwin", "x86_64"), ("msys", "x86_64"), ("freebsd14", "arm64"), ("freebsd14", "amd64"),
+    ("darwin", "aarch64"), ("linux", "AMD64"),
+])
+def test_pillow_is_left_out_where_pip_would_build_it(sys_platform, machine):
+    assert not _dependencies()["pillow"].marker.evaluate(_env(sys_platform, machine))
