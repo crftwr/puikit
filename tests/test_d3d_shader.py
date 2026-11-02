@@ -325,3 +325,118 @@ class TestFrameReuse:
         r.render_to_texture(64, 40, 2.0)
         assert r._last_frame is not key
         r.close()
+
+
+# --- the compile cache and the background compile ---------------------------------
+
+
+@pytest.fixture
+def shader_cache(tmp_path, monkeypatch):
+    """A cache folder of the test's own, and an empty process cache."""
+    from puikit.backends import _d3d_shader as d3d
+    monkeypatch.setenv("PUIKIT_SHADER_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setattr(d3d, "_compiled", {})
+    return tmp_path / "cache"
+
+
+def _unique(body: str) -> str:
+    """``body`` made a source no earlier test compiled."""
+    import uuid
+    return f"// {uuid.uuid4()}\n" + body
+
+
+class TestCompileCache:
+
+    def test_a_compile_is_kept_on_disk_and_read_back(self, shader_cache, monkeypatch):
+        from puikit.backends import _d3d_shader as d3d
+        src = d3d.HLSL_PRELUDE + _unique(FLAT_INK)
+        code, err = d3d.compile_cached(src, "puikit_bg_fragment", "ps_4_0")
+        assert code and not err
+        assert len(list(shader_cache.glob("*.cso"))) == 1
+        monkeypatch.setattr(d3d, "_compiled", {})          # a new process...
+        monkeypatch.setattr(d3d, "_compile", lambda *a: pytest.fail("compiled again"))
+        assert d3d.cached_bytecode(src, "puikit_bg_fragment", "ps_4_0") == code
+
+    def test_the_key_covers_the_source_entry_and_target(self, shader_cache):
+        from puikit.backends import _d3d_shader as d3d
+        keys = {d3d._cache_key("a", "e", "ps_4_0"), d3d._cache_key("b", "e", "ps_4_0"),
+                d3d._cache_key("a", "f", "ps_4_0"), d3d._cache_key("a", "e", "vs_4_0")}
+        assert len(keys) == 4
+
+    def test_a_scene_compiled_before_is_ready_at_once(self, shader_cache, monkeypatch):
+        from puikit.backends import _d3d_shader as d3d
+        shader = Shader(source="", source_hlsl=_unique(FLAT_INK), ink=(200, 100, 50))
+        r = D3DShaderBackground()
+        assert r.set_shader(shader)
+        r.close()
+        monkeypatch.setattr(d3d, "_compile", lambda *a: pytest.fail("compiled again"))
+        r = D3DShaderBackground()
+        assert r.set_shader(shader, wait=False) and not r.compiling
+        assert r.render_pixels(8, 8, 0.0)[:3] == bytes((50, 100, 200))
+        r.close()
+
+    def test_disabled_by_the_environment(self, monkeypatch):
+        from puikit.backends import _d3d_shader as d3d
+        monkeypatch.setenv("PUIKIT_SHADER_CACHE", "off")
+        assert d3d.shader_cache_dir() is None
+
+
+def _settle(r, timeout=60.0):
+    """Wait until a background compile has handed its result over."""
+    import time as _time
+    end = _time.monotonic() + timeout
+    while r.compiling and r._compiled_result is None:
+        assert _time.monotonic() < end, "the background compile never finished"
+        _time.sleep(0.01)
+
+
+class TestBackgroundCompile:
+
+    def test_the_backdrop_shows_until_the_scene_is_ready(self, shader_cache, monkeypatch):
+        import threading
+        from puikit.backends import _d3d_shader as d3d
+        gate, ready = threading.Event(), threading.Event()
+        real = d3d._compile
+        monkeypatch.setattr(d3d, "_compile", lambda *a: (gate.wait(60), real(*a))[1])
+        r = D3DShaderBackground()
+        r.on_ready = ready.set
+        shader = Shader(source="", source_hlsl=_unique(FLAT_INK), ink=(200, 100, 50))
+        assert r.set_shader(shader, wait=False) and r.compiling
+        assert r.render_to_texture(8, 8, 0.0) is None          # nothing to draw yet
+        gate.set()
+        assert ready.wait(60)
+        _settle(r)
+        assert r.render_pixels(8, 8, 0.0)[:3] == bytes((50, 100, 200))
+        assert not r.compiling
+        r.close()
+
+    def test_a_superseded_compile_is_dropped(self, shader_cache):
+        r = D3DShaderBackground()
+        assert r.set_shader(Shader(source="", source_hlsl=_unique(FLAT_INK), ink=(200, 0, 0)),
+                            wait=False)
+        assert r.set_shader(Shader(source="", source_hlsl=_unique(FLAT_INK), ink=(0, 0, 200)),
+                            wait=False)
+        _settle(r)
+        assert r.render_pixels(8, 8, 0.0)[:3] == bytes((200, 0, 0))   # BGRA: blue wins
+        r.close()
+
+    def test_a_compile_error_surfaces_when_the_compile_ends(self, shader_cache):
+        r = D3DShaderBackground()
+        assert r.set_shader(Shader(source="", source_hlsl=_unique("this is not hlsl")),
+                            wait=False)
+        _settle(r)
+        assert r.render_to_texture(8, 8, 0.0) is None
+        assert r.error and not r.compiling
+        r.close()
+
+
+def test_the_pixel_scale_uniform_reaches_the_shader():
+    r = D3DShaderBackground()
+    assert r.set_shader(Shader(source="", source_hlsl="""
+float4 puikit_bg_fragment(float4 pos : SV_Position) : SV_Target {
+    return float4(pixel_scale / 4.0, 0.0, 0.0, 1.0);
+}
+"""))
+    px = r.render_pixels(4, 4, 0.0, pixel_scale=2.0)
+    assert abs(px[2] - 128) <= 1                     # BGRA: red is byte 2
+    r.close()

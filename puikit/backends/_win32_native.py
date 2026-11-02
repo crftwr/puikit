@@ -341,6 +341,10 @@ _IDX_TEXT_LAYOUT_SET_FONT_COLLECTION = 30
 _IDX_TEXT_LAYOUT_SET_FONT_FAMILY_NAME = 31
 _IDX_TEXT_LAYOUT_GET_LINE_METRICS = 59
 _IDX_TEXT_LAYOUT_GET_METRICS = 60
+_IDX_TEXT_LAYOUT_GET_CLUSTER_METRICS = 62
+# IDWriteTextLayout1 (QueryInterface from a text layout), after IDWriteTextLayout's
+# 67 slots: SetPairKerning[67], GetPairKerning[68], SetCharacterSpacing[69].
+_IDX_TEXT_LAYOUT1_SET_CHARACTER_SPACING = 69
 
 
 class DWRITE_TEXT_RANGE(ctypes.Structure):
@@ -833,6 +837,47 @@ def rt_draw_text_layout(rt: ComPtr, x: float, y: float, layout: ComPtr, brush: C
         [D2D1_POINT_2F, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32],
         D2D1_POINT_2F(x, y), layout.addr, brush.addr, options,
     )
+
+
+class DWRITE_CLUSTER_METRICS(ctypes.Structure):
+    # width, then a UINT16 length and a UINT16 of flag bits: 8 bytes.
+    _fields_ = [("width", ctypes.c_float), ("length", ctypes.c_uint16),
+                ("flags", ctypes.c_uint16)]
+
+
+IID_IDWriteTextLayout1 = GUID.from_str("9064d822-80a7-465c-a986-df65f78b8feb")
+
+
+def text_layout_set_character_spacing(layout: ComPtr, leading: float, trailing: float,
+                                      start: int, length: int) -> None:
+    """IDWriteTextLayout1::SetCharacterSpacing[69] over ``[start, start+length)``:
+    space added before and after every character of the range — DirectWrite's
+    NSKernAttributeName. Takes the IDWriteTextLayout1 a QueryInterface of the
+    layout hands back. ``DWRITE_TEXT_RANGE`` passed BY VALUE."""
+    hr = layout.call(
+        _IDX_TEXT_LAYOUT1_SET_CHARACTER_SPACING, ctypes.c_int32,
+        [ctypes.c_float, ctypes.c_float, ctypes.c_float, DWRITE_TEXT_RANGE],
+        leading, trailing, 0.0, DWRITE_TEXT_RANGE(start, length),
+    )
+    if not hresult_ok(hr):
+        raise OSError(f"SetCharacterSpacing failed: 0x{hr & 0xFFFFFFFF:08x}")
+
+
+def text_layout_cluster_widths(layout: ComPtr, max_clusters: int) -> "list[float] | None":
+    """The advance of each cluster of a single-line layout, in order —
+    IDWriteTextLayout::GetClusterMetrics[62] — or None if there are more than
+    ``max_clusters`` (a glyph sequence shaped into more clusters than the caller
+    counted is not one it can place)."""
+    metrics = (DWRITE_CLUSTER_METRICS * max(1, max_clusters))()
+    actual = ctypes.c_uint32()
+    hr = layout.call(
+        _IDX_TEXT_LAYOUT_GET_CLUSTER_METRICS, ctypes.c_int32,
+        [ctypes.POINTER(DWRITE_CLUSTER_METRICS), ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32)],
+        metrics, max(1, max_clusters), ctypes.byref(actual),
+    )
+    if not hresult_ok(hr):
+        return None
+    return [metrics[i].width for i in range(actual.value)]
 
 
 def text_layout_get_metrics(layout: ComPtr) -> DWRITE_TEXT_METRICS:
@@ -2132,6 +2177,8 @@ user32.InvalidateRect.argtypes = [HWND, ctypes.c_void_p, wintypes.BOOL]
 user32.DestroyWindow.argtypes = [HWND]
 user32.ShowWindow.argtypes = [HWND, ctypes.c_int]
 user32.UpdateWindow.argtypes = [HWND]
+user32.GetUpdateRect.argtypes = [HWND, ctypes.c_void_p, wintypes.BOOL]
+user32.GetUpdateRect.restype = wintypes.BOOL
 user32.SetWindowTextW.argtypes = [HWND, ctypes.c_wchar_p]
 
 user32.SetTimer.restype = ctypes.c_void_p

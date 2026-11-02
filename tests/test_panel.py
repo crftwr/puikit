@@ -833,6 +833,87 @@ def test_cursor_intent_is_not_pushed_without_capability():
     assert calls == []
 
 
+# --- which pointer moves need a redraw (Panel.dispatch_event for MOUSE_MOVE) ---
+
+
+class _PlainWidget(Widget):
+    """Draws the same whatever the pointer does."""
+
+    def draw(self, ctx):
+        ctx.draw_text(0, 0, "plain")
+
+
+class _FollowWidget(Widget):
+    """Draws where the pointer is within it (a list's hovered row)."""
+
+    def draw(self, ctx):
+        ctx.pointer
+
+
+class _BandWidget(Widget):
+    """Lights a two-column band at x 4..6 (a splitter's grab zone)."""
+
+    def draw(self, ctx):
+        ctx.pointer_in(4, 0, 2, 3)
+
+
+class _RawPointerWidget(Widget):
+    """Reads Panel.pointer directly — the Panel cannot tell what it did."""
+
+    def draw(self, ctx):
+        ctx.panel.pointer
+
+
+def _moves(widget, *points):
+    """Render once, then report for each move whether the Panel asks a redraw."""
+    panel = Panel(MemoryBackend(width=40, height=8))
+    panel.add(widget, x=0, y=0, w=10, h=3)
+    panel.render()
+    return [panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=x, y=y))
+            for x, y in points]
+
+
+def test_a_move_nothing_drew_from_needs_no_redraw():
+    assert _moves(_PlainWidget(), (1.0, 1.0), (2.0, 1.0), (30.0, 6.0)) == [False] * 3
+
+
+def test_hover_redraws_only_when_the_pointer_crosses_the_widget_edge():
+    # outside -> inside, inside -> inside, inside -> outside, outside -> outside
+    assert _moves(_CursorWidget(), (2.0, 1.0), (3.0, 2.0), (15.0, 1.0), (20.0, 4.0)) \
+        == [True, False, True, False]
+
+
+def test_a_followed_widget_redraws_on_every_move_over_it():
+    assert _moves(_FollowWidget(), (2.0, 1.0), (3.0, 1.0), (15.0, 1.0), (20.0, 1.0)) \
+        == [True, True, True, False]
+
+
+def test_a_sub_rect_redraws_only_across_its_own_edge():
+    assert _moves(_BandWidget(), (1.0, 1.0), (4.5, 1.0), (5.0, 2.0), (8.0, 1.0)) \
+        == [False, True, False, True]
+
+
+def test_a_direct_panel_pointer_read_redraws_on_any_move():
+    # Conservative for code that has not moved to ctx.pointer: correct, not cheap.
+    assert _moves(_RawPointerWidget(), (30.0, 6.0), (31.0, 6.0)) == [True, True]
+
+
+def test_the_pointer_leaving_the_window_counts_as_crossing():
+    assert _moves(_CursorWidget(), (2.0, 1.0), (-1.0, -1.0))[1] is True
+
+
+def test_a_splitter_redraws_near_its_handle_not_over_its_panes():
+    from puikit.widgets import Splitter
+    panel = Panel(MemoryBackend(width=40, height=8))
+    panel.add(Splitter(_PlainWidget(), _PlainWidget()), x=0, y=0, w=40, h=8)
+    panel.render()
+    def move(x):
+        return panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=x, y=3.0))
+    assert [move(3.0), move(6.0), move(33.0)] == [False, False, False]   # over the panes
+    assert move(20.0) is True                                             # onto the handle
+    assert move(3.0) is True                                              # and off it
+
+
 class _AlwaysCursorWidget(Widget):
     """An underlying widget that claims a cursor on every frame regardless of
     the pointer (e.g. a pane splitter's resize affordance)."""
@@ -960,3 +1041,46 @@ def test_remove_layer_removes_by_identity_wherever_it_sits():
     assert panel.remove_layer(below) is False
     assert panel.remove_layer(above) is True
     assert panel._layers == []
+
+
+# --- the resolved-style memo (DrawContext._resolve / _text_style) -----------
+
+
+def _ctx(panel, background=None, caps=None):
+    from puikit.panel import DrawContext, Rect
+    backend = panel.backend
+    return DrawContext(backend, Rect(0, 0, 10, 3), caps or backend.capabilities,
+                       panel=panel, background=background)
+
+
+def _fresh(ctx, method, *args):
+    """What the memoized method computes with the memo out of the way."""
+    return getattr(ctx, method + "_uncached")(*args)
+
+
+def test_the_style_memo_answers_what_resolving_would():
+    panel = Panel(MemoryBackend(width=40, height=8, capabilities=PROFILE_GUI_DESKTOP))
+    styles = [Style(), Style(fg=(10, 20, 30)), Style(bg=(1, 2, 3)),
+              Style(attr=TextAttribute.BOLD | TextAttribute.REVERSE),
+              Style(font=Font(family="X", size=12)), Style(fg=(9, 9, 9), bg=(40, 50, 60))]
+    for background in (None, (40, 50, 60), (250, 250, 250)):
+        ctx = _ctx(panel, background)
+        for auto_ink in (False, True):
+            panel.auto_ink = auto_ink
+            for style in styles:
+                for _ in range(2):                          # a miss, then a hit
+                    assert ctx._resolve(style) == _fresh(ctx, "_resolve", style)
+                    for ink in (True, False):
+                        assert ctx._text_style(style, ink) == _fresh(ctx, "_text_style", style, ink)
+    assert panel._style_memo                                  # it did remember
+
+
+def test_the_style_memo_follows_the_theme_and_the_capabilities():
+    panel = Panel(MemoryBackend(width=40, height=8, capabilities=PROFILE_GUI_DESKTOP))
+    ctx = _ctx(panel)
+    before = ctx._text_style(Style())
+    import dataclasses
+    panel.theme = dataclasses.replace(panel.theme, text=(1, 2, 3))
+    assert ctx._text_style(Style()).fg == (1, 2, 3) != before.fg
+    tui = _ctx(panel, caps=PROFILE_TUI)
+    assert tui._resolve(Style(font=Font(family="X"))) == _fresh(tui, "_resolve", Style(font=Font(family="X")))

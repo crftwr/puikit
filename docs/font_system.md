@@ -396,7 +396,11 @@ Placing every glyph in its own call is always correct and always slowest, so
 the grid path batches: a contiguous run of glyphs goes out as **one** string,
 positioned by the text engine's own advances (macOS corrects the base face's
 advance to the rounded-up base unit with a constant kern; the web emits one
-`fillText` per cell). Windows does not batch at all — one `DrawText` per glyph.
+`fillText` per cell). Windows does what macOS does with DirectWrite's character
+spacing (`IDWriteTextLayout1::SetCharacterSpacing`, trailing = base unit −
+advance): a run is one cached text layout and one `DrawTextLayout`; a run whose
+clusters the face does not advance evenly (a fallback glyph) is refused and
+drawn one `DrawText` per glyph, as before.
 
 Batching is sound **only for glyphs the resolved face advances by exactly one
 base unit**, and that is narrower than "display width 1". Two ordinary kinds of

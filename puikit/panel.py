@@ -152,6 +152,11 @@ def _composite(color, base):
     )
 
 
+#: Resolved styles kept per Panel (see DrawContext._resolve): far more than the
+#: distinct styles a frame uses, few enough to forget a theme switched away from.
+_STYLE_MEMO_MAX = 4096
+
+
 def _intersect(a: Rect, b: Rect) -> Rect | None:
     x0, y0 = max(a.x, b.x), max(a.y, b.y)
     x1 = min(a.x + a.w, b.x + b.w)
@@ -227,6 +232,27 @@ class DrawContext:
         the text path defaults the foreground: primitives whose `fg` carries a
         different meaning (a scrollbar thumb / box-line color, where `None`
         selects the backend's own default) keep using `_resolve` directly."""
+        panel = self._panel
+        memo = key = None
+        if panel is not None:
+            # Every input this method reads is in the key, so a hit is the
+            # value it would compute; a row of a file list draws the same few
+            # styles over and over, and each resolve built new Style objects.
+            theme = panel.theme
+            key = ("text", style, ink, None if theme is None else theme.text,
+                   bool(getattr(panel, "auto_ink", False)), self._background, id(self._caps))
+            memo = getattr(panel, "_style_memo", None)
+            hit = memo.get(key) if memo is not None else None
+            if hit is not None:
+                return hit
+        resolved = self._text_style_uncached(style, ink)
+        if memo is not None:
+            if len(memo) >= _STYLE_MEMO_MAX:
+                memo.clear()
+            memo[key] = resolved
+        return resolved
+
+    def _text_style_uncached(self, style: Style, ink: bool) -> Style:
         if style.fg is None and self._panel is not None and self._panel.theme is not None:
             style = replace(style, fg=self._panel.theme.text)
         resolved = self._resolve(style)
@@ -265,6 +291,21 @@ class DrawContext:
         styles without an explicit background inherit the pane's, and a font
         is folded down for backends that cannot render it (docs/font_system.md
         §6) — weight/slant become bold/italic attributes, the rest is dropped."""
+        memo = getattr(self._panel, "_style_memo", None)
+        if memo is None:
+            return self._resolve_uncached(style)
+        # A pure function of the style, the pane background and the capability
+        # profile, so it is memoized on the Panel (see _text_style).
+        key = ("resolve", style, self._background, id(self._caps))
+        hit = memo.get(key)
+        if hit is None:
+            hit = self._resolve_uncached(style)
+            if len(memo) >= _STYLE_MEMO_MAX:
+                memo.clear()
+            memo[key] = hit
+        return hit
+
+    def _resolve_uncached(self, style: Style) -> Style:
         bg = self._background if (self._background is not None and style.bg is None) else style.bg
         fg = style.fg
         folded = fold_font(style, self._caps)
@@ -451,9 +492,12 @@ class DrawContext:
         """True when the mouse pointer is over this widget's visible rect.
         Drives modern hover styling; resolved by pure geometry against the
         Panel's last pointer position, so widgets never track the mouse."""
-        if self._panel is None or self._panel.pointer is None:
+        if self._panel is None:
             return False
-        px, py = self._panel.pointer
+        self._panel._note_pointer_region(self._hit_rect)
+        if self._panel._pointer is None:
+            return False
+        px, py = self._panel._pointer
         return self._hit_rect is not None and self._hit_rect.contains(px, py)
 
     def hovered_in(self, w: float, h: float | None = None) -> bool:
@@ -462,15 +506,33 @@ class DrawContext:
         or a field in a full-width ScrollView row) restricts its hover to the
         part it actually occupies, so the cue does not light up the empty space
         to its right. ``h`` defaults to the full widget height."""
-        if self._panel is None or self._panel.pointer is None:
+        return self.pointer_in(0, 0, w, self._rect.h if h is None else h)
+
+    def pointer_in(self, x: float, y: float, w: float, h: float) -> bool:
+        """True when the pointer is over the local sub-rect ``(x, y, w, h)`` of
+        this widget (and inside its clip). The general form of :meth:`hovered_in`
+        for a cue that lives somewhere inside the widget — a splitter's grab
+        zone, a gutter. Like every pointer read during draw it tells the Panel
+        what this frame depends on: only the pointer crossing this sub-rect's
+        edge needs a redraw (see :meth:`Panel.dispatch_event`)."""
+        if self._panel is None:
             return False
-        px, py = self._panel.pointer
-        hh = self._rect.h if h is None else h
-        within = (
-            self._rect.x <= px < self._rect.x + w
-            and self._rect.y <= py < self._rect.y + hh
-        )
-        return within and self._clip.contains(px, py)
+        region = _intersect(Rect(self._rect.x + x, self._rect.y + y, w, h), self._clip)
+        self._panel._note_pointer_region(region)
+        p = self._panel._pointer
+        return p is not None and region is not None and region.contains(p[0], p[1])
+
+    @property
+    def pointer(self) -> tuple[float, float] | None:
+        """The pointer position in screen base units, or None — for a widget
+        whose drawing follows the pointer *within* it (the hovered row of a
+        list, the tab under it). Reading it marks this widget's whole visible
+        rect as pointer-dependent: any move over it redraws. Prefer
+        :attr:`hovered` / :meth:`pointer_in` when only "over or not" matters."""
+        if self._panel is None:
+            return None
+        self._panel._note_pointer_region(self._hit_rect, follow=True)
+        return self._panel._pointer
 
     def set_cursor(self, shape: str | None) -> None:
         """Ask for the mouse pointer shape over this widget, named with a CSS/X
@@ -495,7 +557,8 @@ class DrawContext:
         if self._panel is None:
             return False
         down = self._panel.press_down
-        cur = self._panel.pointer
+        cur = self._panel._pointer
+        self._panel._note_pointer_region(self._hit_rect)
         if down is None or cur is None or self._hit_rect is None:
             return False
         return (
@@ -1568,6 +1631,12 @@ class Panel:
         # Last known pointer position in screen base units, fed by every mouse
         # event. DrawContext.hovered reads it to resolve hover styling.
         self._pointer: tuple[float, float] | None = None
+        # What the last frame's drawing read of the pointer (see
+        # _note_pointer_region): a move that changes none of it needs no redraw.
+        self._pointer_regions: list[tuple[Rect | None, bool]] = []
+        self._rendering = False
+        # DrawContext's memo of resolved styles (see DrawContext._resolve).
+        self._style_memo: dict[tuple, Style] = {}
         # Pointer shape a widget requested during this frame's draw (the topmost
         # hovered widget wins, since it draws last). Collected each render and
         # pushed to the backend once at the end of the frame; None resets to the
@@ -1774,8 +1843,34 @@ class Panel:
 
     @property
     def pointer(self) -> tuple[float, float] | None:
-        """Last pointer position in screen base units, or None."""
+        """Last pointer position in screen base units, or None. Read during a
+        draw, it makes any pointer move redraw (the Panel cannot tell what the
+        reader did with it); a widget should read ``ctx.pointer``, ``ctx.hovered``
+        or ``ctx.pointer_in`` instead, which say how much of it matters."""
+        if self._rendering:
+            self._pointer_regions.append((None, True))
         return self._pointer
+
+    def _note_pointer_region(self, region: "Rect | None", follow: bool = False) -> None:
+        """Record, during a draw, that the frame depends on whether the pointer is
+        inside ``region`` — or, with ``follow``, on where it is inside it. A
+        widget with no visible region (``None``) depends on nothing."""
+        if self._rendering and region is not None:
+            self._pointer_regions.append((region, follow))
+
+    def _pointer_move_matters(self, old: "tuple[float, float] | None",
+                              new: "tuple[float, float] | None") -> bool:
+        """True when moving the pointer from ``old`` to ``new`` changes what the
+        last frame drew from it: it crossed the edge of a region a widget tested,
+        or moved within one a widget follows."""
+        for region, follow in self._pointer_regions:
+            if region is None:
+                return True
+            was = old is not None and region.contains(old[0], old[1])
+            now = new is not None and region.contains(new[0], new[1])
+            if was != now or (follow and (was or now) and old != new):
+                return True
+        return False
 
     @property
     def press_down(self) -> tuple[float, float] | None:
@@ -1851,8 +1946,8 @@ class Panel:
 
     def _on_window_event(self, event: Event) -> None:
         """Default event sink for a bound secondary window."""
-        self.dispatch_event(event)
-        self.render()
+        if self.dispatch_event(event) or event.type is not EventType.MOUSE_MOVE:
+            self.render()
 
     def render(self) -> None:
         if self._window is not None:
@@ -1862,6 +1957,14 @@ class Panel:
         self._render_impl()
 
     def _render_impl(self) -> None:
+        self._pointer_regions = []
+        self._rendering = True
+        try:
+            self._render_frame()
+        finally:
+            self._rendering = False
+
+    def _render_frame(self) -> None:
         self._sync_text_input()
         self._text_frame_reset()
         if self._layout is not None:
@@ -2791,7 +2894,10 @@ class Panel:
     # --- event routing ----------------------------------------------------------------
 
     def dispatch_event(self, event: Event) -> bool:
-        """Route an event to widgets. Returns True if it was consumed."""
+        """Route an event to widgets. Returns True if it was consumed — and, for
+        a ``MOUSE_MOVE`` (which no widget receives), True when the move changes
+        a hover cue or cursor the last frame drew, so the caller re-renders only
+        then."""
         if self._window is not None:
             # Size-dependent handling (layer placement, hit testing helpers)
             # must see the bound window's geometry, not the main window's.
@@ -2801,6 +2907,7 @@ class Panel:
 
     def _dispatch_event_impl(self, event: Event) -> bool:
         # Track the pointer for hover/press styling on any positioned mouse event.
+        before = self._pointer
         if event.x is not None and event.type in (
             EventType.MOUSE_CLICK, EventType.MOUSE_DOWN, EventType.MOUSE_UP,
             EventType.MOUSE_DRAG, EventType.MOUSE_MOVE, EventType.MOUSE_SCROLL,
@@ -2808,9 +2915,12 @@ class Panel:
         ):
             self._pointer = (event.x, event.y)
         # Plain hover movement updates the pointer but is not delivered to a
-        # widget; the caller re-renders to reflect the new hover state.
+        # widget. It returns whether the move changes what the last frame drew
+        # from the pointer — a hover cue, a cursor shape — so the caller
+        # re-renders only then: redrawing a whole window for every mouse move
+        # that crosses nothing starves the frame of time on a slow machine.
         if event.type is EventType.MOUSE_MOVE:
-            return False
+            return self._pointer_move_matters(before, self._pointer)
 
         # The topmost INTERACTIVE layer gets events exclusively (modal behavior);
         # it owns its own focus traversal (e.g. a dialog cycles its buttons), so

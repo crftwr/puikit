@@ -121,10 +121,10 @@ class RadioGroup(Widget):
         return min(w, ctx.size_units[0])
 
     def _hover_row(self, ctx: DrawContext) -> int | None:
-        panel = ctx.panel
-        if panel is None or panel.pointer is None:
+        pointer = ctx.pointer
+        if pointer is None:
             return None
-        px, py = panel.pointer
+        px, py = pointer
         rx, ry, _rw, rh = ctx.screen_rect
         x0, x1 = self._row_x
         # Limit the hover to the content's x-range, not the full (wider) slot.

@@ -909,6 +909,7 @@ class WebBackend(Backend):
             "ink": _rgba01(bg.ink, (255, 255, 255)),
             "backdrop": _rgba01(bg.backdrop, (10, 10, 14)),
             "resolution_scale": float(bg.resolution_scale),
+            "pixel_density": float(bg.pixel_density),
             "reduced_motion": self.reduced_motion,
         }))
 

@@ -7,6 +7,7 @@ import ctypes
 import struct
 import sys
 import threading
+import time
 import zlib
 from ctypes import wintypes
 
@@ -25,8 +26,8 @@ from puikit.font import Font, FontWeight  # noqa: E402
 from puikit.backends._image_cache import MISS  # noqa: E402
 from puikit.image import source_key  # noqa: E402
 from puikit.backends.windows_backend import (  # noqa: E402
-    Animation, WindowsBackend, _SHADOW_KERNEL, _drop_shadow_params, _glow_matrix,
-    _roll_band_top, _roll_falloff, _shadow_tap_alpha, _tint_matrix,
+    Animation, WindowsBackend, _drop_shadow_params, _glow_matrix, _text_shadow_batches,
+    _roll_band_top, _roll_falloff, _tint_matrix,
 )
 from puikit.backends import _win32_native as native  # noqa: E402
 from puikit.backends import windows_backend  # noqa: E402
@@ -1159,27 +1160,38 @@ def test_drop_shadow_params_grow_and_cap():
     # Pure mapping, mirroring the roll-helper coverage above.
     assert _drop_shadow_params(0.0) is None          # off at/below zero
     assert _drop_shadow_params(-1.0) is None
-    dx, dy, peak, blur = _drop_shadow_params(0.6)
+    dx, dy, peak, sigma = _drop_shadow_params(0.6)
     assert dy > dx > 0                               # offset down-right, deeper than wide
-    assert blur > 0                                  # a soft spread, not a hard copy
+    assert sigma == pytest.approx(0.6 * 1.6 / 2)     # NSShadow's blur radius, halved
     assert peak == pytest.approx(min(0.6, 0.2 + 0.6 * 0.45))
-    dx2, dy2, peak2, blur2 = _drop_shadow_params(1.0)   # a deeper shadow spreads further
-    assert dx2 > dx and dy2 > dy and blur2 > blur
+    dx2, dy2, peak2, sigma2 = _drop_shadow_params(1.0)   # a deeper shadow spreads further
+    assert dx2 > dx and dy2 > dy and sigma2 > sigma
     assert peak2 == pytest.approx(0.6)               # and its alpha saturates at the cap
 
 
-def test_shadow_tap_alpha_reaches_peak_when_fully_overlapped():
-    # The kernel's per-tap alpha is chosen so all taps overlapping compose up to
-    # the requested core alpha; a single tap is much lighter (the feathered edge).
-    peak = 0.47
-    a = _shadow_tap_alpha(peak)
-    assert 0 < a < peak
-    composited = 1.0 - (1.0 - a) ** len(_SHADOW_KERNEL)
-    assert composited == pytest.approx(peak)
+def test_text_shadow_batches_are_runs_of_text():
+    # One shadow per run of consecutive text commands; any other command ends
+    # the run, and a text with a background of its own starts a new one (its
+    # shadow must land on that background, not under it).
+    plain, boxed = Style(fg=(1, 1, 1)), Style(fg=(1, 1, 1), bg=(9, 9, 9))
+    front = [
+        ("fill", 0, 0, 4, 1, plain),
+        ("text", 0, 0, "a", plain), ("text", 1, 0, "b", plain),
+        ("clip_push", 0, 0, 9, 9),
+        ("text", 0, 1, "c", plain), ("text", 1, 1, "d", boxed), ("text", 2, 1, "e", plain),
+        ("clip_pop",),
+    ]
+    batches = _text_shadow_batches(front)
+    assert [(i, [c[3] for c in cmds]) for i, cmds in batches] == [
+        (1, ["a", "b"]), (4, ["c"]), (5, ["d", "e"])]
+    # A reversed style paints its fg as a background.
+    from puikit.backend import TextAttribute
+    rev = Style(fg=(1, 1, 1), attr=TextAttribute.REVERSE)
+    assert len(_text_shadow_batches([("text", 0, 0, "a", plain), ("text", 1, 0, "b", rev)])) == 2
 
 
 def test_drop_shadow_only_effect_skips_the_composite_pass():
-    # drop_shadow is painted inline per glyph, not composited, so a shadow-only
+    # drop_shadow is drawn under the text, not composited, so a shadow-only
     # effect leaves _crt None (no frame capture) while still arming the shadow.
     be = WindowsBackend()
     be.set_post_effect(PostEffect(drop_shadow=0.6))
@@ -1191,43 +1203,75 @@ def test_drop_shadow_only_effect_skips_the_composite_pass():
     assert be._drop_shadow is None
 
 
-def test_render_text_draws_soft_offset_shadow_under_each_glyph(monkeypatch):
-    # With a drop shadow active, each glyph gets a soft shadow: one kernel of
-    # translucent-black copies (all glyphs), then the real foreground pass, so the
-    # segments read as embossed. No GPU: the D2D draw calls and the brush setter
-    # are stubbed; _render_text's geometry (_unit_rect) is pure.
-    be = WindowsBackend(base_font=Font(size=14, monospace=True))
-    be._init_fonts()
-    be._render_target = object()      # non-None sentinel; the draw calls are stubbed
-    be._dpi_scale = 1.0
-    be.set_post_effect(PostEffect(drop_shadow=0.6))
+def test_drop_shadow_draws_each_run_once_more_and_only_when_it_changes(monkeypatch):
+    """The text drop shadow costs one silhouette per changed batch, not a
+    kernel of copies per glyph: the first frame draws each row twice (its
+    recorded silhouette and itself), an unchanged repaint once, and a frame
+    where one row changed re-records only that row's batch. A grid row is one
+    draw call (see test_a_grid_run_is_one_draw_call)."""
+    backend = WindowsBackend(width=40, height=16, title="puikit-text-shadow-test")
+    backend.open()
     calls = []
+    real_text, real_layout = native.rt_draw_text, native.rt_draw_text_layout
     monkeypatch.setattr(native, "rt_draw_text",
-                        lambda rt, text, fmt, rect, brush: calls.append((text, rect)))
-    monkeypatch.setattr(native, "rt_fill_rectangle", lambda *a, **k: None)
-    monkeypatch.setattr(be, "_set_brush", lambda *a, **k: None)
-    be._render_text(2, 3, "AB", Style(fg=(20, 30, 20)))
-    k = len(_SHADOW_KERNEL)
-    # 2 glyphs x (k shadow taps + 1 foreground): shadow taps first, then the fg pass.
-    assert [t for t, _ in calls] == ["A"] * k + ["B"] * k + ["A", "B"]
-    a_taps = [r for t, r in calls[:k]]                    # the "A" glyph's shadow kernel
-    a_fg = calls[2 * k][1]                                # the "A" glyph's foreground rect
-    # The kernel spreads around its offset center (a soft blur, not one hard copy)...
-    assert max(r.left for r in a_taps) > min(r.left for r in a_taps)
-    assert max(r.top for r in a_taps) > min(r.top for r in a_taps)
-    # ...and its center of mass sits down-right of the glyph (the offset).
-    assert sum(r.left for r in a_taps) / k > a_fg.left
-    assert sum(r.top for r in a_taps) / k > a_fg.top
+                        lambda *a: (calls.append(a[1]), real_text(*a))[1])
+    monkeypatch.setattr(native, "rt_draw_text_layout",
+                        lambda rt, x, y, layout, brush, *o: (calls.append(round(y)), real_layout(rt, x, y, layout, brush, *o))[1])
     try:
-        be.close()
-    except Exception:
-        pass
+        backend.set_post_effect(PostEffect(drop_shadow=0.6))
+
+        def frame(rows):
+            backend.clear()
+            for y, (text, bg) in enumerate(rows):
+                if bg is not None:
+                    backend.draw_box(0, y, 20, 1, hints={"fill": True}, style=Style(bg=bg))
+                backend.draw_text(1, y, text, style=Style(fg=(22, 32, 22)))
+            backend.present()
+            calls.clear()
+            backend._render()
+            return len(calls)
+
+        rows = [("abc", (200, 210, 190)), ("de", (200, 210, 190))]
+        assert frame(rows) == 4                    # two silhouettes, two rows
+        assert frame(rows) == 2                    # silhouettes kept
+        rows[1] = ("xy", (200, 210, 190))
+        assert frame(rows) == 3                    # one silhouette re-recorded
+    finally:
+        backend.close()
+
+
+def test_a_grid_run_is_one_draw_call_on_the_grid(monkeypatch):
+    """A row of single-column glyphs is drawn as one spaced text layout, not a
+    call per glyph (the macOS grid path's batching), and its glyphs still land
+    one base unit apart. A wide glyph is drawn alone in its two-column cell."""
+    backend = WindowsBackend(width=40, height=16, title="puikit-grid-run-test")
+    backend.open()
+    texts, layouts = [], []
+    real_text, real_layout = native.rt_draw_text, native.rt_draw_text_layout
+    monkeypatch.setattr(native, "rt_draw_text",
+                        lambda *a: (texts.append(a[1]), real_text(*a))[1])
+    monkeypatch.setattr(native, "rt_draw_text_layout",
+                        lambda rt, x, y, layout, brush, *o: (layouts.append((x, layout)), real_layout(rt, x, y, layout, brush, *o))[1])
+    try:
+        backend.draw_text(2, 1, "file0001.txt", style=Style())
+        backend.draw_text(2, 2, "ab\u65e5cd", style=Style())
+        backend.present()
+        backend._render()
+        assert texts == ["\u65e5"]                 # only the wide CJK cell alone
+        assert len(layouts) == 3                   # "file0001.txt", "ab", "cd"
+        x0, layout = layouts[0]
+        assert x0 == 2 * backend._base_w
+        widths = native.text_layout_cluster_widths(layout, 12)
+        assert widths == pytest.approx([backend._base_w] * 12, abs=1e-3)
+        assert layouts[2][0] == (2 + 4) * backend._base_w   # after "ab" + a 2-column glyph
+    finally:
+        backend.close()
 
 
 def test_render_with_drop_shadow_effect():
     """The real draw path for the Segment LCD look: text (grid and flow fonts)
-    drawn through the inline shadow-ink pass against a live swap chain. A wrong
-    offset rect or a missing brush reset would fault or fail EndDraw here."""
+    drawn over its recorded, blurred silhouette against a live swap chain. A
+    wrong offset or a missing brush reset would fault or fail EndDraw here."""
     backend = WindowsBackend(width=40, height=16, title="puikit-lcd-test")
     backend.open()
     try:
@@ -1239,7 +1283,7 @@ def test_render_with_drop_shadow_effect():
         backend.draw_text(1, 3, "segment", style=Style(                   # flow path
             fg=(22, 32, 22), font=Font(family="Consolas", size=16)))
         backend.present()
-        backend._render()   # paints the offset shadow ink inline
+        backend._render()   # records the silhouettes, blurs and draws them
     finally:
         backend.close()
 
@@ -1294,7 +1338,10 @@ def test_default_faces_share_one_baseline(monkeypatch, mono, ui):
         real_text(rt, glyph, fmt, rect, brush)
 
     def flow(rt, x, y, layout, brush):
-        drawn.setdefault("flow", y + native.text_layout_get_line_metrics(layout).baseline)
+        # A grid run is drawn as a text layout too (one per run), at column 1;
+        # the flow run at column 4.
+        which = "grid" if x < 3 * backend._base_w else "flow"
+        drawn.setdefault(which, y + native.text_layout_get_line_metrics(layout).baseline)
         real_layout(rt, x, y, layout, brush)
 
     monkeypatch.setattr(native, "rt_draw_text", grid)
@@ -2109,3 +2156,66 @@ def test_app_icons_are_loaded_once():
     for _ in range(50):
         assert wb._load_app_icons() == first
     assert get_gui(process, GR_GDIOBJECTS) == before
+
+
+def test_a_busy_queue_still_paints_once_a_frame(monkeypatch):
+    """WM_PAINT comes only when the queue is empty, so a stream of input that
+    keeps invalidating the window would hold the paint off for as long as it
+    lasts. After each dispatched message the loop sends a pending paint itself
+    once a frame has passed since the last — and never sooner."""
+    be = WindowsBackend.__new__(WindowsBackend)
+    be._hwnd = 1234
+    be._last_paint = 0.0
+    pending = {"region": True}
+    sent = []
+    monkeypatch.setattr(native.user32, "GetUpdateRect", lambda hwnd, rect, erase: pending["region"])
+    monkeypatch.setattr(native.user32, "UpdateWindow", lambda hwnd: sent.append(hwnd))
+    clock = {"now": 10.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["now"])
+    be._paint_if_starved()
+    assert sent == [1234]                       # waiting since long ago: paint now
+    be._last_paint = clock["now"]
+    clock["now"] += 0.005
+    be._paint_if_starved()
+    assert sent == [1234]                       # painted 5 ms ago: let the queue run
+    clock["now"] += 0.02
+    pending["region"] = False
+    be._paint_if_starved()
+    assert sent == [1234]                       # nothing to paint
+    pending["region"] = True
+    be._paint_if_starved()
+    assert sent == [1234, 1234]
+
+
+def test_a_folded_autorepeat_dispatches_every_press(monkeypatch):
+    """A held key repeats faster than a busy window takes messages, and Windows
+    then folds the repeats into one WM_KEYDOWN's repeat count (lParam bits
+    0-15). Each counted press is dispatched, as macOS delivers each repeat."""
+    from puikit.backends.windows_backend import _repeat_count
+    assert _repeat_count(0) == 1 and _repeat_count(1) == 1
+    assert _repeat_count(0x4153_0004) == 4          # scan code and flags above bit 15
+    be = WindowsBackend.__new__(WindowsBackend)
+    events = []
+    monkeypatch.setattr(be, "_dispatch", events.append, raising=False)
+    monkeypatch.setattr(windows_backend, "_key_modifiers", lambda: frozenset())
+    be._on_key_down(0x28, None, 3)                  # VK_DOWN, three presses folded
+    assert [e.key for e in events] == ["down"] * 3
+    events.clear()
+    be._pending_high_surrogate = None
+    be._on_char(ord("a"), 2)
+    assert [e.key for e in events] == ["a", "a"]
+
+
+def test_measure_text_answers_a_repeat_from_its_memo_until_fonts_change(monkeypatch):
+    backend = WindowsBackend()
+    backend._init_fonts()
+    style = Style(font=Font(size=13))
+    first = backend.measure_text("file0001.txt", style)
+    calls = []
+    real = backend._measure_text_uncached
+    monkeypatch.setattr(backend, "_measure_text_uncached",
+                        lambda *a: (calls.append(a), real(*a))[1])
+    assert backend.measure_text("file0001.txt", style) == first and calls == []
+    backend._rebuild_fonts()                    # a DPI change: widths change too
+    backend.measure_text("file0001.txt", style)
+    assert len(calls) == 1

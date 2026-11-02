@@ -106,7 +106,8 @@ class TestDescriptor:
         assert not isinstance(Shader(source="x"), Wallpaper)
         assert {f.name for f in dataclasses.fields(Shader)} == {
             "source", "speed", "opacity", "ink", "backdrop", "resolution_scale",
-            "source_hlsl", "source_glsl", "idle", "textures", "frame_rate", "targets", "passes"}
+            "source_hlsl", "source_glsl", "idle", "textures", "frame_rate", "targets", "passes",
+            "pixel_density"}
 
     def test_resolution_scale_is_clamped_above_zero(self):
         # Zero would ask for a zero-sized drawable, which is an error rather than
@@ -264,3 +265,66 @@ fragment float4 wrongly_named(float4 pos [[position]],
 
     def test_render_without_a_shader_is_a_noop(self):
         assert MetalBackground().render_to_texture(8, 8, 0.0) is None
+
+
+class TestPixelDensity:
+    """Shader.pixel_density: a render scale in points, not in display pixels."""
+
+    def test_unset_keeps_the_resolution_scale(self):
+        s = Shader(source="x", resolution_scale=0.5)
+        assert s.render_scale(2.0) == s.render_scale(1.0) == 0.5
+
+    def test_a_density_renders_alike_on_every_display(self):
+        s = Shader(source="x", resolution_scale=0.5, pixel_density=1.0)
+        assert s.render_scale(2.0) == 0.5          # Retina: half, as before
+        assert s.render_scale(1.0) == 1.0          # standard: full, the same render
+        assert s.render_scale(1.5) == pytest.approx(2 / 3)
+
+    def test_the_display_caps_it(self):
+        assert Shader(source="x", pixel_density=3.0).render_scale(2.0) == 1.0
+        assert Shader(source="x", pixel_density=0.01).render_scale(2.0) == 0.1
+
+    def test_negative_is_unset(self):
+        assert Shader(source="x", pixel_density=-1).pixel_density == 0.0
+
+
+@pytest.mark.skipif(not HAVE_METAL, reason="Metal unavailable")
+def test_the_pixel_scale_uniform_reaches_the_shader():
+    r = MetalBackground()
+    assert r.set_shader(Shader(source="""
+fragment float4 puikit_bg_fragment(float4 pos [[position]],
+                                   constant BackgroundUniforms &u [[buffer(0)]]) {
+    return float4(u.pixel_scale / 4.0, 0.0, 0.0, 1.0);
+}
+"""))
+    assert abs(_pixel(r.render_to_texture(4, 4, 0.0, pixel_scale=2.0))[0] - 128) <= 1
+
+
+class TestShaderCacheDir:
+    """Where the Direct3D backend keeps compiled shaders (puikit.background)."""
+
+    def test_the_app_chooses_the_folder(self, monkeypatch, tmp_path):
+        from puikit import background
+        monkeypatch.delenv("PUIKIT_SHADER_CACHE", raising=False)
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+        monkeypatch.setattr(background, "_shader_cache_dir", None)
+        assert background.shader_cache_dir() == tmp_path / "local" / "PuiKit" / "shader-cache"
+        background.set_shader_cache_dir(tmp_path / "app")
+        assert background.shader_cache_dir() == tmp_path / "app"
+        background.set_shader_cache_dir(None)
+        assert background.shader_cache_dir() == tmp_path / "local" / "PuiKit" / "shader-cache"
+
+    def test_the_environment_wins(self, monkeypatch, tmp_path):
+        from puikit import background
+        monkeypatch.setattr(background, "_shader_cache_dir", tmp_path / "app")
+        monkeypatch.setenv("PUIKIT_SHADER_CACHE", str(tmp_path / "env"))
+        assert background.shader_cache_dir() == tmp_path / "env"
+        monkeypatch.setenv("PUIKIT_SHADER_CACHE", "off")
+        assert background.shader_cache_dir() is None
+
+    def test_no_default_without_localappdata(self, monkeypatch):
+        from puikit import background
+        monkeypatch.delenv("PUIKIT_SHADER_CACHE", raising=False)
+        monkeypatch.delenv("LOCALAPPDATA", raising=False)
+        monkeypatch.setattr(background, "_shader_cache_dir", None)
+        assert background.shader_cache_dir() is None

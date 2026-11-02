@@ -100,7 +100,7 @@ class Tabs(FocusContainer, Widget):
         # Resolve the hovered tab against last frame's positions *before* we
         # rebuild them — _tab_x is emptied below, so hit-testing the list while
         # it is still being filled would never match the current tab.
-        hover = ctx.panel.pointer if ctx.panel is not None else None
+        hover = ctx.pointer
         hovered_idx = self._hit_strip(ctx, hover) if hover is not None else None
         # A pointing hand over a tab title, so the strip reads as clickable.
         if hovered_idx is not None:

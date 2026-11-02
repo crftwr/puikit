@@ -342,7 +342,7 @@ class MetalBackground:
 
     def _uniforms(self, width: float, height: float, elapsed: float,
                   fade: float = 1.0, seed: float = 0.0, seed_prev: float | None = None,
-                  seed_mix: float = 1.0) -> bytes:
+                  seed_mix: float = 1.0, pixel_scale: float = 1.0) -> bytes:
         """Pack ``BackgroundUniforms`` for this frame — see UNIFORM_BYTES.
 
         ``fade`` scales the descriptor's own opacity, which is how an idle scene
@@ -360,19 +360,21 @@ class MetalBackground:
         f[12] = float(seed)
         f[13] = float(seed if seed_prev is None else seed_prev)
         f[14] = float(seed_mix)
+        f[15] = float(pixel_scale)
         return bytes(buf)
 
     def _encode(self, texture: Any, width: float, height: float,
                 elapsed: float, fade: float = 1.0, block: bool = False,
                 seed: float = 0.0, seed_prev: float | None = None,
-                seed_mix: float = 1.0) -> Any:
+                seed_mix: float = 1.0, pixel_scale: float = 1.0) -> Any:
         """Encode one frame into a command buffer (not committed): every frame
         pass in order, the last into ``texture``. Until the scene's textures are
         on the GPU and its once passes have run — or for good if a texture
         failed — the frame is the bare backdrop."""
         clear = _rgba(getattr(self._shader, "backdrop", None), 0.08)
         command = self._queue.commandBuffer()
-        uniforms = self._uniforms(width, height, elapsed, fade, seed, seed_prev, seed_mix)
+        uniforms = self._uniforms(width, height, elapsed, fade, seed, seed_prev, seed_mix,
+                                  pixel_scale)
         if not self._textures_ready(block) or not self._bake(command, uniforms, block):
             descriptor = Metal.MTLRenderPassDescriptor.renderPassDescriptor()
             attachment = descriptor.colorAttachments().objectAtIndexedSubscript_(0)
@@ -392,7 +394,8 @@ class MetalBackground:
 
     def render_to_layer(self, layer: Any, elapsed: float, fade: float = 1.0,
                         wait: bool = False, seed: float = 0.0,
-                        seed_prev: float | None = None, seed_mix: float = 1.0) -> bool:
+                        seed_prev: float | None = None, seed_mix: float = 1.0,
+                        pixel_scale: float = 1.0) -> bool:
         """Draw one frame into ``layer``'s next drawable and present it.
 
         Returns False when there is nothing to draw or the layer has no drawable
@@ -416,7 +419,7 @@ class MetalBackground:
         size = layer.drawableSize()
         command = self._encode(drawable.texture(), size.width, size.height,
                                elapsed, fade, seed=seed, seed_prev=seed_prev,
-                               seed_mix=seed_mix)
+                               seed_mix=seed_mix, pixel_scale=pixel_scale)
         if wait:
             command.commit()
             command.waitUntilScheduled()
@@ -439,7 +442,8 @@ class MetalBackground:
 
     def render_to_texture(self, width: int, height: int, elapsed: float,
                           fade: float = 1.0, seed: float = 0.0,
-                          seed_prev: float | None = None, seed_mix: float = 1.0) -> Any:
+                          seed_prev: float | None = None, seed_mix: float = 1.0,
+                          pixel_scale: float = 1.0) -> Any:
         """Draw one frame into a fresh offscreen texture and return it, or ``None``.
 
         The window-free path: same pipeline, same uniforms, a texture instead of a
@@ -457,7 +461,8 @@ class MetalBackground:
         # Window-free means synchronous: wait for the textures rather than hand
         # back a backdrop-only frame the caller cannot tell from a real one.
         command = self._encode(texture, width, height, elapsed, fade, block=True,
-                               seed=seed, seed_prev=seed_prev, seed_mix=seed_mix)
+                               seed=seed, seed_prev=seed_prev, seed_mix=seed_mix,
+                               pixel_scale=pixel_scale)
         command.commit()
         command.waitUntilCompleted()
         return texture

@@ -65,7 +65,15 @@ fragment float4 puikit_bg_fragment(
 
 Uniforms, shared by all three dialects: `resolution` (drawable pixels), `time`
 (seconds since the background was set, scaled by `speed`), `opacity`, `ink`,
-`backdrop`, `seed`.
+`backdrop`, `seed`, `pixel_scale`.
+
+**`pixel_scale`** is how many render pixels make one point (the UI's unit, a
+CSS pixel on the web): the display's density times the scene's render scale —
+2 on a Retina display at full scale, 1 at half, 0.5 on a standard display at
+half. A scene that sizes something in points (a gap, a speed, a stroke) uses it
+to look the same on every display; without it, a scene tuned in a Retina
+display's pixels draws everything twice as large, and moves it twice as fast,
+on a standard one.
 
 **`seed`** is for a scene that moves *between* compositions rather than through
 one. It is a whole number 0..65535 the backend draws at random when the
@@ -92,6 +100,7 @@ client does not set the seed uniforms yet (they read 0).
 | `idle` | What the scene comes to rest as when the backend parks it: `"freeze"` (default) holds the last frame, `"fade"` dissolves it to `backdrop` first. See §4.1. An unrecognized value falls back to `"freeze"`. |
 | `textures` | Images the scene samples (§3.1). A plain path is shorthand for `ShaderTexture(path)`. |
 | `frame_rate` | The most frames a second the scene is rendered at; `0` = every frame (§3.3). |
+| `pixel_density` | Render pixels per point, at most the display's own; `0` (default) leaves the scale to `resolution_scale`. `resolution_scale` is a fraction of the *display's* pixels, so a half-scale scene renders twice as coarsely on a standard display as on Retina; a density renders it the same wherever the display can show it (`1.0` = half scale on Retina, full on a standard display). |
 | `targets` | Offscreen textures the passes write and read (§3.2). |
 | `passes` | The scene as a sequence of draws (§3.2). Empty = the single-pass form. |
 
@@ -233,6 +242,25 @@ On Windows, where the background is rendered inside the UI's own frame, the
 renderer also reuses its last texture whenever nothing the shader sees has
 changed (the clock, the fade, the seeds, the size) — so a key press or a scroll
 over a parked or capped background does not pay for a scene.
+
+### 3.4 Compiling on Windows
+
+fxc (`d3dcompiler_47`) inlines every call, so a ray-marched scene takes it
+seconds to compile — twelve for one measured in a VM — where Metal takes
+milliseconds. Two things keep that off the user:
+
+- **A compile cache.** Compiled bytecode is kept in memory and on disk, keyed
+  by the source, entry point and target, so a scene this machine has compiled
+  before is ready in milliseconds, across launches. The folder is the app's to
+  choose: `puikit.background.set_shader_cache_dir(path)` (its own data folder,
+  say), else `%LOCALAPPDATA%\PuiKit\shader-cache`; `PUIKIT_SHADER_CACHE`
+  overrides both, and `0`/`off` disables the disk cache.
+- **A background compile.** The window path sets a shader with
+  `set_shader(..., wait=False)`: what is not cached compiles on worker threads
+  (in parallel — D3DCompile releases the GIL), the frame is the bare backdrop
+  meanwhile, as while textures load, and the next frame after it finishes
+  adopts it. The UI thread never waits for fxc. A compile error is reported when
+  the compile ends. The window-free `set_shader()` still compiles in place.
 
 ### Shader source is the one genuinely backend-specific thing
 

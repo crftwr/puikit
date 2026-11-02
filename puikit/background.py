@@ -36,9 +36,42 @@ you need the old implementation.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from .backend import Color
+
+
+#: Where the app asked compiled shaders to be kept (see set_shader_cache_dir).
+_shader_cache_dir: "Path | None" = None
+
+
+def set_shader_cache_dir(path: "str | os.PathLike | None") -> None:
+    """Keep compiled background shaders under ``path`` — the app's own data
+    folder, say — instead of PuiKit's default; ``None`` restores the default.
+
+    Only the Direct3D backend compiles slowly enough to need a cache on disk
+    (fxc takes seconds over a ray-marched scene, Metal milliseconds); the other
+    backends ignore it. The ``PUIKIT_SHADER_CACHE`` environment variable still
+    wins, so a run can be pointed elsewhere (or ``0``/``off`` to disable it)
+    without the app's help. Call it before setting a background."""
+    global _shader_cache_dir
+    _shader_cache_dir = None if path is None else Path(path).expanduser()
+
+
+def shader_cache_dir() -> "Path | None":
+    """Where compiled background shaders are kept, or None for no disk cache:
+    ``PUIKIT_SHADER_CACHE`` if set (``0``/``off``/empty disables it), else the
+    folder :func:`set_shader_cache_dir` named, else
+    ``%LOCALAPPDATA%\\PuiKit\\shader-cache`` (None where that is not set)."""
+    override = os.environ.get("PUIKIT_SHADER_CACHE")
+    if override is not None:
+        return None if override.strip().lower() in ("", "0", "off") else Path(override)
+    if _shader_cache_dir is not None:
+        return _shader_cache_dir
+    base = os.environ.get("LOCALAPPDATA")
+    return Path(base) / "PuiKit" / "shader-cache" if base else None
 
 
 @dataclass(frozen=True)
@@ -103,6 +136,14 @@ class Wallpaper:
 #: seconds, so a scene that composes both can blend the old composition into the
 #: new one rather than cut.
 #:
+#: **``pixel_scale``** is how many render pixels make one point (the UI's own
+#: unit, a CSS pixel on the web): the display's density times the scene's
+#: render scale — 2 on a Retina display at full scale, 1 at half, 0.5 on a
+#: standard display at half. A scene that sizes something in points (a gap, a
+#: speed) multiplies by it, so the thing looks the same on any display; a
+#: hairline stays a render pixel. It sits in the slot after ``seed_mix`` that the
+#: struct's alignment already reserved, so the buffer did not grow.
+#:
 #: **``PassUniforms``** is what each :class:`Pass` is told about its own output
 #: and inputs, at ``buffer(1)``; the single-pass form never needs it.
 SHADER_PRELUDE = """\
@@ -118,6 +159,7 @@ struct BackgroundUniforms {
     float  seed;         // a whole number 0..65535, redrawn on set and on resume
     float  seed_prev;    // the seed before the last redraw
     float  seed_mix;     // 0..1, eased: how far from seed_prev to seed
+    float  pixel_scale;  // render pixels per point (UI unit): 2 on Retina at full scale
 };
 
 // What one Pass is told about itself (see Pass), at buffer(1).
@@ -161,6 +203,7 @@ uniform vec4 backdrop;     // theme background, rgba 0..1
 uniform float seed;        // see SHADER_PRELUDE; the web client leaves these
 uniform float seed_prev;   //   at 0, so a web scene sees one fixed composition
 uniform float seed_mix;
+uniform float pixel_scale; // render pixels per CSS pixel (point)
 out vec4 fragColor;
 
 vec4 puikit_bg_fragment(vec2 pos);
@@ -471,9 +514,19 @@ class Shader:
     #: A backend that cannot run passes (the web backend, today) draws the
     #: backdrop for a multi-pass scene.
     passes: "tuple[Pass, ...]" = ()
+    #: How finely the scene is rendered, as render pixels per point (the UI's
+    #: unit), at most the display's own density; ``0`` (the default) leaves it to
+    #: :attr:`resolution_scale`. ``resolution_scale`` is a fraction of the
+    #: *display's* pixels, so the same scene renders twice as coarsely on a
+    #: standard display as on a Retina one — a half-scale scene of fine sparkles
+    #: is crisp points on one and soft blobs on the other. A density keeps the
+    #: render the same wherever the display can show it: ``1.0`` is what half
+    #: scale gives on Retina, and on a standard display it means full scale.
+    pixel_density: float = 0.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "frame_rate", max(0.0, float(self.frame_rate or 0.0)))
+        object.__setattr__(self, "pixel_density", max(0.0, float(self.pixel_density or 0.0)))
         # A dict is what dataclasses.asdict() turns a ShaderTexture, Target or
         # Pass into, so accepting one keeps ``Shader(**asdict(s)) == s`` true.
         object.__setattr__(self, "textures", tuple(
@@ -495,6 +548,16 @@ class Shader:
         # backend did before this field existed — a typo costs the fade, not the
         # background.
         object.__setattr__(self, "idle", "fade" if self.idle == "fade" else "freeze")
+
+    def render_scale(self, display_scale: float) -> float:
+        """The fraction of the display's pixels to render at, on a display of
+        ``display_scale`` pixels per point: :attr:`pixel_density` over that,
+        capped at full and floored like :attr:`resolution_scale`, or
+        ``resolution_scale`` itself when no density is set."""
+        if self.pixel_density <= 0.0:
+            return self.resolution_scale
+        ratio = self.pixel_density / max(0.01, float(display_scale))
+        return 0.1 if ratio < 0.1 else 1.0 if ratio > 1.0 else ratio
 
     @property
     def fades_when_idle(self) -> bool:

@@ -36,16 +36,22 @@ capability unsupported, so the app falls back to a segment background or a solid
 from __future__ import annotations
 
 import ctypes
+import hashlib
+import os
 import struct
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from ctypes import wintypes
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 
 from . import _bg_graph
 from . import _win32_native as native
 from ._bg_textures import TextureLoad
 from ._win32_native import ComPtr, hresult_ok
+from ..background import shader_cache_dir
 
 try:
     _d3dcompiler = ctypes.WinDLL("d3dcompiler_47")
@@ -80,6 +86,7 @@ cbuffer BackgroundUniforms : register(b0) {
     float  seed;         // see puikit.background.SHADER_PRELUDE
     float  seed_prev;
     float  seed_mix;
+    float  pixel_scale;  // render pixels per point
 };
 
 cbuffer PassUniforms : register(b1) {
@@ -315,6 +322,99 @@ def _compile(source: str, entry: str, target: str) -> "tuple[bytes | None, str]"
     return data, ""
 
 
+#: Bumped when what a cache entry holds, or how its key is made, changes.
+_SHADER_CACHE_VERSION = "1"
+
+#: Entries the on-disk cache keeps before it drops its oldest.
+_SHADER_CACHE_MAX = 512
+
+#: Compiled bytecode by cache key, for this process (see compile_cached).
+_compiled: "dict[str, bytes]" = {}
+_compiled_lock = threading.Lock()
+
+
+def _cache_key(source: str, entry: str, target: str) -> str:
+    h = hashlib.sha256()
+    for part in (_SHADER_CACHE_VERSION, "d3dcompiler_47", target, entry):
+        h.update(part.encode("utf-8") + b"\0")
+    h.update(source.encode("utf-8"))
+    return h.hexdigest()
+
+
+def cached_bytecode(source: str, entry: str, target: str) -> "bytes | None":
+    """``source``'s ``entry`` compiled for ``target`` if this process or an
+    earlier run already compiled it, else None — never compiles."""
+    key = _cache_key(source, entry, target)
+    with _compiled_lock:
+        code = _compiled.get(key)
+    if code is not None:
+        return code
+    folder = shader_cache_dir()
+    if folder is None:
+        return None
+    try:
+        code = (folder / f"{key}.cso").read_bytes()
+    except OSError:
+        return None
+    if not code:
+        return None
+    with _compiled_lock:
+        _compiled[key] = code
+    return code
+
+
+def compile_cached(source: str, entry: str, target: str) -> "tuple[bytes | None, str]":
+    """:func:`_compile` behind the cache: the bytecode an earlier compile of the
+    same source, entry and target produced, or a fresh compile that is then kept
+    in memory and on disk. Safe to call from any thread — D3DCompile is, and the
+    process cache is locked.
+
+    fxc inlines every call, so a ray-marched scene takes it seconds — twelve for
+    XeFM's Crystal on the VM it was measured in — every time the background is
+    set, launch after launch. Kept, it is a file read."""
+    code = cached_bytecode(source, entry, target)
+    if code is not None:
+        return code, ""
+    code, err = _compile(source, entry, target)
+    if code is None:
+        return None, err
+    key = _cache_key(source, entry, target)
+    with _compiled_lock:
+        _compiled[key] = code
+    folder = shader_cache_dir()
+    if folder is not None:
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            tmp = folder / f"{key}.{os.getpid()}.{threading.get_ident()}.tmp"
+            tmp.write_bytes(code)
+            os.replace(tmp, folder / f"{key}.cso")
+            _prune_cache(folder)
+        except OSError:
+            pass                         # a cache that cannot be written is only slower
+    return code, ""
+
+
+def _prune_cache(folder: Path) -> None:
+    entries = list(folder.glob("*.cso"))
+    if len(entries) <= _SHADER_CACHE_MAX:
+        return
+    entries.sort(key=lambda p: p.stat().st_mtime)
+    for old in entries[: len(entries) - _SHADER_CACHE_MAX * 3 // 4]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+
+def _compile_all(jobs: list) -> "list[tuple[bytes | None, str]]":
+    """compile_cached over ``jobs`` ((source, entry, target) each), in parallel:
+    D3DCompile runs with the GIL released, and a scene's entries are independent."""
+    if len(jobs) == 1:
+        return [compile_cached(*jobs[0])]
+    with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as pool:
+        return list(pool.map(lambda job: compile_cached(*job), jobs))
+
+
 class D3DShaderBackground:
     """Compiles one HLSL shader and draws it into an offscreen texture.
 
@@ -368,6 +468,14 @@ class D3DShaderBackground:
         # What the last complete frame was rendered from (see render_to_texture).
         self._last_frame: tuple | None = None
         self._last_render = 0.0
+        # A compile running in the background (set_shader(wait=False)): which
+        # set_shader it belongs to, and what it produced once done.
+        self._generation = 0
+        self._pending: "tuple | None" = None
+        self._compiled_result: "tuple | None" = None
+        #: Called from the compiling thread when a background compile finishes,
+        #: so the owner can repaint (the next render_to_texture adopts it).
+        self.on_ready: "Callable[[], None] | None" = None
         if not HAVE_D3D_SHADER:
             return
         try:
@@ -424,7 +532,7 @@ class D3DShaderBackground:
 
     # --- shader compile ----------------------------------------------------
 
-    def set_shader(self, shader: Any) -> bool:
+    def set_shader(self, shader: Any, wait: bool = True) -> bool:
         """Compile ``shader``'s HLSL (:data:`HLSL_PRELUDE` + its ``source_hlsl``)
         into the vertex shader and a pixel shader per pass. Returns success.
 
@@ -435,8 +543,19 @@ class D3DShaderBackground:
         crash. Re-setting the same source and graph is a no-op (baked targets
         included), so a theme switch that keeps the background does not
         recompile.
+
+        Compiled bytecode is kept (see :func:`compile_cached`), so a scene this
+        machine has compiled before is ready at once. With ``wait`` False, the
+        entries it has not are compiled on worker threads instead of here: the
+        call returns True for a graph that holds together, the frame is the bare
+        backdrop until they are done, :attr:`on_ready` is called, and the next
+        :meth:`render_to_texture` adopts them — or reports the compile error
+        then. The window path passes False: a scene can take fxc seconds, and
+        the UI thread must not stop for them.
         """
         self._last_frame = None
+        self._generation += 1
+        self._pending = self._compiled_result = None
         if not self.available or shader is None:
             self._plan = None
             return False
@@ -459,17 +578,66 @@ class D3DShaderBackground:
             self._error = plan.error
             return False
         program = HLSL_PRELUDE + "\n" + source
-        if self._vs is None:
-            vs_code, err = _compile(HLSL_PRELUDE, "puikit_bg_vertex", "vs_4_0")
-            self._vs = self._create_shader(_IDX_DEV_CREATE_VERTEX_SHADER, vs_code) if vs_code else None
-            if self._vs is None:
-                self._error = err or "CreateVertexShader failed"
+        jobs = [(HLSL_PRELUDE, "puikit_bg_vertex", "vs_4_0")] + [
+            (program, entry, "ps_4_0") for entry in sorted({e for e, _f in plan.entries})]
+        codes = [cached_bytecode(*job) for job in jobs]
+        if all(c is not None for c in codes):
+            return self._adopt(shader, plan, jobs, [(c, "") for c in codes])
+        if wait:
+            return self._adopt(shader, plan, jobs, _compile_all(jobs))
+        generation = self._generation
+        self._pending = (generation, shader, plan, jobs)
+
+        def run() -> None:
+            results = _compile_all(jobs)
+            if generation != self._generation:
+                return                     # superseded while compiling
+            self._compiled_result = (generation, results)
+            callback = self.on_ready
+            if callback is not None:
+                try:
+                    callback()
+                except Exception:
+                    pass
+        threading.Thread(target=run, name="puikit-shader-compile", daemon=True).start()
+        return True
+
+    @property
+    def compiling(self) -> bool:
+        """True while a background compile (``set_shader(wait=False)``) runs."""
+        return self._pending is not None
+
+    def _adopt_pending(self) -> None:
+        """On the drawing thread: take a finished background compile, if any."""
+        if self._pending is None or self._compiled_result is None:
+            return
+        generation, shader, plan, jobs = self._pending
+        done_generation, results = self._compiled_result
+        self._pending = self._compiled_result = None
+        if done_generation != generation:
+            return
+        if not self._adopt(shader, plan, jobs, results):
+            sys.stderr.write(f"[puikit] background shader failed to compile: {self._error}\n")
+
+    def _adopt(self, shader: Any, plan: Any, jobs: list,
+               results: "list[tuple[bytes | None, str]]") -> bool:
+        """Create the GPU objects for compiled ``results`` (one per job: the
+        vertex shader, then a pixel shader per entry) and make ``plan`` current."""
+        for (_src, entry, _target), (code, err) in zip(jobs, results):
+            if code is None:
+                self._error = err or f"could not compile {entry}"
+                self._release_graph()
                 return False
-        for entry in sorted({e for e, _fmt in plan.entries}):
-            code, err = _compile(program, entry, "ps_4_0")
-            ps = self._create_shader(_IDX_DEV_CREATE_PIXEL_SHADER, code) if code else None
+        vs_code = results[0][0]
+        if self._vs is None:
+            self._vs = self._create_shader(_IDX_DEV_CREATE_VERTEX_SHADER, vs_code)
+            if self._vs is None:
+                self._error = "CreateVertexShader failed"
+                return False
+        for (_src, entry, _target), (code, _err) in zip(jobs[1:], results[1:]):
+            ps = self._create_shader(_IDX_DEV_CREATE_PIXEL_SHADER, code)
             if ps is None:
-                self._error = err or f"CreatePixelShader failed for {entry}"
+                self._error = f"CreatePixelShader failed for {entry}"
                 self._release_graph()
                 return False
             self._pixel[entry] = ps
@@ -636,7 +804,7 @@ class D3DShaderBackground:
     def render_to_texture(self, width: int, height: int, elapsed: float,
                           fade: float = 1.0, block: bool = False,
                           seed: float = 0.0, seed_prev: float | None = None,
-                          seed_mix: float = 1.0) -> Any:
+                          seed_mix: float = 1.0, pixel_scale: float = 1.0) -> Any:
         """Draw one frame into the (recreated-on-resize) offscreen texture and
         return its ``ComPtr``, or ``None`` when there is nothing to draw. The
         texture is owned by this object and reused across frames — the caller must
@@ -649,6 +817,7 @@ class D3DShaderBackground:
         Until the scene's textures are on the GPU (and for good if they failed to
         load) the frame is the bare backdrop; ``block`` waits for the decode
         instead, for the window-free path."""
+        self._adopt_pending()
         if self._plan is None or not self.available:
             return None
         width, height = max(1, int(width)), max(1, int(height))
@@ -659,7 +828,8 @@ class D3DShaderBackground:
         # nothing the shader sees has changed since the last complete frame, that
         # frame is still right: reuse it.
         key = (id(self._shader), width, height, float(elapsed), float(fade), float(seed),
-               None if seed_prev is None else float(seed_prev), float(seed_mix))
+               None if seed_prev is None else float(seed_prev), float(seed_mix),
+               float(pixel_scale))
         if key == self._last_frame:
             return self._tex
         # Shader.frame_rate: within the interval, the last frame stands.
@@ -676,7 +846,8 @@ class D3DShaderBackground:
         clear_arr = (ctypes.c_float * 4)(*clear)
         ctx.call(_IDX_CTX_CLEAR_RENDER_TARGET_VIEW, None,
                  [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float)], self._rtv.addr, clear_arr)
-        self._write_uniforms(width, height, elapsed, fade, seed, seed_prev, seed_mix)
+        self._write_uniforms(width, height, elapsed, fade, seed, seed_prev, seed_mix,
+                             pixel_scale)
         ctx.call(_IDX_CTX_RS_SET_STATE, None, [ctypes.c_void_p], self._raster.addr)
         ctx.call(_IDX_CTX_IA_SET_INPUT_LAYOUT, None, [ctypes.c_void_p], None)
         ctx.call(_IDX_CTX_IA_SET_PRIMITIVE_TOPOLOGY, None, [ctypes.c_uint32], _TRIANGLELIST)
@@ -694,13 +865,14 @@ class D3DShaderBackground:
 
     def render_pixels(self, width: int, height: int, elapsed: float,
                       fade: float = 1.0, seed: float = 0.0, seed_prev: float | None = None,
-                      seed_mix: float = 1.0) -> "bytearray | None":
+                      seed_mix: float = 1.0, pixel_scale: float = 1.0) -> "bytearray | None":
         """Render one frame and read it back as BGRA bytes (top row first). The
         window-free path used by the tests; copies the render texture into a
         staging texture, maps it, and returns a tightly-packed ``width*height*4``
         buffer."""
         tex = self.render_to_texture(width, height, elapsed, fade, block=True, seed=seed,
-                                     seed_prev=seed_prev, seed_mix=seed_mix)
+                                     seed_prev=seed_prev, seed_mix=seed_mix,
+                                     pixel_scale=pixel_scale)
         if tex is None:
             return None
         width, height = max(1, int(width)), max(1, int(height))
@@ -996,7 +1168,7 @@ class D3DShaderBackground:
 
     def _write_uniforms(self, width: float, height: float, elapsed: float,
                         fade: float = 1.0, seed: float = 0.0, seed_prev: float | None = None,
-                        seed_mix: float = 1.0) -> None:
+                        seed_mix: float = 1.0, pixel_scale: float = 1.0) -> None:
         shader = self._shader
         buf = (ctypes.c_float * (UNIFORM_BYTES // 4))()
         buf[0], buf[1] = float(width), float(height)
@@ -1009,6 +1181,7 @@ class D3DShaderBackground:
         buf[12] = float(seed)
         buf[13] = float(seed if seed_prev is None else seed_prev)
         buf[14] = float(seed_mix)
+        buf[15] = float(pixel_scale)
         # UpdateSubresource writes the whole buffer (no box), the simplest of the
         # constant-buffer update paths and fine at 48 bytes once per frame.
         self._ctx.call(_IDX_CTX_UPDATE_SUBRESOURCE, None,

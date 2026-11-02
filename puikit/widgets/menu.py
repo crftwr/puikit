@@ -133,10 +133,10 @@ class MenuPopup(Widget):
     # --- drawing -------------------------------------------------------------
 
     def _hover_row(self, ctx: DrawContext) -> int | None:
-        panel = ctx.panel
-        if panel is None or panel.pointer is None:
+        pointer = ctx.pointer
+        if pointer is None:
             return None
-        px, py = panel.pointer
+        px, py = pointer
         rx, ry, rw, rh = ctx.screen_rect
         if not (rx <= px < rx + rw and ry <= py < ry + rh):
             return None
@@ -455,9 +455,10 @@ class MenuBar(Widget):
         # A pointing hand over an enabled top-level title, so the bar reads as
         # clickable. Pointer taken in widget-local coords (screen pointer minus
         # this widget's origin), tested against the title spans built above.
-        if ctx.panel is not None and ctx.panel.pointer is not None:
+        pointer = ctx.pointer
+        if pointer is not None:
             rx, ry, _rw, rh = self._abs
-            lx, ly = ctx.panel.pointer[0] - rx, ctx.panel.pointer[1] - ry
+            lx, ly = pointer[0] - rx, pointer[1] - ry
             if 0 <= ly < rh and any(
                 x0 <= lx < x1 and item.is_enabled() for x0, x1, item in self._entry_x
             ):
