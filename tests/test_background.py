@@ -136,6 +136,26 @@ def test_fill_opacity_floor_keeps_a_mark_solid_under_translucent_surfaces():
     assert alphas == [pytest.approx(0.6), pytest.approx(0.95), pytest.approx(0.6)]
 
 
+def test_list_selection_keeps_its_fill_under_a_translucent_surface():
+    from puikit import Panel
+    from puikit.backends.web_backend import WebBackend
+    from puikit.widgets import ListView
+    from puikit.widgets.base import SELECTION_OPACITY
+    be = WebBackend(open_browser=False)
+    be.set_surface_opacity(0.6)
+    fills = []
+    real = be.fill_rect
+    be.fill_rect = lambda *a, **k: (fills.append((a, k)), real(*a, **k))
+    panel = Panel(be)
+    lv = ListView(["one", "two"])
+    panel.add(lv, x=0, y=0, w=10, h=3)
+    panel.focus(lv)
+    panel.render()
+    sel = panel.theme.selection_active_bg
+    marks = [k.get("opacity") for a, k in fills if a[4].bg == sel]
+    assert marks and all(o == SELECTION_OPACITY for o in marks)
+
+
 def test_macos_fill_records_its_opacity_floor_only_when_named():
     mb = pytest.importorskip("puikit.backends.macos_backend")
     from puikit.backend import Style

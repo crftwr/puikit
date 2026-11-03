@@ -377,6 +377,9 @@ ctx.fill_rect(x, y, w, 1, Style(bg=selection), opacity=0.95)
 `opacity` is a floor, never a cap — under an opaque UI the fill is opaque as
 always — and a grid ignores it like the knob itself.
 
+`ListView` and `TreeView` draw their selected row this way, at
+`widgets.base.SELECTION_OPACITY` (0.95).
+
 ---
 
 ## 6. History: why there is no CPU background kind
