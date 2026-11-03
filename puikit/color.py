@@ -120,6 +120,44 @@ def ensure_text_headroom(bg: Color, toward: Color, target: float, *, margin: flo
     return _mix_rgb(bg3, toward, hi)
 
 
+def ensure_fill_distinct(fill: Color, surfaces: tuple[Color, ...], min_de: float, *,
+                         text: Color, text_lc: float = LC_LARGE) -> Color:
+    """Nudge a *fill* — a selection, a highlight, any background that marks
+    something on top of another background — far enough from every surface it is
+    drawn on that the mark is seen.
+
+    A fill is derived against one background but drawn on several: a list's
+    selection over the page and over a popup, a text selection over the page and
+    inside an input. Where one of those surfaces lands at the fill's own shade the
+    mark disappears. ``fill`` is blended toward white or black — whichever reaches
+    ``min_de`` (OKLab ΔE) from all of ``surfaces`` in the smaller move — and no
+    further than keeps ``text`` at ``min(its Lc now, text_lc)`` on it, so the fill
+    never gets less legible than ``text_lc`` to buy its distance. Floor-only: a fill
+    already ``min_de`` from every surface is returned unchanged; one that cannot
+    get there within the text floor gets as far as it can."""
+    fill3 = (fill[0], fill[1], fill[2])
+
+    def gap(c: Color) -> float:
+        return min(oklab_distance(c, s) for s in surfaces)
+
+    if gap(fill3) >= min_de:
+        return fill3
+    floor = min(abs(apca_lc(text, fill3)), text_lc)
+    reached: list[tuple[int, Color]] = []        # (move, fill) per pole that gets there
+    furthest: tuple[float, Color] = (gap(fill3), fill3)
+    for pole in (_WHITE, _BLACK):
+        for step in range(1, 101):
+            cand = _mix_rgb(fill3, pole, step / 100)
+            if abs(apca_lc(text, cand)) < floor:
+                break
+            g = gap(cand)
+            if g >= min_de:
+                reached.append((step, cand))
+                break
+            furthest = max(furthest, (g, cand))
+    return min(reached)[1] if reached else furthest[1]
+
+
 # --- OKLab / OKLCh ------------------------------------------------------------
 def _lin(c: float) -> float:      # sRGB 0..1 -> linear (standard piecewise EOTF)
     return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4

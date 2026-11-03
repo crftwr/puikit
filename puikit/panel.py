@@ -901,11 +901,21 @@ class DrawContext:
         self.draw_text(gx, gy, glyph)
 
     def fill_rect(
-        self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE
+        self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE,
+        *, opacity: float | None = None,
     ) -> None:
-        self._backend.fill_rect(
-            self._rect.x + x, self._rect.y + y, w, h, self._resolve(style)
-        )
+        """Fill a rect with ``style.bg``. ``opacity`` is the least opacity the fill
+        keeps under translucent surfaces (see ``Backend.fill_rect``) — for a mark,
+        such as a selection, that the background must not wash out."""
+        if opacity is None:
+            self._backend.fill_rect(
+                self._rect.x + x, self._rect.y + y, w, h, self._resolve(style)
+            )
+        else:
+            self._backend.fill_rect(
+                self._rect.x + x, self._rect.y + y, w, h, self._resolve(style),
+                opacity=opacity,
+            )
 
     # --- modern control faces (vector on capable backends, grid otherwise) ----
 

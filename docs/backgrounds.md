@@ -365,6 +365,18 @@ dissolves. It is deliberately separate from `set_background`: one knob, reused
 across background kinds. A character grid has no sub-cell alpha, so it ignores
 values below `1`.
 
+A fill that *marks* something — a selected row — is a surface fill too, and at
+the surface opacity the scene shows through it as much as through the pane: over
+a busy scene a marked row over a dark patch can come out the color of an unmarked
+row over a bright one. Such a fill names the least opacity it keeps:
+
+```python
+ctx.fill_rect(x, y, w, 1, Style(bg=selection), opacity=0.95)
+```
+
+`opacity` is a floor, never a cap — under an opaque UI the fill is opaque as
+always — and a grid ignores it like the knob itself.
+
 ---
 
 ## 6. History: why there is no CPU background kind

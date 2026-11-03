@@ -413,7 +413,9 @@ class VTBackend(Backend):
             self.draw_text(x + w - 1, y + row, "│", style)
         self.draw_text(x, y + h - 1, "└" + "─" * (w - 2) + "┘", style)
 
-    def fill_rect(self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE) -> None:
+    def fill_rect(self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE,
+                  *, opacity: float | None = None) -> None:
+        # A grid cell is opaque: there is no translucent surface for ``opacity``.
         assert self._grid is not None
         self._grid.fill_rect(x, y, w, h, style.fg, style.bg, int(style.attr),
                              _underline_color(style, self._underline_colors))

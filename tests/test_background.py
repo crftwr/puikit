@@ -122,6 +122,29 @@ def test_macos_ui_fill_alpha_tracks_surface_opacity():
     assert be._ui_fill_alpha() == pytest.approx(0.0)
 
 
+def test_fill_opacity_floor_keeps_a_mark_solid_under_translucent_surfaces():
+    # A selection drawn as a fill names the least opacity it keeps: the surface
+    # around it still dissolves at the surface opacity, the mark does not.
+    from puikit.backend import Style
+    from puikit.backends.web_backend import WebBackend
+    be = WebBackend(open_browser=False)
+    be.set_surface_opacity(0.6)
+    be.fill_rect(0, 0, 4, 1, Style(bg=(10, 20, 30)))
+    be.fill_rect(0, 1, 4, 1, Style(bg=(10, 20, 30)), opacity=0.95)
+    be.fill_rect(0, 2, 4, 1, Style(bg=(10, 20, 30)), opacity=0.2)   # a floor, not a cap
+    alphas = [c[-1] for c in be._back if c[0] == "fill"][-3:]
+    assert alphas == [pytest.approx(0.6), pytest.approx(0.95), pytest.approx(0.6)]
+
+
+def test_macos_fill_records_its_opacity_floor_only_when_named():
+    mb = pytest.importorskip("puikit.backends.macos_backend")
+    from puikit.backend import Style
+    be = mb.MacOSBackend()
+    be.fill_rect(0, 0, 1, 1, Style(bg=(1, 2, 3)))
+    be.fill_rect(0, 0, 1, 1, Style(bg=(1, 2, 3)), opacity=0.9)
+    assert len(be._back[-2]) == 6 and be._back[-1][-1] == 0.9
+
+
 def test_macos_reveal_exempt_group_stays_opaque():
     # Inside a reveal-exempt (opaque) overlay group, surface fills ignore the
     # surface opacity so the layer occludes the base UI instead of dissolving it.

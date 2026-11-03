@@ -530,12 +530,15 @@ class WebBackend(Backend):
     ) -> None:
         self._back.append(("box", x, y, w, h, style, hints or {}))
 
-    def fill_rect(self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE) -> None:
+    def fill_rect(self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE,
+                  *, opacity: float | None = None) -> None:
         # Surface fills dissolve at the surface opacity so a shader background
         # shows through — except inside a reveal-exempt (opaque overlay) group,
         # which stays solid to occlude the base. Captured now, at draw time, when
         # the group depth is live (mirrors macOS _ui_fill_alpha).
         alpha = 1.0 if self._reveal_exempt_depth > 0 else self.surface_opacity
+        if opacity is not None:
+            alpha = max(alpha, min(1.0, opacity))  # a mark keeps its own floor
         self._back.append(("fill", x, y, w, h, style, alpha))
 
     def draw_round_rect(
