@@ -132,6 +132,16 @@ The division of labor: **`legible_ink` extracts the maximum a background allows;
 `max_achievable_lc` — the moment `legible_ink` would fall short is exactly the
 moment `ensure_text_headroom` is needed.
 
+### 4c. `ensure_fill_distinct(fill, surfaces, min_de, *, text, text_lc=LC_LARGE)` — keep a mark visible
+
+A fill that marks something — a selection — is derived against one background
+but drawn on several: a list's selection on the page and inside a popup, a text
+selection on the page and inside an input. This moves `fill` toward white or
+black, whichever reaches `min_de` (OKLab ΔE) from every one of `surfaces` in the
+smaller move, and no further than keeps `text` at `min(its Lc now, text_lc)` on
+it. Floor-only; a fill that cannot get there within the text floor gets as far
+as it can.
+
 ---
 
 ## 5. The three layers
@@ -227,6 +237,16 @@ is deepened toward the background just enough to bear chrome text, while a bar
 that already has the headroom (a vivid accent, a dark blend) is left exactly as
 the recipe drew it. **A theme picks the look; the recipe layer guarantees it's
 legible** — the recipe author never has to check contrast by hand.
+
+A **fill pass** follows it, over the selection fills: `selection_active_bg` /
+`selection_bg` and `selection_inactive_bg` against the page, the popup and the
+raised surface; `text_selection_bg` and `text_selection_inactive_bg` against the
+page and the input face (`control_bg`). Each goes through `ensure_fill_distinct`
+with `FILL_MIN_DE` (0.10), or `FILL_MIN_DE_INACTIVE` (0.07) for the inactive
+ones, which are meant to be the quieter cue. It exists because
+`mix(background, foreground, 0.18)` — the inactive list fill — lands at about a
+popup's own shade on most dark palettes, and an unfocused list in a dialog showed
+no selection at all (puikit#187).
 
 The same primitive applies to any background an *app* derives itself. A file
 manager's selection fill — the pane background tinted toward the accent — lands

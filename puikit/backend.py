@@ -583,9 +583,17 @@ class Backend(ABC):
         surface around it)."""
 
     @abstractmethod
-    def fill_rect(self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE) -> None:
+    def fill_rect(self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE,
+                  *, opacity: float | None = None) -> None:
         """Fill the region with the style's background color (TUI: spaces
-        with the background; GUI: solid rect). Used for pane backgrounds."""
+        with the background; GUI: solid rect). Used for pane backgrounds.
+
+        ``opacity`` is the least opacity this fill keeps while the surfaces are
+        translucent (:meth:`set_surface_opacity`): a *mark* drawn as a fill — a
+        selected row — that must not dissolve into the background the way the
+        surface around it does. ``None`` (the default) composites at the surface
+        opacity like every other fill. A backend that cannot composite (a grid)
+        paints every fill opaque and ignores it."""
 
     @abstractmethod
     def push_clip(self, x: float, y: float, w: float, h: float) -> None:

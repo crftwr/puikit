@@ -927,7 +927,9 @@ class CursesBackend(Backend):
             self.draw_text(x + w - 1, y + row, "│", style)
         self.draw_text(x, y + h - 1, "└" + "─" * (w - 2) + "┘", style)
 
-    def fill_rect(self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE) -> None:
+    def fill_rect(self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE,
+                  *, opacity: float | None = None) -> None:
+        # A grid cell is opaque: there is no translucent surface for ``opacity``.
         x, y, w, h = round(x), round(y), round(w), round(h)
         for row in range(h):
             self.draw_text(x, y + row, " " * w, style)

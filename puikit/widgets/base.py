@@ -55,6 +55,14 @@ def selected_row_style(
     return Style(base.fg, active, base.attr)
 
 
+#: Least opacity a list's selected-row fill keeps while the surfaces are
+#: translucent over a background (``Backend.set_surface_opacity``). The selection
+#: is a mark, not surface: at the surface opacity the scene shows through it as
+#: much as through the rows around it, and on a scene in the selection's own hue
+#: the selected row stopped standing out (XeFM's Sci-Fi and Cyber dialogs).
+SELECTION_OPACITY = 0.95
+
+
 def draw_list_row(
     ctx: DrawContext,
     y: float,
@@ -91,6 +99,9 @@ def draw_list_row(
     font's line height); the selection fill spans it so the highlight covers the
     whole row rather than a single base unit.
 
+    The fill keeps ``SELECTION_OPACITY`` under a translucent surface, so a
+    background scene does not wash the selection into the rows around it.
+
     A non-selected row draws no fill of its own: its ``bg`` is ``None``, which
     ``DrawContext`` draws transparently over the pane's already-painted surface
     on a compositing backend (so a taller font's descender is not clipped by a
@@ -100,7 +111,7 @@ def draw_list_row(
     if fill_w is None:
         fill_w = text_w
     if style.bg is not None and not (style.attr & TextAttribute.REVERSE):
-        ctx.fill_rect(0, y, fill_w, row_h, Style(bg=style.bg))
+        ctx.fill_rect(0, y, fill_w, row_h, Style(bg=style.bg), opacity=SELECTION_OPACITY)
         ctx.draw_text(x, y, clipped, style)
     else:
         text = clipped + " " * (text_w - display_width(clipped))

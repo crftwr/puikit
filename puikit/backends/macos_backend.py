@@ -3017,8 +3017,11 @@ class MacOSBackend(Backend):
     ) -> None:
         self._back.append(("box", x, y, w, h, style, hints or {}))
 
-    def fill_rect(self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE) -> None:
-        self._back.append(("fill", x, y, w, h, style))
+    def fill_rect(self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE,
+                  *, opacity: float | None = None) -> None:
+        # The floor rides along only when named, so a plain fill keeps its shape.
+        self._back.append(("fill", x, y, w, h, style) if opacity is None
+                          else ("fill", x, y, w, h, style, opacity))
 
     def draw_round_rect(
         self,
@@ -3869,10 +3872,13 @@ class MacOSBackend(Backend):
             return 1.0
         return self._surface_opacity
 
-    def _render_fill(self, x: float, y: float, w: float, h: float, style: Style) -> None:
+    def _render_fill(self, x: float, y: float, w: float, h: float, style: Style,
+                     opacity: float | None = None) -> None:
         rect = self._unit_rect(x, y, w, h)
         color = style.bg or _DEFAULT_BG
         alpha = self._ui_fill_alpha()
+        if opacity is not None:
+            alpha = max(alpha, min(1.0, opacity))  # a mark keeps its own floor
         if alpha >= 1.0:
             _fill_rect(rect, color)  # opaque fast path (also handles RGBA colors)
             return

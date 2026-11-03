@@ -20,7 +20,7 @@ from typing import Any
 
 from .backend import Color
 from .capability import CapabilityProfile
-from .color import LC_LARGE, ensure_text_headroom
+from .color import LC_LARGE, ensure_fill_distinct, ensure_text_headroom
 
 
 @dataclass(frozen=True)
@@ -187,6 +187,14 @@ def lift(c: Color, amt: float, *, dark: bool | None = None) -> Color:
     return _mix(c, _WHITE, amt) if dark else _mix(c, _BLACK, amt * 0.5)
 
 
+#: How far (OKLab ΔE) ``derive_theme`` keeps a selection fill from every surface
+#: it is drawn on. 0.10 reads at a glance; the inactive fills, which are meant to
+#: be the quieter cue, keep a smaller gap — the smallest at which a selection
+#: whose focus moved away is still found without looking for it.
+FILL_MIN_DE = 0.10
+FILL_MIN_DE_INACTIVE = 0.07
+
+
 def derive_theme(
     *,
     background: Color,
@@ -293,6 +301,21 @@ def derive_theme(
     for role in ("status", "footer"):
         derived["surfaces"][role] = ensure_text_headroom(
             derived["surfaces"][role], background, LC_LARGE)
+    # Fill pass, after it: each selection fill is derived against the background
+    # but also drawn on another surface — a list's selection inside a popup, a
+    # text selection inside an input — and where that surface sits at the fill's
+    # own shade the selection vanishes (the inactive list fill was within ΔE 0.02
+    # of the popup on Solarized, puikit#187). Push each away from every surface
+    # it lands on, without costing its text more than the chrome floor.
+    page, popup, field = background, derived["popup_bg"], derived["control_bg"]
+    for name, under, gap in (
+            ("selection_active_bg", (page, popup, surface), FILL_MIN_DE),
+            ("selection_bg", (page, popup, surface), FILL_MIN_DE),
+            ("selection_inactive_bg", (page, popup, surface), FILL_MIN_DE_INACTIVE),
+            ("text_selection_bg", (page, field), FILL_MIN_DE),
+            ("text_selection_inactive_bg", (page, field), FILL_MIN_DE_INACTIVE)):
+        derived[name] = ensure_fill_distinct(derived[name], under, gap,
+                                             text=derived["text"])
     return Theme(**derived)
 
 

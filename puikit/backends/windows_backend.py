@@ -1970,8 +1970,11 @@ class WindowsBackend(Backend):
     ) -> None:
         self._back.append(("box", x, y, w, h, style, hints or {}))
 
-    def fill_rect(self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE) -> None:
-        self._back.append(("fill", x, y, w, h, style))
+    def fill_rect(self, x: float, y: float, w: float, h: float, style: Style = DEFAULT_STYLE,
+                  *, opacity: float | None = None) -> None:
+        # The floor rides along only when named, so a plain fill keeps its shape.
+        self._back.append(("fill", x, y, w, h, style) if opacity is None
+                          else ("fill", x, y, w, h, style, opacity))
 
     def draw_round_rect(
         self,
@@ -3114,12 +3117,16 @@ class WindowsBackend(Backend):
         self._set_brush(style.fg or _DEFAULT_FG)
         native.rt_draw_rectangle(self._render_target, inset, self._brush, 1.0)
 
-    def _render_fill(self, x: float, y: float, w: float, h: float, style: Style) -> None:
+    def _render_fill(self, x: float, y: float, w: float, h: float, style: Style,
+                     opacity: float | None = None) -> None:
         # UI surface fills composite at the surface opacity so a background shows
         # through; a reveal-exempt (opaque overlay) group stays opaque. Text,
         # strokes and framed boxes are unaffected, so the UI stays legible. See
         # MacOSBackend._render_fill / _ui_fill_alpha.
-        self._set_brush(style.bg or _DEFAULT_BG, self._ui_fill_alpha())
+        alpha = self._ui_fill_alpha()
+        if opacity is not None:
+            alpha = max(alpha, min(1.0, opacity))  # a mark keeps its own floor
+        self._set_brush(style.bg or _DEFAULT_BG, alpha)
         native.rt_fill_rectangle(self._render_target, self._unit_rect(x, y, w, h), self._brush)
 
     def _ui_fill_alpha(self) -> float:
