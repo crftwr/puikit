@@ -1383,3 +1383,18 @@ def test_single_row_control_focus_brackets_on_grid(backend, make):
     panel.focus(spacer)
     panel.render()
     assert not backend.snapshot()[1].startswith("[")
+
+
+def test_the_blink_tick_retires_when_its_window_closes():
+    """A closed window leaves its panel's focus where it was. A tick that only
+    watched focus would run, and hold the field and its panel, for good."""
+    backend = MemoryBackend(width=20, height=6, capabilities=PROFILE_GUI_DESKTOP)
+    window = backend.create_window(20, 6)
+    panel = Panel(backend, window=window)
+    field = TextEdit("hi")
+    panel.add(field, x=1, y=1, w=10, h=1)
+    panel.render()
+    assert field._focused_now is True and field._blink_tick() is True
+    window.close()
+    assert field._blink_tick() is False
+    assert field._blinking is False

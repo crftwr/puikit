@@ -311,3 +311,83 @@ def test_a_raster_becomes_an_nsimage_with_the_right_pixels():
     # having been scaled into the color the way premultiplication would.
     assert round(right.blueComponent()) == 1
     assert 0.4 < right.alphaComponent() < 0.6
+
+
+class TestARastersEntriesGoWithIt:
+
+    def _raster(self):
+        return RasterImage(1, 1, b"\0\0\0\0")
+
+    def test_they_stay_while_it_lives(self):
+        cache = ImageCache()
+        raster = self._raster()
+        key = source_key(raster)
+        cache.put(key, "native", 4, owner=raster)
+        cache.drain()
+        assert cache.get(key) == "native"
+
+    def test_they_go_on_the_drain_after_it_dies(self):
+        gone = []
+        cache = ImageCache(on_evict=gone.append)
+        raster = self._raster()
+        cache.put(source_key(raster), "native", 4, owner=raster)
+        del raster
+        # Not yet: a raster can die on any thread, and the entries are the UI
+        # thread's to touch.
+        assert gone == [] and cache.nbytes == 4
+        cache.drain()
+        assert gone == ["native"] and cache.nbytes == 0 and len(cache) == 0
+
+    def test_a_death_asks_for_a_drain_and_touches_nothing_itself(self):
+        woken = []
+        cache = ImageCache(wake=lambda: woken.append(len(cache)))
+        raster = self._raster()
+        cache.put(source_key(raster), "native", 4, owner=raster)
+        del raster
+        assert woken == [1]
+
+    def test_a_failing_wake_is_left_to_the_next_put(self):
+        def wake():
+            raise RuntimeError("no window yet")
+        cache = ImageCache(wake=wake)
+        raster = self._raster()
+        cache.put(source_key(raster), "native", 4, owner=raster)
+        del raster
+        cache.put("other", "other", 1)
+        assert len(cache) == 1 and cache.get("other") == "other"
+
+    def test_every_revision_goes(self):
+        cache = ImageCache()
+        raster = self._raster()
+        cache.put(source_key(raster), "first", 4, owner=raster)
+        raster.touch()
+        cache.put(source_key(raster), "second", 4, owner=raster)
+        del raster
+        cache.drain()
+        assert len(cache) == 0
+
+    def test_a_path_has_no_owner_and_stays(self):
+        cache = ImageCache()
+        cache.put(("path", "a.png", 1, 1), "native", 4)
+        cache.drain()
+        assert len(cache) == 1
+
+    def test_one_evicted_by_the_budget_is_not_dropped_twice(self):
+        gone = []
+        cache = ImageCache(budget=4, on_evict=gone.append)
+        raster = self._raster()
+        cache.put(source_key(raster), "native", 4, owner=raster)
+        cache.put("other", "other", 4)
+        assert gone == ["native"]
+        del raster
+        cache.drain()
+        assert gone == ["native"] and len(cache) == 1
+
+    def test_an_own_buffer_that_cannot_be_weakly_referenced_goes_by_the_budget(self):
+        class Buffer:
+            __slots__ = ()
+            cache_key = (1, 0)
+        cache = ImageCache()
+        cache.put(("raster", 1, 0), "native", 4, owner=Buffer())
+        cache.drain()
+        assert len(cache) == 1

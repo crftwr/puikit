@@ -25,11 +25,21 @@ the same answer.
 **Nothing is ever evicted to make room for itself.** An image bigger than the
 whole budget is still drawn, and still cached — alone. The alternative is a
 cache that refuses precisely the images that most need one.
+
+**A raster's entries go with the raster.** A raster's identity is handed out
+once, so when the raster is gone nothing can ask for its entries again, and the
+budget would only hold them until something else pushed them out. A viewer that
+makes a new raster per picture would otherwise always sit at the full budget.
+While a raster lives it may be drawn again, and the display list that draws it
+holds it, so its entries stay. A raster can die on any thread and in the middle
+of anything, whereas the entries belong to the UI thread: a death only queues,
+and asks ``wake`` to have :meth:`ImageCache.drain` called there.
 """
 
 from __future__ import annotations
 
-from collections import OrderedDict
+import weakref
+from collections import OrderedDict, deque
 from typing import Any, Callable
 
 #: Returned by :meth:`ImageCache.get` when the key is not held at all — as
@@ -48,7 +58,8 @@ class ImageCache:
     total byte budget, least-recently-used evicted first."""
 
     def __init__(self, budget: int = DEFAULT_BUDGET,
-                 on_evict: Callable[[Any], None] | None = None):
+                 on_evict: Callable[[Any], None] | None = None,
+                 wake: Callable[[], None] | None = None):
         self._entries: "OrderedDict[Any, tuple[Any, int]]" = OrderedDict()
         self._budget = max(1, int(budget))
         self._bytes = 0
@@ -56,6 +67,12 @@ class ImageCache:
         # the garbage collector knows nothing about. Never called for ``None``,
         # which is a remembered failure and owns nothing.
         self._on_evict = on_evict
+        # Called from wherever a raster died, to get drain() called on the UI
+        # thread. It must take no lock that thread's code can be holding.
+        self._wake = wake
+        self._dead: deque[Any] = deque()    # identities of rasters that died
+        self._by_owner: dict[Any, set] = {} # identity -> its keys, while it lives
+        self._owner_of: dict[Any, Any] = {} # key -> identity
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -74,15 +91,47 @@ class ImageCache:
         self._entries.move_to_end(key)
         return entry[0]
 
-    def put(self, key: Any, value: Any, nbytes: int = 0) -> None:
+    def put(self, key: Any, value: Any, nbytes: int = 0, owner: Any = None) -> None:
         """Store ``value`` under ``key``, weighing it at ``nbytes``, then evict
-        until the total is back inside the budget."""
+        until the total is back inside the budget. An ``owner`` (a raster) takes
+        the entry with it when it dies, whichever revision the entry is of."""
+        self.drain()
         self._drop(key)
         weight = max(0, int(nbytes))
         self._entries[key] = (value, weight)
         self._bytes += weight
+        if owner is not None:
+            self._own(key, owner)
         while self._bytes > self._budget and len(self._entries) > 1:
             self._drop(next(iter(self._entries)))
+
+    def drain(self) -> None:
+        """Drop the entries of the rasters that have died. UI thread only."""
+        while self._dead:
+            for key in self._by_owner.pop(self._dead.popleft(), ()):
+                self._drop(key)
+
+    def _own(self, key: Any, owner: Any) -> None:
+        identity = owner.cache_key[0]
+        keys = self._by_owner.get(identity)
+        if keys is None:
+            try:
+                weakref.finalize(owner, self._owner_died, identity).atexit = False
+            except TypeError:
+                # A pixel buffer of the application's own that cannot be weakly
+                # referenced: its entries go by the budget, as anything's do.
+                return
+            keys = self._by_owner[identity] = set()
+        keys.add(key)
+        self._owner_of[key] = identity
+
+    def _owner_died(self, identity: Any) -> None:
+        self._dead.append(identity)
+        if self._wake is not None:
+            try:
+                self._wake()
+            except Exception:
+                pass    # the next put() drains it; a finalizer must not raise
 
     def clear(self) -> None:
         """Drop everything, releasing each held value. A backend calls this when
@@ -96,5 +145,8 @@ class ImageCache:
             return
         value, weight = entry
         self._bytes -= weight
+        identity = self._owner_of.pop(key, None)
+        if identity is not None and identity in self._by_owner:
+            self._by_owner[identity].discard(key)
         if value is not None and self._on_evict is not None:
             self._on_evict(value)

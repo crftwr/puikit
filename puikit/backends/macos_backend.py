@@ -1569,7 +1569,15 @@ class MacWindowHandle(WindowHandle):
         self.nswindow.orderOut_(None)
         if self in self._backend._secondary_windows:
             self._backend._secondary_windows.remove(self)
+        self._let_go()
+
+    def _let_go(self) -> None:
+        # handle -> view/delegate -> handle runs through Objective-C objects,
+        # where Python's gc cannot see it: a cycle left here is never collected,
+        # and it keeps the window, its layer's backing store and the app's whole
+        # Panel alive (Keyhac #325: 3 MB per window, forever).
         self.view.pk_window = None
+        self._delegate.handle = None
 
     def set_title(self, title: str) -> None:
         self.nswindow.setTitle_(title)
@@ -1656,6 +1664,7 @@ class MacWindowHandle(WindowHandle):
         self._closed = True
         if self in self._backend._secondary_windows:
             self._backend._secondary_windows.remove(self)
+        self._let_go()
         if self.on_close is not None:
             self.on_close()
 
@@ -2077,7 +2086,7 @@ class MacOSBackend(Backend):
         # merely bounded for the same second reason: a decoded 24-megapixel
         # photo is ~100 MB of RGBA, and "one entry per distinct source" is no
         # longer a small number of megabytes.
-        self._image_cache = ImageCache()
+        self._image_cache = ImageCache(wake=self._wake_image_cache)
         self._animations: dict[int, Animation] = {}  # keyed by id(widget)
         self._anim_timer = None
         self._anim_timer_interval: float | None = None  # rate of the live timer
@@ -4103,8 +4112,12 @@ class MacOSBackend(Backend):
             image = NSImage.alloc().initWithContentsOfFile_(source)
             size = image.size() if image is not None else None
             weight = int(size.width * size.height * 4) if size is not None else 0
-        self._image_cache.put(key, image, weight)
+        self._image_cache.put(key, image, weight,
+                              owner=source if is_raster(source) else None)
         return image
+
+    def _wake_image_cache(self) -> None:
+        AppHelper.callAfter(self._image_cache.drain)
 
     def image_size(self, source: Any) -> tuple[int, int] | None:
         """The image's size in **pixels**, read through ImageIO.
