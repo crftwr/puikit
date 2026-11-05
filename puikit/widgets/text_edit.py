@@ -293,7 +293,11 @@ class TextEdit(Widget):
         # costs a short walk; the previous form inferred it from whether a full
         # render re-set _focused_now, which is why this tick used to have to
         # render every frame to stay correct.
-        if self._panel.focused_leaf() is not self:
+        #
+        # A closed window is not a focus move: its panel still says this field
+        # is focused, so this has to ask. Left ticking, the backend's tick list
+        # would hold the field, its panel and its window for good.
+        if self._panel.focused_leaf() is not self or self._panel.window_closed:
             self._focused_now = False
             self._blinking = False
             return False

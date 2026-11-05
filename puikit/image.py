@@ -137,7 +137,7 @@ class RasterImage:
     mutates the bytes it passed in must call :meth:`touch`.
     """
 
-    __slots__ = ("_width", "_height", "_data", "_identity", "_revision")
+    __slots__ = ("_width", "_height", "_data", "_identity", "_revision", "__weakref__")
 
     def __init__(self, width: int, height: int, data: bytes | bytearray | memoryview):
         global _next_identity

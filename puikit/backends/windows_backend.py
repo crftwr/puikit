@@ -1226,7 +1226,8 @@ class WindowsBackend(Backend):
         # tens of megabytes each. Evicting releases the ID2D1Bitmap — a COM
         # reference nothing else is holding.
         self._image_cache = ImageCache(
-            on_evict=lambda cached: cached[0].release())
+            on_evict=lambda cached: cached[0].release(),
+            wake=self._wake_image_cache)
         # Active background behind the UI (set_background): a Shader (GPU), a
         # Wallpaper (static image), or None (solid). A Shader drives a per-frame
         # tick and is composited beneath the UI; a Wallpaper the render pass draws.
@@ -3481,8 +3482,15 @@ class WindowsBackend(Backend):
                 if bitmap is not None:
                     result = (bitmap, iw, ih)
         weight = 0 if result is None else result[1] * result[2] * 4
-        self._image_cache.put(key, result, weight)
+        self._image_cache.put(key, result, weight,
+                              owner=source if is_raster(source) else None)
         return result
+
+    def _wake_image_cache(self) -> None:
+        # Not call_on_main_thread: this can run inside a collection on any
+        # thread, including one already holding that method's lock.
+        if self._hwnd:
+            native.user32.PostMessageW(self._hwnd, _WM_CALL_ON_MAIN_THREAD, 0, 0)
 
     def image_size(self, source: Any) -> tuple[int, int] | None:
         """The image's pixel size, read through WIC.
@@ -4664,6 +4672,7 @@ class WindowsBackend(Backend):
             return 0
         if msg == _WM_CALL_ON_MAIN_THREAD:
             self._drain_main_thread_callbacks()
+            self._image_cache.drain()
             return 0
         if msg == _WM_TRAY_CALLBACK:
             # Left or right click on the tray icon opens the tray menu.

@@ -1921,6 +1921,12 @@ class Panel:
 
     # --- rendering --------------------------------------------------------------
 
+    @property
+    def window_closed(self) -> bool:
+        """Whether this panel's secondary window has been closed. Closing a
+        window tells nothing inside its panel: focus stays where it was."""
+        return self._window is not None and self._window.closed
+
     def focused_leaf(self) -> Any | None:
         """The deepest focused widget — descending through focused containers to
         the leaf that actually holds focus (e.g. a ``TextEdit`` nested in a
