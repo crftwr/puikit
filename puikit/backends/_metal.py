@@ -27,6 +27,7 @@ from ._bg_textures import TextureLoad
 
 try:
     import Metal
+    import objc
     HAVE_METAL = True
 except ImportError:  # pragma: no cover - depends on the PyObjC install
     Metal = None
@@ -50,6 +51,38 @@ _TEX_FORMAT = 70        # MTLPixelFormatRGBA8Unorm
 _TEX_FORMAT_SRGB = 71   # MTLPixelFormatRGBA8Unorm_sRGB
 
 _ADDRESS = {"repeat": 2, "clamp": 0}   # MTLSamplerAddressModeRepeat / ClampToEdge
+
+_OUT_ERROR = {"type": b"^@", "type_modifier": b"o"}
+
+#: Every Metal ``new*`` method this module calls, with the arguments of its PyObjC
+#: metadata. These return an object the caller owns, but PyObjC's Metal metadata
+#: does not say so: it retains the result again and the object can never be freed
+#: (xefm#852, a per-frame uniform buffer and every window-sized target on a resize).
+#: Registering a selector replaces its metadata rather than merging, which is why
+#: the arguments are repeated: without them an ``error:`` stops being returned.
+#: A new ``new*`` call goes here too; a test holds the list to the calls.
+_NEW_SELECTORS = {
+    b"newCommandQueue": {},
+    b"newFunctionWithName:": {2: {"type": b"@"}},
+    b"newLibraryWithSource:options:error:": {2: {"type": b"@"}, 3: {"type": b"@"},
+                                             4: _OUT_ERROR},
+    b"newRenderPipelineStateWithDescriptor:error:": {2: {"type": b"@"}, 3: _OUT_ERROR},
+    b"newTextureWithDescriptor:": {2: {"type": b"@"}},
+    b"newBufferWithBytes:length:options:": {
+        2: {"type": b"^v", "type_modifier": b"n", "c_array_length_in_arg": 3},
+        3: {"type": b"Q"},
+        4: {"type": b"Q"},
+    },
+    b"newSamplerStateWithDescriptor:": {2: {"type": b"@"}},
+}
+
+if HAVE_METAL:
+    for _selector, _arguments in _NEW_SELECTORS.items():
+        objc.registerMetaDataForSelector(b"NSObject", _selector, {
+            "required": True,
+            "retval": {"type": b"@", "already_retained": True},
+            "arguments": _arguments,
+        })
 
 
 def _rgba(color: "tuple[int, int, int] | None", default: float = 0.0
