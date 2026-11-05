@@ -7,11 +7,16 @@ without ever opening a window. They skip where Metal is unavailable.
 """
 
 import dataclasses
+import gc
+import re
+from collections import Counter
+from pathlib import Path
 
 import pytest
 
-from puikit import Shader
+from puikit import Pass, Shader, Target
 from puikit.background import SHADER_ENTRY, SHADER_PRELUDE
+from puikit.backends import _metal
 from puikit.backends._metal import HAVE_METAL, MetalBackground, UNIFORM_BYTES
 from puikit.backends.memory_backend import MemoryBackend
 from puikit import PROFILE_TUI
@@ -43,6 +48,60 @@ fragment float4 puikit_bg_fragment(float4 pos [[position]],
     return float4(fract(u.time), 0.0, 0.0, 1.0);
 }
 """
+
+
+#: Fills a window-sized target and shows it, the shape of a scene that rebuilds
+#: its targets when the window changes size.
+SIZED_TARGET_MSL = """
+fragment float4 fill(float4 pos [[position]]) { return float4(0.5); }
+fragment float4 show(float4 pos [[position]], texture2d<float> half_ [[texture(0)]],
+                     sampler s [[sampler(0)]]) {
+    return half_.sample(s, float2(0.5));
+}
+"""
+
+
+#: How many more objects may be alive after the second half of a run than after
+#: the first. Each half makes dozens of them, so a leak is well past this.
+OBJECT_SLACK = 3
+
+
+def _sized_target_shader():
+    return Shader(source=SIZED_TARGET_MSL, targets=(Target("half", scale=1.0),),
+                  passes=(Pass("fill", "half"), Pass("show", inputs=("half",))))
+
+
+class _TrackedMaker:
+    """Stands in for a Metal object that makes others, weakly recording what each
+    ``new*`` call returns. The runtime cannot list an object's instances, but a
+    weak reference to each one says whether it is still alive."""
+
+    def __init__(self, real, log):
+        self._real, self._log = real, log
+
+    def __getattr__(self, name):
+        attr = getattr(self._real, name)
+        if not name.startswith("new"):
+            return attr
+
+        def make(*args):
+            import objc
+            result = attr(*args)
+            made = result[0] if isinstance(result, tuple) else result
+            if made is None:
+                return result
+            self._log.append((name, objc.WeakRef(made)))
+            if name.startswith("newLibrary"):
+                # A library makes the shader functions.
+                return _TrackedMaker(made, self._log), result[1]
+            return result
+        return make
+
+
+def _live(log):
+    """How many logged objects are still alive, by the ``new*`` call that made them."""
+    gc.collect()
+    return Counter(name for name, ref in log if ref() is not None)
 
 
 def _pixel(texture, x=0, y=0):
@@ -265,6 +324,65 @@ fragment float4 wrongly_named(float4 pos [[position]],
 
     def test_render_without_a_shader_is_a_noop(self):
         assert MetalBackground().render_to_texture(8, 8, 0.0) is None
+
+
+@pytestmark_metal
+class TestNewObjectsAreOwned:
+    """A Metal ``new*`` result is released with its Python reference (xefm#852)."""
+
+    def test_every_new_call_is_declared(self):
+        source = Path(_metal.__file__).read_text(encoding="utf-8")
+        called = {name.replace("_", ":").encode()
+                  for name in re.findall(r"\.(new[A-Z]\w*)\(", source)}
+        assert called == set(_metal._NEW_SELECTORS)
+
+    def _tracked(self):
+        """A renderer on the sized-target scene, and the log of what it creates."""
+        log = []
+        r = MetalBackground()
+        r._device = _TrackedMaker(r._device, log)
+        assert r.set_shader(_sized_target_shader()), r.error
+        return r, log
+
+    def _draw(self, r, sizes):
+        import objc
+        for size in sizes:
+            with objc.autorelease_pool():
+                r.render_to_texture(size, size, 0.0)
+
+    # Each test compares two later counts instead of naming one: what a healthy
+    # scene keeps alive is Metal's business, and only growth is a leak. The slack
+    # is for the odd object Metal lets go of a moment after a frame completes.
+
+    def test_drawing_frames_does_not_accumulate_objects(self):
+        r, log = self._tracked()
+        self._draw(r, [16] * 20)
+        before = _live(log)
+        self._draw(r, [16] * 20)
+        grown = _live(log) - before
+        assert grown.total() <= OBJECT_SLACK, grown
+
+    def test_resizing_does_not_accumulate_objects(self):
+        r, log = self._tracked()
+        self._draw(r, range(16, 36))
+        before = _live(log)
+        self._draw(r, range(36, 56))
+        grown = _live(log) - before
+        assert grown.total() <= OBJECT_SLACK, grown
+
+    def test_switching_shaders_does_not_accumulate_objects(self):
+        r, log = self._tracked()
+
+        def switch():
+            for shader in (Shader(source=GRADIENT), _sized_target_shader()) * 5:
+                assert r.set_shader(shader), r.error
+                self._draw(r, [16])
+
+        switch()
+        before = _live(log)
+        switch()
+        grown = _live(log) - before
+        assert grown.total() <= OBJECT_SLACK, grown
 
 
 class TestPixelDensity:
