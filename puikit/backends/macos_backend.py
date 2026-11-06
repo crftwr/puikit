@@ -1476,10 +1476,11 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
         )
 
 
-def _make_notification_delegate(UN):
+def _make_notification_delegate(UN, clicked):
     """The delegate that shows a notification posted while this application is
-    active. Defined on first use: the protocol exists only once
-    UserNotifications, a framework most applications never load, is imported."""
+    active and reports a click on one. Defined on first use: the protocol exists
+    only once UserNotifications, a framework most applications never load, is
+    imported. ``clicked`` takes the notification's identifier."""
     global _notification_delegate_class
     if _notification_delegate_class is None:
         options = (UN.UNNotificationPresentationOptionBanner
@@ -1492,11 +1493,26 @@ def _make_notification_delegate(UN):
                     self, _center, _notification, completion):
                 completion(options)
 
+            def userNotificationCenter_didReceiveNotificationResponse_withCompletionHandler_(
+                    self, _center, response, completion):
+                # Dismissing one from Notification Center comes here too.
+                if response.actionIdentifier() == UN.UNNotificationDefaultActionIdentifier:
+                    identifier = str(response.notification().request().identifier())
+                    # On a thread of the framework's choosing.
+                    AppHelper.callAfter(self.clicked, identifier)
+                completion()
+
         _notification_delegate_class = _PuiKitNotificationDelegate
-    return _notification_delegate_class.alloc().init()
+    delegate = _notification_delegate_class.alloc().init()
+    delegate.clicked = clicked
+    return delegate
 
 
 _notification_delegate_class = None
+
+#: How many notifications' on_click are held. Notification Center keeps them for
+#: as long as the user does, and a long-running application posts without end.
+_MAX_NOTIFICATION_CLICKS = 64
 
 
 class _PuiKitWindowDelegate(NSObject):
@@ -1964,6 +1980,7 @@ class MacOSBackend(Backend):
         self._notification_center_object = None  # post_notification
         self._notification_delegate = None
         self._notifications_refused = False
+        self._notification_clicks = {}  # identifier -> on_click, oldest first
         self._tray_responder = None   # retained menu responder
         self._tray_badge = None       # the badge dot's NSView, if shown
         self._tray_images = {}        # path -> NSImage, for set_tray_image frames
@@ -2259,7 +2276,8 @@ class MacOSBackend(Backend):
             self._tray_responder = responder  # NSMenuItem does not retain targets
             self._status_item.setMenu_(ns_menu)
 
-    def post_notification(self, title: str, text: str = "") -> bool:
+    def post_notification(self, title: str, text: str = "", on_click=None,
+                          on_refused=None) -> bool:
         center = self._notification_center()
         if center is None:
             return False
@@ -2268,21 +2286,39 @@ class MacOSBackend(Backend):
         content = UN.UNMutableNotificationContent.alloc().init()
         content.setTitle_(title)
         content.setBody_(text)
+        identifier = str(uuid.uuid4())
         request = UN.UNNotificationRequest.requestWithIdentifier_content_trigger_(
-            str(uuid.uuid4()), content, None)
+            identifier, content, None)
+        # What this call returns has to agree with what becomes of the
+        # notification: where it says False, the caller says it another way, so
+        # nothing is posted here even if the answer has since changed.
+        posting = not self._notifications_refused
 
         def on_authorization(granted, _error):
             # On a thread of the framework's choosing. A bool is all it writes.
             self._notifications_refused = not granted
+            if not posting:
+                return
             if granted:
                 center.addNotificationRequest_withCompletionHandler_(request, None)
+            elif on_refused is not None:
+                AppHelper.callAfter(on_refused)
 
+        if posting and on_click is not None:
+            self._notification_clicks[identifier] = on_click
+            while len(self._notification_clicks) > _MAX_NOTIFICATION_CLICKS:
+                del self._notification_clicks[next(iter(self._notification_clicks))]
         center.requestAuthorizationWithOptions_completionHandler_(
             UN.UNAuthorizationOptionAlert | UN.UNAuthorizationOptionSound,
             on_authorization)
         # Asked again every time, which only prompts once: a user who changes
         # their mind in System Settings is seen by the next call.
-        return not self._notifications_refused
+        return posting
+
+    def _notification_clicked(self, identifier: str) -> None:
+        on_click = self._notification_clicks.pop(identifier, None)
+        if on_click is not None:
+            on_click()
 
     def _notification_center(self):
         """The notification center, or None where this process cannot have one.
@@ -2299,7 +2335,8 @@ class MacOSBackend(Backend):
             center = UN.UNUserNotificationCenter.currentNotificationCenter()
             # Without a delegate the OS drops a notification posted while this
             # application is the active one.
-            self._notification_delegate = _make_notification_delegate(UN)
+            self._notification_delegate = _make_notification_delegate(
+                UN, self._notification_clicked)
             center.setDelegate_(self._notification_delegate)
         except Exception:
             return None

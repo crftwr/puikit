@@ -2219,3 +2219,15 @@ def test_measure_text_answers_a_repeat_from_its_memo_until_fonts_change(monkeypa
     backend._rebuild_fonts()                    # a DPI change: widths change too
     backend.measure_text("file0001.txt", style)
     assert len(calls) == 1
+
+
+def test_a_click_on_the_toast_runs_the_latest_on_click_once():
+    """The callback message names no notification, so only the latest counts."""
+    backend = WindowsBackend.__new__(WindowsBackend)
+    backend._hwnd_windows = {}
+    clicks = []
+    backend._notification_click = lambda: clicks.append(1)
+    message = (0, windows_backend._WM_TRAY_CALLBACK, 0, native.NIN_BALLOONUSERCLICK)
+    assert backend._handle_message(*message) == 0
+    assert backend._handle_message(*message) == 0
+    assert clicks == [1]

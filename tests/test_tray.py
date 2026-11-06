@@ -85,5 +85,7 @@ def test_post_notification_is_a_base_no_op_reporting_nothing_was_posted():
     assert backend.post_notification("Done", "All 12 items") is False
     assert backend.capabilities["system_notifications"] is False
     sig = inspect.signature(Backend.post_notification)
-    assert list(sig.parameters) == ["self", "title", "text"]
+    assert list(sig.parameters) == ["self", "title", "text", "on_click", "on_refused"]
     assert sig.parameters["text"].default == ""
+    assert sig.parameters["on_click"].default is None
+    assert sig.parameters["on_refused"].default is None
