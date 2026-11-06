@@ -10,6 +10,7 @@ pytestmark = pytest.mark.skipif(
 pytest.importorskip("AppKit", reason="pyobjc not installed")
 
 from AppKit import NSFontAttributeName  # noqa: E402
+from CoreFoundation import CFCharacterSetIsLongCharacterMember  # noqa: E402
 
 from puikit import Font, FontSlant, FontWeight, Style, TextAttribute  # noqa: E402
 from puikit.backends.macos_backend import (  # noqa: E402
@@ -713,7 +714,9 @@ def test_grid_batches_only_glyphs_that_advance_one_column():
     # Off-grid while *covered*: U+25B6 is in Noto Sans Mono at double advance,
     # yet East-Asian-Ambiguous, so display_width calls it one column. A coverage
     # test would wrongly batch this one.
-    assert ns_font.coveredCharacterSet().longCharacterIsMember_(0x25B6)
+    # Through CoreFoundation: on macOS 27 this returns a CFCharacterSet that
+    # PyObjC cannot call the NSCharacterSet method on.
+    assert CFCharacterSetIsLongCharacterMember(ns_font.coveredCharacterSet(), 0x25B6)
     assert not batchable("▶")
 
 
