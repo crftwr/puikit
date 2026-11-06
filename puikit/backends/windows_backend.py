@@ -981,6 +981,7 @@ class WindowsBackend(Backend):
             "os_drag_drop": True,  # drag-OUT: IDropSource + DoDragDrop (_win32_dragdrop.py)
             "ime": True,  # mode-gated, inline preedit (_win32_ime.py)
             "system_tray": True,  # set_tray: Shell_NotifyIconW tray icon + menu
+            "system_notifications": True,  # post_notification: the tray icon's toast
             # Unused by any PuiKit app to date (see MacOSBackend.PROFILE, which
             # leaves the same three False) — not on this backend's punch list.
             "clipboard_rich": False,
@@ -1036,6 +1037,7 @@ class WindowsBackend(Backend):
         # unaffected, so the event loop runs normally while hidden.
         self._start_hidden = start_hidden
         self._tray_installed = False
+        self._notification_click = None  # post_notification's on_click
         self._tray_menu = None
         self._tray_hicon = 0  # HICON loaded from set_tray(image=…); ours to destroy
         self._tray_badge = None  # the badge color, re-drawn on each image swap
@@ -3855,6 +3857,28 @@ class WindowsBackend(Backend):
         self._tray_installed = True
         self._tray_menu = menu
 
+    def post_notification(self, title: str, text: str = "", on_click=None) -> bool:
+        """The tray icon's info balloon (NIF_INFO), which Windows 10 and later
+        show as a toast. It belongs to the icon, so with no icon there is
+        nothing to post from. An empty szInfo would remove a balloon rather
+        than show one, so the title stands in for missing text.
+
+        A click arrives as the icon's callback message, naming no notification:
+        only the latest one's on_click can be run."""
+        if not self._tray_installed:
+            return False
+        self._notification_click = on_click
+        data = native.NOTIFYICONDATAW()
+        data.cbSize = ctypes.sizeof(native.NOTIFYICONDATAW)
+        data.hWnd = self._hwnd
+        data.uID = _TRAY_ICON_ID
+        data.uFlags = native.NIF_INFO
+        data.szInfoTitle = title[:63]
+        data.szInfo = (text or title or " ")[:255]
+        data.dwInfoFlags = native.NIIF_INFO
+        return bool(native.shell32.Shell_NotifyIconW(
+            native.NIM_MODIFY, ctypes.byref(data)))
+
     def set_tray_image(self, image: str | None) -> None:
         """Swap the icon alone (NIM_MODIFY with NIF_ICON): the menu and the
         tooltip stay as set_tray left them. The badge is part of the icon's
@@ -4675,6 +4699,11 @@ class WindowsBackend(Backend):
             self._image_cache.drain()
             return 0
         if msg == _WM_TRAY_CALLBACK:
+            if lparam == native.NIN_BALLOONUSERCLICK:
+                on_click, self._notification_click = self._notification_click, None
+                if on_click is not None:
+                    on_click()
+                return 0
             # Left or right click on the tray icon opens the tray menu.
             if lparam in (native.WM_LBUTTONUP, native.WM_RBUTTONUP) \
                     and self._tray_menu is not None:

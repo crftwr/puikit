@@ -78,3 +78,13 @@ def test_memory_backend_models_a_covered_window():
     backend.main_window_active = False          # shown, but behind another
     assert backend.is_main_window_visible()
     assert not backend.is_main_window_active()
+
+
+def test_post_notification_is_a_base_no_op_reporting_nothing_was_posted():
+    backend = MemoryBackend(width=20, height=5)
+    assert backend.post_notification("Done", "All 12 items") is False
+    assert backend.capabilities["system_notifications"] is False
+    sig = inspect.signature(Backend.post_notification)
+    assert list(sig.parameters) == ["self", "title", "text", "on_click"]
+    assert sig.parameters["text"].default == ""
+    assert sig.parameters["on_click"].default is None

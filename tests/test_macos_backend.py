@@ -1527,3 +1527,82 @@ def test_a_face_of_its_own_keeps_its_metrics():
     assert backend.measure_line_height(Style(font=Font(size=80.0))) > 1.5
     named = backend.font_metrics(Style(font=Font(family="Georgia")))
     assert named != backend.font_metrics(Style(font=Font()))
+
+
+class _FakeNotificationCenter:
+    """Answers the authorization request as told, on the spot."""
+
+    def __init__(self, granted):
+        self.granted = granted
+        self.requests = []
+
+    def requestAuthorizationWithOptions_completionHandler_(self, _options, handler):
+        handler(self.granted, None)
+
+    def addNotificationRequest_withCompletionHandler_(self, request, _handler):
+        self.requests.append(request)
+
+
+@pytest.fixture
+def notifying(monkeypatch):
+    """A backend with a fake notification center; callAfter runs at once."""
+    pytest.importorskip("UserNotifications")
+    from puikit.backends import macos_backend
+
+    monkeypatch.setattr(macos_backend.AppHelper, "callAfter",
+                        lambda callback, *args: callback(*args))
+
+    def make(granted=True):
+        backend = MacOSBackend()
+        backend._notification_center_object = _FakeNotificationCenter(granted)
+        return backend, backend._notification_center_object
+
+    return make
+
+
+def test_a_click_on_a_notification_runs_its_on_click_once(notifying):
+    backend, center = notifying()
+    clicks = []
+    assert backend.post_notification("Saved", "report.csv", on_click=lambda: clicks.append(1))
+    identifier = str(center.requests[0].identifier())
+    backend._notification_clicked(identifier)
+    backend._notification_clicked(identifier)
+    assert clicks == [1]
+
+
+def test_a_click_on_a_notification_nobody_holds_does_nothing(notifying):
+    backend, _center = notifying()
+    backend._notification_clicked("from before this process started")
+
+
+def test_the_oldest_on_click_goes_past_the_limit(notifying):
+    from puikit.backends.macos_backend import _MAX_NOTIFICATION_CLICKS
+
+    backend, center = notifying()
+    clicks = []
+    for n in range(_MAX_NOTIFICATION_CLICKS + 1):
+        backend.post_notification("Saved", on_click=lambda n=n: clicks.append(n))
+    backend._notification_clicked(str(center.requests[0].identifier()))
+    backend._notification_clicked(str(center.requests[1].identifier()))
+    assert clicks == [1]
+
+
+def test_a_refusal_posts_nothing_and_shows_as_false_from_the_next_call(notifying):
+    backend, center = notifying(granted=False)
+    assert backend.post_notification("First") is True
+    assert center.requests == []
+    clicks = []
+    assert backend.post_notification("Second", on_click=lambda: clicks.append(1)) is False
+    assert center.requests == []
+    assert backend._notification_clicks == {}
+
+
+def test_a_permission_given_since_is_seen_by_the_next_call_not_this_one(notifying):
+    """What a call returns stays true of what becomes of its notification."""
+    backend, center = notifying(granted=False)
+    backend.post_notification("First")
+    center.granted = True
+    assert backend.post_notification("Second") is False
+    assert center.requests == []
+    assert backend.post_notification("Third") is True
+    assert len(center.requests) == 1

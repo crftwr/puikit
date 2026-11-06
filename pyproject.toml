@@ -84,6 +84,9 @@ dependencies = [
     # losing the render-the-same-on-any-machine guarantee the bundled fonts
     # exist to provide.
     "pyobjc-framework-CoreText>=10; sys_platform == 'darwin'",
+    # post_notification (macos_backend). Imported only when a notification is
+    # posted, since most applications never post one.
+    "pyobjc-framework-UserNotifications>=10; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
