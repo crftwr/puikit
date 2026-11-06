@@ -21,6 +21,7 @@ import os
 import random
 import sys
 import time
+import uuid
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -1475,6 +1476,29 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
         )
 
 
+def _make_notification_delegate(UN):
+    """The delegate that shows a notification posted while this application is
+    active. Defined on first use: the protocol exists only once
+    UserNotifications, a framework most applications never load, is imported."""
+    global _notification_delegate_class
+    if _notification_delegate_class is None:
+        options = (UN.UNNotificationPresentationOptionBanner
+                   | UN.UNNotificationPresentationOptionList)
+
+        class _PuiKitNotificationDelegate(
+                NSObject,
+                protocols=[objc.protocolNamed("UNUserNotificationCenterDelegate")]):
+            def userNotificationCenter_willPresentNotification_withCompletionHandler_(
+                    self, _center, _notification, completion):
+                completion(options)
+
+        _notification_delegate_class = _PuiKitNotificationDelegate
+    return _notification_delegate_class.alloc().init()
+
+
+_notification_delegate_class = None
+
+
 class _PuiKitWindowDelegate(NSObject):
     backend = None
 
@@ -1873,6 +1897,7 @@ class MacOSBackend(Backend):
             "clipboard_rich": True,   # NSPasteboard multi-type write (HTML + plain)
             "native_file_dialog": False,
             "system_tray": True,   # set_tray: NSStatusItem menu bar extra
+            "system_notifications": True,  # post_notification: UNUserNotificationCenter
             "media_keys": False,
             "gpu_acceleration": False,
             "post_effects": True,    # Core Image content-filter composite; gated
@@ -1936,6 +1961,9 @@ class MacOSBackend(Backend):
         # it. The run loop and timers are unaffected while hidden.
         self._start_hidden = start_hidden
         self._status_item = None      # NSStatusItem (set_tray)
+        self._notification_center_object = None  # post_notification
+        self._notification_delegate = None
+        self._notifications_refused = False
         self._tray_responder = None   # retained menu responder
         self._tray_badge = None       # the badge dot's NSView, if shown
         self._tray_images = {}        # path -> NSImage, for set_tray_image frames
@@ -2230,6 +2258,53 @@ class MacOSBackend(Backend):
             ns_menu, responder = build_popup_menu(menu)
             self._tray_responder = responder  # NSMenuItem does not retain targets
             self._status_item.setMenu_(ns_menu)
+
+    def post_notification(self, title: str, text: str = "") -> bool:
+        center = self._notification_center()
+        if center is None:
+            return False
+        import UserNotifications as UN
+
+        content = UN.UNMutableNotificationContent.alloc().init()
+        content.setTitle_(title)
+        content.setBody_(text)
+        request = UN.UNNotificationRequest.requestWithIdentifier_content_trigger_(
+            str(uuid.uuid4()), content, None)
+
+        def on_authorization(granted, _error):
+            # On a thread of the framework's choosing. A bool is all it writes.
+            self._notifications_refused = not granted
+            if granted:
+                center.addNotificationRequest_withCompletionHandler_(request, None)
+
+        center.requestAuthorizationWithOptions_completionHandler_(
+            UN.UNAuthorizationOptionAlert | UN.UNAuthorizationOptionSound,
+            on_authorization)
+        # Asked again every time, which only prompts once: a user who changes
+        # their mind in System Settings is seen by the next call.
+        return not self._notifications_refused
+
+    def _notification_center(self):
+        """The notification center, or None where this process cannot have one.
+
+        Asking for it outside an application bundle raises, so the bundle is
+        checked first and an exception still counts as "no center"."""
+        if self._notification_center_object is not None:
+            return self._notification_center_object
+        from Foundation import NSBundle
+        if NSBundle.mainBundle().bundleIdentifier() is None:
+            return None
+        try:
+            import UserNotifications as UN
+            center = UN.UNUserNotificationCenter.currentNotificationCenter()
+            # Without a delegate the OS drops a notification posted while this
+            # application is the active one.
+            self._notification_delegate = _make_notification_delegate(UN)
+            center.setDelegate_(self._notification_delegate)
+        except Exception:
+            return None
+        self._notification_center_object = center
+        return center
 
     def set_tray_image(self, image: str | None) -> None:
         if self._status_item is None:

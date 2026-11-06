@@ -57,6 +57,7 @@ PROFILE_TUI = CapabilityProfile(
                              # Panel's file-clipboard calls are harmless no-ops.
     native_file_dialog=False,
     system_tray=False,
+    system_notifications=False,  # post_notification: Notification Center / toast
     native_menus=False,      # OS menu bar / context menus (NSMenu, HMENU, ...);
                              # the Panel falls back to a widget-rendered menu
     hover=False,
@@ -128,6 +129,7 @@ PROFILE_GUI_DESKTOP = CapabilityProfile(
         "clipboard_files": True,
         "native_file_dialog": True,
         "system_tray": True,
+        "system_notifications": True,
         "native_menus": True,
         "os_drag_drop": True,  # native NSDraggingSource: drag files to other apps
         "colored_underlines": True,  # NSUnderlineColorAttributeName / its own brush
@@ -159,6 +161,7 @@ PROFILE_MOBILE = CapabilityProfile(
     {
         **PROFILE_GUI_WEB,
         "system_tray": False,
+        "system_notifications": False,
         "media_keys": False,
         "native_file_dialog": False,
         "touch": True,

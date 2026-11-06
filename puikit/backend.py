@@ -1133,6 +1133,21 @@ class Backend(ABC):
         system, and stays so with a red dot beside it."""
         raise CapabilityNotSupported("system_tray")
 
+    def post_notification(self, title: str, text: str = "") -> bool:
+        """Post a native OS notification (capability "system_notifications").
+
+        Notification Center on macOS, a toast on Windows. The OS decides
+        whether it is shown: Focus or Do Not Disturb can hold it back.
+
+        Returns whether it was handed to the OS, so a caller can say the same
+        thing another way. Where this returns False, nothing was posted: the
+        base no-op, a macOS process with no application bundle or whose
+        notifications the user has refused, or a Windows process with no tray
+        icon to post from. macOS asks the user for permission the first time,
+        and the first notification waits for the answer, so a refusal shows up
+        as False from the next call on."""
+        return False
+
     def set_tray_image(self, image: str | None) -> None:
         """Swap the tray icon's image and nothing else - for animating it.
 

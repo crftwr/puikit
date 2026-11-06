@@ -324,6 +324,7 @@ into a busy loop.
 | `background` | `True` | wallpaper image drawn under the UI |
 | `background_shader` | `True`\* | D3D11 + HLSL; \*gated on `HAVE_D3D_SHADER` at runtime |
 | `system_tray` | `True` | `set_tray`: `Shell_NotifyIconW` icon (from the host exe or a `.ico` path) + click menu |
+| `system_notifications` | `True` | `post_notification`: the tray icon's info balloon (`NIF_INFO`), shown as a toast on Windows 10 and later. Returns False with no tray icon |
 | `clipboard_files` | `True` | `CF_HDROP` + "Preferred DropEffect", as Explorer's Copy / Cut (see [`drag_drop.md`](drag_drop.md)) |
 | `clipboard_rich` | `False` | unused by any PuiKit app to date |
 | `native_file_dialog` | `False` | " |

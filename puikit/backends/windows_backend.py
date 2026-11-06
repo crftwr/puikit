@@ -981,6 +981,7 @@ class WindowsBackend(Backend):
             "os_drag_drop": True,  # drag-OUT: IDropSource + DoDragDrop (_win32_dragdrop.py)
             "ime": True,  # mode-gated, inline preedit (_win32_ime.py)
             "system_tray": True,  # set_tray: Shell_NotifyIconW tray icon + menu
+            "system_notifications": True,  # post_notification: the tray icon's toast
             # Unused by any PuiKit app to date (see MacOSBackend.PROFILE, which
             # leaves the same three False) — not on this backend's punch list.
             "clipboard_rich": False,
@@ -3854,6 +3855,24 @@ class WindowsBackend(Backend):
         self._tray_hicon = h_file_icon
         self._tray_installed = True
         self._tray_menu = menu
+
+    def post_notification(self, title: str, text: str = "") -> bool:
+        """The tray icon's info balloon (NIF_INFO), which Windows 10 and later
+        show as a toast. It belongs to the icon, so with no icon there is
+        nothing to post from. An empty szInfo would remove a balloon rather
+        than show one, so the title stands in for missing text."""
+        if not self._tray_installed:
+            return False
+        data = native.NOTIFYICONDATAW()
+        data.cbSize = ctypes.sizeof(native.NOTIFYICONDATAW)
+        data.hWnd = self._hwnd
+        data.uID = _TRAY_ICON_ID
+        data.uFlags = native.NIF_INFO
+        data.szInfoTitle = title[:63]
+        data.szInfo = (text or title or " ")[:255]
+        data.dwInfoFlags = native.NIIF_INFO
+        return bool(native.shell32.Shell_NotifyIconW(
+            native.NIM_MODIFY, ctypes.byref(data)))
 
     def set_tray_image(self, image: str | None) -> None:
         """Swap the icon alone (NIM_MODIFY with NIF_ICON): the menu and the
