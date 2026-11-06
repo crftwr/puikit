@@ -3857,16 +3857,14 @@ class WindowsBackend(Backend):
         self._tray_installed = True
         self._tray_menu = menu
 
-    def post_notification(self, title: str, text: str = "", on_click=None,
-                          on_refused=None) -> bool:
+    def post_notification(self, title: str, text: str = "", on_click=None) -> bool:
         """The tray icon's info balloon (NIF_INFO), which Windows 10 and later
         show as a toast. It belongs to the icon, so with no icon there is
         nothing to post from. An empty szInfo would remove a balloon rather
         than show one, so the title stands in for missing text.
 
-        The answer is known here and now, so on_refused never runs. A click
-        arrives as the icon's callback message, naming no notification: only
-        the latest one's on_click can be run."""
+        A click arrives as the icon's callback message, naming no notification:
+        only the latest one's on_click can be run."""
         if not self._tray_installed:
             return False
         self._notification_click = on_click

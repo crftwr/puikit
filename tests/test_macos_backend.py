@@ -1587,29 +1587,18 @@ def test_the_oldest_on_click_goes_past_the_limit(notifying):
     assert clicks == [1]
 
 
-def test_a_refusal_after_the_call_returned_runs_on_refused(notifying):
+def test_a_refusal_posts_nothing_and_shows_as_false_from_the_next_call(notifying):
     backend, center = notifying(granted=False)
-    refused = []
-    clicks = []
-    assert backend.post_notification("Saved", on_click=lambda: clicks.append(1),
-                                     on_refused=lambda: refused.append(1)) is True
-    assert refused == [1]
+    assert backend.post_notification("First") is True
     assert center.requests == []
-
-
-def test_a_refusal_already_known_returns_false_and_leaves_it_to_the_caller(notifying):
-    backend, center = notifying(granted=False)
-    backend.post_notification("First")
-    refused = []
-    assert backend.post_notification("Second", on_refused=lambda: refused.append(1)) is False
-    assert refused == []
+    clicks = []
+    assert backend.post_notification("Second", on_click=lambda: clicks.append(1)) is False
     assert center.requests == []
     assert backend._notification_clicks == {}
 
 
 def test_a_permission_given_since_is_seen_by_the_next_call_not_this_one(notifying):
-    """This call said False, so its caller said it another way: posting as well
-    would say it twice."""
+    """What a call returns stays true of what becomes of its notification."""
     backend, center = notifying(granted=False)
     backend.post_notification("First")
     center.granted = True

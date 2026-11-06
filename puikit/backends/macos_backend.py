@@ -2276,8 +2276,7 @@ class MacOSBackend(Backend):
             self._tray_responder = responder  # NSMenuItem does not retain targets
             self._status_item.setMenu_(ns_menu)
 
-    def post_notification(self, title: str, text: str = "", on_click=None,
-                          on_refused=None) -> bool:
+    def post_notification(self, title: str, text: str = "", on_click=None) -> bool:
         center = self._notification_center()
         if center is None:
             return False
@@ -2290,19 +2289,15 @@ class MacOSBackend(Backend):
         request = UN.UNNotificationRequest.requestWithIdentifier_content_trigger_(
             identifier, content, None)
         # What this call returns has to agree with what becomes of the
-        # notification: where it says False, the caller says it another way, so
-        # nothing is posted here even if the answer has since changed.
+        # notification: where it says False, nothing is posted, even if the
+        # answer has since changed.
         posting = not self._notifications_refused
 
         def on_authorization(granted, _error):
             # On a thread of the framework's choosing. A bool is all it writes.
             self._notifications_refused = not granted
-            if not posting:
-                return
-            if granted:
+            if posting and granted:
                 center.addNotificationRequest_withCompletionHandler_(request, None)
-            elif on_refused is not None:
-                AppHelper.callAfter(on_refused)
 
         if posting and on_click is not None:
             self._notification_clicks[identifier] = on_click
