@@ -1317,6 +1317,35 @@ def test_flow_run_keeps_the_primary_baseline_through_fallback(monkeypatch):
         backend.close()
 
 
+@pytest.mark.parametrize("line_break", ["\n", "\r", "\r\n", "\v", "\f", "\x85", "\u2028", "\u2029"])
+def test_flow_run_with_a_line_break_keeps_the_first_lines_baseline(monkeypatch, line_break):
+    """NO_WRAP stops DirectWrite wrapping, not breaking: a line break in the
+    text still makes a second line, and a one-entry GetLineMetrics answers
+    E_NOT_SUFFICIENT_BUFFER. Raised from WM_PAINT, that lost the frame and
+    wrote one traceback per paint. Apps draw names they did not write, so the
+    run has to draw, its first line where a plain run's is."""
+    backend = WindowsBackend(width=60, height=16, title="puikit-line-break-test")
+    backend.open()
+    drawn = []
+    real_draw = native.rt_draw_text_layout
+
+    def record(rt, x, y, layout, brush):
+        drawn.append(y + native.text_layout_get_line_metrics(layout).baseline)
+        real_draw(rt, x, y, layout, brush)
+
+    monkeypatch.setattr(native, "rt_draw_text_layout", record)
+    try:
+        style = Style(font=Font())
+        backend.draw_text(1, 1, "first", style=style)
+        backend.draw_text(1, 1, f"first{line_break}second", style=style)
+        backend.present()
+        backend._render()
+        assert len(drawn) == 2
+        assert abs(drawn[0] - drawn[1]) < 0.5, drawn
+    finally:
+        backend.close()
+
+
 @pytest.mark.parametrize("mono, ui", [
     (None, None),                    # the bundled, metrics-matched Noto pair
     ("Courier New", "MS Gothic"),    # UI face shorter in both ascent and descent

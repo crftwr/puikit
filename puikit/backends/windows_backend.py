@@ -3083,8 +3083,8 @@ class WindowsBackend(Backend):
         # uses the tallest run's), dropping the whole run below a run of the
         # primary font alone, like an adjacent column; and a default face sits on
         # the row's shared baseline, not its own.
-        origin_y -= self._flow_baseline_fix(layout, style)
         try:
+            origin_y -= self._flow_baseline_fix(layout, style)
             # The batch's drop shadow, over the bg and under the run (see _render_text).
             if shadow is not None:
                 self._draw_text_shadow(shadow)

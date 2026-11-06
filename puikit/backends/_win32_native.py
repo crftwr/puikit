@@ -888,24 +888,33 @@ def text_layout_get_metrics(layout: ComPtr) -> DWRITE_TEXT_METRICS:
     return metrics
 
 
+_E_NOT_SUFFICIENT_BUFFER = 0x8007007A
+
+
 def text_layout_get_line_metrics(layout: ComPtr) -> DWRITE_LINE_METRICS:
-    """First line's metrics — the caller lays out a single line (NO_WRAP), so
-    one DWRITE_LINE_METRICS is all there is. GetLineMetrics fills up to
-    ``maxCount`` entries and reports how many lines exist via ``actualCount``;
-    request one and read it back."""
-    metrics = (DWRITE_LINE_METRICS * 1)()
-    actual = ctypes.c_uint32()
-    hr = layout.call(
-        _IDX_TEXT_LAYOUT_GET_LINE_METRICS,
-        ctypes.c_int32,
-        [ctypes.POINTER(DWRITE_LINE_METRICS), ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32)],
-        metrics,
-        1,
-        ctypes.byref(actual),
-    )
-    # E_NOT_SUFFICIENT_BUFFER (0x8007007A) would mean >1 line, impossible for a
-    # single NO_WRAP line; any other failure is a real error. The single entry
-    # is already written on success.
+    """First line's metrics. Almost always the only line, but NO_WRAP stops
+    DirectWrite wrapping, not breaking: a line break in the text still starts
+    another line. GetLineMetrics fills up to ``maxCount`` entries and reports
+    how many lines exist via ``actualCount``, failing with
+    E_NOT_SUFFICIENT_BUFFER when they do not fit, so ask for one and, if there
+    are more, again for that many."""
+
+    def read(count: int) -> tuple[int, Any, int]:
+        metrics = (DWRITE_LINE_METRICS * count)()
+        actual = ctypes.c_uint32()
+        hr = layout.call(
+            _IDX_TEXT_LAYOUT_GET_LINE_METRICS,
+            ctypes.c_int32,
+            [ctypes.POINTER(DWRITE_LINE_METRICS), ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32)],
+            metrics,
+            count,
+            ctypes.byref(actual),
+        )
+        return hr, metrics, actual.value
+
+    hr, metrics, actual = read(1)
+    if hr & 0xFFFFFFFF == _E_NOT_SUFFICIENT_BUFFER:
+        hr, metrics, _ = read(actual)
     if not hresult_ok(hr):
         raise OSError(f"GetLineMetrics failed: 0x{hr & 0xFFFFFFFF:08x}")
     return metrics[0]
