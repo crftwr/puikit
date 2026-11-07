@@ -2241,6 +2241,20 @@ def set_process_dpi_awareness() -> None:
         fn2()
 
 
+#: DwmSetWindowAttribute's "draw this title bar dark", from Windows 10 20H1.
+_DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+
+
+def set_title_bar_dark(hwnd: int, dark: bool) -> None:
+    """Draw the window's title bar in the dark or the light variant. A Windows
+    too old for the attribute refuses it and keeps its light one."""
+    fn = ctypes.WinDLL("dwmapi").DwmSetWindowAttribute
+    fn.restype = ctypes.c_long
+    fn.argtypes = [HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+    value = wintypes.BOOL(dark)
+    fn(hwnd, _DWMWA_USE_IMMERSIVE_DARK_MODE, ctypes.byref(value), ctypes.sizeof(value))
+
+
 def get_dpi_for_window(hwnd: int) -> int:
     """The window's monitor DPI (96 == 100% scaling). Falls back to 96 on
     Windows older than 10 (1607), where GetDpiForWindow is unavailable."""

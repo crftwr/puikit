@@ -72,6 +72,34 @@ def test_base_font_drives_base_unit():
         large.close()
 
 
+def test_set_base_font_before_open_is_what_the_constructor_would_have_had():
+    backend = WindowsBackend(base_font=Font(size=12, monospace=True))
+    backend.set_base_font(Font(size=20, monospace=True))
+    assert backend._base_size_pt() == 20
+
+
+def test_set_appearance_pins_and_releases():
+    backend = WindowsBackend()
+    backend.set_appearance("dark")
+    assert backend.effective_appearance() == "dark"
+    backend.set_appearance("light")
+    assert backend.effective_appearance() == "light"
+    backend.set_appearance(None)
+    assert backend.effective_appearance() in ("light", "dark")
+
+
+def test_a_title_bar_is_left_alone_until_the_app_asks(monkeypatch):
+    calls = []
+    monkeypatch.setattr(native, "set_title_bar_dark",
+                        lambda hwnd, dark: calls.append((hwnd, dark)))
+    backend = WindowsBackend()
+    backend._apply_appearance(1)
+    assert calls == []
+    backend.set_appearance("dark")
+    backend._apply_appearance(1)
+    assert calls == [(1, True)]
+
+
 def test_style_font_is_cached():
     backend = WindowsBackend()
     try:

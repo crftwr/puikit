@@ -273,6 +273,24 @@ when it decides to.
 - `main_window_close="hide"` is unchanged: a hidden window is not a request
   to quit. `None` restores the default.
 
+## Light and dark: `set_appearance` / `effective_appearance`
+
+**Status: shipped on macOS and Windows; a no-op elsewhere.**
+
+`Panel.theme` colors what the Panel draws. The OS draws the rest (title bars, on
+macOS the native menus too), and that is what these are for:
+
+```python
+backend.set_appearance("light")   # or "dark"; None follows the OS
+backend.effective_appearance()    # "light" | "dark" | None if unknown
+```
+
+To follow the OS, call `set_appearance(None)`, pick a Theme from
+`effective_appearance()`, and poll: no event says the setting changed. On a
+change, set the new Theme and call `set_appearance(None)` again, since Windows
+does not recolor a title bar by itself. An app that never calls `set_appearance`
+gets the OS's own default, as before.
+
 ## Screen marks (capability `screen_markers`)
 
 ```python
