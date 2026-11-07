@@ -199,6 +199,11 @@ MacOSBackend(
 )
 ```
 
+`Backend.set_base_font(font)` replaces the base font while the app runs, on macOS
+and Windows. Windows keep their pixel frames and get a RESIZE event, because the
+same frame now holds a different number of base units. A Style with its own
+`Font.size` keeps that size.
+
 So an unnamed `Font()` resolves to `ui_font`, and an unnamed `Font(monospace=True)`
 to `base_font`'s family — every widget shares one configurable pair of faces
 instead of hardcoding the OS system font. Only the family is taken from the

@@ -936,6 +936,19 @@ def _register_window_class() -> None:
 _AUTOSAVE_REGISTRY_ROOT = r"Software\PuiKit\FrameAutosave"
 
 
+def _apps_use_light_theme() -> bool:
+    """Settings > Personalization > Colors, "Choose your app mode". Light where
+    the value is absent, as Windows treats it."""
+    import winreg
+    try:
+        with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
+            return bool(winreg.QueryValueEx(key, "AppsUseLightTheme")[0])
+    except OSError:
+        return True
+
+
 def _load_autosave_rect(name: str) -> tuple[int, int, int, int] | None:
     """Read back a frame saved by `_save_autosave_rect`, or None if unset/invalid."""
     import winreg
@@ -1050,6 +1063,8 @@ class WindowsBackend(Backend):
         # descriptor a text widget uses. The base unit (the layout's length
         # unit) is derived from this font's glyph box on open.
         self._base_font = base_font or Font(size=14.0, monospace=True)
+        self._appearance: str | None = None   # set_appearance
+        self._appearance_asked = False
         # Default *proportional* face for an unnamed non-monospace Font() (see
         # _font_params). None keeps the OS UI font (Segoe UI). Only its family is
         # read; size comes from the base font.
@@ -1299,6 +1314,7 @@ class WindowsBackend(Backend):
         if not self._hwnd:
             raise OSError(f"CreateWindowExW failed: {ctypes.get_last_error()}")
         _hwnd_backends[self._hwnd] = self
+        self._apply_appearance(self._hwnd)
 
         # _rebuild_fonts, not _init_fonts: text formats resolved *before* the
         # window existed were built at the placeholder 1.0 scale, and they live
@@ -3936,6 +3952,42 @@ class WindowsBackend(Backend):
         u.GetForegroundWindow.restype = ctypes.c_void_p
         return (u.GetForegroundWindow() or 0) == int(self._hwnd)
 
+    def set_base_font(self, font: Font) -> None:
+        self._assert_ui_thread("set_base_font")
+        self._base_font = font
+        if not self._hwnd:
+            return  # open() derives the base unit from it
+        self._rebuild_fonts()
+        self._drop_text_shadows()
+        w, h = self.size
+        self._dispatch_main(Event(type=EventType.RESIZE, hints={"w": w, "h": h}))
+        for handle in list(self._secondary_windows):
+            if handle.on_event is not None:
+                uw, uh = handle.size_units
+                handle.on_event(Event(type=EventType.RESIZE,
+                                      hints={"w": int(uw), "h": int(uh)}))
+        native.user32.InvalidateRect(self._hwnd, None, False)
+
+    def set_appearance(self, appearance: str | None) -> None:
+        self._assert_ui_thread("set_appearance")
+        self._appearance = appearance
+        self._appearance_asked = True
+        if self._hwnd:
+            self._apply_appearance(self._hwnd)
+        for handle in self._secondary_windows:
+            self._apply_appearance(handle.hwnd)
+
+    def effective_appearance(self) -> str | None:
+        if self._appearance is not None:
+            return self._appearance
+        return "light" if _apps_use_light_theme() else "dark"
+
+    def _apply_appearance(self, hwnd: int) -> None:
+        """Bring a title bar in line with set_appearance; one the app never
+        asked about stays as Windows made it."""
+        if self._appearance_asked:
+            native.set_title_bar_dark(hwnd, self.effective_appearance() == "dark")
+
     def pointer_position_px(self) -> tuple[float, float] | None:
         """The live pointer in virtual-screen pixels, which are already the
         portable top-left convention."""
@@ -4182,6 +4234,7 @@ class WindowsBackend(Backend):
         _hwnd_backends[hwnd] = self
         self._hwnd_windows[hwnd] = handle
         self._secondary_windows.append(handle)
+        self._apply_appearance(hwnd)
         # Mode-gate the new window the way open() gates the main one: a popup
         # opens in command mode, so a bare `j` in a chooser's list dispatches
         # as a command instead of being swallowed into composition by a CJK

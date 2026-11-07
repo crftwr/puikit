@@ -33,6 +33,9 @@ from AppKit import (
     NSApplication,
     NSApplicationActivationPolicyAccessory,
     NSApplicationActivationPolicyRegular,
+    NSAppearance,
+    NSAppearanceNameAqua,
+    NSAppearanceNameDarkAqua,
     NSAttributedString,
     NSBackingStoreBuffered,
     NSBezierPath,
@@ -2409,6 +2412,43 @@ class MacOSBackend(Backend):
         # one that will take keys when it is activated again.
         return (self._window is not None and bool(NSApp.isActive())
                 and bool(self._window.isKeyWindow()))
+
+    def set_base_font(self, font: Font) -> None:
+        self._assert_ui_thread("set_base_font")
+        self._base_font = font
+        if self._window is None:
+            return  # open() derives the base unit from it
+        self._rebuild_fonts()
+        w, h = self.size
+        self._dispatch(Event(type=EventType.RESIZE, hints={"w": w, "h": h}))
+        for handle in list(self._secondary_windows):
+            handle._on_did_resize()
+        self._view.setNeedsDisplay_(True)
+
+    def _rebuild_fonts(self) -> None:
+        """Drop everything derived from the base font and derive it again. An
+        unsized Font inherits the base size, so every resolved face can be
+        stale, and these caches are keyed by the identity of a face."""
+        self._style_fonts.clear()
+        self._attr_cache.clear()
+        self._width_cache.clear()
+        self._glyph_metric_cache.clear()
+        self._init_fonts()
+
+    def set_appearance(self, appearance: str | None) -> None:
+        self._assert_ui_thread("set_appearance")
+        # The app's appearance, which its windows and menus inherit: secondary
+        # windows and the tray menu need nothing of their own.
+        name = {"light": NSAppearanceNameAqua,
+                "dark": NSAppearanceNameDarkAqua}.get(appearance)
+        NSApplication.sharedApplication().setAppearance_(
+            NSAppearance.appearanceNamed_(name) if name is not None else None)
+
+    def effective_appearance(self) -> str | None:
+        best = NSApplication.sharedApplication().effectiveAppearance() \
+            .bestMatchFromAppearancesWithNames_(
+                [NSAppearanceNameAqua, NSAppearanceNameDarkAqua])
+        return "dark" if best == NSAppearanceNameDarkAqua else "light"
 
     def pointer_position_px(self) -> tuple[float, float] | None:
         """The live pointer, flipped into portable screen coordinates.

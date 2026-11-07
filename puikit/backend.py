@@ -1190,6 +1190,37 @@ class Backend(ABC):
         without window activation can give."""
         return self.is_main_window_visible()
 
+    def set_base_font(self, font: Font) -> None:
+        """Replace the base font while the app runs: what ``base_font=`` at the
+        constructor names, and through it the base unit (docs/font_system.md
+        §3) and the size of every font that names none.
+
+        Windows keep their pixel frames and hold more or fewer base units, so
+        each gets a RESIZE event to lay out again and render. A widget that
+        stored a length it measured re-measures on it. A Style naming its own
+        ``Font.size`` keeps that size; that is the app's to restate.
+
+        Before ``open()`` this is the same as having passed it to the
+        constructor. Base is a no-op: a terminal has one font, and the backends
+        that take a base font but not at run time (web, memory) keep theirs."""
+
+    def set_appearance(self, appearance: str | None) -> None:
+        """Pick the light or dark variant of what the OS draws for this app: the
+        title bars on both GUI desktops, and on macOS the native menus too.
+        ``"light"`` or ``"dark"`` pin it, None follows the OS. Nothing the Panel
+        draws reads this; that is ``Panel.theme``.
+
+        A backend never calls this for itself, so an app that does not ask gets
+        the OS's own default. Windows does not recolor a title bar when the OS
+        setting changes, so an app following the OS calls this again with None
+        when ``effective_appearance()`` changes. Base is a no-op."""
+
+    def effective_appearance(self) -> str | None:
+        """``"light"`` or ``"dark"``: what ``set_appearance`` pinned, otherwise
+        what the OS says now. None where the backend cannot say. Read it to
+        match a Theme to the OS; the OS sends no event, so poll."""
+        return None
+
     def pointer_position_px(self) -> tuple[float, float] | None:
         """Where the pointer is **now**, in the portable screen coordinates
         ``screen_frames()`` / ``WindowHandle.frame_px()`` report. None where

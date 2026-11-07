@@ -113,6 +113,41 @@ def test_resolve_font_applies_weight_and_slant():
     assert italic_trait or italic.matrix()[2] != 0
 
 
+def test_set_base_font_rederives_the_unit_and_every_inherited_size():
+    backend = MacOSBackend(base_font=Font(size=12, monospace=True))
+    backend._init_fonts()
+    small_w, small_h = backend.base_size
+    small_ui = backend._resolve_style_font(Style(font=Font()))
+    backend._measure_memo[("x", Style())] = 1.0
+
+    backend._base_font = Font(size=24, monospace=True)
+    backend._rebuild_fonts()
+
+    assert backend.base_size[0] > small_w and backend.base_size[1] > small_h
+    assert backend._resolve_style_font(Style(font=Font())).pointSize() == 24
+    assert small_ui.pointSize() == 12
+    assert not backend._measure_memo
+
+
+def test_set_base_font_before_open_is_what_the_constructor_would_have_had():
+    backend = MacOSBackend(base_font=Font(size=12, monospace=True))
+    backend.set_base_font(Font(size=20, monospace=True))
+    backend._init_fonts()
+    assert backend._fonts[TextAttribute.NORMAL].pointSize() == 20
+
+
+def test_set_appearance_pins_and_releases():
+    backend = MacOSBackend()
+    try:
+        backend.set_appearance("dark")
+        assert backend.effective_appearance() == "dark"
+        backend.set_appearance("light")
+        assert backend.effective_appearance() == "light"
+    finally:
+        backend.set_appearance(None)
+    assert backend.effective_appearance() in ("light", "dark")
+
+
 def test_style_font_is_cached():
     backend = MacOSBackend()
     style = Style(font=Font(family="Georgia", size=18))
