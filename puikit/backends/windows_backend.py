@@ -42,6 +42,7 @@ from typing import Any
 
 from . import _screen_mark, _win32_dragdrop, _win32_ime
 from . import _win32_native as native
+from ._win32_keys import chord_glyph
 from ._bg_seed import SceneSeed
 from ._d3d_shader import HAVE_D3D_SHADER, D3DShaderBackground
 from ..background import Shader, Wallpaper
@@ -333,6 +334,14 @@ _VK_KEYS = {
 }
 
 _VK_LETTER_RANGE = range(0x41, 0x5B)  # 'A'-'Z'
+# Keydowns that never stand for a glyph of their own under Ctrl / Alt: the
+# modifiers themselves, Space (Alt+Space is the window menu), a key the IME is
+# taking, a character SendInput injected.
+_VK_NOT_A_GLYPH = frozenset({
+    native.VK_SHIFT, native.VK_CONTROL, native.VK_MENU,
+    native.VK_LCONTROL, native.VK_RCONTROL, native.VK_LMENU, native.VK_RMENU,
+    native.VK_SPACE, native.VK_PROCESSKEY, native.VK_PACKET,
+})
 _VK_DIGIT_RANGE = range(0x30, 0x3A)  # '0'-'9'
 
 _BUTTON_BY_MSG = {
@@ -405,6 +414,46 @@ def _discard_queued_char(hwnd: int | None, code: int) -> None:
         return
     native.user32.PeekMessageW(ctypes.byref(msg), hwnd, native.WM_CHAR,
                                native.WM_CHAR, native.PM_REMOVE)
+
+
+def _typed_text(vk: int, lparam: int, strip: bool) -> str | None:
+    """What ``vk`` types under the current layout and keyboard state, with
+    Ctrl and Alt released when ``strip``: ToUnicodeEx with the no-state-change
+    flag, so a half-typed dead key survives the lookup. None for nothing, a
+    dead key, or more than one character."""
+    state = (ctypes.c_ubyte * 256)()
+    if not native.user32.GetKeyboardState(state):
+        return None
+    if strip:
+        for key in (native.VK_CONTROL, native.VK_LCONTROL, native.VK_RCONTROL,
+                    native.VK_MENU, native.VK_LMENU, native.VK_RMENU):
+            state[key] = 0
+    buf = ctypes.create_unicode_buffer(8)
+    scan = (lparam >> 16) & 0xFF
+    count = native.user32.ToUnicodeEx(vk, scan, state, buf, len(buf),
+                                      native.TOUNICODE_NO_STATE_CHANGE,
+                                      native.user32.GetKeyboardLayout(0))
+    return buf.value[:1] if count == 1 else None
+
+
+def _discard_queued_chord_char(hwnd: int | None, glyph: str) -> None:
+    """Drop what TranslateMessage queued for a Ctrl / Alt punctuation chord
+    the keydown has already reported: a WM_CHAR holding a control code (Ctrl+-
+    queues 0x1F, Ctrl+[ queues 0x1B, which _on_char would read as Escape), or
+    the WM_SYSCHAR of an Alt chord (unread here, and DefWindowProc beeps on
+    it). Anything else is left alone, as _discard_queued_char does."""
+    msg = wintypes.MSG()
+    if native.user32.PeekMessageW(ctypes.byref(msg), hwnd, native.WM_CHAR,
+                                  native.WM_CHAR, native.PM_NOREMOVE):
+        code = msg.wParam & 0xFFFF
+        if code < 0x20 or code == 0x7F:
+            native.user32.PeekMessageW(ctypes.byref(msg), hwnd, native.WM_CHAR,
+                                       native.WM_CHAR, native.PM_REMOVE)
+    if native.user32.PeekMessageW(ctypes.byref(msg), hwnd, native.WM_SYSCHAR,
+                                  native.WM_SYSCHAR, native.PM_NOREMOVE):
+        if chr(msg.wParam & 0xFFFF) == glyph:
+            native.user32.PeekMessageW(ctypes.byref(msg), hwnd, native.WM_SYSCHAR,
+                                       native.WM_SYSCHAR, native.PM_REMOVE)
 
 
 @dataclass
@@ -4469,6 +4518,18 @@ class WindowsBackend(Backend):
             ch = chr(vk).lower()
             for _ in range(_repeat_count(lparam)):
                 self._dispatch(Event(type=EventType.KEY, key=ch, char=ch, modifiers=mods))
+            return
+        # Ctrl/Alt+punctuation: the queued char is a control code or nothing
+        # (Ctrl+- is 0x1F, Ctrl+= types none), so report the glyph the key
+        # types without them, as macOS reports Cmd+- (see _win32_keys).
+        if vk in _VK_NOT_A_GLYPH or vk in _VK_LETTER_RANGE or vk in _VK_DIGIT_RANGE:
+            return
+        glyph = chord_glyph(mods, lambda strip: _typed_text(vk, lparam, strip))
+        if glyph is None:
+            return
+        _discard_queued_chord_char(hwnd, glyph)
+        for _ in range(_repeat_count(lparam)):
+            self._dispatch(char_key_event(glyph, mods))
 
     def _on_char(self, wparam: int, lparam: int = 0) -> None:
         code = wparam & 0xFFFF
