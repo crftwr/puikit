@@ -235,3 +235,139 @@ def test_every_row_covers_every_surface():
     for key, row in RAW.items():
         assert set(row) == set(SURFACES) - set(RAW_OF), key
         assert key in EXPECTED
+
+
+# --- Windows GUI: Ctrl / Alt on a punctuation key ---------------------------
+#
+# Windows types a control code (Ctrl+- is 0x1F, Ctrl+[ is 0x1B) or nothing
+# (Ctrl+=) for these, so the keydown reports the glyph the key types without
+# Ctrl and Alt. The decision is in _win32_keys and runs anywhere; the message
+# handling below it needs a real window.
+
+ALT = frozenset({"alt"})
+CTRL_ALT = frozenset({"ctrl", "alt"})
+CTRL_SHIFT = frozenset({"ctrl", "shift"})
+
+
+def _layout(plain, shifted=None, altgr=None):
+    """A stand-in for ToUnicodeEx on one key: what it types without Ctrl/Alt
+    (Shift applied by the caller), and with Ctrl+Alt held (AltGr)."""
+    def translate(strip):
+        return plain if strip else altgr
+    return translate
+
+
+@pytest.mark.parametrize("mods, plain, expected", [
+    (CTRL, "-", "-"),                  # Ctrl+-  (WM_CHAR 0x1F)
+    (CTRL, "=", "="),                  # Ctrl+=  (no WM_CHAR)
+    (CTRL_SHIFT, "+", "+"),            # Ctrl+Shift+= on US is Ctrl and "+"
+    (CTRL, "\\", "\\"),                # Ctrl+\  (WM_CHAR 0x1C)
+    (CTRL, "[", "["),                  # Ctrl+[  (WM_CHAR 0x1B, not Escape)
+    (ALT, "+", "+"),                   # Alt+Num+ / Alt+Shift+=
+    (CTRL_ALT, "-", "-"),              # Ctrl+Alt+- that types nothing is a chord
+])
+def test_ctrl_alt_punctuation_reports_its_glyph(mods, plain, expected):
+    from puikit.backends._win32_keys import chord_glyph
+    assert chord_glyph(mods, _layout(plain)) == expected
+
+
+def test_altgr_that_types_a_character_is_left_to_wm_char():
+    # German AltGr+Q is "@": text, not a chord.
+    from puikit.backends._win32_keys import chord_glyph
+    assert chord_glyph(CTRL_ALT, _layout("q", altgr="@")) is None
+
+
+@pytest.mark.parametrize("mods, plain", [
+    (NONE, "-"),                       # no Ctrl/Alt: WM_CHAR types it
+    (frozenset({"shift"}), "+"),
+    (CTRL, None),                      # a dead key, or nothing
+    (CTRL, " "),                       # Space
+    (CTRL, "\r"),                      # Ctrl+Enter keeps its own path
+    (CTRL, "ab"),                      # more than one character
+])
+def test_what_is_not_a_punctuation_chord(mods, plain):
+    from puikit.backends._win32_keys import chord_glyph
+    assert chord_glyph(mods, _layout(plain)) is None
+
+
+def _win_chord(vk, mods, queued, typed):
+    """Drive one keydown through a real WindowsBackend with ``queued`` posted
+    first, as TranslateMessage does, and ToUnicodeEx answered by ``typed``."""
+    if sys.platform != "win32":
+        pytest.skip("Windows GUI: needs a real window and message queue")
+    import ctypes
+    from ctypes import wintypes
+
+    from puikit.backends import _win32_native as native
+    from puikit.backends import windows_backend
+    from puikit.backends.windows_backend import WindowsBackend
+
+    patch = pytest.MonkeyPatch()
+    patch.setattr(windows_backend, "_key_modifiers", lambda: mods)
+    patch.setattr(windows_backend, "_typed_text", lambda vk, lparam, strip: typed(strip))
+    backend = WindowsBackend(width=40, height=12, title="puikit-conformance")
+    backend.open()
+    events = []
+    backend._handler = events.append
+    try:
+        hwnd = backend._hwnd
+        for msg, code in queued:
+            native.user32.PostMessageW(hwnd, msg, code, 0)
+        down = native.WM_SYSKEYDOWN if "alt" in mods else native.WM_KEYDOWN
+        backend._handle_message(hwnd, down, vk, 0)
+        msg = wintypes.MSG()
+        left = []
+        while native.user32.PeekMessageW(ctypes.byref(msg), hwnd, native.WM_CHAR,
+                                         native.WM_SYSCHAR, native.PM_REMOVE):
+            if msg.message in (native.WM_CHAR, native.WM_SYSCHAR):
+                left.append((msg.message, msg.wParam))
+                backend._handle_message(hwnd, msg.message, msg.wParam, msg.lParam)
+        return [(e.key, e.char, e.modifiers) for e in events], left
+    finally:
+        backend._handler = None
+        backend.close()
+        patch.undo()
+
+
+VK_OEM_MINUS, VK_OEM_PLUS, VK_OEM_4 = 0xBD, 0xBB, 0xDB
+_needs_windows = pytest.mark.skipif(
+    sys.platform != "win32", reason="Windows GUI: needs a real window and message queue")
+
+
+@_needs_windows
+def test_win_ctrl_minus_is_one_event_and_its_control_code_is_dropped():
+    from puikit.backends import _win32_native as native
+    events, left = _win_chord(VK_OEM_MINUS, CTRL, [(native.WM_CHAR, 0x1F)],
+                              _layout("-"))
+    assert events == [("-", "-", CTRL)] and left == []
+
+
+@_needs_windows
+def test_win_ctrl_bracket_is_no_longer_escape():
+    from puikit.backends import _win32_native as native
+    events, left = _win_chord(VK_OEM_4, CTRL, [(native.WM_CHAR, 0x1B)], _layout("["))
+    assert events == [("[", "[", CTRL)] and left == []
+
+
+@_needs_windows
+def test_win_ctrl_shift_equal_is_ctrl_plus():
+    events, _left = _win_chord(VK_OEM_PLUS, CTRL_SHIFT, [], _layout("+"))
+    assert events == [("+", "+", CTRL)]
+
+
+@_needs_windows
+def test_win_alt_plus_drops_its_syschar():
+    from puikit.backends import _win32_native as native
+    events, left = _win_chord(VK_OEM_PLUS, frozenset({"alt", "shift"}),
+                              [(native.WM_SYSCHAR, ord("+"))], _layout("+"))
+    assert events == [("+", "+", ALT)] and left == []
+
+
+@_needs_windows
+def test_win_altgr_still_types_through_wm_char():
+    from puikit.backends import _win32_native as native
+    events, left = _win_chord(ord("Q"), CTRL_ALT, [(native.WM_CHAR, ord("@"))],
+                              _layout("q", altgr="@"))
+    # The letter path is untouched: Ctrl+Alt+Q still reports "q", and the "@"
+    # WM_CHAR stays for _on_char, as it did before.
+    assert left == [(native.WM_CHAR, ord("@"))]

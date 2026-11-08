@@ -2032,6 +2032,7 @@ WM_KEYUP = 0x0101
 WM_CHAR = 0x0102
 WM_SYSKEYDOWN = 0x0104
 WM_SYSKEYUP = 0x0105
+WM_SYSCHAR = 0x0106
 WM_COMMAND = 0x0111
 WM_TIMER = 0x0113
 WM_MOUSEMOVE = 0x0200
@@ -2096,6 +2097,17 @@ VK_TAB = 0x09
 VK_ESCAPE = 0x1B
 VK_BACK = 0x08
 VK_F1 = 0x70
+VK_SPACE = 0x20
+VK_LCONTROL = 0xA2
+VK_RCONTROL = 0xA3
+VK_LMENU = 0xA4
+VK_RMENU = 0xA5
+VK_PROCESSKEY = 0xE5  # a key the IME is taking
+VK_PACKET = 0xE7      # a character injected by SendInput, not a key
+
+# ToUnicodeEx flag (Windows 10 1607+): translate without changing the
+# keyboard's state, so a dead key half-typed is not consumed by the lookup.
+TOUNICODE_NO_STATE_CHANGE = 0x4
 
 
 class TRACKMOUSEEVENT(ctypes.Structure):
@@ -2193,6 +2205,15 @@ user32.TrackMouseEvent.argtypes = [ctypes.POINTER(TRACKMOUSEEVENT)]
 
 user32.GetKeyState.restype = ctypes.c_short
 user32.GetKeyState.argtypes = [ctypes.c_int]
+
+user32.GetKeyboardState.restype = wintypes.BOOL
+user32.GetKeyboardState.argtypes = [ctypes.POINTER(ctypes.c_ubyte)]
+user32.GetKeyboardLayout.restype = ctypes.c_void_p
+user32.GetKeyboardLayout.argtypes = [wintypes.DWORD]
+user32.ToUnicodeEx.restype = ctypes.c_int
+user32.ToUnicodeEx.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.POINTER(ctypes.c_ubyte),
+                               ctypes.c_wchar_p, ctypes.c_int, ctypes.c_uint,
+                               ctypes.c_void_p]
 
 user32.ClientToScreen.argtypes = [HWND, ctypes.POINTER(wintypes.POINT)]
 user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
