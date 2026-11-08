@@ -516,6 +516,12 @@ def test_menu_shortcut_parsed_to_key_equivalent():
         "c", NSEventModifierFlagCommand | NSEventModifierFlagShift)
     assert _key_equivalent("Shift-=") == ("=", NSEventModifierFlagShift)
     assert _key_equivalent(";") == (";", 0)
+    # The minus key: the last '-' is the key, the others separate modifiers.
+    assert _key_equivalent("-") == ("-", 0)
+    assert _key_equivalent("Cmd--") == ("-", NSEventModifierFlagCommand)
+    assert _key_equivalent("Cmd-Shift--") == (
+        "-", NSEventModifierFlagCommand | NSEventModifierFlagShift)
+    assert _key_equivalent("Cmd-") is None    # a dangling separator names no key
     # An unknown modifier makes the whole hint unrepresentable (no wrong glyph).
     assert _key_equivalent("Hyper-Z") is None
 
