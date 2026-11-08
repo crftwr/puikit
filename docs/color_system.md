@@ -187,12 +187,47 @@ fill**, where the glyphs land on whatever a widget painted underneath and that
 widget owns the contrast (a list's cursor row that strokes an outline over a
 fill, say). Turning it on is one line: `panel.auto_ink = True`.
 
+**Translucent surfaces.** Where the backend draws surface fills translucently
+over a scene (`set_surface_opacity` below 1 with `has_wallpaper`), a fill is not
+seen as its declared colour: a white chrome bar at 0.6 over dark water reads as a
+mid gray, and text inked for white came out faint on it. Auto-ink then inks the
+run against the declared fill as before, and floors that result again against
+the fill *as seen* -- mixed toward the theme's page background (the backdrop a
+scene is drawn over) by `1 - opacity` -- with the declared fill still picking the
+polarity (`legible_ink(..., pole_from=fill)`): text on a light bar stays dark and
+goes as dark as the gray needs, to black if it cannot carry the target. The
+second pass only ever strengthens the first. The scene behind is an estimate,
+and on a dark fill it is darker than a bright patch of scene, so judging by it
+alone would loosen light-on-dark text; with the floor, a dark translucent bar
+inks exactly as an opaque one. APCA alone would turn it white there, which then fails over a bright
+patch of the scene. The base layout and cover layers composite this way; a
+floating overlay (dialog, menu) draws in an opaque group and is inked for its own
+fill. A dark surface mixed toward a dark page barely moves, so light-on-dark text
+is unchanged.
+
 Two explicit escape hatches sit alongside the automatic path:
 
 - **`ctx.ink(color, *, on=None, target=LC_BODY)`** — the manual form. A widget
   that paints its own local fill (a selection tint, a highlight) passes that fill
   as `on` so its text contrasts against what is actually behind it, not the pane
   default. Same floor-only `legible_ink` underneath.
+- **`ctx.draw_text(..., over_fill=True)`** — the widget has already filled the
+  run's background with `style.bg` (a code block's row-wide panel, a table band).
+  Auto-ink still judges against that colour, but a compositing backend does not
+  paint it again behind the glyphs: over a translucent surface a second coat made
+  the text's box visibly denser than the rest of the fill. A run drawn with the
+  bg of a fill *this context* painted under it (a viewer's header bar, then its
+  title in the bar's colour) is treated so without the flag; the same bg where
+  nothing was filled (an inline code span) still paints its own box. That box,
+  like any text run's background, composites at the surface opacity on macOS and
+  Windows, so an inline span and a code block's row read as the same panel.
+- **`ctx.fill_mark(x, y, w, h, color)`** — fill a *mark* (a selection, a search
+  hit) behind text drawn over it in that colour. Over a scene it keeps
+  `MARK_OPACITY` (0.95) instead of fading with the surfaces, which would let a
+  bright patch of scene swallow it; elsewhere it is a plain fill. The selectable
+  text widgets, `LogView`, `JsonView`, `TextEdit` and `MarkdownView` draw their
+  selections with it. `ctx.surface_opacity` tells a widget how much scene shows
+  through its fills, for a mark that wants to be firmer there.
 - **`ctx.draw_text(..., ink=False)`** — opt a run *out* of auto-ink entirely, for
   text whose palette a widget owns deliberately and does not want normalized: a
   syntax highlighter, a color legend. See §8 for the polarity-conditional pattern

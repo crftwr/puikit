@@ -2949,7 +2949,9 @@ class WindowsBackend(Backend):
         widths = [max(1, display_width(glyph)) for glyph in runs]
         total = sum(widths)
         if bg is not None and not is_transparent(bg):
-            self._set_brush(bg)
+            # A text run's own background is a surface fill: it composites at
+            # the surface opacity (see MacOSBackend._fill_text_bg).
+            self._set_brush(bg, self._ui_fill_alpha())
             native.rt_fill_rectangle(self._render_target, self._unit_rect(x, y, total, 1), self._brush)
 
         # Drop shadow (Segment LCD look): the batch's blurred silhouette, over
@@ -3076,7 +3078,9 @@ class WindowsBackend(Backend):
         line_h = self._base_h * self.measure_line_height(style)
         width = self.measure_text(text, style) * self._base_w
         if bg is not None and not is_transparent(bg):
-            self._set_brush(bg)
+            # A text run's own background is a surface fill: it composites at
+            # the surface opacity (see MacOSBackend._fill_text_bg).
+            self._set_brush(bg, self._ui_fill_alpha())
             # Exactly one row (_base_h), not the font's own natural line
             # height (line_h, used below only for underline/strike position):
             # a UI font's measured line height can exceed one row's pitch

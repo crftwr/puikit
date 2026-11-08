@@ -956,6 +956,10 @@ def _wrap_spans(spans: list[Span], width: float, measure, *, word: bool) -> list
 # light one), matching XeFM's text-viewer isearch.
 _SEARCH_HUE: Color = (200, 175, 55)
 _SEARCH_TINT = 0.24
+#: The tints over a scene (the surface translucent over a wallpaper); a hit is
+#: filled as a mark there too (DrawContext.fill_mark). See _search_bg.
+_SEARCH_TINT_SCENE = 0.46
+_SEARCH_CURRENT_TINT_SCENE = 0.62
 _SEARCH_CURRENT_TINT = 0.46
 
 
@@ -964,10 +968,16 @@ def _mix(a: Color, b: Color, t: float) -> Color:
     return tuple(round(a[i] + (b[i] - a[i]) * t) for i in range(3))  # type: ignore[return-value]
 
 
-def _search_bg(surface: Color | None, current: bool) -> Color:
-    """Search-highlight background for ``surface``, firmer for the current match."""
-    return _mix(surface or (30, 30, 38), _SEARCH_HUE,
-                _SEARCH_CURRENT_TINT if current else _SEARCH_TINT)
+def _search_bg(surface: Color | None, current: bool, translucent: bool = False) -> Color:
+    """Search-highlight background for ``surface``, firmer for the current match.
+    Over a scene (``translucent``) the tints step up: they are relative to the
+    surface, and a dark surface's tint was swallowed by the brighter scene that
+    shows through it."""
+    if translucent:
+        tint = _SEARCH_CURRENT_TINT_SCENE if current else _SEARCH_TINT_SCENE
+    else:
+        tint = _SEARCH_CURRENT_TINT if current else _SEARCH_TINT
+    return _mix(surface or (30, 30, 38), _SEARCH_HUE, tint)
 
 
 def _wrap_cells(cells: list[Span], width: float, measure, *, word: bool) -> list[list[Span]]:
@@ -1750,7 +1760,10 @@ class MarkdownView(Widget):
                 w = ctx.measure_text(text, style)
                 if (index, -1, -1, si) in focus_parts:
                     style = self._focus_link_style(ctx, x, y, w, row.height, style, theme)
-                ctx.draw_text(x, y, text, style)
+                # A code row's panel is already filled across the block: the run
+                # must not lay a second coat of it behind its own glyphs.
+                ctx.draw_text(x, y, text, style,
+                              over_fill=row.code_bg is not None and style.bg == row.code_bg)
                 if href:
                     self._link_hits.append((x, y, x + w, y + row.height, href))
                 x += w
@@ -1856,7 +1869,9 @@ class MarkdownView(Widget):
                     if (index, ci, li, si) in focus_parts:
                         style = self._focus_link_style(
                             ctx, x, ly, tw, self._line_pitch, style, theme)
-                    ctx.draw_text(x, ly, text, style)
+                    # Likewise a banded table row, filled cell-wide above.
+                    ctx.draw_text(x, ly, text, style,
+                                  over_fill=tr.bg is not None and style.bg == tr.bg)
                     if href:
                         self._link_hits.append((x, ly, x + tw, ly + self._line_pitch, href))
                     x += tw
@@ -1899,7 +1914,7 @@ class MarkdownView(Widget):
         if not hits:
             return
         surface = self.style.bg or theme.surface_bg("content")
-        hl = _search_bg(surface, current)
+        hl = _search_bg(surface, current, ctx.surface_opacity < 1.0)
         # Per-span offsets: (char_start, text, style, x_start), so a match at any
         # character offset maps to an x position even across span boundaries.
         segs: list[tuple[int, str, Style, float]] = []
@@ -1920,7 +1935,7 @@ class MarkdownView(Widget):
                 # Paint the tint across the row's full height, then redraw the
                 # glyphs over it (a grid backend, which can't composite a
                 # transparent glyph over the fill, keeps the tint via bg=hl too).
-                ctx.fill_rect(hx, y, ctx.measure_text(seg, style), row.height, Style(bg=hl))
+                ctx.fill_mark(hx, y, ctx.measure_text(seg, style), row.height, hl)
                 ctx.draw_text(hx, y, seg, replace(style, bg=hl))
 
     # --- selection ------------------------------------------------------------
@@ -2090,7 +2105,9 @@ class MarkdownView(Widget):
             if e > s:
                 hx = sx + self._measure("".join(gl[: s - gi]), style)
                 seg = "".join(gl[s - gi : e - gi])
-                ctx.fill_rect(hx, ly, self._measure(seg, style), height, Style(bg=sel_bg))
+                # A mark: over a scene it keeps its own opacity floor, so a
+                # selection on a translucent code block is not washed out.
+                ctx.fill_mark(hx, ly, self._measure(seg, style), height, sel_bg)
                 ctx.draw_text(hx, ly, seg, replace(style, bg=sel_bg))
             sx += self._measure(text, style) if text else 0.0
             gi += n

@@ -136,3 +136,19 @@ def test_ensure_headroom_polarity_follows_toward():
     deep = ensure_text_headroom(mid, (0, 0, 0), LC_BODY)      # toward dark
     pale = ensure_text_headroom(mid, (255, 255, 255), LC_BODY)  # toward light
     assert sum(deep) < sum(mid) < sum(pale)
+
+
+def test_legible_ink_pole_from_keeps_the_fill_polarity():
+    from puikit.color import legible_ink, apca_lc, LC_BODY
+    light, gray, white = (207, 230, 234), (144, 148, 145), (238, 232, 224)
+    # Measured on the gray alone, APCA prefers white text there ...
+    assert sum(legible_ink(light, gray, LC_BODY)) > 600
+    # ... but a white fill seen as that gray wants dark text: as dark as needed,
+    # here the pole, since the gray cannot carry body text.
+    assert legible_ink(light, gray, LC_BODY, pole_from=white) == (0, 0, 0)
+    # A gray that can carry it stops short of the pole, on the dark side.
+    lighter = (225, 227, 223)
+    got = legible_ink(light, lighter, LC_BODY, pole_from=white)
+    assert apca_lc(got, lighter) >= LC_BODY and got != (0, 0, 0)
+    # Without pole_from, behaviour is unchanged.
+    assert legible_ink((30, 30, 30), (240, 240, 240), LC_BODY) == (30, 30, 30)

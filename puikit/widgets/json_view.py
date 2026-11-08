@@ -944,6 +944,8 @@ class JsonView(Widget):
         x, piece = _window_text(label[a:b],
                                 text_x + display_width(label[cs:a]), lo, hi)
         if piece:
+            if theme is not None:
+                ctx.fill_mark(x, top, ctx.measure_text(piece, style), 1.0, style.bg)
             ctx.draw_text(x, top, piece, style)
 
     def _copy_selection(self) -> None:

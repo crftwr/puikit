@@ -104,6 +104,7 @@ class SelectableText:
         # legible blue when focused, a muted neutral when focus is elsewhere.
         sel_bg = theme.text_selection_bg if ctx.focused else theme.text_selection_inactive_bg
         sel_style = Style(fg=style.fg, bg=sel_bg, attr=style.attr, font=style.font)
+        ctx.fill_mark(x, y, ctx.measure_text(seg, sel_style), 1.0, sel_bg)
         ctx.draw_text(x, y, seg, sel_style)
 
     # --- selection state -----------------------------------------------------

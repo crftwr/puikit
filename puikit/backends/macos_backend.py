@@ -3897,8 +3897,7 @@ class MacOSBackend(Backend):
         total = sum(widths)
         on_grid = self._grid_batchable(ns_font, runs, widths)
         if bg is not None and not is_transparent(bg):
-            _ns_color(bg).setFill()
-            NSRectFill(self._unit_rect(x, y, total, 1))
+            self._fill_text_bg(self._unit_rect(x, y, total, 1), bg)
         kerned = dict(attrs)
         kerned[NSKernAttributeName] = self._grid_kern
         kerned[NSParagraphStyleAttributeName] = self._default_para(ns_font)
@@ -3996,8 +3995,7 @@ class MacOSBackend(Backend):
         origin = self._unit_rect(x, y, 1, 1).origin
         if bg is not None and not is_transparent(bg):
             width = ns_text.size().width
-            _ns_color(bg).setFill()
-            NSRectFill(NSMakeRect(origin.x, origin.y, width, self._base_h))
+            self._fill_text_bg(NSMakeRect(origin.x, origin.y, width, self._base_h), bg)
         ns_text.drawAtPoint_(origin)
 
     def _render_box(
@@ -4027,6 +4025,19 @@ class MacOSBackend(Backend):
         if self._reveal_exempt_depth > 0:
             return 1.0
         return self._surface_opacity
+
+    def _fill_text_bg(self, rect, bg) -> None:
+        """Paint a text run's own background. It is a surface fill like any
+        other, so it composites at the surface opacity: an inline code span's box
+        then reads as the same translucent panel as a code block's row fill, and
+        not as an opaque patch over the scene."""
+        alpha = self._ui_fill_alpha()
+        if alpha >= 1.0:
+            _ns_color(bg).setFill()
+            NSRectFill(rect)
+            return
+        _ns_color(bg, alpha=alpha).setFill()
+        NSRectFillUsingOperation(rect, NSCompositingOperationSourceOver)
 
     def _render_fill(self, x: float, y: float, w: float, h: float, style: Style,
                      opacity: float | None = None) -> None:

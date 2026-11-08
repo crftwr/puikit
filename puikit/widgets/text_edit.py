@@ -233,6 +233,8 @@ class TextEdit(Widget):
             # (docs/interaction_states.md §5).
             fg = theme.accent if marked else theme.text
             cell_bg = sel_bg if selected else bg
+            if selected:
+                ctx.fill_mark(1 + col, ty, nxt - col, 1.0, sel_bg)
             ctx.draw_text(1 + col, ty, ch, Style(fg=fg, bg=cell_bg, attr=attr))
             prefix += ch
             col = nxt
@@ -273,7 +275,7 @@ class TextEdit(Widget):
             # carried by the field border (docs/interaction_states.md §3).
             ctx.draw_caret(
                 1 + caret_col, ty, height=1.0, theme=theme,
-                glyph=ch, visible=ctx.caret_visible,
+                glyph=ch, visible=ctx.caret_visible, on=bg,
             )
 
     def _blink_tick(self) -> bool:
