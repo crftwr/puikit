@@ -90,6 +90,13 @@ def max_achievable_lc(background: Color) -> float:
     return max(abs(apca_lc(_BLACK, background)), abs(apca_lc(_WHITE, background)))
 
 
+def _same_side(ink: Color, background: Color, fill: Color) -> bool:
+    """Whether ``ink`` on ``background`` has the polarity ``fill`` calls for:
+    dark text on a fill that wants dark text, light on one that wants light."""
+    wants_dark = abs(apca_lc(_BLACK, fill)) > abs(apca_lc(_WHITE, fill))
+    return (apca_lc(ink, background) > 0) == wants_dark
+
+
 def _mix_rgb(a: Color, b: Color, t: float) -> Color:
     return tuple(max(0, min(255, round(a[i] + (b[i] - a[i]) * t))) for i in range(3))
 
@@ -213,7 +220,8 @@ def _lerp(a: _RGB, b: _RGB, t: float) -> _RGB:
 
 # --- the headline: contrast-guaranteeing ink ----------------------------------
 @lru_cache(maxsize=2048)
-def legible_ink(ink: Color, background: Color, target_lc: float = LC_BODY) -> Color:
+def legible_ink(ink: Color, background: Color, target_lc: float = LC_BODY, *,
+                pole_from: Color | None = None) -> Color:
     """Return ``ink`` if it already clears ``target_lc`` on ``background``
     (floor-only — the designer's exact color is kept). Otherwise lift it in
     OKLab toward whichever pole (white/black) the background is farther from,
@@ -223,14 +231,33 @@ def legible_ink(ink: Color, background: Color, target_lc: float = LC_BODY) -> Co
     If the background physically cannot support the target
     (:func:`max_achievable_lc` ``< target_lc``), returns the best-effort pole —
     the caller should treat that as "fix the background," not a legible result.
+
+    ``pole_from`` picks the pole from another colour than the one contrast is
+    measured on: for a translucent fill, the declared fill decides whether text
+    on it is dark or light, and the fill as seen over what shows through decides
+    how far it must go. Over a white bar seen as mid-gray, APCA alone would turn
+    the text white; with the bar as ``pole_from`` it goes dark, to black if the
+    gray cannot carry the target.
     """
     ink3 = _rgb3(ink)
-    if abs(apca_lc(ink, background)) >= target_lc:
+    if abs(apca_lc(ink, background)) >= target_lc and (
+            pole_from is None or _same_side(ink3, background, pole_from)):
         return (ink[0], ink[1], ink[2])
 
     # Push toward the pole that is farther (in APCA terms) from the background.
-    pole = _WHITE if abs(apca_lc(_WHITE, background)) >= abs(apca_lc(_BLACK, background)) else _BLACK
+    judge = background if pole_from is None else pole_from
+    pole = _WHITE if abs(apca_lc(_WHITE, judge)) >= abs(apca_lc(_BLACK, judge)) else _BLACK
     ink_lab, pole_lab = rgb_to_oklab(ink3), rgb_to_oklab(pole)
+
+    if pole_from is not None:
+        # The pole may be the near one on ``background``, where contrast along
+        # ink->pole first falls and then rises: step, and take the first point
+        # on the pole's side that reaches the target -- else the pole itself.
+        for step in range(1, 101):
+            cand = oklab_to_rgb(_lerp(ink_lab, pole_lab, step / 100))
+            if abs(apca_lc(cand, background)) >= target_lc and _same_side(cand, background, pole_from):
+                return cand
+        return oklab_to_rgb(pole_lab)
 
     if max_achievable_lc(background) < target_lc:
         return oklab_to_rgb(pole_lab)  # unreachable: recipe layer must intervene

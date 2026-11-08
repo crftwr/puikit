@@ -15,7 +15,7 @@ from typing import Any
 
 from .backend import Backend, Color, DEFAULT_STYLE, Style, TextAttribute, TRANSPARENT, is_transparent
 from .capability import CapabilityProfile
-from .color import LC_BODY, LC_LARGE, LC_MIN_NONTEXT, legible_ink
+from .color import LC_BODY, LC_LARGE, LC_MIN_NONTEXT, _mix_rgb, legible_ink
 from . import easing as easing_mod
 from .event import Event, EventType
 from .focus import FocusContainer, focus_on_click, move_focus
@@ -156,6 +156,17 @@ def _composite(color, base):
 #: distinct styles a frame uses, few enough to forget a theme switched away from.
 _STYLE_MEMO_MAX = 4096
 
+#: How many of its own flat fills a draw context remembers for spotting text
+#: drawn over them (DrawContext._painted_under); a viewer's bars and a page of
+#: code rows fit, and a pathological widget only loses the automatic case.
+_FILL_MEMORY = 256
+
+#: Least opacity a *mark* -- a selection, a search hit -- keeps over a scene
+#: (DrawContext.fill_mark). At the surface opacity the scene shows through a
+#: mark as much as through the pane, and a selection over a bright patch came out
+#: the colour of the unselected text beside it.
+MARK_OPACITY = 0.95
+
 
 def _intersect(a: Rect, b: Rect) -> Rect | None:
     x0, y0 = max(a.x, b.x), max(a.y, b.y)
@@ -194,6 +205,7 @@ class DrawContext:
         hit_rect: Rect | None = None,
         widget: Any = None,
         text_variant: Any = None,
+        translucent: bool = False,
     ):
         self._backend = backend
         self._rect = rect
@@ -222,8 +234,17 @@ class DrawContext:
         # Backend clips this context pushed itself (e.g. draw_border's
         # interior clip); the Panel pops them when the widget's draw returns.
         self._pushed_clips = 0
+        # Whether this subtree's surface fills composite at the backend's surface
+        # opacity -- the base layout and a cover layer do; a floating overlay
+        # (dialog, menu) draws in an opaque group and does not. Auto-ink reads it
+        # to judge text against the colour actually on screen (_ink_background).
+        self._translucent = translucent
+        # The flat fills this context has painted, as (x0, y0, x1, y1, color) in
+        # its own units: a text run drawn over one of them with that same bg is
+        # over_fill without the widget saying so (see draw_text).
+        self._fills: list[tuple[float, float, float, float, Any]] = []
 
-    def _text_style(self, style: Style, ink: bool = True) -> Style:
+    def _text_style(self, style: Style, ink: bool = True, over_fill: bool = False) -> Style:
         """Resolve a Style for drawing/measuring *text*: the shared `_resolve`
         seam, plus a theme-driven default foreground. A text run that names no
         color inherits the theme's text color, the same way it inherits the
@@ -239,20 +260,21 @@ class DrawContext:
             # value it would compute; a row of a file list draws the same few
             # styles over and over, and each resolve built new Style objects.
             theme = panel.theme
-            key = ("text", style, ink, None if theme is None else theme.text,
-                   bool(getattr(panel, "auto_ink", False)), self._background, id(self._caps))
+            key = ("text", style, ink, over_fill, None if theme is None else theme.text,
+                   bool(getattr(panel, "auto_ink", False)), self._background, id(self._caps),
+                   self._ink_veil())
             memo = getattr(panel, "_style_memo", None)
             hit = memo.get(key) if memo is not None else None
             if hit is not None:
                 return hit
-        resolved = self._text_style_uncached(style, ink)
+        resolved = self._text_style_uncached(style, ink, over_fill)
         if memo is not None:
             if len(memo) >= _STYLE_MEMO_MAX:
                 memo.clear()
             memo[key] = resolved
         return resolved
 
-    def _text_style_uncached(self, style: Style, ink: bool) -> Style:
+    def _text_style_uncached(self, style: Style, ink: bool, over_fill: bool = False) -> Style:
         if style.fg is None and self._panel is not None and self._panel.theme is not None:
             style = replace(style, fg=self._panel.theme.text)
         resolved = self._resolve(style)
@@ -266,7 +288,7 @@ class DrawContext:
         if (ink and self._panel is not None and getattr(self._panel, "auto_ink", False)
                 and resolved.fg is not None and resolved.bg is not None
                 and not is_transparent(resolved.fg) and not is_transparent(resolved.bg)):
-            inked = legible_ink(resolved.fg, resolved.bg, _auto_ink_target(resolved.attr))
+            inked = self._ink_for(resolved.fg, resolved.bg, _auto_ink_target(resolved.attr))
             if inked != resolved.fg:
                 resolved = replace(resolved, fg=inked)
         # Don't repaint a background the pane already filled: on a compositing
@@ -280,11 +302,82 @@ class DrawContext:
         # REVERSE is excluded: it *swaps* fg/bg in the backend, so a transparent
         # bg would become a transparent foreground — invisible glyphs on the
         # reversed fill (the "Reverse label" showing as a blank rectangle).
-        if (resolved.bg is not None and resolved.bg == self._background
+        # The same goes for a fill the widget painted itself and says so
+        # (``over_fill``).
+        if (resolved.bg is not None and (resolved.bg == self._background or over_fill)
+                and not is_transparent(resolved.bg)
                 and not (resolved.attr & TextAttribute.REVERSE)
                 and self._caps.supports("transparency")):
             resolved = replace(resolved, bg=TRANSPARENT)
         return resolved
+
+    @property
+    def surface_opacity(self) -> float:
+        """How opaque this context's flat fills are over the scene behind them:
+        the backend's surface opacity where they composite over a wallpaper,
+        else ``1.0`` (no scene, a grid backend, or a floating overlay drawn in an
+        opaque group). A widget that marks something on its surface -- a search
+        hit -- reads it to make the mark firmer where the scene shows through
+        and would otherwise swallow it."""
+        veil = self._ink_veil()
+        return 1.0 if veil is None else veil[0]
+
+    def _painted_under(self, x: float, y: float, bg: Any) -> bool:
+        """Whether a fill of ``bg`` this context painted lies under a text run
+        starting at (x, y): a widget that fills a bar or a code row and then draws
+        its text with the same bg (the common way to say "this text sits on
+        that") need not also pass ``over_fill``."""
+        cy = y + 0.5
+        for x0, y0, x1, y1, color in reversed(self._fills):
+            if color == bg and x0 <= x < x1 and y0 <= cy < y1:
+                return True
+        return False
+
+    def _ink_veil(self) -> "tuple[float, Color] | None":
+        """How a translucent surface fill is seen, for auto-ink: ``(opacity,
+        behind)`` when this context's fills composite at a surface opacity below 1
+        over a wallpaper, else ``None``. ``behind`` is the theme's page
+        background, the backdrop a scene is drawn over and the best single-colour
+        estimate of what shows through."""
+        if not self._translucent or self._panel is None:
+            return None
+        backend = self._backend
+        opacity = getattr(backend, "surface_opacity", 1.0)
+        if opacity >= 1.0 or not getattr(backend, "has_wallpaper", False):
+            return None
+        if not self._caps.supports("transparency"):
+            return None
+        theme = self._panel.theme
+        behind = theme.surface_bg("content") if theme is not None else None
+        if behind is None:
+            return None
+        return (opacity, behind)
+
+    def _ink_for(self, fg: Color, bg: Color, target: float) -> Color:
+        """``fg`` inked for a run on the fill ``bg``: against the declared fill
+        first, then -- where the fill is translucent over a scene -- floored again
+        against the fill as seen, keeping the declared fill's polarity. The second
+        pass only ever strengthens the first: the scene behind is estimated (the
+        page background), and on a dark fill that estimate is darker than a bright
+        patch of scene, so judging by it alone loosened light-on-dark text."""
+        inked = legible_ink(fg, bg, target)
+        seen = self._ink_background(bg)
+        if seen != (bg[0], bg[1], bg[2]):
+            inked = legible_ink(inked, seen, target, pole_from=bg)
+        return inked
+
+    def _ink_background(self, bg: Color) -> Color:
+        """The background auto-ink judges a text run against: the declared fill,
+        or -- where that fill is translucent over a scene -- the fill as it is
+        seen, mixed toward what shows through by ``1 - opacity``. A white chrome
+        bar at 0.6 over dark water reads as a light gray, and text inked for white
+        came out faint on it. Only the judgement changes; the fill drawn is the
+        declared colour."""
+        veil = self._ink_veil()
+        if veil is None:
+            return bg
+        opacity, behind = veil
+        return _mix_rgb((bg[0], bg[1], bg[2]), behind, 1.0 - opacity)
 
     def _resolve(self, style: Style) -> Style:
         """The single seam every Style crosses before the backend sees it:
@@ -658,7 +751,13 @@ class DrawContext:
         return self._backend.measure_text(text, self._resolve(style))
 
     def draw_text(self, x: float, y: float, text: str, style: Style = DEFAULT_STYLE,
-                  *, ink: bool = True, anim_key: Any = None) -> None:
+                  *, ink: bool = True, anim_key: Any = None, over_fill: bool = False) -> None:
+        # ``over_fill=True`` says the widget has already filled the run's
+        # background with ``style.bg`` (a code block's row-wide panel, a table
+        # band): auto-ink still reads that colour, but a compositing backend does
+        # not paint it again behind the glyphs -- over a translucent surface the
+        # second coat made the text's box denser than the rest of the fill.
+        #
         # ``ink=False`` opts this run out of auto-ink (see Panel.auto_ink): the
         # color is drawn exactly as given, for text whose palette a widget owns
         # deliberately — syntax highlighting, a color legend — and does not want
@@ -682,11 +781,13 @@ class DrawContext:
         # the slice math is taken in whole cells so truncation stays grid-safe.
         if not -1 < y < self._rect.h:
             return
+        if not over_fill and style.bg is not None and self._painted_under(x, y, style.bg):
+            over_fill = True
         # Arriving-text effect (puikit.textfx). Applied here, at the single seam
         # every widget's text passes through, which is why a widget needs no code
         # to take part. Before the clip/slice below, so the effect transforms the
         # whole run rather than a truncated view of it.
-        resolved = self._text_style(style, ink=ink)
+        resolved = self._text_style(style, ink=ink, over_fill=over_fill)
         source = text
         grid = grid_aligned(resolved.font)
         if self._panel is not None:
@@ -759,16 +860,17 @@ class DrawContext:
                 i += 1
 
     def draw_text_baseline(self, x: float, baseline_y: float, text: str,
-                           style: Style = DEFAULT_STYLE, *, ink: bool = True) -> None:
+                           style: Style = DEFAULT_STYLE, *, ink: bool = True,
+                           over_fill: bool = False) -> None:
         """Draw ``text`` with its baseline at ``baseline_y`` (this pane's unit)
         instead of positioning by the top of the line box. A widget that mixes
         fonts on one row reads each font's ``font_metrics``, sizes the row, and
         draws every run at the same baseline so they align. Whole-run, unsliced
         (the pane clip trims overflow) — the proportional/mixed-font path, not
-        the grid path. ``ink`` matches ``draw_text``."""
+        the grid path. ``ink`` and ``over_fill`` match ``draw_text``."""
         if not text:
             return
-        resolved = self._text_style(style, ink=ink)
+        resolved = self._text_style(style, ink=ink, over_fill=over_fill)
         self._backend.draw_text_baseline(
             self._rect.x + x, self._rect.y + baseline_y, text, resolved
         )
@@ -910,6 +1012,11 @@ class DrawContext:
         # Named to the backend only while the surfaces are translucent: an opaque
         # surface paints every fill opaque anyway, and a backend written before
         # the keyword (a test double, another app's) keeps working.
+        resolved_bg = style.bg
+        if resolved_bg is not None and not is_transparent(resolved_bg) and w > 0 and h > 0:
+            if len(self._fills) >= _FILL_MEMORY:
+                del self._fills[0]
+            self._fills.append((x, y, x + w, y + h, resolved_bg))
         if opacity is None or getattr(self._backend, "surface_opacity", 1.0) >= 1.0:
             self._backend.fill_rect(
                 self._rect.x + x, self._rect.y + y, w, h, self._resolve(style)
@@ -919,6 +1026,14 @@ class DrawContext:
                 self._rect.x + x, self._rect.y + y, w, h, self._resolve(style),
                 opacity=opacity,
             )
+
+    def fill_mark(self, x: float, y: float, w: float, h: float, color: Color) -> None:
+        """Fill a *mark* -- a selection, a search hit -- behind text about to be
+        drawn over it in ``color`` (which that text then need not paint again, see
+        draw_text). Like ``fill_rect``, but over a scene the mark keeps
+        :data:`MARK_OPACITY` instead of fading with the surfaces."""
+        self.fill_rect(x, y, w, h, Style(bg=color),
+                       opacity=MARK_OPACITY if self.surface_opacity < 1.0 else None)
 
     # --- modern control faces (vector on capable backends, grid otherwise) ----
 
@@ -1247,7 +1362,7 @@ class DrawContext:
 
     def draw_caret(
         self, x: float, y: float, *, height: float, theme: "Theme",
-        glyph: str = " ", visible: bool = True,
+        glyph: str = " ", visible: bool = True, on: Color | None = None,
     ) -> None:
         """Draw a text caret whose top-left sits at (x, y), ``height`` base units
         tall. Vector backends get a thin vertical I-beam in the foreground color
@@ -1260,13 +1375,22 @@ class DrawContext:
         own hardware cursor at the focused field's caret (``request_text_input``,
         applied in ``present()``), so the native cursor — in the user's configured
         shape and blink — *is* the caret. Painting a reverse-video block over it
-        would only fight the real cursor and ignore the user's terminal settings."""
+        would only fight the real cursor and ignore the user's terminal settings.
+
+        ``on`` is the field's own fill. The caret is a fill, not a text run, so
+        auto-ink never reaches it; given ``on``, it is inked the way the field's
+        text is (floor-only, against the fill as seen), so a light theme text
+        colour does not vanish into a light field the text itself was darkened
+        for."""
         if not visible:
             return
         if self._caps.supports("vector_shapes"):
             bw = self.base_size[0]
             w = 1.0 / bw if bw else 0.1  # ~one device pixel wide
-            self.fill_rect(x, y, w, height, Style(bg=theme.text))
+            color = theme.text
+            if on is not None and not is_transparent(on):
+                color = self._ink_for(color, on, LC_BODY)
+            self.fill_rect(x, y, w, height, Style(bg=color))
 
     def _mark_box(
         self, x: float, y: float, row_h: float = 1.0
@@ -1399,6 +1523,7 @@ class DrawContext:
             clip=clip, panel=self._panel, background=background,
             focused=child_focused, widget=widget,
             text_variant=self._text_variant,
+            translucent=self._translucent,
         )
         widget.draw(child_ctx)
         child_ctx._close()
@@ -2107,6 +2232,7 @@ class Panel:
             panel=self, background=background,
             focused=slot.widget is self._focused,
             widget=slot.widget,
+            translucent=True,     # the base layout composites at the surface opacity
         )
         slot.widget.draw(slot_ctx)
         slot_ctx._close()
@@ -2184,6 +2310,8 @@ class Panel:
             # the modal beneath drawing focused (its text field keeps the caret/IME).
             focused=slot is self._top_interactive_slot(),
             widget=slot.widget,
+            # Opaque group unless a cover layer (see begin_group above).
+            translucent=bool(slot.hints.get("cover")),
         )
         slot.widget.draw(layer_ctx)
         layer_ctx._close()

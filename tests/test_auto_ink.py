@@ -125,3 +125,188 @@ def test_progress_bar_rules_keep_theme_colors_under_auto_ink():
 
     assert backend.style_at(2, 0).fg == theme.accent           # filled run
     assert backend.style_at(18, 0).fg == theme.control_border  # track
+
+
+# --- translucent surfaces over a scene ----------------------------------------
+
+from puikit.theme import derive_theme
+
+_PAGE = (3, 22, 26)          # dark water: the page and what a scene is drawn over
+_SHELL = (238, 232, 224)     # a white chrome bar
+_LIGHT_FG = (207, 230, 234)  # the theme's (light) text colour
+
+
+class _SceneBackend(MemoryBackend):
+    """A compositing memory backend with something drawn behind the UI."""
+    has_wallpaper = True
+
+
+def _shell_theme():
+    return derive_theme(background=_PAGE, foreground=_LIGHT_FG, muted=(127, 166, 173),
+                        accent=(40, 120, 136), surface=_SHELL, selection=(190, 178, 164),
+                        surfaces={"status": _SHELL})
+
+
+def _render_bar(opacity, wallpaper=True, layer=False):
+    cls = _SceneBackend if wallpaper else MemoryBackend
+    backend = cls(width=12, height=3, capabilities=PROFILE_GUI_DESKTOP)
+    backend.set_surface_opacity(opacity)
+    panel = Panel(backend, theme=_shell_theme())
+    panel.auto_ink = True
+    widget = _Ink(_LIGHT_FG)
+    if layer:
+        panel.set_layout(VSplit(Item(_Ink(_LIGHT_FG), hints={"surface": "content"})))
+        panel.push_layer(widget, hints={"surface": "status", "x": 0, "y": 0, "w": 12, "h": 1})
+    else:
+        panel.set_layout(VSplit(Item(widget, hints={"surface": "status"})))
+    panel.render()
+    return backend.style_at(0, 0).fg
+
+
+def test_text_on_an_opaque_white_bar_is_inked_for_white():
+    assert _render_bar(1.0) == legible_ink(_LIGHT_FG, _SHELL, LC_BODY)
+
+
+def test_text_on_a_translucent_white_bar_is_judged_as_seen():
+    # At 0.6 over dark water the white bar is seen as a mid gray: text inked for
+    # white came out faint there. It stays dark (the bar's polarity) and goes as
+    # dark as the gray needs -- black, since the gray cannot carry body text.
+    opaque, seen = _render_bar(1.0), _render_bar(0.6)
+    assert sum(seen) < sum(opaque)
+    assert seen == (0, 0, 0)
+
+
+def test_translucency_without_a_scene_changes_nothing():
+    assert _render_bar(0.6, wallpaper=False) == _render_bar(1.0, wallpaper=False)
+
+
+def test_an_opaque_overlay_is_inked_for_its_own_fill():
+    # A dialog draws in an opaque group: its fill is what is seen.
+    assert _render_bar(0.6, layer=True) == legible_ink(_LIGHT_FG, _SHELL, LC_BODY)
+
+
+def test_light_text_on_a_translucent_dark_pane_is_unchanged():
+    backend = _SceneBackend(width=12, height=3, capabilities=PROFILE_GUI_DESKTOP)
+    backend.set_surface_opacity(0.6)
+    panel = Panel(backend, theme=_shell_theme())
+    panel.auto_ink = True
+    panel.set_layout(VSplit(Item(_Ink(_LIGHT_FG), hints={"surface": "content"})))
+    panel.render()
+    assert backend.style_at(0, 0).fg == _LIGHT_FG
+
+
+def test_over_fill_inks_against_the_fill_but_does_not_paint_it_again():
+    # A widget that filled a row-wide panel (a code block) draws its runs over it:
+    # with over_fill the run is still inked for that fill, but a compositing
+    # backend gets a transparent bg, so a translucent fill is not doubled behind
+    # the glyphs.
+    panel_fill = (250, 247, 242)
+
+    class _OverFill(Widget):
+        def __init__(self, over):
+            self.over = over
+
+        def draw(self, ctx):
+            # Drawn on a row this context did not fill, so only the explicit flag
+            # (not the automatic detection below) can make it over_fill.
+            ctx.draw_text(0, 1, "code", Style(fg=_LIGHT_FG, bg=panel_fill), over_fill=self.over)
+
+    def drawn(over):
+        backend = MemoryBackend(width=12, height=3, capabilities=PROFILE_GUI_DESKTOP)
+        seen = []
+        real = backend.draw_text
+        backend.draw_text = lambda x, y, text, style=None: (seen.append(style), real(x, y, text, style))
+        panel = Panel(backend, theme=_shell_theme())
+        panel.auto_ink = True
+        panel.set_layout(VSplit(Item(_OverFill(over), hints={"surface": "content"})))
+        panel.render()
+        return seen[-1]
+
+    over, plain = drawn(True), drawn(False)
+    assert over.bg == TRANSPARENT and plain.bg == panel_fill
+    assert over.fg == plain.fg == legible_ink(_LIGHT_FG, panel_fill, LC_BODY)
+
+
+def test_text_over_a_fill_the_widget_painted_is_over_fill_by_itself():
+    # A viewer fills its header bar, then draws the title with the bar's bg: the
+    # run is not painted again (no denser box over a translucent bar). The same bg
+    # where nothing was filled -- an inline code span -- keeps its own box.
+    bar = (240, 235, 228)
+
+    class _Bar(Widget):
+        def draw(self, ctx):
+            ctx.fill_rect(0, 0, 12, 1, Style(bg=bar))
+            ctx.draw_text(1, 0, "title", Style(fg=_LIGHT_FG, bg=bar))
+            ctx.draw_text(1, 1, "code", Style(fg=_LIGHT_FG, bg=bar))
+
+    backend = MemoryBackend(width=12, height=3, capabilities=PROFILE_GUI_DESKTOP)
+    seen = []
+    real = backend.draw_text
+    backend.draw_text = lambda x, y, text, style=None: (seen.append((text, style)), real(x, y, text, style))
+    panel = Panel(backend, theme=_shell_theme())
+    panel.auto_ink = True
+    panel.set_layout(VSplit(Item(_Bar(), hints={"surface": "content"})))
+    panel.render()
+    styles = dict(seen)
+    assert styles["title"].bg == TRANSPARENT
+    assert styles["code"].bg == bar
+    assert styles["title"].fg == styles["code"].fg == legible_ink(_LIGHT_FG, bar, LC_BODY)
+
+
+def test_surface_opacity_is_seen_by_the_base_layout_but_not_by_an_overlay():
+    # A widget that marks its surface (a search hit) reads how much scene shows
+    # through: the base layout over a wallpaper sees the backend's opacity, a
+    # dialog (opaque group) and a backend with no scene see 1.
+    got = {}
+
+    class _Probe(Widget):
+        def __init__(self, key):
+            self.key = key
+
+        def draw(self, ctx):
+            got[self.key] = ctx.surface_opacity
+
+    backend = _SceneBackend(width=12, height=3, capabilities=PROFILE_GUI_DESKTOP)
+    backend.set_surface_opacity(0.6)
+    panel = Panel(backend, theme=_shell_theme())
+    panel.set_layout(VSplit(Item(_Probe("base"), hints={"surface": "content"})))
+    panel.push_layer(_Probe("dialog"), hints={"surface": "status", "x": 0, "y": 0, "w": 12, "h": 1})
+    panel.render()
+    assert got == {"base": 0.6, "dialog": 1.0}
+    plain = MemoryBackend(width=12, height=3, capabilities=PROFILE_GUI_DESKTOP)
+    plain.set_surface_opacity(0.6)
+    panel = Panel(plain, theme=_shell_theme())
+    panel.set_layout(VSplit(Item(_Probe("none"), hints={"surface": "content"})))
+    panel.render()
+    assert got["none"] == 1.0
+
+
+def test_a_mark_keeps_its_opacity_floor_over_a_scene_only():
+    # A selection drawn as a mark (fill_mark): over a scene it keeps MARK_OPACITY
+    # instead of fading with the surfaces; in a dialog (opaque group) it is a
+    # plain fill.
+    from puikit.panel import MARK_OPACITY
+    calls = {}
+
+    class _Mark(Widget):
+        def __init__(self, key):
+            self.key = key
+
+        def draw(self, ctx):
+            ctx.fill_mark(0, 0, 4, 1, (166, 78, 62))
+
+    backend = _SceneBackend(width=12, height=3, capabilities=PROFILE_GUI_DESKTOP)
+    backend.set_surface_opacity(0.6)
+    real = backend.fill_rect
+
+    def record(x, y, w, h, style=None, *, opacity=None):
+        if style is not None and style.bg == (166, 78, 62):
+            calls.setdefault("seen", []).append(opacity)
+        return real(x, y, w, h, style)
+
+    backend.fill_rect = record
+    panel = Panel(backend, theme=_shell_theme())
+    panel.set_layout(VSplit(Item(_Mark("base"), hints={"surface": "content"})))
+    panel.push_layer(_Mark("dialog"), hints={"surface": "status", "x": 0, "y": 2, "w": 12, "h": 1})
+    panel.render()
+    assert calls["seen"] == [MARK_OPACITY, None]

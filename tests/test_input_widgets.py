@@ -1398,3 +1398,46 @@ def test_the_blink_tick_retires_when_its_window_closes():
     window.close()
     assert field._blink_tick() is False
     assert field._blinking is False
+
+
+def test_caret_is_inked_against_its_field():
+    # The caret is a fill, so auto-ink never reached it: a light theme text colour
+    # vanished into a light field whose text had been darkened. Given the field's
+    # fill, it is inked like the text -- and left alone where it already reads.
+    from puikit import Item, Panel, VSplit
+    from puikit.backends.memory_backend import MemoryBackend
+    from puikit.capability import PROFILE_GUI_DESKTOP
+    from puikit.color import LC_BODY, apca_lc
+    from puikit.theme import derive_theme
+    from puikit.widgets.base import Widget
+
+    light_text, white_field, dark_field = (207, 230, 234), (250, 247, 242), (40, 59, 63)
+    theme = derive_theme(background=(3, 22, 26), foreground=light_text, muted=(127, 166, 173),
+                         accent=(40, 120, 136), surface=(238, 232, 224), selection=(190, 178, 164))
+
+    class _Caret(Widget):
+        def __init__(self, on):
+            self.on = on
+
+        def draw(self, ctx):
+            ctx.draw_caret(0, 0, height=1.0, theme=ctx.panel.theme, on=self.on)
+
+    class _VectorBackend(MemoryBackend):
+        @property
+        def capabilities(self):   # the caret is a vector shape; the grid backend hides them
+            return PROFILE_GUI_DESKTOP
+
+    def caret_color(on):
+        backend = _VectorBackend(width=12, height=3, capabilities=PROFILE_GUI_DESKTOP)
+        fills = []
+        real = backend.fill_rect
+        backend.fill_rect = lambda x, y, w, h, style=None, **kw: (fills.append(style), real(x, y, w, h, style, **kw))
+        panel = Panel(backend, theme=theme)
+        panel.set_layout(VSplit(Item(_Caret(on), hints={"surface": "content"})))
+        panel.render()
+        return [s.bg for s in fills if s is not None and s.bg not in (None, theme.surface_bg("content"))][-1]
+
+    on_white = caret_color(white_field)
+    assert abs(apca_lc(on_white, white_field)) >= LC_BODY - 0.5
+    assert sum(on_white) < sum(light_text)
+    assert caret_color(dark_field) == light_text
