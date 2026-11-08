@@ -197,9 +197,14 @@ def _key_equivalent(shortcut: str) -> tuple[str, int] | None:
     """Parse a puikit shortcut hint (``"Cmd-Shift-C"``, ``"Enter"``, ``"="``)
     into ``(keyEquivalent_char, modifier_mask)`` for native NSMenuItem display,
     or ``None`` when it can't be represented — so an item shows no accelerator
-    rather than a wrong one."""
-    parts = shortcut.split("-")
-    base, mod_parts = parts[-1], parts[:-1]
+    rather than a wrong one. The minus key itself is the hint's last ``-``
+    (``"Cmd--"``, ``"-"``), since ``-`` also separates the modifiers."""
+    if shortcut.endswith("-") and (shortcut == "-" or shortcut.endswith("--")):
+        base = "-"
+        mod_parts = shortcut[:-2].split("-") if len(shortcut) > 1 else []
+    else:
+        parts = shortcut.split("-")
+        base, mod_parts = parts[-1], parts[:-1]
     mask = 0
     for part in mod_parts:
         flag = _EQUIV_MOD.get(part.upper())
