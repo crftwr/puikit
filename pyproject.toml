@@ -14,16 +14,14 @@ dynamic = ["version", "readme"]
 description = "Capability-based Python UI framework with TUI and GUI backends"
 license = "MIT"
 authors = [{ name = "craftware" }]
+# No upper bound and no per-version classifiers: requires-python is the one
+# statement of support, and the release tests decide which versions are run.
 requires-python = ">=3.10"
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3 :: Only",
     "Topic :: Software Development :: User Interfaces",
     "Topic :: Terminals",
 ]
