@@ -2259,3 +2259,60 @@ def test_a_click_on_the_toast_runs_the_latest_on_click_once():
     assert backend._handle_message(*message) == 0
     assert backend._handle_message(*message) == 0
     assert clicks == [1]
+
+
+def test_flow_layouts_are_kept_between_frames(monkeypatch):
+    """xefm#866: a flow run's layout is built once and drawn again in later
+    frames - moved to another row or in another colour - and dropped with the
+    formats when the fonts are rebuilt. Measuring builds none for the cache."""
+    backend = WindowsBackend(width=60, height=16, title="puikit-flow-layout-cache-test")
+    backend.open()
+    built = []
+    real_build = native.dwrite_create_text_layout
+
+    names = ["report.txt", "議事録.pdf"]
+
+    def counting(factory, text, fmt, *args):
+        if text in names:                       # not the line-height probes
+            built.append(text)
+        return real_build(factory, text, fmt, *args)
+
+    monkeypatch.setattr(native, "dwrite_create_text_layout", counting)
+    try:
+        style = Style(font=Font(family="Segoe UI", size=14))
+        for name in names:                      # measure first, as a pane does
+            backend.measure_text(name, style)
+        measured = len(built)
+        assert not backend._flow_layouts
+        for frame in range(3):
+            for row, name in enumerate(names):
+                fg = (255, 0, 0) if frame == 1 else (200, 200, 200)
+                backend.draw_text(2, row + frame, name, style=Style(fg=fg, font=style.font))
+            backend.present()
+            backend._render()
+        assert len(built) - measured == len(names)
+        assert len(backend._flow_layouts) == len(names)
+        backend._rebuild_fonts()
+        assert not backend._flow_layouts
+        backend.draw_text(2, 1, names[0], style=style)
+        backend.present()
+        backend._render()
+        assert len(backend._flow_layouts) == 1
+    finally:
+        backend.close()
+    assert not backend._flow_layouts
+
+
+def test_flow_layout_cache_is_bounded(monkeypatch):
+    """The oldest kept layout is released once the cache holds more than
+    _FLOW_LAYOUT_CACHE runs."""
+    monkeypatch.setattr(windows_backend, "_FLOW_LAYOUT_CACHE", 3)
+    backend = WindowsBackend(width=60, height=16, title="puikit-flow-layout-bound-test")
+    backend.open()
+    try:
+        style = Style(font=Font(family="Segoe UI", size=14))
+        for i in range(5):
+            backend._flow_layout(f"name {i}", style)
+        assert [key[0] for key in backend._flow_layouts] == ["name 2", "name 3", "name 4"]
+    finally:
+        backend.close()

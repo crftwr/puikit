@@ -111,6 +111,30 @@ shared ascent for a default face (`docs/font_system.md` §3.1), the font's own
 ascent otherwise. It covers both without knowing which face fallback chose. The grid path's per-cell CJK
 nudge keeps its own `_cjk_baseline_dy`.
 
+### Text layouts are kept between frames
+
+Building an `IDWriteTextLayout` shapes the run, and a frame draws the same file
+names as the one before, so both paths keep their layouts in an LRU of 4,096:
+the grid path in `_grid_segment_layout`, the flow path in `_flow_layout`
+(xefm#866). A layout holds glyphs and advances from the run's own origin, not
+where it is drawn or in what colour — those are `DrawTextLayout`'s arguments —
+so a name that scrolls to another row, or becomes the cursor row, reuses it.
+The flow key is the text, the primary format's address and whether the CJK
+faces are in; the line's baseline is read once and kept beside the layout.
+`_drop_text_layouts` releases both caches before `_rebuild_fonts` and
+`_close_impl` release the formats the keys name.
+
+Measuring does not use the flow cache. Eliding a name measures every growing
+prefix of it, dozens of strings that are never drawn, so `_measure_text_uncached`
+builds a layout of its own, reads the width, and releases it; the widths are
+kept instead (`_width_cache`, `_measure_memo`).
+
+Measured on XeFM's file panes holding Down (Windows 11 on Arm VM, x64
+Python, 200 % scale, 37 rows a pane): the Direct2D pass went from 36 to 20 ms
+a frame, the layouts built a frame from 113 to about one, and a held key's
+list stopped 0.15–0.5 s after release instead of 1.5 s. The panes' pixels
+were the same before and after. Details in xefm#866.
+
 `measure_line_height` has a related trap: `font=None` does **not** mean "one
 grid row". `Panel._resolve()` substitutes the proportional UI font before
 anything is drawn, so a content-sized default-font widget must be *measured* as
