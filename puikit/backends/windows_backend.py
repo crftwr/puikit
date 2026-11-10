@@ -205,6 +205,10 @@ def _roll_falloff(pos: float) -> float:
 #: screens of distinct rows, file names and status text.
 _GRID_LAYOUT_CACHE = 4096
 
+#: Flow (proportional) text layouts kept between frames (see _flow_layout):
+#: the same budget as the grid's, a few screens of file names and labels.
+_FLOW_LAYOUT_CACHE = 4096
+
 
 def _repeat_count(lparam: int) -> int:
     """How many presses one WM_KEYDOWN / WM_CHAR stands for: bits 0-15 of its
@@ -1136,6 +1140,9 @@ class WindowsBackend(Backend):
         # Grid text runs as spaced text layouts (see _grid_segment_layout),
         # least recently drawn first; None marks a run that cannot be batched.
         self._grid_layouts: "OrderedDict[tuple, Any]" = OrderedDict()
+        # Flow runs as drawn (see _flow_layout): (layout, line baseline),
+        # least recently drawn first.
+        self._flow_layouts: "OrderedDict[tuple, tuple[Any, float]]" = OrderedDict()
         # Custom DirectWrite collection of the bundled Noto faces, loaded once
         # (lazily); None once loading has been attempted and failed/skipped, so
         # the backend falls back to the OS fonts.
@@ -1417,7 +1424,7 @@ class WindowsBackend(Backend):
         Safe between frames: the display list stores Style objects and resolves
         them to text formats at paint time, never holding a format across
         frames."""
-        self._drop_grid_layouts()   # keyed by the formats released below
+        self._drop_text_layouts()   # keyed by the formats released below
         for fmt in self._fonts.values():
             fmt.release()
         self._fonts.clear()
@@ -1523,7 +1530,7 @@ class WindowsBackend(Backend):
         self._anim_timer_running = False
         self._animations.clear()
         self._tick_callbacks.clear()
-        self._drop_grid_layouts()   # keyed by the formats released below
+        self._drop_text_layouts()   # keyed by the formats released below
         for fmt in self._fonts.values():
             fmt.release()
         self._fonts.clear()
@@ -1553,7 +1560,7 @@ class WindowsBackend(Backend):
             self._font_collection.release()
             self._font_collection = None
         self._font_collection_loaded = False
-        self._drop_grid_layouts()
+        self._drop_text_layouts()
         if self._dwrite_factory is not None:
             self._dwrite_factory.release()
             self._dwrite_factory = None
@@ -1776,7 +1783,9 @@ class WindowsBackend(Backend):
 
         A Latin-only run (or one with no CJK, or when the CJK faces are absent)
         gets no overrides: it is already a single-format single-pass layout. The
-        caller owns the returned layout and must ``release()`` it."""
+        caller owns the returned layout and must ``release()`` it — measuring
+        builds one and lets it go; drawing asks ``_flow_layout``, which keeps
+        them."""
         if self._dwrite_factory is None:
             self._dwrite_factory = native.create_dwrite_factory()
         primary = self._resolve_style_font(style)
@@ -1799,7 +1808,42 @@ class WindowsBackend(Backend):
                 u16 += seg_len
         return layout
 
-    def _flow_baseline_fix(self, layout: Any, style: Style) -> float:
+    def _flow_layout(self, text: str, style: Style) -> tuple[Any, float]:
+        """The layout a flow run is drawn with, and its line's baseline, kept
+        between frames: ``(layout, baseline)``. The backend owns the layout —
+        never ``release()`` it.
+
+        A layout holds the shaped glyphs and their advances from the run's own
+        origin, nothing of where it is drawn or in what colour (the brush and
+        the origin are DrawTextLayout's arguments), so a file name that scrolls
+        to another row, or turns into the cursor row, draws the layout of the
+        frame before. What it is built from is the key: the text, the primary
+        format (its font, weight, style and DPI size; the CJK family follows
+        from the same font), and whether the bundled CJK faces are in. The
+        formats are released only in ``_rebuild_fonts`` and ``_close_impl``,
+        which drop these first (``_drop_text_layouts``), so a format address in
+        a key never names a different format.
+
+        Only drawing comes here. Measuring keeps building a layout of its own
+        and letting it go: eliding a name measures every growing prefix of it
+        (``text._fit_prefix``), dozens of strings that are never drawn, and a
+        layout kept for each would push out the ones that are."""
+        primary = self._resolve_style_font(style)
+        key = (text, primary.addr, self._cjk_available)
+        cache = self._flow_layouts
+        entry = cache.get(key)
+        if entry is not None:
+            cache.move_to_end(key)
+            return entry
+        layout = self._build_flow_layout(text, style)
+        entry = (layout, native.text_layout_get_line_metrics(layout).baseline)
+        cache[key] = entry
+        while len(cache) > _FLOW_LAYOUT_CACHE:
+            _key, (old, _baseline) = cache.popitem(last=False)
+            old.release()
+        return entry
+
+    def _flow_baseline_fix(self, line_baseline: float, style: Style) -> float:
         """Pixels to shift a laid-out flow run UP so its baseline lands where a
         run of the primary font alone would. DirectWrite gives a line its
         baseline from the *tallest* run on it, so any range drawn in a taller
@@ -1812,8 +1856,9 @@ class WindowsBackend(Backend):
 
         A default face aims at the shared baseline of the row (§3.1), so the
         answer is negative when that face is the shorter of the pair: the run
-        moves *down* onto the line it shares with the other face."""
-        line_baseline = native.text_layout_get_line_metrics(layout).baseline
+        moves *down* onto the line it shares with the other face.
+        ``line_baseline`` is the layout's own (``_flow_layout`` reads it once,
+        when it builds the layout)."""
         return line_baseline - self._baseline_px(style)
 
     def _baseline_px(self, style: Style) -> float:
@@ -3105,11 +3150,16 @@ class WindowsBackend(Backend):
                 old.release()
         return layout
 
-    def _drop_grid_layouts(self) -> None:
+    def _drop_text_layouts(self) -> None:
+        """Release the grid and flow layouts kept between frames: both are
+        keyed by text formats, which the callers release next."""
         for layout in self._grid_layouts.values():
             if layout is not None:
                 layout.release()
         self._grid_layouts.clear()
+        for layout, _baseline in self._flow_layouts.values():
+            layout.release()
+        self._flow_layouts.clear()
 
     def _render_flow_text(
         self, x: int, y: int, text: str, style: Style, fg: tuple, bg: tuple | None, alpha: float, underline: bool, strike: bool = False,
@@ -3147,22 +3197,19 @@ class WindowsBackend(Backend):
         # One shaped layout for the whole run (primary format + per-range CJK
         # overrides); its own NO_WRAP single line is bounded by the outer pane
         # clip, so it only needs to avoid wrapping.
-        layout = self._build_flow_layout(text, style)
+        layout, line_baseline = self._flow_layout(text, style)
         row_top = origin_y
         # Re-anchor to where the baseline belongs (_baseline_px): a CJK range or
         # a fallback glyph would otherwise lower the line's baseline (DirectWrite
         # uses the tallest run's), dropping the whole run below a run of the
         # primary font alone, like an adjacent column; and a default face sits on
         # the row's shared baseline, not its own.
-        origin_y -= self._flow_baseline_fix(layout, style)
-        try:
-            # The batch's drop shadow, over the bg and under the run (see _render_text).
-            if shadow is not None:
-                self._draw_text_shadow(shadow)
-            self._set_brush(fg, alpha)
-            native.rt_draw_text_layout(self._render_target, origin_x, origin_y, layout, self._brush)
-        finally:
-            layout.release()
+        origin_y -= self._flow_baseline_fix(line_baseline, style)
+        # The batch's drop shadow, over the bg and under the run (see _render_text).
+        if shadow is not None:
+            self._draw_text_shadow(shadow)
+        self._set_brush(fg, alpha)
+        native.rt_draw_text_layout(self._render_target, origin_x, origin_y, layout, self._brush)
         # A default face's rules belong to the row (its line box is the unit),
         # wherever the baseline put its glyphs.
         rule_top = row_top if default_face(style.font) else origin_y
@@ -4238,15 +4285,14 @@ class WindowsBackend(Backend):
         self._set_mark_brush(spec["fg"] if spec["fg"] is not None else _DEFAULT_FG)
         y = _screen_mark.PADDING
         for line in spec["lines"]:
-            layout = self._build_flow_layout(line, style)
-            try:
-                # The same re-anchor _render_flow_text does: a CJK range or a
-                # fallback glyph would otherwise take the line's baseline down.
-                dy = self._flow_baseline_fix(layout, style)
-                native.rt_draw_text_layout(
-                    rt, _screen_mark.PADDING, y - dy, layout, brush)
-            finally:
-                layout.release()
+            # A layout belongs to no render target, so the mark's target draws
+            # the kept one too.
+            layout, line_baseline = self._flow_layout(line, style)
+            # The same re-anchor _render_flow_text does: a CJK range or a
+            # fallback glyph would otherwise take the line's baseline down.
+            dy = self._flow_baseline_fix(line_baseline, style)
+            native.rt_draw_text_layout(
+                rt, _screen_mark.PADDING, y - dy, layout, brush)
             y += spec["line_height"]
 
     def _set_mark_brush(self, colour: tuple, alpha: float = 1.0) -> None:
