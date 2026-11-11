@@ -748,7 +748,38 @@ class DrawContext:
         fractional on GUI), so a widget can center, right-align, or wrap
         proportional text against its pane size. Whole-unit backends count
         columns; the font is folded first, matching what draw_text will draw."""
+        if style is DEFAULT_STYLE:
+            # The common case - a file list measures every name, every frame,
+            # in the default style - skips the two Style hashes of the general
+            # path (the resolve memo here and the backend's own memo), which
+            # were a tenth of a file list's Python pass on Windows (xefm#884).
+            # Only a backend that counts its measure resets (_measure_epoch)
+            # takes it: the width of default text follows the UI font, and the
+            # count is how a font rebuild reaches this memo.
+            memo = self._default_measures()
+            if memo is not None:
+                width = memo.get(text)
+                if width is None:
+                    width = self._backend.measure_text(text, self._resolve(style))
+                    if len(memo) >= _STYLE_MEMO_MAX:
+                        memo.clear()
+                    memo[text] = width
+                return width
         return self._backend.measure_text(text, self._resolve(style))
+
+    def _default_measures(self) -> "dict[str, float] | None":
+        """The Panel's memo of default-style widths, emptied when the backend's
+        measures change; None when the backend does not count its resets or
+        there is no Panel. (The default style has no font for the capability
+        fold to change, and its background does not change its width.)"""
+        panel = self._panel
+        epoch = getattr(self._backend, "_measure_epoch", None)
+        if panel is None or epoch is None:
+            return None
+        if getattr(panel, "_default_measure_stamp", None) != epoch:
+            panel._default_measure_stamp = epoch
+            panel._default_measure_memo = {}
+        return panel._default_measure_memo
 
     def draw_text(self, x: float, y: float, text: str, style: Style = DEFAULT_STYLE,
                   *, ink: bool = True, anim_key: Any = None, over_fill: bool = False) -> None:
@@ -1775,6 +1806,10 @@ class Panel:
         self._rendering = False
         # DrawContext's memo of resolved styles (see DrawContext._resolve).
         self._style_memo: dict[tuple, Style] = {}
+        # DrawContext.measure_text's memo of default-style widths, and the
+        # backend measure epoch it was filled under (see _default_measures).
+        self._default_measure_memo: dict[str, float] = {}
+        self._default_measure_stamp: int | None = None
         # Pointer shape a widget requested during this frame's draw (the topmost
         # hovered widget wins, since it draws last). Collected each render and
         # pushed to the backend once at the end of the frame; None resets to the

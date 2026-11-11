@@ -205,6 +205,10 @@ def _read_ptr(address: int) -> int:
 
 # Keyed by (restype, *argtypes) — see ComPtr.call for why this exists.
 _functype_cache: dict[tuple, Any] = {}
+# Keyed by (slot address, signature): the foreign function bound to one vtable
+# slot. Every object of one interface shares the slots, so this stays as small
+# as the set of methods called.
+_bound_cache: dict[tuple, Any] = {}
 
 
 class ComPtr:
@@ -220,35 +224,54 @@ class ComPtr:
     d2d1.h / dwrite.h declaration order.
     """
 
-    __slots__ = ("addr",)
+    __slots__ = ("addr", "_bound")
 
     def __init__(self, addr: int = 0):
         self.addr = addr or 0
+        self._bound = None
 
     def __bool__(self) -> bool:
         return bool(self.addr)
 
     def call(self, index: int, restype, argtypes: list, *args):
+        # The resolved foreign function is kept per pointer and method index:
+        # an object's vtable never changes, so reading the vtable and the slot
+        # and binding a function to it again on every call (three ctypes
+        # round trips, most of a draw call's Python cost) is redone work. A
+        # frame of a file list makes ~700 of these calls on a handful of
+        # long-lived objects (the device context, the brush, the cached text
+        # layouts), and the cache took the Direct2D pass from ~20 to ~15 ms
+        # (xefm#884, docs/windows_backend.md).
+        bound = self._bound
+        if bound is not None:
+            fn = bound.get(index)
+            if fn is not None:
+                return fn(self.addr, *args)
+        else:
+            bound = self._bound = {}
         vtbl = _read_ptr(self.addr)
         slot = _read_ptr(vtbl + index * PTR_SIZE)
         # ctypes.WINFUNCTYPE(...) builds a new ctypes type every time it's
-        # called — expensive (it's metaclass work), and this ran on every
-        # single D2D/DWrite call with no caching, which dominated render time
-        # for any frame with real text content (profiled: >65% of a list's
-        # render time was inside this one line). The (restype, argtypes)
+        # called — expensive (it's metaclass work). The (restype, argtypes)
         # signature is the same on every call to a given D2D/DWrite method,
-        # so the constructed type is cached and reused; only the lightweight
-        # bind to this call's function pointer happens per call.
-        functype = _functype_cache.get((restype, *argtypes))
-        if functype is None:
-            functype = ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)
-            _functype_cache[(restype, *argtypes)] = functype
-        return functype(slot)(self.addr, *args)
+        # so the constructed type is cached and reused module-wide; objects of
+        # one interface share their slots too, so the bound function is.
+        sig = (restype, *argtypes)
+        fn = _bound_cache.get((slot, sig))
+        if fn is None:
+            functype = _functype_cache.get(sig)
+            if functype is None:
+                functype = ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)
+                _functype_cache[sig] = functype
+            fn = _bound_cache[(slot, sig)] = functype(slot)
+        bound[index] = fn
+        return fn(self.addr, *args)
 
     def release(self) -> None:
         if self.addr:
             self.call(2, ctypes.c_uint32, [])  # IUnknown::Release
             self.addr = 0
+            self._bound = None
 
 
 def hresult_ok(hr: int) -> bool:

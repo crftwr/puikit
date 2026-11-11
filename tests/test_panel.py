@@ -1075,6 +1075,45 @@ def test_the_style_memo_answers_what_resolving_would():
     assert panel._style_memo                                  # it did remember
 
 
+class _CountingBackend(MemoryBackend):
+    """Counts measure_text calls; ``_measure_epoch`` as the GUI backends keep it."""
+
+    def __init__(self, **kw):
+        super().__init__(width=40, height=8, capabilities=PROFILE_GUI_DESKTOP, **kw)
+        self.measured: list[str] = []
+        self.unit = 1.0
+        self._measure_epoch = 0
+
+    def measure_text(self, text, style=DEFAULT_STYLE):
+        self.measured.append(text)
+        return self.unit * len(text)
+
+
+def test_default_style_widths_are_kept_until_the_backend_resets_its_measures():
+    backend = _CountingBackend()
+    panel = Panel(backend)
+    ctx = _ctx(panel, (40, 50, 60))
+    assert ctx.measure_text("name") == 4.0
+    assert _ctx(panel).measure_text("name") == 4.0            # another pane, same Panel
+    assert backend.measured == ["name"]
+    backend.unit = 0.5                                        # the UI font changed
+    backend._measure_epoch += 1
+    assert ctx.measure_text("name") == 2.0
+    assert backend.measured == ["name", "name"]
+    ctx.measure_text("name", Style(fg=(1, 2, 3)))             # not the default style
+    ctx.measure_text("name", Style(fg=(1, 2, 3)))
+    assert backend.measured == ["name"] * 4
+
+
+def test_default_style_widths_are_not_kept_without_a_measure_epoch():
+    backend = _CountingBackend()
+    del backend._measure_epoch
+    ctx = _ctx(Panel(backend))
+    ctx.measure_text("name")
+    ctx.measure_text("name")
+    assert backend.measured == ["name", "name"]
+
+
 def test_the_style_memo_follows_the_theme_and_the_capabilities():
     panel = Panel(MemoryBackend(width=40, height=8, capabilities=PROFILE_GUI_DESKTOP))
     ctx = _ctx(panel)
