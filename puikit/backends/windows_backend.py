@@ -56,6 +56,7 @@ from ._image_cache import MISS, ImageCache
 from ..easing import resolve as _resolve_easing
 from ..event import CONTROL_CHAR_KEYS, Event, EventType, char_key_event, is_typed_char
 from ..font import Font, FontMetrics, default_face, grid_aligned
+from .. import text as _text
 from ..text import display_width, glyph_runs as _glyph_runs, is_cjk, cjk_segments, utf16_units
 
 # Bundled default fonts (puikit/fonts): Noto Sans + Noto Sans Mono, a
@@ -209,6 +210,14 @@ _GRID_LAYOUT_CACHE = 4096
 #: the same budget as the grid's, a few screens of file names and labels.
 _FLOW_LAYOUT_CACHE = 4096
 
+# TextAttribute bits as plain ints. ``style.attr & TextAttribute.BOLD`` goes
+# through the enum machinery (a Python-level __and__ building a new flag); the
+# render path tests four to six bits per text command, so it converts once and
+# tests these instead (xefm#884).
+_A_BOLD, _A_ITALIC = int(TextAttribute.BOLD), int(TextAttribute.ITALIC)
+_A_REVERSE, _A_DIM = int(TextAttribute.REVERSE), int(TextAttribute.DIM)
+_A_UNDERLINE, _A_STRIKE = int(TextAttribute.UNDERLINE), int(TextAttribute.STRIKETHROUGH)
+
 
 def _repeat_count(lparam: int) -> int:
     """How many presses one WM_KEYDOWN / WM_CHAR stands for: bits 0-15 of its
@@ -274,7 +283,7 @@ class _TextShadow:
 def _text_bg(style: Style) -> "tuple | None":
     """The background a ``text`` command paints itself, or None (see _render_text)."""
     bg = style.bg
-    if style.attr & TextAttribute.REVERSE:
+    if int(style.attr) & _A_REVERSE:
         bg = style.fg or _DEFAULT_FG
     return None if bg is None or is_transparent(bg) else bg
 
@@ -1140,6 +1149,8 @@ class WindowsBackend(Backend):
         # Grid text runs as spaced text layouts (see _grid_segment_layout),
         # least recently drawn first; None marks a run that cannot be batched.
         self._grid_layouts: "OrderedDict[tuple, Any]" = OrderedDict()
+        self._grid_plans: dict[tuple, tuple] = {}
+        self._grid_plans_widened: Any = None
         # Flow runs as drawn (see _flow_layout): (layout, line baseline),
         # least recently drawn first.
         self._flow_layouts: "OrderedDict[tuple, tuple[Any, float]]" = OrderedDict()
@@ -1254,6 +1265,9 @@ class WindowsBackend(Backend):
         # measure_text's answers by (text, style), in front of the font lookup
         # it would otherwise repeat per call; dropped whenever fonts change.
         self._measure_memo: dict[tuple, float] = {}
+        # Counts the resets of the measures above; Panel keeps its own memo of
+        # default-style widths and drops it when this moves.
+        self._measure_epoch = 0
         self._animations: dict[int, Animation] = {}
         self._anim_timer_running = False
         # Deadline for the next animation tick, time.monotonic()-based. Both
@@ -1435,6 +1449,7 @@ class WindowsBackend(Backend):
         self._width_cache.clear()
         self._line_height_cache.clear()
         self._measure_memo.clear()
+        self._measure_epoch += 1  # and the Panels' default-style memos (DrawContext.measure_text)
         self._font_metrics_cache.clear()
         self._invalidate_ui_cache()  # recorded glyphs are at the old DPI
         self._init_fonts()
@@ -1450,6 +1465,7 @@ class WindowsBackend(Backend):
         self._swap_chain = native.create_swapchain_for_hwnd(self._d3d_device, self._hwnd, cw, ch)
         self._target_bitmap = native.swapchain_bind_target(self._render_target, self._swap_chain, cw, ch)
         self._brush = native.rt_create_solid_color_brush(self._render_target, native.D2D1_COLOR_F(1, 1, 1, 1))
+        self._brush_key = None
         self._shadow_effect = native.dc_create_effect(self._render_target, native.CLSID_D2D1GaussianBlur)
         native.effect_set_value_float(
             self._shadow_effect, native.D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, _SHADOW_BLUR_SIGMA
@@ -1716,8 +1732,9 @@ class WindowsBackend(Backend):
 
     def _resolve_style_font(self, style: Style) -> Any:
         font = style.font
-        bold = bool(style.attr & TextAttribute.BOLD)
-        italic = bool(style.attr & TextAttribute.ITALIC)
+        a = int(style.attr)
+        bold = bool(a & _A_BOLD)
+        italic = bool(a & _A_ITALIC)
         key = (font, bold, italic)
         fmt = self._style_fonts.get(key)
         if fmt is None:
@@ -1730,8 +1747,9 @@ class WindowsBackend(Backend):
         Noto CJK JP face), cached like ``_resolve_style_font``. Used for a run's
         CJK segments so they render/measure in the embedded face."""
         font = style.font
-        bold = bool(style.attr & TextAttribute.BOLD)
-        italic = bool(style.attr & TextAttribute.ITALIC)
+        a = int(style.attr)
+        bold = bool(a & _A_BOLD)
+        italic = bool(a & _A_ITALIC)
         key = (font, bold, italic)
         fmt = self._style_cjk_fonts.get(key)
         if fmt is None:
@@ -2781,6 +2799,14 @@ class WindowsBackend(Backend):
         twice."""
         if color is None:
             color = _DEFAULT_FG
+        # The brush keeps its colour between draws (and frames): text runs
+        # come in long stretches of one colour, so SetColor - a COM call and a
+        # D2D1_COLOR_F built in Python - is skipped when nothing changed. Only
+        # this method sets the brush's colour, and a new brush forgets the key.
+        key = (color, alpha)
+        if key == self._brush_key:
+            return
+        self._brush_key = key
         if len(color) == 4:
             r, g, b, a = color
             alpha = alpha * (a / 255.0)
@@ -2794,6 +2820,8 @@ class WindowsBackend(Backend):
     #: skipped __init__ (the unit tests build one via __new__ and set only the
     #: handful of attributes they exercise).
     _ui_cache: Any = None
+    #: The (colour, alpha) the shared brush holds now; see _set_brush.
+    _brush_key: Any = None
 
     def _invalidate_ui_cache(self) -> None:
         """Drop the recorded display list, so the next frame re-runs the Python
@@ -2984,11 +3012,12 @@ class WindowsBackend(Backend):
         color, which is how that silhouette is recorded."""
         fg = style.fg or _DEFAULT_FG
         bg = style.bg
-        if style.attr & TextAttribute.REVERSE:
+        a = int(style.attr)
+        if a & _A_REVERSE:
             fg, bg = (bg or _DEFAULT_BG), (style.fg or _DEFAULT_FG)
-        alpha = 0.55 if style.attr & TextAttribute.DIM else 1.0
-        underline = bool(style.attr & TextAttribute.UNDERLINE)
-        strike = bool(style.attr & TextAttribute.STRIKETHROUGH)
+        alpha = 0.55 if a & _A_DIM else 1.0
+        underline = bool(a & _A_UNDERLINE)
+        strike = bool(a & _A_STRIKE)
         if silhouette:
             fg, bg, underline, strike = (0, 0, 0), None, False, False
             alpha *= self._drop_shadow[2]
@@ -3004,7 +3033,7 @@ class WindowsBackend(Backend):
             self._render_flow_text(x, y, text, style, fg, bg, alpha, underline, strike, shadow)
             return
 
-        weight = TextAttribute.BOLD if style.attr & TextAttribute.BOLD else TextAttribute.NORMAL
+        weight = TextAttribute.BOLD if a & _A_BOLD else TextAttribute.NORMAL
         # font=None uses the prebuilt base (mono/grid) formats; an explicit
         # grid-aligned monospace Font resolves its own format so its weight/slant
         # are honored (mirrors the macOS grid path). Both resolve to the same
@@ -3023,25 +3052,17 @@ class WindowsBackend(Backend):
         cjk_dy = line_dy + (self._cjk_baseline_dy(text_format, cjk_format)
                             if cjk_format is not None else 0.0)
 
-        def _glyph_fmt(glyph: str) -> tuple[Any, float]:
-            # A CJK cell draws with the embedded CJK format (same size/weight),
-            # so a Japanese file name shows the bundled face, not the OS's, and
-            # is nudged up by cjk_dy to share the Latin baseline. Grid cells are
-            # column-positioned, so this changes only face + baseline, never the
-            # horizontal layout, and needs no measurement change.
-            if cjk_format is not None and is_cjk(glyph[0]):
-                return cjk_format, cjk_dy
-            return text_format, line_dy
-
-        # Grid-locked text: each glyph gets its own DrawText call clipped to
-        # its own (base-unit) cell, so neighboring glyphs cannot drift off the
-        # grid from the font's natural (non-integer-pixel) advance — the same
-        # problem the macOS backend solves with a per-run kern; one call per
-        # glyph sidesteps it by construction at the cost of more draw calls
-        # (a documented v1 simplification — batching is future perf work).
-        runs = _glyph_runs(text)
-        widths = [max(1, display_width(glyph)) for glyph in runs]
-        total = sum(widths)
+        # Grid-locked text: locked to the base-unit grid without a call per
+        # glyph - the macOS grid path's approach. A run of single-column glyphs
+        # in the primary face is one cached text layout whose every character
+        # is spaced out to exactly one column (see _grid_segment_layout), drawn
+        # in one DrawTextLayout; a wide glyph, a CJK cell (the embedded CJK
+        # face, nudged by cjk_dy onto the Latin baseline) or a run the face
+        # does not advance evenly (a fallback glyph) is drawn alone in its cell.
+        # No clip either way: clipping is the container's job (Panel pushes one
+        # per widget slot), and a per-cell clip flat-cut descenders (g/j/p/q/y).
+        # Where the run splits is kept between frames (_grid_plan).
+        total, plan = self._grid_plan(text, cjk_format is not None)
         if bg is not None and not is_transparent(bg):
             # A text run's own background is a surface fill: it composites at
             # the surface opacity (see MacOSBackend._fill_text_bg).
@@ -3055,42 +3076,21 @@ class WindowsBackend(Backend):
             self._draw_text_shadow(shadow)
 
         self._set_brush(fg, alpha)
-        # Locked to the base-unit grid without a call per glyph — the macOS grid
-        # path's approach. A run of single-column glyphs in the primary face is
-        # one cached text layout whose every character is spaced out to exactly
-        # one column (see _grid_segment_layout), drawn in one DrawTextLayout; a
-        # wide glyph, a CJK cell (its own face and baseline) or a run the face
-        # does not advance evenly (a fallback glyph) is drawn alone in its cell.
-        # No clip either way: clipping is the container's job (Panel pushes one
-        # per widget slot), and a per-cell clip flat-cut descenders (g/j/p/q/y).
-        def batchable(i: int) -> bool:
-            return widths[i] == 1 and _glyph_fmt(runs[i])[0] is text_format
-
-        col, i, n = 0, 0, len(runs)
-        while i < n:
-            if batchable(i):
-                j = i + 1
-                while j < n and batchable(j):
-                    j += 1
-                layout = self._grid_segment_layout("".join(runs[i:j]), text_format, j - i)
+        rt, brush = self._render_target, self._brush
+        for col, segment, cells in plan:
+            if segment is not None:
+                layout = self._grid_segment_layout(segment, text_format, len(cells))
                 if layout is not None:
-                    rect = self._unit_rect(x + col, y, j - i, 1)
-                    native.rt_draw_text_layout(self._render_target, rect.left,
-                                               rect.top + line_dy, layout, self._brush)
-                    col += j - i
-                    i = j
+                    rect = self._unit_rect(x + col, y, len(cells), 1)
+                    native.rt_draw_text_layout(rt, rect.left, rect.top + line_dy, layout, brush)
                     continue
-                end = j
-            else:
-                end = i + 1
-            for glyph, width in zip(runs[i:end], widths[i:end]):
+            for glyph, width, cjk in cells:
                 rect = self._unit_rect(x + col, y, width, 1)
-                gfmt, gdy = _glyph_fmt(glyph)
+                gfmt, gdy = (cjk_format, cjk_dy) if cjk else (text_format, line_dy)
                 if gdy:
                     rect = native.D2D1_RECT_F(rect.left, rect.top + gdy, rect.right, rect.bottom + gdy)
-                native.rt_draw_text(self._render_target, glyph, gfmt, rect, self._brush)
+                native.rt_draw_text(rt, glyph, gfmt, rect, brush)
                 col += width
-            i = end
         if underline or strike:
             full = self._unit_rect(x, y, total, 1)
             for ly, rule_fg in _rules(style, underline, strike,
@@ -3105,6 +3105,51 @@ class WindowsBackend(Backend):
                 )
                 if rule_fg is not None:
                     self._set_brush(fg, alpha)
+
+    def _grid_plan(self, text: str, cjk: bool) -> tuple[int, tuple]:
+        """How grid text ``text`` splits into draws: ``(columns, plan)``, where
+        each plan entry is ``(column, segment, cells)``. ``segment`` is the
+        text of a batchable run (single-column glyphs in the primary face, for
+        _grid_segment_layout) or None; ``cells`` is ``(glyph, width, cjk)`` per
+        glyph, drawn one by one when there is no batch or the face refuses it.
+        ``cjk`` says whether a CJK face is there to route CJK glyphs to.
+
+        The walk - glyph_runs, display_width and is_cjk per glyph - was over a
+        quarter of a file list's Direct2D pass, redone every frame for rows
+        that had not changed (puikit#202). It depends only on the text and on
+        ``cjk``, so it is kept on those; it holds no format or layout, so a
+        font rebuild leaves it valid. Widths follow text.set_wide_chars, so
+        the plans start over when the widened set changes. Bounded first-in,
+        first-out."""
+        plans = self._grid_plans
+        if self._grid_plans_widened is not _text._widened:
+            plans.clear()
+            self._grid_plans_widened = _text._widened
+        key = (text, cjk)
+        plan = plans.get(key)
+        if plan is not None:
+            return plan
+        runs = _glyph_runs(text)
+        widths = [max(1, display_width(glyph)) for glyph in runs]
+        to_cjk = [cjk and is_cjk(glyph[0]) for glyph in runs]
+        entries = []
+        col, i, n = 0, 0, len(runs)
+        while i < n:
+            if widths[i] == 1 and not to_cjk[i]:
+                j = i + 1
+                while j < n and widths[j] == 1 and not to_cjk[j]:
+                    j += 1
+                segment = "".join(runs[i:j])
+            else:
+                j, segment = i + 1, None
+            entries.append((col, segment, tuple(zip(runs[i:j], widths[i:j], to_cjk[i:j]))))
+            col += sum(widths[i:j])
+            i = j
+        plan = (col, tuple(entries))
+        if len(plans) >= _GRID_LAYOUT_CACHE:
+            del plans[next(iter(plans))]
+        plans[key] = plan
+        return plan
 
     def _grid_segment_layout(self, segment: str, text_format: Any, glyphs: int) -> Any:
         """A cached text layout of ``segment`` (``glyphs`` single-column glyphs)

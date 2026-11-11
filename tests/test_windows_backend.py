@@ -2316,3 +2316,87 @@ def test_flow_layout_cache_is_bounded(monkeypatch):
         assert [key[0] for key in backend._flow_layouts] == ["name 2", "name 3", "name 4"]
     finally:
         backend.close()
+
+
+def test_grid_plan_splits_a_run_where_drawing_must():
+    """puikit#202: where grid text splits into batched runs and lone cells is
+    worked out once per text, and a CJK glyph goes alone only when a CJK face
+    is there to take it."""
+    backend = WindowsBackend.__new__(WindowsBackend)
+    backend._grid_plans, backend._grid_plans_widened = {}, None
+    total, plan = backend._grid_plan("ab日本éx", True)
+    assert total == 8
+    assert plan == (
+        (0, "ab", (("a", 1, False), ("b", 1, False))),
+        (2, None, (("日", 2, True),)),
+        (4, None, (("本", 2, True),)),
+        (6, "éx", (("é", 1, False), ("x", 1, False))),
+    )
+    assert backend._grid_plan("ab日本éx", True) is backend._grid_plan("ab日本éx", True)
+    _total, plan = backend._grid_plan("a日", False)
+    assert plan == ((0, "a", (("a", 1, False),)), (1, None, (("日", 2, False),)))
+
+
+def test_grid_plans_are_bounded(monkeypatch):
+    monkeypatch.setattr(windows_backend, "_GRID_LAYOUT_CACHE", 3)
+    backend = WindowsBackend.__new__(WindowsBackend)
+    backend._grid_plans, backend._grid_plans_widened = {}, None
+    for i in range(5):
+        backend._grid_plan(f"row {i}", True)
+    assert [key[0] for key in backend._grid_plans] == ["row 2", "row 3", "row 4"]
+
+
+def test_the_brush_colour_is_set_only_when_it_changes(monkeypatch):
+    """puikit#203: SetColor runs for a new colour only, and a new brush forgets
+    the colour the old one held."""
+    backend = WindowsBackend(width=40, height=10, title="puikit-brush-key-test")
+    backend.open()
+    sets = []
+    real = native.brush_set_color
+    monkeypatch.setattr(native, "brush_set_color", lambda brush, colour: (sets.append(1), real(brush, colour)))
+    try:
+        backend._set_brush((10, 20, 30))
+        backend._set_brush((10, 20, 30))
+        assert len(sets) == 1
+        backend._set_brush((10, 20, 30), 0.5)
+        backend._set_brush((10, 20, 30, 128))
+        assert len(sets) == 3
+        backend._recreate_render_target()
+        backend._set_brush((10, 20, 30, 128))
+        assert len(sets) == 4
+    finally:
+        backend.close()
+
+
+def test_a_com_method_is_resolved_once_per_pointer(monkeypatch):
+    """puikit#203: the vtable is read on a pointer's first call of a method,
+    not on every call, and a released pointer keeps nothing."""
+    backend = WindowsBackend(width=40, height=10, title="puikit-com-bound-test")
+    backend.open()
+    reads = []
+    real = native._read_ptr
+    monkeypatch.setattr(native, "_read_ptr", lambda address: (reads.append(address), real(address))[1])
+    try:
+        brush = native.rt_create_solid_color_brush(backend._render_target, native.D2D1_COLOR_F(1, 1, 1, 1))
+        native.brush_set_opacity(brush, 0.5)
+        first = len(reads)
+        assert first == 2                       # the vtable, then the slot
+        native.brush_set_opacity(brush, 0.25)
+        assert len(reads) == first
+        brush.release()
+        assert brush._bound is None
+    finally:
+        backend.close()
+
+
+def test_grid_plans_follow_set_wide_chars():
+    from puikit import text
+    backend = WindowsBackend.__new__(WindowsBackend)
+    backend._grid_plans, backend._grid_plans_widened = {}, None
+    assert backend._grid_plan("a○", False)[0] == 2
+    text.set_wide_chars("○")
+    try:
+        assert backend._grid_plan("a○", False)[0] == 3
+    finally:
+        text.set_wide_chars("")
+    assert backend._grid_plan("a○", False)[0] == 2

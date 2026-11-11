@@ -2113,6 +2113,9 @@ class MacOSBackend(Backend):
         # measure_text's answers by (text, style), in front of the font lookup
         # it would otherwise repeat per call; dropped whenever fonts change.
         self._measure_memo: dict[tuple, float] = {}
+        # Counts the resets of the measures above; Panel keeps its own memo of
+        # default-style widths and drops it when this moves.
+        self._measure_epoch = 0
         # Per-face memo of (advance, ink_x, ink_width) per glyph — what the grid
         # path needs to decide whether it may batch a glyph into a kerned run
         # and, when it may not, how to seat it in its cell (see _grid_batchable
@@ -2792,6 +2795,7 @@ class MacOSBackend(Backend):
         # unit from its glyph box (base font -> base unit). The base font is
         # monospaced, so its advance and line height are canonical.
         self._measure_memo.clear()   # widths are in the base unit derived below
+        self._measure_epoch += 1  # and the Panels' default-style memos (DrawContext.measure_text)
         regular = self.resolve_font(self._base_font)
         bold = self.resolve_font(self._base_font, bold=True)
         self._fonts = {TextAttribute.NORMAL: regular, TextAttribute.BOLD: bold}

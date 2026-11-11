@@ -135,6 +135,44 @@ a frame, the layouts built a frame from 113 to about one, and a held key's
 list stopped 0.15–0.5 s after release instead of 1.5 s. The panes' pixels
 were the same before and after. Details in xefm#866.
 
+### The Python side of a draw call
+
+With the layouts kept, the Direct2D pass is mostly Python, not Direct2D: in
+the same bench, the native calls themselves took about 3.6 ms of the 20. Four
+things take that Python cost out, and none changes what is drawn:
+
+- **`ComPtr.call` keeps the bound function** per pointer and method index.
+  Reading the vtable, reading the slot and binding a ctypes function to it
+  were three ctypes round trips on every call, about 700 calls a frame
+  (puikit#203). Functions bound to one slot are shared between objects of an
+  interface (`_bound_cache`), and `release` drops the pointer's own.
+- **`_set_brush` skips `SetColor`** when the brush already holds that colour
+  and alpha. Rows come in long runs of one colour. Only `_set_brush` sets the
+  shared brush's colour, and a new brush starts with no key.
+- **Attribute bits are tested on an int.** `style.attr & TextAttribute.BOLD`
+  goes through the enum's Python-level `__and__`; `_render_text` and the font
+  resolvers convert `style.attr` once and test module-level ints.
+- **The grid walk is kept** (`_grid_plan`, puikit#202). Where a grid run
+  splits into batched segments and lone cells depends only on its text and on
+  whether a CJK face is in, so the plan is kept on those two and holds no
+  format or layout: a font rebuild leaves it valid.
+
+One more is not in the backend. `DrawContext.measure_text` keeps
+default-style widths in a memo on the Panel, keyed by the text alone, which
+skips the two `Style` hashes of the general path. The width of default text
+follows the UI font, so the memo is emptied whenever the backend's
+`_measure_epoch` moves; the Windows and macOS backends move it where they
+reset `_measure_memo`. A backend without the counter does not take the fast
+path.
+
+Measured with the same bench as above, before and after, all five together:
+the Direct2D pass went from 20 to 7 ms a frame (median of three runs each).
+Under the profiler, `DrawContext.measure_text` fell from 1.25 to 0.73 s over
+the run, and the Python pass from 52 to 42 ms a frame (the profiler inflates
+it). After release, the held key's list kept moving for 0.33-0.49 s before;
+after, it stopped at once in two runs of three and moved 0.33 s in the third.
+The panes' pixels were byte-identical. Details in xefm#884.
+
 `measure_line_height` has a related trap: `font=None` does **not** mean "one
 grid row". `Panel._resolve()` substitutes the proportional UI font before
 anything is drawn, so a content-sized default-font widget must be *measured* as
