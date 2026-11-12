@@ -1114,6 +1114,47 @@ def test_default_style_widths_are_not_kept_without_a_measure_epoch():
     assert backend.measured == ["name", "name"]
 
 
+def test_measure_epoch_moves_with_a_font_rebuild_and_with_set_wide_chars():
+    from puikit import text
+    backend = _CountingBackend()
+    ctx = _ctx(Panel(backend))
+    before = ctx.measure_epoch
+    assert ctx.measure_epoch == before                        # stays while nothing changes
+    backend._measure_epoch += 1                               # the fonts were rebuilt
+    rebuilt = ctx.measure_epoch
+    assert rebuilt != before
+    try:
+        text.set_wide_chars("○")
+        widened = ctx.measure_epoch
+        assert widened != rebuilt
+        text.set_wide_chars("○")                              # the same set: no change
+        assert ctx.measure_epoch == widened
+    finally:
+        text.set_wide_chars("")
+    assert ctx.measure_epoch != widened                       # put back is a change too
+
+
+def test_measure_epoch_is_there_on_a_backend_that_does_not_count():
+    from puikit import text
+    backend = _CountingBackend()
+    del backend._measure_epoch
+    ctx = _ctx(Panel(backend))
+    assert ctx.measure_epoch == text._measure_epoch
+
+
+def test_set_wide_chars_empties_the_default_style_memo():
+    from puikit import text
+    backend = _CountingBackend()
+    ctx = _ctx(Panel(backend))
+    ctx.measure_text("○")
+    try:
+        text.set_wide_chars("○")
+        ctx.measure_text("○")
+    finally:
+        text.set_wide_chars("")
+    assert backend.measured == ["○", "○"]
+
+
 def test_the_style_memo_follows_the_theme_and_the_capabilities():
     panel = Panel(MemoryBackend(width=40, height=8, capabilities=PROFILE_GUI_DESKTOP))
     ctx = _ctx(panel)
