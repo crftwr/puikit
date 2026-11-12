@@ -33,6 +33,11 @@ def _is_variation_selector(ch: str) -> bool:
 #: Unicode gives them one — see :func:`set_wide_chars`.
 _widened: frozenset = frozenset()
 
+#: Counts the changes :func:`set_wide_chars` made to the widened set: a width
+#: measured before one may be wrong after it. ``DrawContext.measure_epoch``
+#: adds it to the backend's own count of font rebuilds.
+_measure_epoch = 0
+
 
 def set_wide_chars(chars) -> frozenset:
     """Count each of ``chars`` as two columns wherever width is measured.
@@ -48,13 +53,15 @@ def set_wide_chars(chars) -> frozenset:
     ``chars`` is any iterable of characters (a string works). ASCII, and
     anything already zero or two columns wide, is left as it is. Returns
     the set now in force. Call it before drawing: a widget that measured text
-    earlier keeps what it measured until it lays out again."""
-    global _widened
+    earlier keeps what it measured until it lays out again, unless it keys
+    what it keeps on ``DrawContext.measure_epoch``, which a change here moves."""
+    global _widened, _measure_epoch
     widened = frozenset(ch for ch in chars
                         if isinstance(ch, str) and len(ch) == 1
                         and ord(ch) >= 128 and _natural_width(ch) == 1)
     if widened != _widened:
         _widened = widened
+        _measure_epoch += 1
         for measured in (char_width, display_width):
             clear = getattr(measured, "cache_clear", None)
             if clear is not None:

@@ -344,6 +344,30 @@ A widget that only ever uses the base monospaced font can keep counting
 characters and never call this; it exists for widgets that opt into real
 fonts.
 
+### Keeping widths across frames: `measure_epoch`
+
+```python
+DrawContext.measure_epoch -> int
+```
+
+A widget that measures a whole list once and keeps the widths (a file
+list's column widths) must know when they went stale. `measure_epoch`
+changes whenever `measure_text`, `measure_line_height` or `font_metrics`
+may answer differently, and never while they cannot. It moves when the
+backend rebuilds its fonts (`set_base_font`, and on Windows the window
+moving to a monitor with another DPI) and when `text.set_wide_chars`
+changes the widened set. Key what is kept on it and compare for equality;
+the number means nothing on its own.
+
+The value a draw reads belongs to the fonts that draw uses: a backend moves
+it on the UI thread, before the RESIZE and redraw that follow a rebuild. A
+backend whose measures depend on the text alone (a character grid) never
+moves its share, so there only `set_wide_chars` changes it.
+
+Probing a few widths (`measure_text(" ")`, `"W"`) to notice a change is what
+this replaces: a probe can stay the same while other widths move, as whole
+pixel advances do from one size to the next.
+
 **Vertical companion — `measure_line_height`.** Width is not the only metric a
 font carries: a taller proportional or sized font also needs more *vertical*
 space per line. A widget that stacks lines (a wrapped `TextBlock`) asks for its

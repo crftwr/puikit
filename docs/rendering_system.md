@@ -106,6 +106,7 @@ units; `x`/`y`/`w`/`h`/`length` may be fractional on a pixel backend.
 | `draw_text(x, y, text, style, *, ink=True)` | The workhorse. Grid font → sliced to whole columns and clipped; a proportional/sized font (`style.font`) → handed whole to the backend and trimmed by the pane clip at the exact pixel edge. `ink=False` opts a run out of auto-ink (a color the widget owns deliberately — syntax highlighting). |
 | `draw_text_baseline(x, baseline_y, text, style)` | Place text by its baseline, not the top of the line box, so runs of different fonts on one row align. The proportional/mixed-font path (unsliced). |
 | `measure_text`, `line_height`, `font_metrics`, `font_size` | The measurement seam: displayed width / row pitch / ascent+descent / point size of `style`'s (folded) font, in this pane's unit. Whole-unit backends count columns and answer `1.0` line height, so the same math runs everywhere (`docs/font_system.md`). |
+| `measure_epoch` | Changes whenever the four above may answer differently (a font rebuild, `set_wide_chars`); key widths kept across frames on it (`docs/font_system.md` §8). |
 
 **Underlines carry their own color.** `Style.underline_color` colors the rule
 drawn for `TextAttribute.UNDERLINE` independently of `fg` — a cursor cue that
@@ -335,7 +336,8 @@ Widget:        draw(ctx), handle_event(event) -> bool,
                class attrs: focusable, wants_text_input
 
 DrawContext    text:      draw_text, draw_text_baseline,
-(puikit.panel)            measure_text, line_height, font_metrics, font_size
+(puikit.panel)            measure_text, line_height, font_metrics, font_size,
+                          measure_epoch
                fills:     fill_rect, draw_box, draw_border, round_rect
                lines:     draw_hairline, draw_frame_divider, draw_divider
                faces:     draw_check_mark, draw_radio_mark, draw_caret,

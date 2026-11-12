@@ -20,6 +20,7 @@ from . import easing as easing_mod
 from .event import Event, EventType
 from .focus import FocusContainer, focus_on_click, move_focus
 from .font import Font, FontMetrics, FontSlant, FontWeight, grid_aligned
+from . import text as _text
 from . import textfx
 from .theme import Theme, theme_for
 
@@ -436,6 +437,23 @@ class DrawContext:
         return self._backend.base_size
 
     @property
+    def measure_epoch(self) -> int:
+        """A number that changes whenever what this context measures may have
+        changed: ``measure_text``, ``measure_line_height`` and
+        ``font_metrics`` can answer differently once it moves, and cannot
+        while it stays. It moves when the backend rebuilds its fonts (a new
+        base font, the window moving to a monitor with another scale) and
+        when ``puikit.text.set_wide_chars`` changes the widened set.
+
+        A widget that keeps widths across frames keys them on it instead of
+        guessing from probes, and measures again when it differs. The value
+        read during a draw always belongs to the fonts that draw uses: the
+        backend moves it on the UI thread before the redraw that follows a
+        rebuild. Compare it for equality only; it says nothing on its own,
+        and is 0 on a backend whose measures depend on the text alone."""
+        return getattr(self._backend, "_measure_epoch", 0) + _text._measure_epoch
+
+    @property
     def base_pixel_size(self) -> tuple[float, float]:
         """The *true physical* pixel size of one base unit, for aspect-sensitive
         math. Equals ``base_size`` on pixel backends; on a character grid
@@ -776,6 +794,7 @@ class DrawContext:
         epoch = getattr(self._backend, "_measure_epoch", None)
         if panel is None or epoch is None:
             return None
+        epoch += _text._measure_epoch   # measure_epoch, without the second getattr
         if getattr(panel, "_default_measure_stamp", None) != epoch:
             panel._default_measure_stamp = epoch
             panel._default_measure_memo = {}
