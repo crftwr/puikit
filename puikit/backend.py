@@ -1358,6 +1358,13 @@ class Backend(ABC):
         because the user is busy in that loop, which is not a stall."""
         return _watchdog.paused()
 
+    def input_pending(self) -> bool:
+        """True while user input (a key, a mouse button, the wheel) is waiting
+        in the queue, not yet dispatched. Panel.render reads it to skip a frame
+        the next event would replace anyway. The base answers False — every
+        frame is drawn — which is always correct, only slower under a flood."""
+        return False
+
     def call_later(self, delay_seconds: float, callback: Callable[[], None]) -> Callable[[], None]:
         """Schedule ``callback`` to run once on the UI thread after
         ``delay_seconds``. Returns a zero-argument cancel function; calling it

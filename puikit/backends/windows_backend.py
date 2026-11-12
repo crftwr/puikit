@@ -219,6 +219,13 @@ _A_REVERSE, _A_DIM = int(TextAttribute.REVERSE), int(TextAttribute.DIM)
 _A_UNDERLINE, _A_STRIKE = int(TextAttribute.UNDERLINE), int(TextAttribute.STRIKETHROUGH)
 
 
+# PeekMessage ranges for input_pending: every key message, and the mouse
+# messages after WM_MOUSEMOVE (buttons, wheel).
+_WM_KEYFIRST, _WM_KEYLAST = 0x0100, 0x0109
+_WM_LBUTTONDOWN, _WM_MOUSELAST = 0x0201, 0x020E
+_PM_NOYIELD = 0x0002
+
+
 def _repeat_count(lparam: int) -> int:
     """How many presses one WM_KEYDOWN / WM_CHAR stands for: bits 0-15 of its
     lParam. A held key autorepeats at the keyboard rate, and when the window is
@@ -1232,6 +1239,8 @@ class WindowsBackend(Backend):
         # _TIMER_ID so the animation timer's id can never collide.
         self._later_timers: dict[int, Callable[[], None]] = {}
         self._later_timer_next_id = 1000
+        # Presses of a folded key repeat still to dispatch (see _dispatch_repeats).
+        self._repeats_left = 0
         # Display list double buffer: widgets fill `_back`, WM_PAINT reads
         # `_front`. Accessed through the _front/_back properties, which route
         # to the active secondary window's own pair when one is scoped.
@@ -2239,6 +2248,20 @@ class WindowsBackend(Backend):
             return native.INFINITE
         remaining = self._anim_next_tick - time.monotonic()
         return max(0, int(remaining * 1000.0))
+
+    def input_pending(self) -> bool:
+        """A key or mouse-button / wheel message waits in this thread's queue.
+        PeekMessage without removing, over both ranges, so a posted key (what a
+        test or an IME sends) counts as well as one from the keyboard. Pointer
+        moves are left out: a moving mouse would otherwise starve the frame."""
+        if self._repeats_left:
+            return True
+        msg = wintypes.MSG()
+        peek = native.user32.PeekMessageW
+        flags = native.PM_NOREMOVE | _PM_NOYIELD
+        if peek(ctypes.byref(msg), None, _WM_KEYFIRST, _WM_KEYLAST, flags):
+            return True
+        return bool(peek(ctypes.byref(msg), None, _WM_LBUTTONDOWN, _WM_MOUSELAST, flags))
 
     def call_later(self, delay_seconds: float, callback: Callable[[], None]) -> Callable[[], None]:
         """One-shot WM_TIMER on this window — a real OS timer instead of the
@@ -4595,8 +4618,7 @@ class WindowsBackend(Backend):
         mods = _key_modifiers()
         name = _VK_KEYS.get(vk)
         if name is not None:
-            for _ in range(_repeat_count(lparam)):
-                self._dispatch(Event(type=EventType.KEY, key=name, modifiers=mods))
+            self._dispatch_repeats(Event(type=EventType.KEY, key=name, modifiers=mods), lparam)
             return
         # Ctrl/Alt+letter would otherwise arrive at WM_CHAR as an unreadable
         # control code (Ctrl+C -> 0x03); synthesize the shortcut form here and
@@ -4621,6 +4643,16 @@ class WindowsBackend(Backend):
         _discard_queued_chord_char(hwnd, glyph)
         for _ in range(_repeat_count(lparam)):
             self._dispatch(char_key_event(glyph, mods))
+
+    def _dispatch_repeats(self, event: Event, lparam: int) -> None:
+        """Dispatch ``event`` as many times as the message's repeat count. All
+        but the last count as input still pending (see input_pending), so a
+        folded burst renders once, after its last press, not once per press."""
+        count = _repeat_count(lparam)
+        for i in range(count):
+            self._repeats_left = count - 1 - i
+            self._dispatch(event)
+        self._repeats_left = 0
 
     def _on_char(self, wparam: int, lparam: int = 0) -> None:
         code = wparam & 0xFFFF

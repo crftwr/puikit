@@ -358,6 +358,26 @@ Backend        core:      clear, draw_text, draw_box, dim_rect, draw_scrollbar,
                           draw_shadow (shadow); animate (animation); …
 ```
 
+### Frames skipped under input
+
+An app renders after every event it handles, and a frame can cost more than
+the gap between two key repeats. `Panel.render()` therefore puts a frame off
+while more input already waits in the backend's queue
+(`Backend.input_pending()`): every event is still handled, only the frames
+between them are dropped. The frame owed is drawn once the queue is empty (a
+zero-delay `call_later`, which the backends deliver after pending input) or
+after `Panel.DEFER_MAX_SECONDS` (0.1 s), so a long burst still shows progress;
+the first event after a pause always renders at once. Without it a held key
+on a slow frame lets the queue grow, and the cursor keeps moving after the key
+is released.
+
+`input_pending()` answers False on the base backend, so a backend that cannot
+tell draws every frame — correct, only slower under a flood. Windows peeks the
+key and mouse-button ranges, and also counts the presses still to come of a
+folded autorepeat (one `WM_KEYDOWN` whose repeat count says it stands for
+several), so a folded burst renders once, after its last press. Secondary
+windows are never deferred.
+
 ---
 
 ## 8. Relationship to other systems
