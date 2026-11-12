@@ -1823,6 +1823,12 @@ class Panel:
         # _note_pointer_region): a move that changes none of it needs no redraw.
         self._pointer_regions: list[tuple[Rect | None, bool]] = []
         self._rendering = False
+        # Frames put off while input waits in the backend's queue (see
+        # _defer_for_input): when the last frame was drawn, whether one is owed,
+        # and whether the timer that pays it is armed.
+        self._last_frame_time = 0.0
+        self._frame_owed = False
+        self._owed_timer_armed = False
         # DrawContext's memo of resolved styles (see DrawContext._resolve).
         self._style_memo: dict[tuple, Style] = {}
         # DrawContext.measure_text's memo of default-style widths, and the
@@ -2147,12 +2153,49 @@ class Panel:
         if self.dispatch_event(event) or event.type is not EventType.MOUSE_MOVE:
             self.render()
 
+    #: The longest a frame is put off while input keeps arriving: a held key
+    #: still shows the cursor moving, at this rate, instead of a frozen pane.
+    DEFER_MAX_SECONDS = 0.1
+
     def render(self) -> None:
+        if self._defer_for_input():
+            return
+        self._frame_owed = False
         if self._window is not None:
             with self.backend._window_scope(self._window):
                 self._render_impl()
-            return
-        self._render_impl()
+        else:
+            self._render_impl()
+        self._last_frame_time = time.monotonic()
+
+    def _defer_for_input(self) -> bool:
+        """Put this frame off when more input is already waiting.
+
+        An app renders after every event, and a frame can cost more than the gap
+        between two key repeats. Rendering each one then lets the queue grow
+        for as long as the key is held, and on release the backlog plays out —
+        the cursor keeps moving after the key is up. Every event is still
+        handled (no key is lost); only the frames between them are skipped. The
+        frame owed is drawn once the queue is empty — a zero-delay timer, which
+        the backends deliver only after pending input — or after
+        DEFER_MAX_SECONDS, whichever comes first, so a long burst still shows
+        progress. The first event after a pause always renders at once."""
+        if self._window is not None or self._rendering:
+            return False
+        if time.monotonic() - self._last_frame_time >= self.DEFER_MAX_SECONDS:
+            return False
+        if not self.backend.input_pending():
+            return False
+        self._frame_owed = True
+        if not self._owed_timer_armed:
+            self._owed_timer_armed = True
+            self.backend.call_later(0.0, self._pay_owed_frame)
+        return True
+
+    def _pay_owed_frame(self) -> None:
+        self._owed_timer_armed = False
+        if self._frame_owed:
+            self.render()
 
     def _render_impl(self) -> None:
         self._pointer_regions = []
