@@ -17,8 +17,10 @@ false and the backend falls back to reporting the capability as unsupported.
 
 from __future__ import annotations
 
+import collections
 import ctypes
 import sys
+import threading
 import time
 from typing import Any
 
@@ -32,6 +34,11 @@ try:
 except ImportError:  # pragma: no cover - depends on the PyObjC install
     Metal = None
     HAVE_METAL = False
+
+try:
+    from Foundation import NSLog
+except ImportError:  # pragma: no cover - depends on the PyObjC install
+    NSLog = None
 
 #: Uniform buffer size in bytes. Fifteen floats are used (the ``seed`` trio is
 #: the last three); the struct is padded to 64 by its 16-byte alignment, matching
@@ -85,6 +92,121 @@ if HAVE_METAL:
         })
 
 
+#: ``MTLCommandEncoderErrorState`` by value, for the failure report.
+_ENCODER_STATES = {0: "unknown", 1: "completed", 2: "affected", 3: "pending",
+                   4: "FAULTED"}
+
+#: How many GPU frame times the watch keeps, to show what led up to a failure.
+GPU_HISTORY = 30
+
+#: Full failure reports written before the watch only counts them: once macOS
+#: refuses a process's submissions every later buffer fails too (xefm#892).
+GPU_REPORT_LIMIT = 3
+
+
+class GpuWatch:
+    """Watches every command buffer this renderer commits (xefm#892).
+
+    A failed buffer used to leave no trace: the layer kept its last frame and
+    the background looked frozen. Each buffer now carries a completion handler
+    that records its GPU time and, when the buffer failed, writes a report: the
+    error, the state of each labelled pass (which one faulted, which were only
+    caught up in it), the frame's scene time and size, and the GPU times of the
+    frames before it. The report goes to stderr and to the unified log (NSLog),
+    which survives a GUI app launched without a terminal.
+
+    The handler runs on a Metal thread, so it only appends and formats; nothing
+    here touches the renderer's state.
+    """
+
+    def __init__(self, sink: Any = None) -> None:
+        self._history: "collections.deque[float]" = collections.deque(maxlen=GPU_HISTORY)
+        self._lock = threading.Lock()
+        self.failures = 0
+        self._sink = sink if sink is not None else _report
+
+    def command_buffer(self, queue: Any, label: str, **context: Any) -> Any:
+        """A new command buffer from ``queue`` named ``label``, with per-encoder
+        error status on and the completion handler attached. ``context`` (scene
+        time, size, ...) is repeated in a failure report."""
+        desc = Metal.MTLCommandBufferDescriptor.alloc().init()
+        desc.setErrorOptions_(Metal.MTLCommandBufferErrorOptionEncoderExecutionStatus)
+        command = queue.commandBufferWithDescriptor_(desc)
+        command.setLabel_(label)
+        command.addCompletedHandler_(lambda done: self.completed(done, context))
+        return command
+
+    def completed(self, command: Any, context: "dict[str, Any]") -> None:
+        """The completion handler: record the GPU time, report a failure."""
+        start, end = command.GPUStartTime(), command.GPUEndTime()
+        gpu_ms = (end - start) * 1000.0 if end > start else 0.0
+        if command.status() != Metal.MTLCommandBufferStatusError:
+            self._history.append(gpu_ms)
+            return
+        with self._lock:
+            self.failures += 1
+            count = self.failures
+            history = list(self._history)
+        if count > GPU_REPORT_LIMIT:
+            return
+        lines = [f"GPU command buffer failed #{count} ({command.label()}): "
+                 + _describe_error(command.error())]
+        if context:
+            lines.append("  frame: " + ", ".join(f"{k}={_short(v)}"
+                                                 for k, v in context.items()))
+        lines.append(f"  GPU ms of this buffer: {gpu_ms:.1f}")
+        for info in _encoder_infos(command.error()):
+            lines.append(f"  pass {info[0]!r}: {info[1]}")
+        lines.append("  GPU ms of the frames before: "
+                     + (" ".join(f"{ms:.1f}" for ms in history) or "(none)"))
+        if count == GPU_REPORT_LIMIT:
+            lines.append("  (further failures are not reported)")
+        self._sink(lines)
+
+
+def _short(value: Any) -> str:
+    return f"{value:.2f}" if isinstance(value, float) else str(value)
+
+
+def _describe_error(error: Any) -> str:
+    if error is None:
+        return "no error object"
+    try:
+        return (f"{error.domain()} code {int(error.code())}: "
+                f"{error.localizedDescription()}")
+    except Exception as e:  # noqa: BLE001 - a report must never raise
+        return f"(error not readable: {e})"
+
+
+def _encoder_infos(error: Any) -> "list[tuple[str, str]]":
+    """(label, state) of each encoder in a failed buffer, from the error's
+    ``MTLCommandBufferEncoderInfoErrorKey``; empty when the OS gave none."""
+    if error is None:
+        return []
+    try:
+        infos = error.userInfo().get(Metal.MTLCommandBufferEncoderInfoErrorKey) or []
+        out = []
+        for info in infos:
+            state = _ENCODER_STATES.get(int(info.errorState()), str(info.errorState()))
+            signposts = list(info.debugSignposts() or [])
+            label = str(info.label())
+            out.append((label + (f" {signposts}" if signposts else ""), state))
+        return out
+    except Exception as e:  # noqa: BLE001 - a report must never raise
+        return [("(encoder info not readable)", str(e))]
+
+
+def _report(lines: "list[str]") -> None:
+    """Write a failure report to stderr and to the unified log."""
+    for line in lines:
+        try:
+            sys.stderr.write(f"[puikit] {line}\n")
+        except Exception:  # noqa: BLE001 - stderr may be gone at exit
+            pass
+        if NSLog is not None:
+            NSLog("[puikit] %@", line)
+
+
 def _rgba(color: "tuple[int, int, int] | None", default: float = 0.0
           ) -> "tuple[float, float, float, float]":
     """A 0..255 RGB triple as 0..1 RGBA, or an opaque ``default`` grey if ``None``."""
@@ -106,6 +228,7 @@ class MetalBackground:
     def __init__(self) -> None:
         self._device = Metal.MTLCreateSystemDefaultDevice() if HAVE_METAL else None
         self._queue = self._device.newCommandQueue() if self._device is not None else None
+        self.gpu_watch = GpuWatch()
         self._shader = None
         self._error: str | None = None
         # The resolved graph and a pipeline per (entry, output format); None
@@ -285,6 +408,8 @@ class MetalBackground:
             attachment.setClearColor_(Metal.MTLClearColorMake(*clear))
         attachment.setStoreAction_(Metal.MTLStoreActionStore)
         encoder = command.renderCommandEncoderWithDescriptor_(descriptor)
+        name = "screen" if step.output is None else self._plan.targets[step.output].name
+        encoder.setLabel_(f"{step.entry} -> {name}" + (f"[{slice_}]" if size[2] > 1 else ""))
         fmt = None if step.output is None else self._plan.targets[step.output].format
         encoder.setRenderPipelineState_(self._pipes[(step.entry, fmt)])
         pass_uniforms = _bg_graph.pass_uniforms(step, size, slice_, extents)
@@ -356,7 +481,7 @@ class MetalBackground:
         texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow_(
             Metal.MTLRegionMake2D(0, 0, width, height), 0, bytes(raster.data), width * 4)
         if desc.mipmaps:
-            command = self._queue.commandBuffer()
+            command = self.gpu_watch.command_buffer(self._queue, "mipmaps")
             blit = command.blitCommandEncoder()
             blit.generateMipmapsForTexture_(texture)
             blit.endEncoding()
@@ -405,7 +530,9 @@ class MetalBackground:
         on the GPU and its once passes have run — or for good if a texture
         failed — the frame is the bare backdrop."""
         clear = _rgba(getattr(self._shader, "backdrop", None), 0.08)
-        command = self._queue.commandBuffer()
+        command = self.gpu_watch.command_buffer(
+            self._queue, "frame", time=float(elapsed), size=f"{int(width)}x{int(height)}",
+            fade=float(fade), seed=float(seed))
         uniforms = self._uniforms(width, height, elapsed, fade, seed, seed_prev, seed_mix,
                                   pixel_scale)
         if not self._textures_ready(block) or not self._bake(command, uniforms, block):
@@ -415,7 +542,9 @@ class MetalBackground:
             attachment.setLoadAction_(Metal.MTLLoadActionClear)
             attachment.setClearColor_(Metal.MTLClearColorMake(*clear))
             attachment.setStoreAction_(Metal.MTLStoreActionStore)
-            command.renderCommandEncoderWithDescriptor_(descriptor).endEncoding()
+            encoder = command.renderCommandEncoderWithDescriptor_(descriptor)
+            encoder.setLabel_("backdrop")
+            encoder.endEncoding()
             return command
         self._ensure_targets(int(width), int(height))
         for step in self._plan.frame:

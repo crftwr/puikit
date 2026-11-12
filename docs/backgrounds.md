@@ -298,6 +298,27 @@ Both GPU paths gate the capability at runtime on whether the shader-compile path
 is actually usable (`HAVE_D3D_SHADER` on Windows, the Metal gate on macOS), so
 the app falls back to a plain backdrop rather than failing.
 
+**A failed GPU frame leaves a report (macOS).** Every command buffer
+`_metal.py` commits goes through `GpuWatch` (xefm#892). Each render pass
+carries a label (`entry -> target`, `screen` for the drawable, `backdrop` for a
+frame drawn before the scene is ready), and per-encoder error status is turned
+on. A completion handler records each buffer's GPU time. When a buffer fails,
+the handler writes a report to stderr and to the unified log (`NSLog`, so it
+survives an app launched from Finder). The report holds the error, the state of
+each pass (`FAULTED`, or `affected` / `pending` when a pass was only caught up
+in someone else's fault), the frame's scene time, size, fade and seed, and the
+GPU times of the last 30 frames. Only the first three failures are reported.
+After repeated GPU errors macOS refuses every later submission from the
+process ("Ignored (for causing prior/excessive GPU errors)"), so later failures
+add nothing. On a failure, pull the report out with:
+
+```
+log show --last 30m --predicate 'eventMessage CONTAINS "[puikit]"'
+```
+
+The watch only reports. It does not yet stop drawing or fall back to the
+backdrop when frames fail. That waits on what the reports show.
+
 ### 4.1 Idle parking, and `idle`
 
 An animated background is the one thing that keeps an otherwise-idle app
