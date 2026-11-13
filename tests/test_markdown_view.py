@@ -421,6 +421,74 @@ def test_image_reserves_aspect_height(tmp_path):
     assert abs(row.height - 10.0) < 0.01
 
 
+class _TallCellBackend(MemoryBackend):
+    """A character grid whose cell is 8x16 pixels, as a real terminal's is:
+    base_size stays (1, 1), the cell is the layout unit."""
+
+    @property
+    def base_pixel_size(self):
+        return (8.0, 16.0)
+
+
+def _tui_image_row(tmp_path, view_h=40, w=20, px=(400, 200), images=True):
+    from puikit.capability import CapabilityProfile
+
+    png = tmp_path / "pic.png"
+    png.write_bytes(_png_bytes(*px))
+    caps = CapabilityProfile({**PROFILE_TUI, "images": images})
+    panel = Panel(_TallCellBackend(width=w, height=view_h, capabilities=caps))
+    view = MarkdownView(f"![w]({png})")
+    panel.add(view, x=0, y=0, w=w, h=view_h)
+    panel.render()
+    return view._rows[0]
+
+
+def test_a_terminal_image_keeps_its_aspect_in_tall_cells(tmp_path):
+    # 400x200 shrunk to 20 cells of 8 px = 160 px wide -> 80 px = 5 rows of 16.
+    row = _tui_image_row(tmp_path)
+    assert row.image[2:] == (20, pytest.approx(5.0))
+
+
+def test_the_terminal_height_does_not_size_an_image(tmp_path):
+    # Taller than the view: not shrunk to it; the document scrolls (and the
+    # scrollbar it now needs takes one column of the width).
+    assert _tui_image_row(tmp_path, view_h=3).image[2:] == (19, pytest.approx(4.75))
+
+
+def test_a_small_image_is_not_enlarged(tmp_path):
+    # 40x20 px is 5 cells of 8 px wide, 20 px = 1.25 rows of 16 tall.
+    row = _tui_image_row(tmp_path, px=(40, 20))
+    assert row.image[2:] == (pytest.approx(5.0), pytest.approx(1.25))
+
+
+class _RetinaCellBackend(_TallCellBackend):
+    """A terminal on a 2x display: it reports its cell in device pixels."""
+
+    @property
+    def base_pixel_size(self):
+        return (16.0, 32.0)
+
+
+def test_a_screenshot_is_as_wide_on_a_retina_terminal(tmp_path):
+    # 1280 px at one logical px each: 160 cells of 8 logical px, wider than the
+    # 120-column view, so full width - not the 80 cells device pixels give.
+    from puikit.capability import CapabilityProfile
+
+    png = tmp_path / "shot.png"
+    png.write_bytes(_png_bytes(1280, 640))
+    caps = CapabilityProfile({**PROFILE_TUI, "images": True})
+    panel = Panel(_RetinaCellBackend(width=120, height=200, capabilities=caps))
+    view = MarkdownView(f"![s]({png})")
+    panel.add(view, x=0, y=0, w=120, h=200)
+    panel.render()
+    assert view._rows[0].image[2] == 120
+
+
+def test_without_pictures_an_image_takes_one_line(tmp_path):
+    row = _tui_image_row(tmp_path, images=False)
+    assert row.height == 1.0
+
+
 def test_image_alt_glyph_on_terminal(tmp_path):
     png = tmp_path / "img.png"
     png.write_bytes(_png_bytes(10, 10))

@@ -105,6 +105,10 @@ class LayoutContext:
     # widget whose height depends on it (a table's border rows take a cell
     # each on a grid and next to nothing on a vector backend).
     vector_shapes: bool = False
+    # The backend draws pictures (capability ``images``). Without it the Panel
+    # stands a single alt glyph in for each one, so a widget that would reserve
+    # a picture's height reserves one line instead (MarkdownView).
+    images: bool = True
     # Divider rects emitted during resolve, for the Panel to draw.
     dividers: list[Divider] = field(default_factory=list)
 
