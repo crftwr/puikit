@@ -60,7 +60,9 @@ needs — handshake (`Sec-WebSocket-Accept`), unfragmented masked text frames in
 unmasked text frames out, ping/pong, close — with `socket` + `http.server` +
 `hashlib` only. This keeps PuiKit dependency-free, the same choice the Windows
 backend makes with raw ctypes. One HTTP server serves both the client assets
-(`/`, `/client.js`, `/client.css`, `/fonts/*.ttf`) and the `/ws` upgrade; there
+(`/`, `/client.js`, `/client.css`, `/fonts/*.ttf`), the images (`/image/<token>`,
+§3) and the `/ws` upgrade. It binds 127.0.0.1, but the browser need not be on the
+same machine: it may reach the port through SSH forwarding. There
 is exactly one client (the launched tab), and a later connection replaces an
 earlier one. `tests/test_web_backend.py` exercises the framing both ways with a
 tiny hand-rolled client over a real socket.
@@ -179,10 +181,28 @@ strikethrough become flags. Coordinates are multiplied by the base unit (float
 CSS px) before serialization; the client scales the canvas backing store by
 `devicePixelRatio` and draws in CSS px, so output is crisp on HiDPI.
 
-**Images** are sent once each as a base64 `data:` URL `asset` message (keyed by
-path) before the first frame that references them; the client caches the decoded
-`Image` by id. A reconnecting tab (a reload) re-requests them because
-`_on_connect` clears the sent set.
+**Images are fetched by the page, not pushed down the socket** (xefm#732). The
+browser may be on another machine, at the end of a forwarded port, and a photo of
+many megabytes on the WebSocket would hold up every frame and input reply queued
+behind it. So before the first frame that references an image, the backend sends
+a small `asset` message carrying only `/image/<token>`. The page fetches that URL
+on a request of its own, and the server answers it on that request's thread:
+
+- a **path** is streamed as the file's own bytes, with no decode or re-encode;
+- a **`RasterImage`** is encoded when fetched, as PNG if any pixel is
+  transparent and as JPEG (quality 90) otherwise (`_encode_raster`; needs Pillow).
+
+Neither happens on the UI thread. The token is random, and only registered
+images have one, so nothing else on disk can be fetched. A token is kept per
+asset id, which follows the source's identity (path + mtime + size, or the
+raster's revision). The response is marked immutable, and a reload, which
+re-sends the `asset` messages (`_on_connect` clears the sent set), is answered
+from the browser's cache. A raster is held weakly: once it is gone, its token
+answers 404.
+
+The client waits for `img.decode()` before using an image, so the first
+`drawImage` does not decode it on the main thread. When an image arrives it
+redraws the latest frame, which was drawn without it.
 
 ---
 

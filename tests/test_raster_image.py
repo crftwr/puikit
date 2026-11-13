@@ -234,12 +234,21 @@ def test_a_repainted_raster_gets_a_new_asset_id():
     assert _asset_id(raster) != before
 
 
-def test_a_raster_reaches_the_browser_as_a_png():
+def test_an_opaque_raster_reaches_the_browser_as_a_jpeg():
     pytest.importorskip("PIL.Image")
-    from puikit.backends.web_backend import _png_bytes
+    from puikit.backends.web_backend import _encode_raster
 
-    data = _png_bytes(_solid(3, 3))
-    assert data is not None and data[:8] == b"\x89PNG\r\n\x1a\n"
+    data, ctype = _encode_raster(_solid(3, 3))
+    assert ctype == "image/jpeg" and data[:3] == b"\xff\xd8\xff"
+
+
+def test_a_raster_with_transparency_reaches_the_browser_as_a_png():
+    pytest.importorskip("PIL.Image")
+    from puikit.backends.web_backend import _encode_raster
+
+    raster = RasterImage(2, 1, bytes((10, 20, 30, 255, 10, 20, 30, 128)))
+    data, ctype = _encode_raster(raster)
+    assert ctype == "image/png" and data[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 def test_the_browser_reads_the_formats_no_application_should_have_to_decode():
