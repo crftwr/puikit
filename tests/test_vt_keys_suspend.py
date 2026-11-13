@@ -46,6 +46,16 @@ class FakeConsole(_StreamConsole):
         super().resume()
 
 
+@pytest.fixture(autouse=True)
+def patient_frames(monkeypatch):
+    """A frame waits for the image worker only a few milliseconds (xefm#732);
+    these tests assert what one present() writes, so let it wait for the
+    picture however long a loaded machine takes."""
+    from puikit.backends import _image_loader
+
+    monkeypatch.setattr(_image_loader, "FRAME_WAIT", 30.0)
+
+
 @pytest.fixture
 def backend():
     be = VTBackend(console=FakeConsole())

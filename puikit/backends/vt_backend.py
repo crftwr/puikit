@@ -47,6 +47,8 @@ import contextlib
 import os
 import re
 import sys
+import time
+from collections import deque
 from typing import Any, Callable
 
 from ..backend import Backend, Color, DEFAULT_STYLE, EventHandler, Style, TextAttribute, _run_tick_callbacks
@@ -54,6 +56,7 @@ from ..capability import CapabilityProfile, PROFILE_TUI
 from ..event import CONTROL_CHAR_KEYS, Event, EventType, char_key_event, is_typed_char
 from ..image import CONTAIN, COVER, contain_box, cover_source
 from ..text import display_width
+from . import _image_loader
 from . import _terminal_graphics
 from ._textgrid import (
     DIM_BG,
@@ -114,6 +117,32 @@ _ENCODED_CACHE_MAX = 32
 #: and per-band column bits at one size — larger than an encoded payload, so
 #: fewer are kept.
 _SIXEL_SOURCE_CACHE_MAX = 8
+
+#: What a prepared-sixel slot holds for a picture that could not be read, so it
+#: is not built again every frame.
+_NO_PICTURE = object()
+
+
+def _build_sequence(protocol: str, source: Any, cols: int, rows: int,
+                    cell_w: float, cell_h: float, src: Any, image_id: int) -> str:
+    """A kitty / iTerm2 payload for one placement, or ``""`` when the picture
+    cannot be read. Runs on the image worker (xefm#732)."""
+    rendered = _terminal_graphics.render(source, cols * cell_w, rows * cell_h, src)
+    if rendered is None:
+        return ""
+    image, png = rendered
+    return _terminal_graphics.encode(
+        protocol, image, png, cols, rows, image_id, fill=src is not None) or ""
+
+
+def _build_sixel(source: Any, px_w: int, px_h: int, fit_src: Any) -> Any:
+    """A picture prepared for sixel at its full box size (see
+    ``VTBackend._sixel_rect``), or :data:`_NO_PICTURE`. Runs on the image
+    worker; sixel needs no PNG, so none is made."""
+    rendered = _terminal_graphics.render(source, px_w, px_h, fit_src, png=False)
+    if rendered is None:
+        return _NO_PICTURE
+    return _terminal_graphics.prepare_sixel(rendered[0])
 
 _BUTTON_NAMES = (
     (_FROM_LEFT_1ST_BUTTON, "left"),
@@ -277,6 +306,17 @@ class VTBackend(Backend):
         # _sixel_rect). Independent of which part is visible, which is what
         # makes scrolling cheap.
         self._sixel_sources: dict[tuple, object] = {}
+        # Pictures are built off the UI thread (xefm#732): decoding a photo,
+        # scaling it and encoding it cost hundreds of milliseconds, which used to
+        # freeze present(). The worker, the jobs it is on, the results it has
+        # finished - drained by the event loop, which wakes every 50 ms anyway,
+        # so no wake-up is needed - the placements on screen still waiting for
+        # their picture, and when the frame being presented stops waiting.
+        self._image_loader: _image_loader.ImageLoader | None = None
+        self._image_jobs: set[tuple] = set()
+        self._image_results: deque = deque()
+        self._image_pending: set[tuple] = set()
+        self._image_wait_deadline: float | None = None
         # The protocol this terminal decodes, or None. Unlike the curses backend
         # this is not merely detected but ACTIONABLE: owning the output stream is
         # what lets the escape reach the screen (xefm#306).
@@ -317,6 +357,12 @@ class VTBackend(Backend):
         # nothing else is looking at it once the TUI is down. An embedding
         # application that opens a terminal and closes it again should not be
         # left holding the last photograph anyone scrolled past.
+        if self._image_loader is not None:
+            self._image_loader.close()
+            self._image_loader = None
+        self._image_jobs.clear()
+        self._image_results.clear()
+        self._image_pending.clear()
         self._encoded.clear()
         self._sixel_sources.clear()
         _terminal_graphics.clear_cache()
@@ -650,7 +696,7 @@ class VTBackend(Backend):
 
     def _sixel_rect(self, source: Any, key: tuple, full_box: tuple,
                     x: int, y: int, cols: int, rows: int,
-                    cell_w: float, cell_h: float) -> str:
+                    cell_w: float, cell_h: float) -> str | None:
         """The sixel for the visible part of a placement.
 
         The whole picture is prepared once at its full box size and kept; each
@@ -669,14 +715,14 @@ class VTBackend(Backend):
         px_h = max(1, int(round(frows * cell_h)))
         cache_key = (key, fit_src, px_w, px_h)
         prepared = self._sixel_sources.get(cache_key)
+        if prepared is None and self._await_picture(
+                ("sixel", cache_key),
+                lambda: _build_sixel(source, px_w, px_h, fit_src)):
+            prepared = self._sixel_sources.get(cache_key)
         if prepared is None:
-            rendered = _terminal_graphics.render(source, px_w, px_h, fit_src)
-            if rendered is None:
-                return ""  # Pillow could not open it
-            prepared = _terminal_graphics.prepare_sixel(rendered[0])
-            self._sixel_sources[cache_key] = prepared
-            while len(self._sixel_sources) > _SIXEL_SOURCE_CACHE_MAX:
-                self._sixel_sources.pop(next(iter(self._sixel_sources)))
+            return None   # still being prepared on the worker
+        if prepared is _NO_PICTURE:
+            return ""     # Pillow could not open it
         x0 = int(round((x - fx) * cell_w))
         y0 = int(round((y - fy) * cell_h))
         return prepared.encode_rect(x0, y0,
@@ -778,7 +824,8 @@ class VTBackend(Backend):
             self._grid.invalidate(ix, iy, icols + 1, irows + 1)
         return ""
 
-    def _emit_images(self, overpainted: frozenset[int] = frozenset()) -> str:
+    def _emit_images(self, overpainted: frozenset[int] = frozenset(),
+                     pending_only: bool = False) -> str:
         """This frame's placements, skipping any that have not changed — a
         payload can be hundreds of KB and re-sending it every frame would make
         scrolling crawl.
@@ -786,52 +833,41 @@ class VTBackend(Backend):
         ``overpainted`` names placements whose cells the grid re-sent as text
         this frame. Those have to go out again even though the placement itself
         did not change: the text landed on top of the pixels and erased them.
+
+        A placement whose picture the worker has not finished is left out and
+        remembered as pending; it goes out with the next frame, or on its own
+        once the picture arrives (``pending_only``, see :meth:`_service_images`).
         """
         protocol = self._term_graphics
         if protocol is None or not self._placements:
             return ""
-        fresh = {k: v for k, v in self._placements.items()
-                 if k in overpainted or self._prev_images.get(k) != v}
+        current = set(self._placements.values())
+        self._image_pending &= current
+        if pending_only:
+            fresh = {k: v for k, v in self._placements.items() if v in self._image_pending}
+        else:
+            fresh = {k: v for k, v in self._placements.items()
+                     if k in overpainted or self._prev_images.get(k) != v
+                     or v in self._image_pending}
         if not fresh:
             return ""
         cell_w, cell_h = self.base_pixel_size
         parts = []
-        for image_id, (x, y, cols, rows, source, src, full_box, key) in fresh.items():
+        for image_id, placement in fresh.items():
+            x, y, cols, rows, source, src, full_box, key = placement
             if protocol == _terminal_graphics.SIXEL:
                 sequence = self._sixel_rect(source, key, full_box, x, y, cols, rows,
                                             cell_w, cell_h)
-                if sequence:
-                    parts.append(f"\x1b[{y + 1};{x + 1}H{sequence}")
-                continue
-            # Encoding is the expensive step — sixel walks every pixel — and a
-            # placement is re-sent whenever the text overpaints it, which a
-            # click or a scroll does constantly. The bytes depend only on the
-            # picture and the box it is drawn into, never on where it sits, so
-            # they are worth keeping: revisiting a page or restyling a button
-            # then costs nothing.
-            # Keyed on the SOURCE's identity, not its path — see
-            # _terminal_graphics.source_key. A path names a location, and the
-            # same location can hold different pixels later.
-            cache_key = (key, cols, rows, src, cell_w, cell_h, protocol, image_id)
-            sequence = self._encoded.get(cache_key)
+            else:
+                sequence = self._payload(image_id, placement, cell_w, cell_h)
             if sequence is None:
-                rendered = _terminal_graphics.render(source, cols * cell_w, rows * cell_h, src)
-                if rendered is None:
-                    continue  # Pillow could not open it
-                image, png = rendered
-                sequence = _terminal_graphics.encode(
-                    protocol, image, png, cols, rows, image_id, fill=src is not None
-                )
-                if not sequence:
-                    continue
-                self._encoded[cache_key] = sequence
-                # Bounded, and evicted oldest-first: a file browser walking a
-                # directory of photos would otherwise hold every one it passed.
-                while len(self._encoded) > _ENCODED_CACHE_MAX:
-                    self._encoded.pop(next(iter(self._encoded)))
-            # Address the cell absolutely per image, so one image's cursor drift
-            # never offsets the next.
-            parts.append(f"\x1b[{y + 1};{x + 1}H{sequence}")
+                self._image_pending.add(placement)
+                continue
+            self._image_pending.discard(placement)
+            if sequence:
+                # Address the cell absolutely per image, so one image's cursor
+                # drift never offsets the next.
+                parts.append(f"\x1b[{y + 1};{x + 1}H{sequence}")
         if not parts:
             return ""
         # Save and restore the cursor around the batch (DECSC/DECRC): iTerm2 and
@@ -839,6 +875,80 @@ class VTBackend(Backend):
         # option, so an image low on the screen would scroll the alternate screen
         # and push itself out of view — the exact "no image appears" symptom.
         return "\x1b7" + "".join(parts) + "\x1b8"
+
+    def _payload(self, image_id: int, placement: tuple,
+                 cell_w: float, cell_h: float) -> str | None:
+        """The kitty / iTerm2 payload for a placement: cached, or built on the
+        worker. ``None`` while the worker is still on it.
+
+        Encoding is the expensive step, and a placement is re-sent whenever the
+        text overpaints it, which a click or a scroll does constantly. The bytes
+        depend only on the picture and the box it is drawn into, never on where
+        it sits, so they are worth keeping: revisiting a page or restyling a
+        button then costs nothing. Keyed on the SOURCE's identity, not its path
+        — see _terminal_graphics.source_key. A path names a location, and the
+        same location can hold different pixels later."""
+        x, y, cols, rows, source, src, _full_box, key = placement
+        protocol = self._term_graphics
+        cache_key = (key, cols, rows, src, cell_w, cell_h, protocol, image_id)
+        sequence = self._encoded.get(cache_key)
+        if sequence is None and self._await_picture(
+                ("payload", cache_key),
+                lambda: _build_sequence(protocol, source, cols, rows,
+                                        cell_w, cell_h, src, image_id)):
+            sequence = self._encoded.get(cache_key)
+        return sequence
+
+    def _await_picture(self, job: tuple, build: Callable[[], Any]) -> bool:
+        """Have the worker ``build`` the picture for ``job``, unless it already
+        is, and wait for it out of the frame's allowance
+        (``_image_loader.FRAME_WAIT``). Whether it arrived in time, which leaves
+        it in its cache."""
+        if self._image_loader is None:
+            self._image_loader = _image_loader.ImageLoader(
+                self._picture_done, self._post_picture,
+                lambda build, _side: build())
+        if job not in self._image_jobs:
+            self._image_jobs.add(job)
+            self._image_loader.submit(job, build, 0)
+        deadline = self._image_wait_deadline
+        if deadline is None:
+            return False
+        return self._image_loader.wait(job, deadline - time.perf_counter())
+
+    def _post_picture(self, fn: Callable[..., None], *args: Any) -> None:
+        # From the worker: queued for the event loop (a deque append is atomic).
+        self._image_results.append((fn, args))
+
+    def _picture_done(self, job: tuple, result: Any) -> None:
+        """A worker's result, on the UI thread: into the cache it belongs in."""
+        self._image_jobs.discard(job)
+        if result is _image_loader.DROPPED:
+            return   # overtaken; asked for again while still on screen
+        kind, cache_key = job
+        if kind == "sixel":
+            self._sixel_sources[cache_key] = _NO_PICTURE if result is None else result
+            while len(self._sixel_sources) > _SIXEL_SOURCE_CACHE_MAX:
+                self._sixel_sources.pop(next(iter(self._sixel_sources)))
+        else:
+            self._encoded[cache_key] = result or ""
+            # Bounded, and evicted oldest-first: a file browser walking a
+            # directory of photos would otherwise hold every one it passed.
+            while len(self._encoded) > _ENCODED_CACHE_MAX:
+                self._encoded.pop(next(iter(self._encoded)))
+
+    def _service_images(self) -> None:
+        """Take in what the worker finished and draw the placements on screen
+        that were waiting for it, over the frame already there. Called by the
+        event loop on every iteration."""
+        while self._image_results:
+            fn, args = self._image_results.popleft()
+            fn(*args)
+        if not self._image_pending or self._grid is None:
+            return
+        out = self._emit_images(pending_only=True)
+        if out:
+            self._console.write(out)
 
     def request_text_input(self, x: int, y: int, hints: dict[str, Any] | None = None) -> None:
         """Where the terminal should compose. In a TUI the IME composes inline at
@@ -870,7 +980,11 @@ class VTBackend(Backend):
         out = erase + self._grid.render()
         self._grid.flip()
         # Then the pixels, on top of a grid that has just been committed.
-        out += self._emit_images(overpainted)
+        self._image_wait_deadline = time.perf_counter() + _image_loader.FRAME_WAIT
+        try:
+            out += self._emit_images(overpainted)
+        finally:
+            self._image_wait_deadline = None
         if self._input_pos is not None:
             cx, cy = self._input_pos
             out += f"\x1b[{cy + 1};{cx + 1}H\x1b[?25h"
@@ -929,6 +1043,7 @@ class VTBackend(Backend):
         if self._quit_requested:
             return False
         handler = self._watch_handler(handler)
+        self._service_images()
         if self._pending:
             handler(self._pending.pop(0))
             return not self._quit_requested

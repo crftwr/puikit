@@ -60,6 +60,16 @@ def mouse(x=0, y=0, buttons=0, flags=0, wheel=0, control=0):
             "flags": flags, "wheel": wheel, "control": control}
 
 
+@pytest.fixture(autouse=True)
+def patient_frames(monkeypatch):
+    """A frame waits for the image worker only a few milliseconds (xefm#732);
+    these tests assert what one present() writes, so let it wait for the
+    picture however long a loaded machine takes."""
+    from puikit.backends import _image_loader
+
+    monkeypatch.setattr(_image_loader, "FRAME_WAIT", 30.0)
+
+
 @pytest.fixture
 def backend():
     be = VTBackend(console=FakeConsole())
@@ -620,3 +630,79 @@ def test_an_uncovered_picture_resolves_to_what_was_recorded(backend, png):
     be.draw_image(1, 1, png, {"w": 8, "h": 4})
     be.present()
     assert be._placements == be._images
+
+
+# --- pictures are built off the UI thread (xefm#732) -------------------------
+
+
+def _drain(be, until, timeout=10.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while not until():
+        assert time.monotonic() < deadline, "the worker did not finish"
+        time.sleep(0.01)
+        be._service_images()
+
+
+@pytest.mark.parametrize("protocol", ["kitty", "sixel"])
+def test_a_slow_picture_does_not_hold_up_the_frame(backend, png, monkeypatch, protocol):
+    import threading
+
+    from puikit.backends import _image_loader, vt_backend
+
+    be, con = backend
+    be._term_graphics = protocol
+    gate = threading.Event()
+    builder = "_build_sixel" if protocol == "sixel" else "_build_sequence"
+    real = getattr(vt_backend, builder)
+
+    def slow(*args):
+        gate.wait(10)
+        return real(*args)
+
+    monkeypatch.setattr(vt_backend, builder, slow)
+    monkeypatch.setattr(_image_loader, "FRAME_WAIT", 0.004)
+    be.clear()
+    be._images = {1: _placement(1, 1, 4, 2, png)}
+    con.written.clear()
+    be.present()                         # returns although the picture is not built
+    assert "\x1b7" not in "".join(con.written)
+    assert be._image_pending
+
+    con.written.clear()
+    gate.set()
+    _drain(be, lambda: not be._image_pending)
+    out = "".join(con.written)
+    # Drawn on its own, over the frame already there, at its own cell.
+    assert out.startswith("\x1b7") and "\x1b[2;2H" in out
+
+
+def test_a_pending_picture_is_dropped_with_its_placement(backend, png, monkeypatch):
+    import threading
+
+    from puikit.backends import _image_loader, vt_backend
+
+    be, con = backend
+    be._term_graphics = "kitty"
+    gate = threading.Event()
+    real = vt_backend._build_sequence
+    monkeypatch.setattr(vt_backend, "_build_sequence",
+                        lambda *a: (gate.wait(10), real(*a))[1])
+    monkeypatch.setattr(_image_loader, "FRAME_WAIT", 0.004)
+    be.clear()
+    be._images = {1: _placement(1, 1, 4, 2, png)}
+    be.present()
+    be.clear()                           # the next frame shows no picture
+    be.present()
+    gate.set()
+    _drain(be, lambda: not be._image_jobs)
+    con.written.clear()
+    be._service_images()
+    assert "".join(con.written) == ""
+
+
+def test_sixel_makes_no_png(png):
+    rendered = _terminal_graphics.render(png, 40, 20, png=False)
+    assert rendered is not None and rendered[1] is None
+    assert _terminal_graphics.render(png, 40, 20)[1][:4] == b"\x89PNG"

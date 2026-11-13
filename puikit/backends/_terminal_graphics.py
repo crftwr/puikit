@@ -39,6 +39,7 @@ import base64
 import os
 import re
 import sys
+import threading
 from typing import Any
 
 KITTY = "kitty"
@@ -264,6 +265,10 @@ def natural_size(path: Any) -> tuple[int, int] | None:
 _DECODED_BUDGET = 64 * 1024 * 1024
 
 _decoded = ImageCache(budget=_DECODED_BUDGET)
+#: Guards :data:`_decoded`: the VT backend renders on its image worker thread
+#: (xefm#732) while another backend, or a teardown, may touch the cache from
+#: the UI thread. Held only around the cache's own calls, never a decode.
+_decoded_lock = threading.Lock()
 
 #: How far Pillow may reduce an image by simple averaging before the real
 #: resampling filter runs (``Image.resize``'s ``reducing_gap``): the pre-pass
@@ -301,7 +306,8 @@ def clear_cache() -> None:
     cache outlives any one frame on purpose, but not the session — an embedding
     application that shuts its TUI down should not be left holding the last
     photograph anyone looked at."""
-    _decoded.clear()
+    with _decoded_lock:
+        _decoded.clear()
 
 
 def _weight(image: Any) -> int:
@@ -336,7 +342,8 @@ def _open(source: Any):
     except ImportError:
         return None
     key = source_key(source)
-    cached = _decoded.get(key)
+    with _decoded_lock:
+        cached = _decoded.get(key)
     if cached is not MISS:
         return cached
     image = None
@@ -373,7 +380,8 @@ def _open(source: Any):
                 "RGBA" if "A" in image.mode or image.mode == "P" else "RGB")
         except Exception:
             image = None
-    _decoded.put(key, image, _weight(image))
+    with _decoded_lock:
+        _decoded.put(key, image, _weight(image))
     return image
 
 
@@ -382,7 +390,8 @@ def render(
     px_w: int,
     px_h: int,
     src: tuple[float, float, float, float] | None = None,
-) -> tuple[Any, bytes] | None:
+    png: bool = True,
+) -> tuple[Any, bytes | None] | None:
     """Crop ``source`` to ``src`` (normalized ``(x, y, w, h)`` fractions of the
     image, top-left origin — the pan/zoom window) and scale it to fit ``px_w`` x
     ``px_h`` preserving aspect ratio.
@@ -394,7 +403,10 @@ def render(
     rather than in the emulator so the payload stays proportional to the screen
     box, not the source file: a 24-megapixel photo ships as a few hundred KB, and
     zooming re-crops from the original rather than upscaling an already-
-    downscaled copy."""
+    downscaled copy.
+
+    ``png=False`` skips the encode and returns ``None`` for the bytes: sixel
+    builds its own wire format from the image and has no use for a PNG."""
     try:
         from PIL import Image
     except ImportError:
@@ -441,6 +453,8 @@ def render(
         image = image.crop(box)
     if target != image.size:
         image = image.resize(target, Image.LANCZOS, reducing_gap=_REDUCING_GAP)
+    if not png:
+        return image, None
     import io
 
     buffer = io.BytesIO()

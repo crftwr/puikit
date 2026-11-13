@@ -180,6 +180,23 @@ per-band column bits, from which `encode_rect` cuts the visible rectangle, so a
 vertical scroll reuses prepared bands outright). A picture that neither moves
 nor changes costs nothing at all per frame — see `_emit_images`.
 
+**The VT backend builds those off the UI thread** (xefm#732). The first
+placement of a large photo still costs its decode, resample and encode, which
+measured 390 ms (kitty, JPEG) to 1.4 s (sixel, PNG) for a 6000x4000 picture,
+and all of it used to sit inside `present()`. Now a cache miss goes to the
+shared image worker (`_image_loader.ImageLoader`, §11): `_build_sequence` makes
+a kitty / iTerm2 payload, `_build_sixel` a prepared sixel picture. `present()`
+waits for it out of the same per-frame allowance as the GUI backends, so a small
+picture is still drawn in its own frame. Otherwise the placement is marked
+pending, and the frame goes out without it. The event loop, which wakes every
+50 ms anyway, takes in finished pictures (`_service_images`) and draws the
+pending placements over the frame already on screen. No wake-up mechanism is
+needed, so the VT backend still declares no `main_thread_dispatch`. A placement
+that leaves the screen before its picture arrives is simply dropped. `present()`
+now takes about 7 ms for that photo, the 4 ms wait included. The curses backend,
+kept as the fallback, still builds pictures on the UI thread. Sixel makes no PNG
+(`render(..., png=False)`): it builds its own wire format from the image.
+
 ---
 
 ## 5. Per-backend decode, and `image_formats()`
