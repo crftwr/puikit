@@ -197,6 +197,15 @@ now takes about 7 ms for that photo, the 4 ms wait included. The curses backend,
 kept as the fallback, still builds pictures on the UI thread. Sixel makes no PNG
 (`render(..., png=False)`): it builds its own wire format from the image.
 
+**kitty and iTerm2 cut a scroll step out of a prepared picture**, as sixel
+does. The worker scales the picture to its full box once (`_build_prepared`)
+and makes that whole picture's PNG too. A placement cut down by a clip or a
+scroll crops the prepared image and encodes only the visible part, on the UI
+thread, at PNG's fastest compression. There is no decode or resample. A
+partly visible picture changes on every step, so this is what a scroll pays:
+for a screenful (1600x960 px) 42-85 ms a step, against 86-218 ms when each step
+re-cropped and re-resampled the original.
+
 ---
 
 ## 5. Per-backend decode, and `image_formats()`

@@ -706,3 +706,30 @@ def test_sixel_makes_no_png(png):
     rendered = _terminal_graphics.render(png, 40, 20, png=False)
     assert rendered is not None and rendered[1] is None
     assert _terminal_graphics.render(png, 40, 20)[1][:4] == b"\x89PNG"
+
+
+@pytest.mark.parametrize("protocol", ["kitty", "iterm2"])
+def test_a_scroll_step_crops_the_prepared_picture_without_the_worker(
+        backend, png, monkeypatch, protocol):
+    from puikit.backends import _image_loader, vt_backend
+
+    be, con = backend
+    be._term_graphics = protocol
+    be.clear()
+    be.draw_image(0, 0, png, {"w": 10, "h": 6})
+    be.present()                          # prepared on the worker, waited for
+    assert not be._image_pending
+
+    def never(*_args):
+        raise AssertionError("a scroll step went back to the worker")
+
+    monkeypatch.setattr(vt_backend, "_build_prepared", never)
+    monkeypatch.setattr(vt_backend, "_build_sequence", never)
+    monkeypatch.setattr(_image_loader, "FRAME_WAIT", 0.0)
+    be.clear()
+    be.draw_image(0, -2, png, {"w": 10, "h": 6})   # scrolled up two rows
+    con.written.clear()
+    be.present()
+    out = "".join(con.written)
+    assert not be._image_pending
+    assert "\x1b7" in out and "\x1b[1;1H" in out   # drawn at once, cut to the top
