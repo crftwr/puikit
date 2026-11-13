@@ -675,7 +675,8 @@ def test_a_slow_picture_does_not_hold_up_the_frame(backend, png, monkeypatch, pr
     _drain(be, lambda: not be._image_pending)
     out = "".join(con.written)
     # Drawn on its own, over the frame already there, at its own cell.
-    assert out.startswith("\x1b7") and "\x1b[2;2H" in out
+    assert out.startswith("\x1b[?2026h\x1b7") and "\x1b[2;2H" in out
+    assert out.endswith("\x1b[?2026l")
 
 
 def test_a_pending_picture_is_dropped_with_its_placement(backend, png, monkeypatch):
@@ -733,3 +734,34 @@ def test_a_scroll_step_crops_the_prepared_picture_without_the_worker(
     out = "".join(con.written)
     assert not be._image_pending
     assert "\x1b7" in out and "\x1b[1;1H" in out   # drawn at once, cut to the top
+
+
+def test_a_frame_with_a_picture_is_shown_at_once_and_text_alone_is_not(backend, png):
+    be, con = backend
+    be._term_graphics = "kitty"
+    be.clear()
+    be.draw_text(0, 0, "hello")
+    con.written.clear()
+    be.present()
+    assert "\x1b[?2026h" not in "".join(con.written)
+    be.clear()
+    be.draw_image(0, 1, png, {"w": 4, "h": 2})
+    con.written.clear()
+    be.present()
+    out = "".join(con.written)
+    assert out.startswith("\x1b[?2026h") and out.endswith("\x1b[?2026l")
+
+
+def test_iterm2_gets_an_opaque_picture_as_a_jpeg(backend, png):
+    import base64
+    import re
+
+    be, con = backend
+    be._term_graphics = "iterm2"
+    for y in (0, -1):                     # whole, then cut by a scroll step
+        be.clear()
+        be.draw_image(0, y, png, {"w": 4, "h": 3})
+        con.written.clear()
+        be.present()
+        payload = re.search(r"\x1b\]1337;File=[^:]*:([^\x07\x1b]*)", "".join(con.written))
+        assert base64.b64decode(payload.group(1))[:3] == b"\xff\xd8\xff"

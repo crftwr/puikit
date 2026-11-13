@@ -122,6 +122,16 @@ _SIXEL_SOURCE_CACHE_MAX = 8
 #: is not built again every frame.
 _NO_PICTURE = object()
 
+#: Synchronized output (DEC private mode 2026): the terminal holds what follows
+#: and shows it at once on the end. A frame with pictures in it erases or
+#: overpaints the old picture and draws the new one in separate steps, and a
+#: terminal that shows each as it arrives flickers through the gap - visible
+#: as a picture blinking on every scroll step. kitty, iTerm2 (3.5), WezTerm,
+#: foot, Ghostty and Windows Terminal honour it; a terminal that does not know
+#: the mode ignores it, as it does any unknown private mode.
+_SYNC_BEGIN = "\x1b[?2026h"
+_SYNC_END = "\x1b[?2026l"
+
 
 def _build_sequence(protocol: str, source: Any, cols: int, rows: int,
                     cell_w: float, cell_h: float, src: Any, image_id: int) -> str:
@@ -135,26 +145,39 @@ def _build_sequence(protocol: str, source: Any, cols: int, rows: int,
         protocol, image, png, cols, rows, image_id, fill=src is not None) or ""
 
 
-def _build_prepared(source: Any, px_w: int, px_h: int, fit_src: Any) -> Any:
-    """A picture scaled to its full box for kitty / iTerm2, with the PNG of
-    the whole of it: ``(image, png)``, or :data:`_NO_PICTURE`. Runs on the image
-    worker. A placement showing all of it sends that PNG as it is; one cut down
-    by a clip or a scroll crops the image and encodes just that part, with no
-    decode or resample (see ``VTBackend._payload``)."""
-    rendered = _terminal_graphics.render(source, px_w, px_h, fit_src)
+def _build_prepared(protocol: str, source: Any, px_w: int, px_h: int,
+                    fit_src: Any) -> Any:
+    """A picture scaled to its full box for kitty / iTerm2, with the whole of
+    it encoded for the wire: ``(image, payload_bytes)``, or :data:`_NO_PICTURE`.
+    Runs on the image worker. A placement showing all of it sends those bytes
+    as they are; one cut down by a clip or a scroll crops the image and encodes
+    just that part, with no decode or resample (see ``VTBackend._payload``)."""
+    rendered = _terminal_graphics.render(source, px_w, px_h, fit_src, png=False)
     if rendered is None:
         return _NO_PICTURE
-    return rendered
+    image = rendered[0]
+    return image, _wire_bytes(protocol, image, fast=False)
 
 
-def _png(image: Any) -> bytes:
-    """A scroll step's PNG, on the UI thread: at the fastest compression,
-    which encodes a screenful in about half the time of the default for some
-    40% more bytes (a 1600x960 crop: 38-68 ms instead of 68-111 ms)."""
+def _wire_bytes(protocol: str, image: Any, fast: bool) -> bytes:
+    """The image file a protocol is sent.
+
+    iTerm2 reads any format macOS decodes, so an opaque picture goes as a JPEG
+    (quality 90): a screenful encodes in about 5 ms and weighs 230-340 KB,
+    where even the fastest PNG took 33-77 ms and 1.4-4 MB - bytes the terminal
+    then has to read and decode on every scroll step. A picture with alpha, and
+    kitty, which reads only PNG, get a PNG; ``fast`` (a scroll step, on the UI
+    thread) asks for the fastest compression, which encodes in about half the
+    time of the default for some 40% more bytes."""
     import io
 
     buffer = io.BytesIO()
-    image.save(buffer, format="PNG", compress_level=1)
+    if protocol == _terminal_graphics.ITERM2 and image.mode == "RGB":
+        image.save(buffer, format="JPEG", quality=90)
+    elif fast:
+        image.save(buffer, format="PNG", compress_level=1)
+    else:
+        image.save(buffer, format="PNG")
     return buffer.getvalue()
 
 
@@ -941,26 +964,26 @@ class VTBackend(Backend):
         prepared = self._prepared.get(prepared_key)
         if prepared is None and self._await_picture(
                 ("prepared", prepared_key),
-                lambda: _build_prepared(source, px_w, px_h, fit_src)):
+                lambda: _build_prepared(protocol, source, px_w, px_h, fit_src)):
             prepared = self._prepared.get(prepared_key)
         if prepared is None:
             return None
         if prepared is _NO_PICTURE:
             sequence = ""
         else:
-            image, whole_png = prepared
+            image, whole = prepared
             x0 = int(round((x - fx) * cell_w))
             y0 = int(round((y - fy) * cell_h))
             box = (x0, y0, min(image.width, x0 + int(round(cols * cell_w))),
                    min(image.height, y0 + int(round(rows * cell_h))))
             if box == (0, 0, image.width, image.height):
-                part, png = image, whole_png
+                part, data = image, whole
             else:
                 part = image.crop(box)
-                png = _png(part)
+                data = _wire_bytes(protocol, part, fast=True)
             # The part is exactly the cell box, so the terminal fills it.
             sequence = _terminal_graphics.encode(
-                protocol, part, png, cols, rows, image_id, fill=True) or ""
+                protocol, part, data, cols, rows, image_id, fill=True) or ""
         self._encoded[cache_key] = sequence
         # Bounded, and evicted oldest-first: a file browser walking a directory
         # of photos would otherwise hold every one it passed.
@@ -1021,7 +1044,7 @@ class VTBackend(Backend):
             return
         out = self._emit_images(pending_only=True)
         if out:
-            self._console.write(out)
+            self._console.write(_SYNC_BEGIN + out + _SYNC_END)
 
     def request_text_input(self, x: int, y: int, hints: dict[str, Any] | None = None) -> None:
         """Where the terminal should compose. In a TUI the IME composes inline at
@@ -1063,6 +1086,10 @@ class VTBackend(Backend):
             out += f"\x1b[{cy + 1};{cx + 1}H\x1b[?25h"
         else:
             out += "\x1b[?25l"
+        if self._placements or self._prev_images:
+            # A frame that draws, moves or removes a picture is shown at once
+            # (see _SYNC_BEGIN). Text-only frames are left as they were.
+            out = _SYNC_BEGIN + out + _SYNC_END
         self._console.write(out)
         self._frames += 1
 

@@ -203,8 +203,18 @@ and makes that whole picture's PNG too. A placement cut down by a clip or a
 scroll crops the prepared image and encodes only the visible part, on the UI
 thread, at PNG's fastest compression. There is no decode or resample. A
 partly visible picture changes on every step, so this is what a scroll pays:
-for a screenful (1600x960 px) 42-85 ms a step, against 86-218 ms when each step
-re-cropped and re-resampled the original.
+for a screenful (1600x960 px) 42-85 ms a step on kitty, against 86-218 ms when
+each step re-cropped and re-resampled the original. **iTerm2 gets JPEG** for an
+opaque picture (it reads any format macOS decodes). A screenful encodes in
+about 5 ms at 230-340 KB, so a step is 7-9 ms and a few hundred KB, where even
+the fastest PNG was 33-77 ms and 1.4-4 MB for the terminal to read and decode.
+kitty reads only PNG.
+
+**A frame with pictures is wrapped in synchronized output** (DEC mode 2026). Moving a
+picture erases or overpaints the old one and draws the new one in separate
+steps, and a terminal that shows each as it arrives flickers through the gap.
+In this mode the terminal shows the frame at once; a terminal that does not
+know the mode ignores it. Text-only frames are left alone.
 
 ---
 
