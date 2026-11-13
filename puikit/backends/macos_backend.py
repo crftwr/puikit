@@ -145,8 +145,10 @@ except ImportError:  # pragma: no cover - older/partial PyObjC
     CATransaction = None
 from ..backend import Backend, DEFAULT_STYLE, EventHandler, ScreenMarker, Style, TextAttribute, WindowHandle, WindowStyle, _run_tick_callbacks, is_transparent
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
-from ..image import is_raster, source_key, upright_size
+from ..image import is_raster, source_key
 from ._image_cache import MISS, ImageCache
+from . import _macos_image_loader as _loader
+from ._macos_image_loader import pixel_size as _imageio_pixel_size
 from ..easing import resolve as _resolve_easing
 from ..event import CONTROL_CHAR_KEYS, Event, EventType, char_key_event, is_typed_char
 from ..font import Font, FontMetrics, FontWeight, default_face
@@ -174,18 +176,6 @@ try:
 except ImportError:  # animation gracefully degrades to immediate switches
     _HAS_QUARTZ = False
     _DEVICE_RGB = None
-
-try:
-    # ImageIO, reached through Quartz's bridge. Only the metadata probe in
-    # _imageio_pixel_size needs it; without it that falls back to the
-    # dependency-free header parse, which knows four formats instead of sixty.
-    from Quartz import (
-        CGImageSourceCopyPropertiesAtIndex,
-        CGImageSourceCreateWithURL,
-    )
-except ImportError:  # pragma: no cover - older/partial PyObjC
-    CGImageSourceCopyPropertiesAtIndex = None
-    CGImageSourceCreateWithURL = None
 
 #: Vignette falloff, in units of the rect's half-extent after an aspect-correct
 #: CTM scale (see _render_vignette): clear out to _INNER, fully dark by _OUTER.
@@ -752,35 +742,6 @@ def _fill_rect(rect, color) -> None:
 #: because the name is missing from some PyObjC builds, and the value is fixed
 #: by the framework.
 _NS_ALPHA_NON_PREMULTIPLIED = 2
-
-def _imageio_pixel_size(path: Any) -> tuple[int, int] | None:
-    """``(width, height)`` in pixels as the picture is *shown*, from ImageIO's
-    metadata alone — no frame is decoded. ``None`` when the file cannot be read
-    or is not an image ImageIO knows.
-
-    ``PixelWidth`` / ``PixelHeight`` are the stored dimensions, but ``NSImage``
-    draws the file upright, applying its EXIF orientation. A phone photo held
-    upright is stored landscape with orientation 6, so the stored size handed a
-    portrait picture a landscape box and stretched it; the size is swapped for
-    the quarter-turn orientations so it agrees with what is drawn."""
-    if CGImageSourceCreateWithURL is None:
-        return None
-    try:
-        url = NSURL.fileURLWithPath_(str(path))
-        source = CGImageSourceCreateWithURL(url, None)
-        if source is None:
-            return None
-        properties = CGImageSourceCopyPropertiesAtIndex(source, 0, None)
-        if not properties:
-            return None
-        width = properties.get("PixelWidth")
-        height = properties.get("PixelHeight")
-        if not width or not height:
-            return None
-        return upright_size(int(width), int(height), properties.get("Orientation"))
-    except Exception:
-        return None
-
 
 def _image_from_raster(raster: Any) -> Any:
     """An ``NSImage`` over a :class:`~puikit.image.RasterImage`'s pixels.
@@ -2138,6 +2099,10 @@ class MacOSBackend(Backend):
         # photo is ~100 MB of RGBA, and "one entry per distinct source" is no
         # longer a small number of megabytes.
         self._image_cache = ImageCache(wake=self._wake_image_cache)
+        # Files decoded off the UI thread (xefm#732): the worker, created on the
+        # first large picture, and the cache keys it is decoding right now.
+        self._image_loader: _loader.ImageLoader | None = None
+        self._image_jobs: set[Any] = set()
         self._animations: dict[int, Animation] = {}  # keyed by id(widget)
         self._anim_timer = None
         self._anim_timer_interval: float | None = None  # rate of the live timer
@@ -2703,6 +2668,9 @@ class MacOSBackend(Backend):
             marker.close()
         for handle in list(self._secondary_windows):
             handle.close()
+        if self._image_loader is not None:
+            self._image_loader.close()
+            self._image_loader = None
         if self._anim_timer is not None:
             self._anim_timer.invalidate()
             self._anim_timer = None
@@ -4234,31 +4202,47 @@ class MacOSBackend(Backend):
         NSRectFill(NSMakeRect(track.origin.x, thumb_y, track.size.width, thumb_h))
 
     def _render_image(self, x: int, y: int, source: Any, hints: dict[str, Any]) -> None:
-        image = self._load_image(source)
-        if image is None:
-            return
+        entry = self._load_image(source, x, y, hints)
+        if entry is None:
+            return   # not decodable, or still decoding on the worker
+        image = entry.image
         iw, ih = image.size().width, image.size().height
         w_units = hints.get("w", max(1, round(iw / self._base_w)))
         h_units = hints.get("h", max(1, round(ih / self._base_h)))
         target = self._unit_rect(x, y, w_units, h_units)
-        dest, source = self._fit_rects(
+        dest, source_rect = self._fit_rects(
             hints.get("fit", "fill"), target, iw, ih, hints.get("src")
         )
+        if entry.full:
+            # A zoom that needs more pixels than the bitmap has, or a zoom-out
+            # that needs far fewer, asks the worker for another size; this one
+            # is drawn until it arrives.
+            need = self._needed_side(dest, source_rect, iw, ih)
+            if _loader.wants_redecode(entry, need):
+                self._request_image(source, need)
         # SourceOver already honors the image's own per-pixel alpha (an RGBA
         # PNG); the "alpha" hint is an extra global opacity (the fraction).
         opacity = float(hints.get("alpha", 1.0))
         image.drawInRect_fromRect_operation_fraction_respectFlipped_hints_(
             dest,
-            source,
+            source_rect,
             2,  # NSCompositingOperationSourceOver
             opacity,
             True,
             None,
         )
 
-    def _load_image(self, source: Any) -> Any:
-        """The cached ``NSImage`` for a path or a
-        :class:`~puikit.image.RasterImage`, or ``None`` when it cannot be built.
+    def _load_image(self, source: Any, x: int = 0, y: int = 0,
+                    hints: dict[str, Any] | None = None) -> Any:
+        """The cached :class:`~puikit.backends._macos_image_loader.Decoded` for
+        a path or a :class:`~puikit.image.RasterImage`, or ``None`` when it
+        cannot be built *or is still being decoded* (xefm#732).
+
+        A raster is already pixels and is wrapped here. A file small enough to
+        decode in a few milliseconds is decoded here too. A larger one is handed
+        to the worker at the pixel size the draw at ``x, y`` with ``hints``
+        needs, and nothing is drawn for it until the result arrives and redraws
+        the frame. A file ImageIO cannot read at all keeps the lazy ``NSImage``.
 
         A failure is cached too — as ``None`` — so a missing or undecodable
         source is attempted once rather than once per frame, which is the same
@@ -4269,14 +4253,66 @@ class MacOSBackend(Backend):
             return cached
         if is_raster(source):
             image = _image_from_raster(source)
-            weight = source.nbytes
-        else:
-            image = NSImage.alloc().initWithContentsOfFile_(source)
-            size = image.size() if image is not None else None
-            weight = int(size.width * size.height * 4) if size is not None else 0
-        self._image_cache.put(key, image, weight,
-                              owner=source if is_raster(source) else None)
-        return image
+            entry = None if image is None else _loader.Decoded(image, nbytes=source.nbytes)
+            self._image_cache.put(key, entry, source.nbytes, owner=source)
+            return entry
+        size = _imageio_pixel_size(source)
+        if size is not None and size[0] * size[1] > _loader.SYNC_PIXELS:
+            self._request_image(source, self._first_side(size, x, y, hints or {}))
+            return None
+        entry = _loader.decode(source)
+        self._image_cache.put(key, entry, entry.nbytes if entry is not None else 0)
+        return entry
+
+    def _first_side(self, size: tuple[int, int], x: int, y: int,
+                    hints: dict[str, Any]) -> int:
+        """The long side to decode a ``size``-pixel file at for its first draw:
+        what fills the box ``hints`` give it, or full size when they give none
+        (the box then follows the image's own size)."""
+        if "w" not in hints or "h" not in hints:
+            return 0
+        iw, ih = size
+        target = self._unit_rect(x, y, hints["w"], hints["h"])
+        dest, source_rect = self._fit_rects(
+            hints.get("fit", "fill"), target, iw, ih, hints.get("src"))
+        return self._needed_side(dest, source_rect, iw, ih)
+
+    def _needed_side(self, dest, source_rect, iw: float, ih: float) -> int:
+        """Device pixels the image's long side needs for ``source_rect`` of it
+        (a zero rect: all of it) to fill ``dest`` on this window's display."""
+        window = self._active_win.nswindow if self._active_win else self._window
+        scale = window.backingScaleFactor() if window is not None else 1.0
+        sw, sh = source_rect.size.width, source_rect.size.height
+        if sw <= 0 or sh <= 0:
+            sw, sh = iw, ih
+        return _loader.needed_side(dest.size.width, dest.size.height,
+                                   sw, sh, iw, ih, scale)
+
+    def _request_image(self, source: Any, side: int) -> None:
+        """Queue a decode of ``source`` at ``side`` pixels on its long side,
+        unless one for it is already under way."""
+        key = source_key(source)
+        if key in self._image_jobs:
+            return
+        self._image_jobs.add(key)
+        if self._image_loader is None:
+            self._image_loader = _loader.ImageLoader(
+                self._image_decoded, AppHelper.callAfter)
+        self._image_loader.submit(key, source, side)
+
+    def _image_decoded(self, key: Any, entry: Any) -> None:
+        """A worker's result, on the UI thread: cache it and redraw, which
+        draws the picture wherever the current frame shows it."""
+        self._image_jobs.discard(key)
+        if entry is _loader.DROPPED:
+            return   # overtaken; the next draw that still wants it asks again
+        self._image_cache.put(key, entry, entry.nbytes if entry is not None else 0)
+        # Every window, not just the active one: which of them shows the
+        # picture is in their display lists, and a redraw is cheap next to it.
+        views = [self._view] + [h.view for h in self._secondary_windows]
+        for view in views:
+            if view is not None:
+                view.setNeedsDisplay_(True)
 
     def _wake_image_cache(self) -> None:
         AppHelper.callAfter(self._image_cache.drain)
