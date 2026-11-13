@@ -1034,6 +1034,29 @@ def _wrap_cells(cells: list[Span], width: float, measure, *, word: bool) -> list
     return [_merge_cells(r) for r in rows] or [[]]
 
 
+#: The height, in logical pixels, a terminal cell is taken to have when an
+#: image's natural size is measured on a character grid (see _natural_width).
+_LOGICAL_CELL_H = 16.0
+
+
+def _natural_width(px_w: float, lc: LayoutContext) -> float:
+    """An image's natural width in base units: its pixels at one logical pixel
+    each, as a browser shows an image (CSS pixels, not the display's).
+
+    A GUI's base unit is measured in logical units already (points on macOS).
+    A terminal reports its cell in *device* pixels, twice as many on a Retina
+    display, and has no way to say what the display's scale is, so a 1280 px
+    screenshot came out half as wide in the terminal as in the GUI. On a
+    character grid the cell is therefore taken to be :data:`_LOGICAL_CELL_H`
+    logical pixels tall, about what a terminal font is at scale 1, with the
+    width that the cell's real aspect gives it. Only the natural size uses
+    this; the aspect of what is drawn still comes from the real pixels."""
+    pbw, pbh = lc.pixel_base
+    if lc.snap and pbh > 0:
+        pbw = pbw * _LOGICAL_CELL_H / pbh
+    return px_w / max(1e-6, pbw)
+
+
 class MarkdownView(Widget):
     focusable = True
 
@@ -1388,7 +1411,7 @@ class MarkdownView(Widget):
                     # character grid base_w/base_h are (1, 1) while a cell is
                     # about twice as tall as wide.
                     pbw, pbh = lc.pixel_base
-                    w = min(max(1.0, width - qind), size[0] / max(1e-6, pbw))
+                    w = min(max(1.0, width - qind), _natural_width(size[0], lc))
                     h = aspect_extent(w, True, size[0], size[1], pbw, pbh)
                     rows.append(_Row(qind, [], h, image=(src, alt, w, h), quote=qd))
                 elif src:
@@ -1556,7 +1579,7 @@ class MarkdownView(Widget):
                 # The image's own width in base units — the scale-to-fit pass
                 # below then shares the row like any wide text column.
                 # (physical pixels per base unit: a cell, on a grid).
-                return src_size[1][0] / max(1e-6, lc.pixel_base[0])
+                return _natural_width(src_size[1][0], lc)
             return cell_w(to_spans(c, b))
 
         content_w = [
@@ -1608,7 +1631,7 @@ class MarkdownView(Widget):
                     # ratio, as for a block image.
                     # In the base unit's physical pixels, as for a block image.
                     pbw, pbh = lc.pixel_base
-                    iw = min(w, pw / max(1e-6, pbw))
+                    iw = min(w, _natural_width(pw, lc))
                     ih = aspect_extent(iw, True, pw, ph, pbw, pbh)
                     img_h = max(img_h, ih)
                     images.append((src, c.alt or None, iw, ih))

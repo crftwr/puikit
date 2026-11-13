@@ -461,6 +461,29 @@ def test_a_small_image_is_not_enlarged(tmp_path):
     assert row.image[2:] == (pytest.approx(5.0), pytest.approx(1.25))
 
 
+class _RetinaCellBackend(_TallCellBackend):
+    """A terminal on a 2x display: it reports its cell in device pixels."""
+
+    @property
+    def base_pixel_size(self):
+        return (16.0, 32.0)
+
+
+def test_a_screenshot_is_as_wide_on_a_retina_terminal(tmp_path):
+    # 1280 px at one logical px each: 160 cells of 8 logical px, wider than the
+    # 120-column view, so full width - not the 80 cells device pixels give.
+    from puikit.capability import CapabilityProfile
+
+    png = tmp_path / "shot.png"
+    png.write_bytes(_png_bytes(1280, 640))
+    caps = CapabilityProfile({**PROFILE_TUI, "images": True})
+    panel = Panel(_RetinaCellBackend(width=120, height=200, capabilities=caps))
+    view = MarkdownView(f"![s]({png})")
+    panel.add(view, x=0, y=0, w=120, h=200)
+    panel.render()
+    assert view._rows[0].image[2] == 120
+
+
 def test_without_pictures_an_image_takes_one_line(tmp_path):
     row = _tui_image_row(tmp_path, images=False)
     assert row.height == 1.0

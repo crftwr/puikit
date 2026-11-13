@@ -247,6 +247,12 @@ shrunk to the width when it is wider, never enlarged. Its height follows the
 aspect however tall that makes it, and the document scrolls. The size is worked
 out in the base unit's *physical* pixels (`LayoutContext.pixel_base`), because
 on a character grid the base unit is a cell, about twice as tall as it is wide.
+The natural size is in logical pixels, as a browser's CSS pixels are: a
+GUI's base unit already is one (points on macOS), but a terminal reports its
+cell in device pixels, twice as many on a Retina display, and cannot say what
+the scale is. So on a character grid the cell is taken to be 16 logical pixels
+tall, with the width its real aspect gives it (`_natural_width`). Otherwise a
+1280 px screenshot came out half as wide in the terminal as in the GUI.
 A backend that draws no pictures (`LayoutContext.images` false) gets one line
 for the alt glyph instead of a block of blank rows. An image used to be
 stretched to the full width and shrunk to the viewport's height, which took a
