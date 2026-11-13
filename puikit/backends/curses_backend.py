@@ -1434,7 +1434,8 @@ class CursesBackend(Backend):
         try:
             for image_id, (x, y, cols, rows, source, src, _key) in fresh.items():
                 rendered = _terminal_graphics.render(
-                    source, cols * cell_w, rows * cell_h, src
+                    source, cols * cell_w, rows * cell_h, src,
+                    png=protocol != _terminal_graphics.SIXEL,
                 )
                 if rendered is None:
                     _terminal_graphics.debug(

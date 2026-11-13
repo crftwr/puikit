@@ -60,6 +60,16 @@ def mouse(x=0, y=0, buttons=0, flags=0, wheel=0, control=0):
             "flags": flags, "wheel": wheel, "control": control}
 
 
+@pytest.fixture(autouse=True)
+def patient_frames(monkeypatch):
+    """A frame waits for the image worker only a few milliseconds (xefm#732);
+    these tests assert what one present() writes, so let it wait for the
+    picture however long a loaded machine takes."""
+    from puikit.backends import _image_loader
+
+    monkeypatch.setattr(_image_loader, "FRAME_WAIT", 30.0)
+
+
 @pytest.fixture
 def backend():
     be = VTBackend(console=FakeConsole())
@@ -620,3 +630,178 @@ def test_an_uncovered_picture_resolves_to_what_was_recorded(backend, png):
     be.draw_image(1, 1, png, {"w": 8, "h": 4})
     be.present()
     assert be._placements == be._images
+
+
+# --- pictures are built off the UI thread (xefm#732) -------------------------
+
+
+def _drain(be, until, timeout=10.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while not until():
+        assert time.monotonic() < deadline, "the worker did not finish"
+        time.sleep(0.01)
+        be._service_images()
+
+
+@pytest.mark.parametrize("protocol", ["kitty", "sixel"])
+def test_a_slow_picture_does_not_hold_up_the_frame(backend, png, monkeypatch, protocol):
+    import threading
+
+    from puikit.backends import _image_loader, vt_backend
+
+    be, con = backend
+    be._term_graphics = protocol
+    gate = threading.Event()
+    builder = "_build_sixel" if protocol == "sixel" else "_build_sequence"
+    real = getattr(vt_backend, builder)
+
+    def slow(*args):
+        gate.wait(10)
+        return real(*args)
+
+    monkeypatch.setattr(vt_backend, builder, slow)
+    monkeypatch.setattr(_image_loader, "FRAME_WAIT", 0.004)
+    be.clear()
+    be._images = {1: _placement(1, 1, 4, 2, png)}
+    con.written.clear()
+    be.present()                         # returns although the picture is not built
+    assert "\x1b7" not in "".join(con.written)
+    assert be._image_pending
+
+    con.written.clear()
+    gate.set()
+    _drain(be, lambda: not be._image_pending)
+    out = "".join(con.written)
+    # Drawn on its own, over the frame already there, at its own cell.
+    assert out.startswith("\x1b[?2026h\x1b7") and "\x1b[2;2H" in out
+    assert out.endswith("\x1b[?2026l")
+
+
+def test_a_pending_picture_is_dropped_with_its_placement(backend, png, monkeypatch):
+    import threading
+
+    from puikit.backends import _image_loader, vt_backend
+
+    be, con = backend
+    be._term_graphics = "kitty"
+    gate = threading.Event()
+    real = vt_backend._build_sequence
+    monkeypatch.setattr(vt_backend, "_build_sequence",
+                        lambda *a: (gate.wait(10), real(*a))[1])
+    monkeypatch.setattr(_image_loader, "FRAME_WAIT", 0.004)
+    be.clear()
+    be._images = {1: _placement(1, 1, 4, 2, png)}
+    be.present()
+    be.clear()                           # the next frame shows no picture
+    be.present()
+    gate.set()
+    _drain(be, lambda: not be._image_jobs)
+    con.written.clear()
+    be._service_images()
+    assert "".join(con.written) == ""
+
+
+def test_sixel_makes_no_png(png):
+    rendered = _terminal_graphics.render(png, 40, 20, png=False)
+    assert rendered is not None and rendered[1] is None
+    assert _terminal_graphics.render(png, 40, 20)[1][:4] == b"\x89PNG"
+
+
+@pytest.mark.parametrize("protocol", ["kitty", "iterm2"])
+def test_a_scroll_step_crops_the_prepared_picture_without_the_worker(
+        backend, png, monkeypatch, protocol):
+    from puikit.backends import _image_loader, vt_backend
+
+    be, con = backend
+    be._term_graphics = protocol
+    be.clear()
+    be.draw_image(0, 0, png, {"w": 10, "h": 6})
+    be.present()                          # prepared on the worker, waited for
+    assert not be._image_pending
+
+    def never(*_args):
+        raise AssertionError("a scroll step went back to the worker")
+
+    monkeypatch.setattr(vt_backend, "_build_prepared", never)
+    monkeypatch.setattr(vt_backend, "_build_sequence", never)
+    monkeypatch.setattr(_image_loader, "FRAME_WAIT", 0.0)
+    be.clear()
+    be.draw_image(0, -2, png, {"w": 10, "h": 6})   # scrolled up two rows
+    con.written.clear()
+    be.present()
+    out = "".join(con.written)
+    assert not be._image_pending
+    assert "\x1b7" in out and "\x1b[1;1H" in out   # drawn at once, cut to the top
+
+
+def test_a_frame_with_a_picture_is_shown_at_once_and_text_alone_is_not(backend, png):
+    be, con = backend
+    be._term_graphics = "kitty"
+    be.clear()
+    be.draw_text(0, 0, "hello")
+    con.written.clear()
+    be.present()
+    assert "\x1b[?2026h" not in "".join(con.written)
+    be.clear()
+    be.draw_image(0, 1, png, {"w": 4, "h": 2})
+    con.written.clear()
+    be.present()
+    out = "".join(con.written)
+    assert out.startswith("\x1b[?2026h") and out.endswith("\x1b[?2026l")
+
+
+def test_iterm2_gets_an_opaque_picture_as_a_jpeg(backend, png):
+    import base64
+    import re
+
+    be, con = backend
+    be._term_graphics = "iterm2"
+    for y in (0, -1):                     # whole, then cut by a scroll step
+        be.clear()
+        be.draw_image(0, y, png, {"w": 4, "h": 3})
+        con.written.clear()
+        be.present()
+        payload = re.search(r"\x1b\]1337;File=[^:]*:([^\x07\x1b]*)", "".join(con.written))
+        assert base64.b64decode(payload.group(1))[:3] == b"\xff\xd8\xff"
+
+
+def test_kitty_transmits_a_picture_once_and_a_scroll_only_moves_it(backend, png):
+    be, con = backend
+    be._term_graphics = "kitty"
+    be.clear()
+    be.draw_image(0, 0, png, {"w": 4, "h": 3})
+    con.written.clear()
+    be.present()
+    first = "".join(con.written)
+    assert first.count("a=t,") == 1 and first.count("a=p,") == 1
+
+    be.clear()
+    be.draw_image(0, -1, png, {"w": 4, "h": 3})    # one row scrolled away
+    con.written.clear()
+    be.present()
+    step = "".join(con.written)
+    assert "a=t," not in step and "a=d," not in step   # no resend, no gap
+    assert step.count("a=p,") == 1 and ",y=" in step and ",y=0," not in step
+    assert len(step) < 300
+
+
+def test_kitty_deletes_only_the_placement_of_a_picture_that_left(backend, png):
+    be, con = backend
+    be._term_graphics = "kitty"
+    be.clear()
+    be.draw_image(0, 0, png, {"w": 4, "h": 3})
+    be.present()
+    be.clear()                                    # the picture scrolled off
+    con.written.clear()
+    be.present()
+    out = "".join(con.written)
+    assert "a=d,d=i," in out and ",p=1," in out   # the placement, not the image
+    # Back on screen: placed again from what the terminal still holds.
+    be.clear()
+    be.draw_image(0, 0, png, {"w": 4, "h": 3})
+    con.written.clear()
+    be.present()
+    out = "".join(con.written)
+    assert "a=t," not in out and "a=p," in out

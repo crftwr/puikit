@@ -180,6 +180,52 @@ per-band column bits, from which `encode_rect` cuts the visible rectangle, so a
 vertical scroll reuses prepared bands outright). A picture that neither moves
 nor changes costs nothing at all per frame — see `_emit_images`.
 
+**The VT backend builds those off the UI thread** (xefm#732). The first
+placement of a large photo still costs its decode, resample and encode, which
+measured 390 ms (kitty, JPEG) to 1.4 s (sixel, PNG) for a 6000x4000 picture,
+and all of it used to sit inside `present()`. Now a cache miss goes to the
+shared image worker (`_image_loader.ImageLoader`, §11): `_build_sequence` makes
+a kitty / iTerm2 payload, `_build_sixel` a prepared sixel picture. `present()`
+waits for it out of the same per-frame allowance as the GUI backends, so a small
+picture is still drawn in its own frame. Otherwise the placement is marked
+pending, and the frame goes out without it. The event loop, which wakes every
+50 ms anyway, takes in finished pictures (`_service_images`) and draws the
+pending placements over the frame already on screen. No wake-up mechanism is
+needed, so the VT backend still declares no `main_thread_dispatch`. A placement
+that leaves the screen before its picture arrives is simply dropped. `present()`
+now takes about 7 ms for that photo, the 4 ms wait included. The curses backend,
+kept as the fallback, still builds pictures on the UI thread. Sixel makes no PNG
+(`render(..., png=False)`): it builds its own wire format from the image.
+
+**kitty and iTerm2 cut a scroll step out of a prepared picture**, as sixel
+does. The worker scales the picture to its full box once (`_build_prepared`)
+and makes that whole picture's PNG too. A placement cut down by a clip or a
+scroll crops the prepared image and encodes only the visible part, on the UI
+thread, at PNG's fastest compression. There is no decode or resample. A
+partly visible picture changes on every step, so this is what a scroll pays:
+for a screenful (1600x960 px) 42-85 ms a step on kitty, against 86-218 ms when
+each step re-cropped and re-resampled the original. **iTerm2 gets JPEG** for an
+opaque picture (it reads any format macOS decodes). A screenful encodes in
+about 5 ms at 230-340 KB, so a step is 7-9 ms and a few hundred KB, where even
+the fastest PNG was 33-77 ms and 1.4-4 MB for the terminal to read and decode.
+**kitty keeps the picture and is told what part to show.** kitty (and Ghostty,
+WezTerm, Konsole, which speak its protocol) stores a transmitted image under an
+id. The prepared picture is sent once (`kitty_transmit`, `a=t`), and every frame
+after that places the visible rectangle of it (`kitty_place`, `a=p` with a
+source rect `x,y,w,h`). A placement with the same image and placement id
+replaces the old one where it stands, so a moved picture needs no delete
+(`_erase_stale_kitty`). Only a slot that shows another picture, or none, has its
+placement deleted (`d=i`). A scroll step is about 100 bytes and 0.3 ms, against
+37-87 ms and 2-6 MB of PNG per step. A stored image is freed (`d=I`) when its
+prepared picture is evicted, and eviction never takes a picture the screen is
+still showing.
+
+**A frame with pictures is wrapped in synchronized output** (DEC mode 2026). Moving a
+picture erases or overpaints the old one and draws the new one in separate
+steps, and a terminal that shows each as it arrives flickers through the gap.
+In this mode the terminal shows the frame at once; a terminal that does not
+know the mode ignores it. Text-only frames are left alone.
+
 ---
 
 ## 5. Per-backend decode, and `image_formats()`
