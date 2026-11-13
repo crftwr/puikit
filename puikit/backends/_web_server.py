@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import shutil
 import struct
 import threading
 from collections.abc import Callable
@@ -51,9 +52,15 @@ class WebServer:
         font_dir: str,
         on_message: Callable[[str], None],
         on_connect: Callable[[], None],
+        image: Callable[[str], tuple[bytes | str, str] | None] | None = None,
     ):
         self._asset_dir = asset_dir
         self._font_dir = font_dir
+        # ``image(token)`` answers GET /image/<token>: ``(body, content_type)``,
+        # where a str body is a file path to stream, or None for 404. It runs on
+        # the request's own thread, never the UI thread, so whatever it costs -
+        # reading a photo, encoding a raster - does not hold up a frame.
+        self._image = image
         self._on_message = on_message
         self._on_connect = on_connect
         self._httpd: ThreadingHTTPServer | None = None
@@ -75,8 +82,12 @@ class WebServer:
                 pass
 
             def do_GET(self):
-                if self.path.split("?")[0] == "/ws":
+                path = self.path.split("?")[0]
+                if path == "/ws":
                     server._handle_ws(self)
+                    return
+                if path.startswith("/image/"):
+                    server._serve_image(self, path[len("/image/"):])
                     return
                 server._serve_asset(self)
 
@@ -131,6 +142,51 @@ class WebServer:
         handler.send_header("Cache-Control", "no-store")
         handler.end_headers()
         handler.wfile.write(body)
+
+    # --- images ------------------------------------------------------------
+
+    def _serve_image(self, handler: BaseHTTPRequestHandler, token: str) -> None:
+        """An image the backend registered under ``token``, fetched by the page
+        like any other resource rather than pushed down the WebSocket: a photo
+        of many megabytes then travels on a connection of its own, and the
+        frames and input behind it are not kept waiting - which matters most
+        when the browser is on another machine, at the end of a forwarded port.
+
+        The token is random and only registered images have one, so nothing
+        else on disk can be named here. The response may be cached for good:
+        the backend gives different pixels a different token."""
+        found = self._image(token) if self._image is not None else None
+        if found is None:
+            handler.send_error(404)
+            return
+        body, ctype = found
+        fh = None
+        if isinstance(body, str):
+            try:
+                fh = open(body, "rb")
+                size = os.fstat(fh.fileno()).st_size
+            except OSError:
+                if fh is not None:
+                    fh.close()
+                handler.send_error(404)
+                return
+        else:
+            size = len(body)
+        try:
+            handler.send_response(200)
+            handler.send_header("Content-Type", ctype)
+            handler.send_header("Content-Length", str(size))
+            handler.send_header("Cache-Control", "private, max-age=31536000, immutable")
+            handler.end_headers()
+            if fh is not None:
+                shutil.copyfileobj(fh, handler.wfile)
+            else:
+                handler.wfile.write(body)
+        except OSError:
+            pass   # the page went away mid-transfer
+        finally:
+            if fh is not None:
+                fh.close()
 
     # --- websocket ---------------------------------------------------------
 
