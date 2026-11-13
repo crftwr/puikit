@@ -89,6 +89,7 @@ def _layout_context(backend: Backend, caps: CapabilityProfile | None = None) -> 
         fold=lambda style: fold_font(style, caps),
         font_size=backend.measure_font_size,
         vector_shapes=caps.supports("vector_shapes"),
+        images=caps.supports("images"),
     )
 
 # Checkbox / radio mark box side as a fraction of min(line_height, 2*advance).

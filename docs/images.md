@@ -242,6 +242,16 @@ same real file and no backend learns URLs exist.
   is remembered for the life of the process, like the Windows backend's
   negative decode cache, not re-attempted every layout pass.
 
+**How big an image is laid out.** As a browser lays it out: its own size,
+shrunk to the width when it is wider, never enlarged. Its height follows the
+aspect however tall that makes it, and the document scrolls. The size is worked
+out in the base unit's *physical* pixels (`LayoutContext.pixel_base`), because
+on a character grid the base unit is a cell, about twice as tall as it is wide.
+A backend that draws no pictures (`LayoutContext.images` false) gets one line
+for the alt glyph instead of a block of blank rows. An image used to be
+stretched to the full width and shrunk to the viewport's height, which took a
+cell for square: a shorter terminal made every image narrower.
+
 ---
 
 ## 8. `RasterImage`: pixels without a file

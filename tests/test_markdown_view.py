@@ -430,29 +430,40 @@ class _TallCellBackend(MemoryBackend):
         return (8.0, 16.0)
 
 
-def _tui_image_row(tmp_path, view_h, w=20):
-    png = tmp_path / "wide.png"
-    png.write_bytes(_png_bytes(40, 20))
-    panel = Panel(_TallCellBackend(width=w, height=view_h, capabilities=PROFILE_TUI))
+def _tui_image_row(tmp_path, view_h=40, w=20, px=(400, 200), images=True):
+    from puikit.capability import CapabilityProfile
+
+    png = tmp_path / "pic.png"
+    png.write_bytes(_png_bytes(*px))
+    caps = CapabilityProfile({**PROFILE_TUI, "images": images})
+    panel = Panel(_TallCellBackend(width=w, height=view_h, capabilities=caps))
     view = MarkdownView(f"![w]({png})")
     panel.add(view, x=0, y=0, w=w, h=view_h)
     panel.render()
-    return view._rows[0].image
+    return view._rows[0]
 
 
 def test_a_terminal_image_keeps_its_aspect_in_tall_cells(tmp_path):
-    # 2:1 picture, 20 cells of 8 px = 160 px wide -> 80 px tall = 5 rows of 16.
-    _src, _alt, w, h = _tui_image_row(tmp_path, view_h=40)
-    assert (w, h) == (20, pytest.approx(5.0))
+    # 400x200 shrunk to 20 cells of 8 px = 160 px wide -> 80 px = 5 rows of 16.
+    row = _tui_image_row(tmp_path)
+    assert row.image[2:] == (20, pytest.approx(5.0))
 
 
-def test_a_shorter_terminal_narrows_an_image_only_when_it_must(tmp_path):
-    # Still fits at 5 rows: full width (it used to be capped at half the width
-    # here, the cell taken for square).
-    assert _tui_image_row(tmp_path, view_h=6)[2] == 20
-    # Shorter than the picture: contained, width shrunk in proportion.
-    _src, _alt, w, h = _tui_image_row(tmp_path, view_h=4)
-    assert h == 4 and w == pytest.approx(16.0)
+def test_the_terminal_height_does_not_size_an_image(tmp_path):
+    # Taller than the view: not shrunk to it; the document scrolls (and the
+    # scrollbar it now needs takes one column of the width).
+    assert _tui_image_row(tmp_path, view_h=3).image[2:] == (19, pytest.approx(4.75))
+
+
+def test_a_small_image_is_not_enlarged(tmp_path):
+    # 40x20 px is 5 cells of 8 px wide, 20 px = 1.25 rows of 16 tall.
+    row = _tui_image_row(tmp_path, px=(40, 20))
+    assert row.image[2:] == (pytest.approx(5.0), pytest.approx(1.25))
+
+
+def test_without_pictures_an_image_takes_one_line(tmp_path):
+    row = _tui_image_row(tmp_path, images=False)
+    assert row.height == 1.0
 
 
 def test_image_alt_glyph_on_terminal(tmp_path):
