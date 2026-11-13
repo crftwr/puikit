@@ -1394,7 +1394,14 @@ class MarkdownView(Widget):
                 alt = sem.runs[0][0] if sem.runs else None
                 if src and size and size[0] > 0 and size[1] > 0:
                     w = width
-                    h = aspect_extent(w, True, size[0], size[1], lc.base_w, lc.base_h)
+                    # The base unit's *physical* pixels (pixel_base), not
+                    # base_w/base_h: on a character grid those are (1, 1) while a
+                    # cell is about twice as tall as wide, so the picture came
+                    # out twice as tall as its aspect, hit the viewport cap
+                    # below at half the height it should, and lost half its
+                    # width - a shorter terminal made every image narrower.
+                    pbw, pbh = lc.pixel_base
+                    h = aspect_extent(w, True, size[0], size[1], pbw, pbh)
                     # An image taller than the viewport is contained to fit it
                     # (aspect kept, width shrunk, centered), so it never reserves
                     # more than one screenful of blank scroll.
@@ -1568,7 +1575,8 @@ class MarkdownView(Widget):
                 src_size = sized[id(c)]
                 # The image's own width in base units — the scale-to-fit pass
                 # below then shares the row like any wide text column.
-                return src_size[1][0] / max(1.0, lc.base_w)
+                # (physical pixels per base unit: a cell, on a grid).
+                return src_size[1][0] / max(1e-6, lc.pixel_base[0])
             return cell_w(to_spans(c, b))
 
         content_w = [
@@ -1618,8 +1626,10 @@ class MarkdownView(Widget):
                     # Natural size up to the column width (no upscaling a small
                     # icon to fill its column), height following the aspect
                     # ratio, capped to the viewport like a block image.
-                    iw = min(w, pw / max(1.0, lc.base_w))
-                    ih = aspect_extent(iw, True, pw, ph, lc.base_w, lc.base_h)
+                    # In the base unit's physical pixels, as for a block image.
+                    pbw, pbh = lc.pixel_base
+                    iw = min(w, pw / max(1e-6, pbw))
+                    ih = aspect_extent(iw, True, pw, ph, pbw, pbh)
                     if self._view_h > 0 and ih > self._view_h:
                         iw *= self._view_h / ih
                         ih = self._view_h

@@ -421,6 +421,40 @@ def test_image_reserves_aspect_height(tmp_path):
     assert abs(row.height - 10.0) < 0.01
 
 
+class _TallCellBackend(MemoryBackend):
+    """A character grid whose cell is 8x16 pixels, as a real terminal's is:
+    base_size stays (1, 1), the cell is the layout unit."""
+
+    @property
+    def base_pixel_size(self):
+        return (8.0, 16.0)
+
+
+def _tui_image_row(tmp_path, view_h, w=20):
+    png = tmp_path / "wide.png"
+    png.write_bytes(_png_bytes(40, 20))
+    panel = Panel(_TallCellBackend(width=w, height=view_h, capabilities=PROFILE_TUI))
+    view = MarkdownView(f"![w]({png})")
+    panel.add(view, x=0, y=0, w=w, h=view_h)
+    panel.render()
+    return view._rows[0].image
+
+
+def test_a_terminal_image_keeps_its_aspect_in_tall_cells(tmp_path):
+    # 2:1 picture, 20 cells of 8 px = 160 px wide -> 80 px tall = 5 rows of 16.
+    _src, _alt, w, h = _tui_image_row(tmp_path, view_h=40)
+    assert (w, h) == (20, pytest.approx(5.0))
+
+
+def test_a_shorter_terminal_narrows_an_image_only_when_it_must(tmp_path):
+    # Still fits at 5 rows: full width (it used to be capped at half the width
+    # here, the cell taken for square).
+    assert _tui_image_row(tmp_path, view_h=6)[2] == 20
+    # Shorter than the picture: contained, width shrunk in proportion.
+    _src, _alt, w, h = _tui_image_row(tmp_path, view_h=4)
+    assert h == 4 and w == pytest.approx(16.0)
+
+
 def test_image_alt_glyph_on_terminal(tmp_path):
     png = tmp_path / "img.png"
     png.write_bytes(_png_bytes(10, 10))
