@@ -171,6 +171,46 @@ def test_loader_serves_newest_first_and_drops_the_oldest():
     assert order == ["a", "d", "c"]
 
 
+def test_loader_wait_delivers_on_the_waiting_thread_once():
+    done = []
+    inbox = _Inbox()
+    worker = loader.ImageLoader(lambda k, r: done.append((k, r)), inbox,
+                                decoder=lambda path, side: f"{path}@{side}")
+    worker.submit("k", "p", 7)
+    assert worker.wait("k", 5.0)
+    assert done == [("k", "p@7")]
+    inbox.run(1)                     # the posted delivery finds nothing left
+    assert done == [("k", "p@7")]
+    assert not worker.wait("k", 0)
+    worker.close()
+
+
+def test_loader_wait_gives_up_at_the_timeout():
+    gate = threading.Event()
+    done = []
+    worker = loader.ImageLoader(lambda k, r: done.append(r), _Inbox(),
+                                decoder=lambda path, side: gate.wait(5))
+    worker.submit("k", "p", 0)
+    started = time.monotonic()
+    assert not worker.wait("k", 0.02)
+    assert time.monotonic() - started < 1.0
+    assert done == []
+    gate.set()
+    worker.close()
+
+
+def test_decode_takes_the_side_as_a_function_of_the_size(tmp_path):
+    path = _png(tmp_path / "a.png", 400, 200)
+    seen = []
+
+    def side(w, h):
+        seen.append((w, h))
+        return w // 4
+
+    assert loader.decode(path, side).pixels == 100
+    assert seen == [(400, 200)]
+
+
 def test_loader_reports_a_failing_decoder_as_none():
     def decoder(path, side):
         raise OSError("boom")
@@ -194,12 +234,25 @@ def _backend_with_inbox():
     return backend, inbox
 
 
-def test_small_picture_is_decoded_on_the_spot(tmp_path):
+def test_a_picture_the_frame_can_wait_for_is_drawn_in_that_frame(tmp_path):
     backend, inbox = _backend_with_inbox()
     path = _png(tmp_path / "icon.png", 32, 32)
+    backend._image_wait_deadline = time.perf_counter() + 5.0
     entry = backend._load_image(path, 0, 0, {"w": 4, "h": 2})
-    assert entry is not None and entry.pixels == 32
+    assert entry is not None and entry.full == 32
     assert not backend._image_jobs
+    assert not inbox.items or inbox.run(1) is None   # the late post is a no-op
+    backend._image_loader.close()
+
+
+def test_outside_a_frame_nothing_waits_even_for_a_tiny_file(tmp_path):
+    backend, inbox = _backend_with_inbox()
+    path = _png(tmp_path / "icon.png", 32, 32)
+    assert backend._image_wait_deadline is None
+    assert backend._load_image(path, 0, 0, {"w": 4, "h": 2}) is None
+    inbox.run(1)
+    assert backend._load_image(path, 0, 0, {"w": 4, "h": 2}).full == 32
+    backend._image_loader.close()
 
 
 def test_large_picture_is_decoded_on_the_worker_at_the_shown_size(tmp_path):

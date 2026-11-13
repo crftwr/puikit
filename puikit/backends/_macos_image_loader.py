@@ -10,8 +10,12 @@ Two things fix it, and both are needed:
 
 **The decode moves to a worker.** ImageIO's ``CGImageSourceCreateThumbnailAtIndex``
 with ``kCGImageSourceShouldCacheImmediately`` returns a fully decoded
-``CGImage``, and ImageIO is safe to call from any thread. The backend draws
-nothing for that source until the result arrives, then redraws.
+``CGImage``, and ImageIO is safe to call from any thread. Every file goes
+there, however small: a 1 MP picture still took 8-17 ms, and a file on a slow
+or network disk can take any time at all just to open. A frame waits a few
+milliseconds in total for what it asked for, so a small picture still appears
+in the frame that asked for it; beyond that the frame draws nothing for the
+source, and redraws when the result arrives.
 
 **The decode is sized to what is shown.** A decoded full-size bitmap still cost
 60 ms on its first draw, because AppKit resamples 24 MP down to the window and
@@ -56,10 +60,12 @@ except ImportError:  # pragma: no cover - older/partial PyObjC
 
 from ..image import upright_size
 
-#: A picture this small (in pixels) is decoded on the UI thread, at full size.
-#: It costs a few milliseconds, and drawing it straight away is worth more than
-#: a blank frame: icons and inline pictures would otherwise flash in.
-SYNC_PIXELS = 1024 * 1024
+#: How long one frame may wait, in total, for the worker to finish pictures it
+#: asked for. A small picture decodes in about a millisecond and is then drawn in
+#: the frame that asked for it, instead of a blank frame and a redraw; a large
+#: one is not waited for. Bounded per frame, so a page of thirty icons costs the
+#: UI thread this much at most, and a file on a slow disk nothing more.
+FRAME_WAIT = 0.004
 
 #: A held bitmap is re-decoded smaller only when it is this many times larger
 #: than needed, so a window resized back and forth does not decode on every
@@ -118,10 +124,13 @@ def pixel_size(path: Any) -> tuple[int, int] | None:
         return None
 
 
-def decode(path: Any, side: int = 0) -> Decoded | None:
+def decode(path: Any, side: Any = 0) -> Decoded | None:
     """Decode ``path`` with its long side at most ``side`` pixels (0: full
-    size). Safe on any thread. ``None`` when the file is not an image at all;
-    a file only ``NSImage`` reads comes back lazy (``pixels == 0``)."""
+    size). ``side`` may instead be a function of the file's upright pixel
+    ``(width, height)``, for a caller that needs the aspect to know the size
+    and should not read the file itself to learn it. Safe on any thread.
+    ``None`` when the file is not an image at all; a file only ``NSImage``
+    reads comes back lazy (``pixels == 0``)."""
     with objc.autorelease_pool():
         lazy = NSImage.alloc().initWithContentsOfFile_(str(path))
         if lazy is None:
@@ -132,6 +141,8 @@ def decode(path: Any, side: int = 0) -> Decoded | None:
             weight = int(size.width * size.height * 4)
             return Decoded(lazy, 0, 0, weight)
         full_side = max(full)
+        if callable(side):
+            side = side(*full)
         want = full_side if side <= 0 else max(1, min(int(side), full_side))
         try:
             source = CGImageSourceCreateWithURL(NSURL.fileURLWithPath_(str(path)), None)
@@ -181,7 +192,8 @@ class ImageLoader:
     """One worker thread decoding queued requests, newest first.
 
     ``post(fn, *args)`` must run ``fn(*args)`` on the UI thread; every
-    ``on_done(key, result)`` arrives through it, ``result`` being a
+    ``on_done(key, result)`` arrives through it, or through :meth:`wait` when
+    the UI thread chose to wait for it, ``result`` being a
     :class:`Decoded`, ``None`` for a file that cannot be read, or
     :data:`DROPPED`."""
 
@@ -193,12 +205,13 @@ class ImageLoader:
         self._post = post
         self._decode = decoder
         self._limit = max(1, limit)
-        self._jobs: list[tuple[Any, Any, int]] = []
+        self._jobs: list[tuple[Any, Any, Any]] = []
+        self._ready: dict[Any, Any] = {}   # key -> result, until delivered
         self._cond = threading.Condition()
         self._thread: threading.Thread | None = None
         self._closed = False
 
-    def submit(self, key: Any, path: Any, side: int) -> None:
+    def submit(self, key: Any, path: Any, side: Any) -> None:
         dropped = []
         with self._cond:
             if self._closed:
@@ -214,11 +227,30 @@ class ImageLoader:
         for key in dropped:
             self._post(self._on_done, key, DROPPED)
 
+    def wait(self, key: Any, timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds for ``key``'s result and, when it
+        comes, deliver it now (``on_done`` on this, the UI thread) instead of
+        through ``post``. Whether it was delivered."""
+        with self._cond:
+            if key not in self._ready and timeout > 0:
+                self._cond.wait_for(lambda: key in self._ready or self._closed,
+                                    timeout)
+        return self._deliver(key)
+
     def close(self) -> None:
         with self._cond:
             self._closed = True
             self._jobs.clear()
-            self._cond.notify()
+            self._ready.clear()
+            self._cond.notify_all()
+
+    def _deliver(self, key: Any) -> bool:
+        with self._cond:
+            if key not in self._ready:
+                return False   # already delivered by wait(), or not done yet
+            result = self._ready.pop(key)
+        self._on_done(key, result)
+        return True
 
     def _run(self) -> None:
         while True:
@@ -232,4 +264,9 @@ class ImageLoader:
                 result = self._decode(path, side)
             except Exception:
                 result = None
-            self._post(self._on_done, key, result)
+            with self._cond:
+                if self._closed:
+                    return
+                self._ready[key] = result
+                self._cond.notify_all()
+            self._post(self._deliver, key)

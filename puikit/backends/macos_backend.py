@@ -2103,6 +2103,9 @@ class MacOSBackend(Backend):
         # first large picture, and the cache keys it is decoding right now.
         self._image_loader: _loader.ImageLoader | None = None
         self._image_jobs: set[Any] = set()
+        # When the frame being drawn stops waiting for the worker (see
+        # _macos_image_loader.FRAME_WAIT); None outside a frame.
+        self._image_wait_deadline: float | None = None
         self._animations: dict[int, Animation] = {}  # keyed by id(widget)
         self._anim_timer = None
         self._anim_timer_interval: float | None = None  # rate of the live timer
@@ -3384,6 +3387,13 @@ class MacOSBackend(Backend):
     # --- pixel rendering (called from the view's drawRect) --------------------
 
     def _render_into_view(self) -> None:
+        self._image_wait_deadline = time.perf_counter() + _loader.FRAME_WAIT
+        try:
+            self._render_frame()
+        finally:
+            self._image_wait_deadline = None
+
+    def _render_frame(self) -> None:
         frame_start = time.perf_counter() if _BG_PROFILE else 0.0
         # Clear the frame. When the background names a backdrop, the opacity-dissolved
         # surface fills (and any bare gaps) fall back to *that* color instead of the
@@ -4238,11 +4248,12 @@ class MacOSBackend(Backend):
         a path or a :class:`~puikit.image.RasterImage`, or ``None`` when it
         cannot be built *or is still being decoded* (xefm#732).
 
-        A raster is already pixels and is wrapped here. A file small enough to
-        decode in a few milliseconds is decoded here too. A larger one is handed
-        to the worker at the pixel size the draw at ``x, y`` with ``hints``
-        needs, and nothing is drawn for it until the result arrives and redraws
-        the frame. A file ImageIO cannot read at all keeps the lazy ``NSImage``.
+        A raster is already pixels and is wrapped here. A file is never read on
+        this thread, not even its header: the worker reads it and decodes it at
+        the pixel size the draw at ``x, y`` with ``hints`` needs. The frame
+        waits for it out of a small per-frame allowance, which is enough for a
+        small picture; otherwise nothing is drawn for it until the result
+        arrives and redraws the frame.
 
         A failure is cached too — as ``None`` — so a missing or undecodable
         source is attempted once rather than once per frame, which is the same
@@ -4256,39 +4267,49 @@ class MacOSBackend(Backend):
             entry = None if image is None else _loader.Decoded(image, nbytes=source.nbytes)
             self._image_cache.put(key, entry, source.nbytes, owner=source)
             return entry
-        size = _imageio_pixel_size(source)
-        if size is not None and size[0] * size[1] > _loader.SYNC_PIXELS:
-            self._request_image(source, self._first_side(size, x, y, hints or {}))
-            return None
-        entry = _loader.decode(source)
-        self._image_cache.put(key, entry, entry.nbytes if entry is not None else 0)
-        return entry
+        self._request_image(source, self._side_for(x, y, hints or {}))
+        deadline = self._image_wait_deadline
+        if deadline is not None and self._image_loader is not None:
+            if self._image_loader.wait(key, deadline - time.perf_counter()):
+                cached = self._image_cache.get(key)
+                return None if cached is MISS else cached
+        return None
 
-    def _first_side(self, size: tuple[int, int], x: int, y: int,
-                    hints: dict[str, Any]) -> int:
-        """The long side to decode a ``size``-pixel file at for its first draw:
-        what fills the box ``hints`` give it, or full size when they give none
-        (the box then follows the image's own size)."""
+    def _side_for(self, x: int, y: int, hints: dict[str, Any]):
+        """For a file not read yet: a function from its pixel size to the long
+        side to decode it at, which the worker calls once it has read the size.
+        It fills the box ``hints`` give, or is 0 (full size) when they give none,
+        since the box then follows the image's own size. Pure geometry, worked
+        out from values taken here, so it is safe on the worker."""
         if "w" not in hints or "h" not in hints:
             return 0
-        iw, ih = size
         target = self._unit_rect(x, y, hints["w"], hints["h"])
-        dest, source_rect = self._fit_rects(
-            hints.get("fit", "fill"), target, iw, ih, hints.get("src"))
-        return self._needed_side(dest, source_rect, iw, ih)
+        fit, src = hints.get("fit", "fill"), hints.get("src")
+        scale = self._backing_scale()
 
-    def _needed_side(self, dest, source_rect, iw: float, ih: float) -> int:
-        """Device pixels the image's long side needs for ``source_rect`` of it
-        (a zero rect: all of it) to fill ``dest`` on this window's display."""
+        def side(iw: int, ih: int) -> int:
+            dest, source_rect = self._fit_rects(fit, target, iw, ih, src)
+            return self._needed_side(dest, source_rect, iw, ih, scale)
+        return side
+
+    def _backing_scale(self) -> float:
         window = self._active_win.nswindow if self._active_win else self._window
-        scale = window.backingScaleFactor() if window is not None else 1.0
+        return window.backingScaleFactor() if window is not None else 1.0
+
+    def _needed_side(self, dest, source_rect, iw: float, ih: float,
+                     scale: float | None = None) -> int:
+        """Device pixels the image's long side needs for ``source_rect`` of it
+        (a zero rect: all of it) to fill ``dest`` at ``scale`` (by default,
+        this window's display)."""
+        if scale is None:
+            scale = self._backing_scale()
         sw, sh = source_rect.size.width, source_rect.size.height
         if sw <= 0 or sh <= 0:
             sw, sh = iw, ih
         return _loader.needed_side(dest.size.width, dest.size.height,
                                    sw, sh, iw, ih, scale)
 
-    def _request_image(self, source: Any, side: int) -> None:
+    def _request_image(self, source: Any, side: Any) -> None:
         """Queue a decode of ``source`` at ``side`` pixels on its long side,
         unless one for it is already under way."""
         key = source_key(source)
@@ -4307,6 +4328,8 @@ class MacOSBackend(Backend):
         if entry is _loader.DROPPED:
             return   # overtaken; the next draw that still wants it asks again
         self._image_cache.put(key, entry, entry.nbytes if entry is not None else 0)
+        if self._image_wait_deadline is not None:
+            return   # delivered to the frame being drawn, which draws it
         # Every window, not just the active one: which of them shows the
         # picture is in their display lists, and a redraw is cheap next to it.
         views = [self._view] + [h.view for h in self._secondary_windows]

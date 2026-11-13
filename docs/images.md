@@ -420,7 +420,7 @@ again on every later draw. Opening a 24-megapixel photo froze the window
 |---|---|---|
 | lazy `NSImage` (before) | JPEG 120 ms, HEIC 227 ms, PNG 379 ms | JPEG 24-43 ms (re-decode), others ~1 ms |
 | full-size decode on a worker | ~60 ms (AppKit resamples 24 MP and caches it) | ~1 ms |
-| decode at the shown size on a worker (now) | 1-6 ms, then 6-10 ms when it arrives | ~2 ms |
+| decode at the shown size on a worker (now) | under 1 ms, then 6-10 ms when it arrives | ~2 ms |
 
 So both halves are needed: the decode moves to a worker, **and** it decodes to the
 pixel size the draw needs, because a full-size bitmap still costs its resample on
@@ -428,15 +428,21 @@ the main thread.
 
 `_macos_image_loader.py` holds it:
 
-- **A file over `SYNC_PIXELS` (1 MP)** goes to one daemon worker
-  (`puikit-image-decode`). ImageIO's `CGImageSourceCreateThumbnailAtIndex`, with
-  `ShouldCacheImmediately`, returns a decoded `CGImage` with its long side capped
-  at what the draw needs: the destination rect over the `src` crop, times the
-  window's backing scale. Nothing is drawn for that source until the result
-  arrives. Then it is cached and every window is marked dirty, so the frame
-  already presented draws it. The application does nothing.
-- **A smaller file is decoded on the spot.** It costs a few milliseconds, and a
-  blank frame would make icons and inline pictures flash in.
+- **Every file goes to one daemon worker** (`puikit-image-decode`), however
+  small, and the UI thread does not even read its header. A 1 MP picture still
+  took 8-17 ms to decode, and a file on a slow or network disk can take any
+  time to open. The worker reads the size and decodes with ImageIO's
+  `CGImageSourceCreateThumbnailAtIndex` and `ShouldCacheImmediately`, which
+  return a decoded `CGImage`. Its long side is capped at what the draw needs:
+  the destination rect over the `src` crop, times the window's backing scale.
+  The UI thread hands the worker that as a function of the pixel size, because
+  the fit needs the aspect.
+- **A frame waits up to `FRAME_WAIT` (4 ms in total)** for what it asked for. A
+  small picture is decoded in about a millisecond and drawn in the frame that
+  asked for it, so icons and inline pictures do not flash in. Past the
+  allowance the frame draws nothing for that source. The result is cached when
+  it arrives and every window is marked dirty, so the frame already presented
+  draws it. The application does nothing.
 - **The bitmap is an `NSImage` sized in the file's own points**, the size the
   lazy `NSImage` reported, so the fit and `src` math and the default `w`/`h`
   stay as they were. Only the pixels behind it change.
