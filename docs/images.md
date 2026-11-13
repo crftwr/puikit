@@ -12,7 +12,8 @@ how an application learns which of the two a given file wants to be.
 `puikit/image.py` (geometry, `RasterImage`, `source_key`) ·
 `puikit/widgets/image.py` (`ImageView`) ·
 `puikit/backends/_terminal_graphics.py` (terminal protocols) ·
-`puikit/backends/_image_cache.py` (the GUI backends' budgeted LRU) · capability
+`puikit/backends/_image_cache.py` (the GUI backends' budgeted LRU) ·
+`puikit/backends/_macos_image_loader.py` (macOS decode off the UI thread) · capability
 `images`
 
 ---
@@ -185,7 +186,7 @@ nor changes costs nothing at all per frame — see `_emit_images`.
 
 | Backend | Decoder | `image_formats()` comes from |
 |---|---|---|
-| macOS | `NSImage` / ImageIO — `NSImage.size` reports **points**, not pixels (see §3), so `image_size` reads the pixel size from `CGImageSourceCopyPropertiesAtIndex` instead, turned upright (§10) | `NSImage.imageFileTypes()`, minus the Classic OSType codes it mixes in |
+| macOS | ImageIO on a worker thread, sized to what is shown (§11); `NSImage` for what ImageIO cannot read (SVG). `NSImage.size` reports **points**, not pixels (see §3), so `image_size` reads the pixel size from `CGImageSourceCopyPropertiesAtIndex` instead, turned upright (§10) | `NSImage.imageFileTypes()`, minus the Classic OSType codes it mixes in |
 | Windows | WIC decode, then **manual alpha premultiply** with numpy — neither WIC's converter nor `CreateBitmap` will do it. See [`windows_backend.md`](windows_backend.md) §4 | the installed WIC decoders, enumerated (`CreateComponentEnumerator`) |
 | Web | The browser decodes; the replayer draws to canvas | a fixed list — the decoder is on the far end of the socket and cannot be asked |
 | VT / curses | `_terminal_graphics.py`, or the alt glyph | Pillow's own registry, plugins included, **plus the OS decoder** (§9) |
@@ -405,3 +406,60 @@ size as soon as the file is opened, and turns the pixels on `load()`; the JPEG
 plugin reports the stored size and leaves the pixels alone. So a terminal does
 not swap Pillow's header size: a tagged picture the header parse does not know is
 sized from its upright decode, which lands in the cache `render` draws from.
+
+---
+
+## 11. macOS: decoding off the UI thread, at the size shown
+
+`NSImage.initWithContentsOfFile_` is lazy. It reads the header and decodes on the
+first `drawInRect`, on the main thread, and a lazy JPEG decodes the whole file
+again on every later draw. Opening a 24-megapixel photo froze the window
+(xefm#732). Measured offscreen, 6000x4000 drawn into 2880x1700:
+
+| | UI thread, first frame | UI thread, later frames |
+|---|---|---|
+| lazy `NSImage` (before) | JPEG 120 ms, HEIC 227 ms, PNG 379 ms | JPEG 24-43 ms (re-decode), others ~1 ms |
+| full-size decode on a worker | ~60 ms (AppKit resamples 24 MP and caches it) | ~1 ms |
+| decode at the shown size on a worker (now) | under 1 ms, then 6-10 ms when it arrives | ~2 ms |
+
+So both halves are needed: the decode moves to a worker, **and** it decodes to the
+pixel size the draw needs, because a full-size bitmap still costs its resample on
+the main thread.
+
+`_macos_image_loader.py` holds it:
+
+- **Every file goes to one daemon worker** (`puikit-image-decode`), however
+  small, and the UI thread does not even read its header. A 1 MP picture still
+  took 8-17 ms to decode, and a file on a slow or network disk can take any
+  time to open. The worker reads the size and decodes with ImageIO's
+  `CGImageSourceCreateThumbnailAtIndex` and `ShouldCacheImmediately`, which
+  return a decoded `CGImage`. Its long side is capped at what the draw needs:
+  the destination rect over the `src` crop, times the window's backing scale.
+  The UI thread hands the worker that as a function of the pixel size, because
+  the fit needs the aspect.
+- **A frame waits up to `FRAME_WAIT` (4 ms in total)** for what it asked for. A
+  small picture is decoded in about a millisecond and drawn in the frame that
+  asked for it, so icons and inline pictures do not flash in. Past the
+  allowance the frame draws nothing for that source. The result is cached when
+  it arrives and every window is marked dirty, so the frame already presented
+  draws it. The application does nothing.
+- **The bitmap is an `NSImage` sized in the file's own points**, the size the
+  lazy `NSImage` reported, so the fit and `src` math and the default `w`/`h`
+  stay as they were. Only the pixels behind it change.
+- **Zoom asks again.** When a draw needs more pixels than the held bitmap has
+  (up to full size), or fewer than 1/1.5 of them (zoom-out, a smaller window),
+  another size is queued. The held bitmap is drawn until the new one arrives.
+  One job per source at a time, so a live resize decodes at the worker's pace,
+  not per frame.
+- **Newest first, at most eight queued.** The oldest request beyond that is
+  dropped and asked for again by the next draw that still wants it. A viewer
+  stepping through a directory gets the picture now on screen.
+- **What ImageIO keeps.** The embedded colour profile (Display P3 photos stay
+  P3), EXIF orientation (`CreateThumbnailWithTransform`), and every format
+  `image_formats()` lists. A file ImageIO cannot read (SVG) keeps the lazy
+  `NSImage`, which decodes on draw as before.
+
+Rasters (§8) are pixels already and are not affected. The Windows backend still
+decodes on the UI thread: WIC can decode on a worker, but the COM apartment on
+that thread and the thread the `ID2D1Bitmap` must be created on need checking
+first.
