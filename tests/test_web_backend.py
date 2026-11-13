@@ -574,3 +574,97 @@ def test_gtext_marks_solo_cells_with_the_cell_to_seat_them_in():
     assert [len(c) for c in cells] == [2, 3, 2, 3, 2]
     assert cells[1][2] == pytest.approx(bw)       # ♡ -> one column
     assert cells[3][2] == pytest.approx(2 * bw)   # 漢 -> two columns
+
+
+# --- images: fetched by the page, not pushed down the socket -----------------
+
+
+class _FakeServer:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, text):
+        self.sent.append(json.loads(text))
+        return True
+
+
+def _http_get(port, path):
+    s = socket.create_connection(("127.0.0.1", port), timeout=5)
+    s.sendall(f"GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".encode())
+    data = b""
+    while True:
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        data += chunk
+    s.close()
+    head, _, body = data.partition(b"\r\n\r\n")
+    status = int(head.split(b" ")[1])
+    headers = dict(line.split(b": ", 1) for line in head.split(b"\r\n")[1:])
+    return status, headers, body
+
+
+def test_an_image_path_goes_down_the_socket_as_a_url_only(tmp_path):
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"\xff\xd8\xff" + b"x" * 5000)
+    b = _backend()
+    b._server = _FakeServer()
+    b._ensure_image(str(photo))
+    b._ensure_image(str(photo))          # once per asset
+    (msg,) = b._server.sent
+    assert msg["type"] == "asset"
+    assert msg["url"].startswith("/image/")
+    assert "photo" not in msg["url"] and len(json.dumps(msg)) < 400
+    token = msg["url"][len("/image/"):]
+    assert b._image_response(token) == (str(photo), "image/jpeg")
+    assert b._image_response("not-a-token") is None
+
+
+def test_a_reloaded_page_is_told_the_same_url(tmp_path):
+    photo = tmp_path / "photo.png"
+    photo.write_bytes(b"\x89PNG")
+    b = _backend()
+    b._server = _FakeServer()
+    b._ensure_image(str(photo))
+    b._sent_images.clear()               # what a reconnect does
+    b._ensure_image(str(photo))
+    first, second = [m for m in b._server.sent if m["type"] == "asset"]
+    assert first["url"] == second["url"]  # so the browser's cache answers
+
+
+def test_a_raster_is_encoded_when_fetched_and_dropped_with_the_raster():
+    pytest.importorskip("PIL.Image")
+    from puikit.image import RasterImage
+
+    raster = RasterImage(4, 4, bytes((1, 2, 3, 255)) * 16)
+    b = _backend()
+    b._server = _FakeServer()
+    b._ensure_image(raster)
+    token = b._server.sent[0]["url"][len("/image/"):]
+    data, ctype = b._image_response(token)
+    assert ctype == "image/jpeg"
+    del raster
+    import gc
+    gc.collect()
+    assert b._image_response(token) is None
+
+
+def test_the_server_streams_a_registered_image_and_nothing_else(tmp_path):
+    photo = tmp_path / "photo.jpg"
+    body = b"\xff\xd8\xff" + os.urandom(300_000)
+    photo.write_bytes(body)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("no")
+    registry = {"tok": (str(photo), "image/jpeg")}
+    server = WebServer("/nonexistent", "/nonexistent", lambda m: None, lambda: None,
+                       image=registry.get)
+    port = server.start()
+    try:
+        status, headers, got = _http_get(port, "/image/tok")
+        assert status == 200 and got == body
+        assert headers[b"Content-Type"] == b"image/jpeg"
+        assert b"immutable" in headers[b"Cache-Control"]
+        assert _http_get(port, "/image/other")[0] == 404
+        assert _http_get(port, "/image/../" + str(secret))[0] == 404
+    finally:
+        server.close()

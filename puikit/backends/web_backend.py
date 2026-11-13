@@ -29,13 +29,15 @@ drop. Everything the demo catalog exercises otherwise runs.
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import queue
+import secrets
 import threading
 import time
+import weakref
 import webbrowser
+from collections import OrderedDict
 from typing import Any
 
 from ..backend import (
@@ -222,12 +224,27 @@ def _asset_id(source: Any) -> str:
     return str(path) if mtime is None else f"{path}#{mtime}:{size}"
 
 
-def _png_bytes(raster: Any) -> bytes | None:
-    """A raster encoded as PNG — the one place in the toolkit where handing
-    decoded pixels to a backend still costs an encode, because PNG *is* the wire
-    format here. Needs Pillow, and returns ``None`` without it (the frame then
-    references an asset the client does not hold and draws nothing, the same as
-    an unreadable file)."""
+#: Content types for the image files a browser reads (_BROWSER_IMAGE_FORMATS),
+#: sent with the file's own bytes.
+_IMAGE_CONTENT_TYPES = {
+    ".png": "image/png", ".apng": "image/apng", ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg", ".jfif": "image/jpeg", ".gif": "image/gif",
+    ".webp": "image/webp", ".avif": "image/avif", ".bmp": "image/bmp",
+    ".ico": "image/x-icon", ".cur": "image/x-icon", ".svg": "image/svg+xml",
+}
+
+#: How many images the page may still fetch by token. An image is fetched once
+#: right after it is first drawn, so this only has to outlast that.
+_IMAGE_TOKENS_MAX = 512
+
+
+def _encode_raster(raster: Any) -> tuple[bytes, str] | None:
+    """A raster as an image file the browser reads: PNG when any pixel is
+    transparent, JPEG (quality 90) when none is, since a photo - the usual
+    raster - is many times smaller as a JPEG and loses nothing visible. Needs
+    Pillow, and returns ``None`` without it (the page then draws nothing, the
+    same as an unreadable file). Runs on the image request's thread, never the
+    UI thread (see :meth:`WebBackend._image_response`)."""
     import io
 
     try:
@@ -236,10 +253,13 @@ def _png_bytes(raster: Any) -> bytes | None:
         return None
     buffer = io.BytesIO()
     try:
-        image.save(buffer, format="PNG")
+        if image.getchannel("A").getextrema()[0] < 255:
+            image.save(buffer, format="PNG")
+            return buffer.getvalue(), "image/png"
+        image.convert("RGB").save(buffer, format="JPEG", quality=90)
+        return buffer.getvalue(), "image/jpeg"
     except Exception:
         return None
-    return buffer.getvalue()
 
 
 class WebBackend(Backend):
@@ -322,6 +342,13 @@ class WebBackend(Backend):
         self._canvas_px: tuple[float, float] | None = None
         self._pressed_button: str | None = None
         self._sent_images: set[str] = set()
+        # Images the page may fetch, by unguessable token: the token for each
+        # asset id (kept, so a reload's fetch hits the browser's cache), and what
+        # each token serves - a path, or a weak reference to a raster. Read by
+        # the server's request threads, hence the lock.
+        self._image_tokens: dict[str, str] = {}
+        self._image_sources: "OrderedDict[str, tuple[str, Any]]" = OrderedDict()
+        self._image_lock = threading.Lock()
         self._pointer_shape: str | None = None
         # Active background (a Shader, or None), and the surface-reveal machinery
         # that lets it show through: fills recorded inside a reveal-exempt
@@ -348,7 +375,8 @@ class WebBackend(Backend):
     def open(self) -> None:
         self._note_ui_thread()
         self._quit = False
-        server = WebServer(_ASSET_DIR, _FONT_DIR, self._on_message, self._on_connect)
+        server = WebServer(_ASSET_DIR, _FONT_DIR, self._on_message, self._on_connect,
+                           image=self._image_response)
         self._port = server.start()
         self._server = server
         url = f"http://127.0.0.1:{self._port}/"
@@ -837,13 +865,21 @@ class WebBackend(Backend):
         server.send(json.dumps({"type": "frame", "w": w, "h": h, "ops": ops}))
 
     def _ensure_image(self, source: Any) -> None:
-        """Make sure the client holds the bytes this frame is about to
-        reference, sending them once under :func:`_asset_id`.
+        """Make sure the page holds the image this frame is about to reference,
+        telling it once per :func:`_asset_id` where to fetch it.
+
+        Only a URL goes down the WebSocket. The page fetches the image itself,
+        on a connection of its own, and the server answers that request on its
+        own thread (:meth:`_image_response`): neither reading a photo nor
+        encoding a raster happens on the UI thread, and a large image never sits
+        in front of the frames and input on the socket. The browser may be on
+        another machine, reached through a forwarded port, so that queue is a
+        real network link.
 
         Keyed on the source's identity rather than its name, so a file rewritten
-        under the same path is re-sent instead of the client redrawing the copy
-        it was given first — and so a raster that was painted into arrives again
-        with its new pixels."""
+        under the same path is fetched again instead of the page redrawing the
+        copy it was given first — and so a raster that was painted into arrives
+        again with its new pixels."""
         from ..image import is_raster
 
         asset = _asset_id(source)
@@ -851,20 +887,43 @@ class WebBackend(Backend):
             return
         self._sent_images.add(asset)
         if is_raster(source):
-            data = _png_bytes(source)
-            if data is None:
-                return
-            mime = "png"
-        else:
             try:
-                with open(source, "rb") as fh:
-                    data = fh.read()
-            except (OSError, TypeError, ValueError):
-                return
-            ext = os.path.splitext(source)[1].lstrip(".").lower() or "png"
-            mime = "jpeg" if ext in ("jpg", "jpeg") else ext
-        url = f"data:image/{mime};base64," + base64.b64encode(data).decode()
-        self._server.send(json.dumps({"type": "asset", "id": asset, "url": url}))
+                entry = ("raster", weakref.ref(source))
+            except TypeError:
+                entry = ("raster", lambda source=source: source)
+        else:
+            entry = ("path", str(source))
+        with self._image_lock:
+            token = self._image_tokens.get(asset)
+            if token is None:
+                token = self._image_tokens[asset] = secrets.token_urlsafe(18)
+            self._image_sources[token] = entry
+            self._image_sources.move_to_end(token)
+            while len(self._image_sources) > _IMAGE_TOKENS_MAX:
+                self._image_sources.popitem(last=False)
+            if len(self._image_tokens) > 4 * _IMAGE_TOKENS_MAX:
+                live = set(self._image_sources)
+                self._image_tokens = {a: t for a, t in self._image_tokens.items() if t in live}
+        self._server.send(json.dumps({"type": "asset", "id": asset, "url": f"/image/{token}"}))
+
+    def _image_response(self, token: str) -> tuple[bytes | str, str] | None:
+        """What GET /image/<token> serves, on that request's thread: a file
+        path with its content type, sent as its own bytes with no decode, or a
+        raster's pixels encoded by :func:`_encode_raster`. ``None`` (404) for a
+        token nobody registered, a file that is not an image a browser reads,
+        or a raster that has since died."""
+        with self._image_lock:
+            entry = self._image_sources.get(token)
+        if entry is None:
+            return None
+        kind, ref = entry
+        if kind == "path":
+            # An unlisted suffix still goes: the browser reads an image by its
+            # bytes, and the type is only a hint.
+            ext = os.path.splitext(ref)[1].lower()
+            return ref, _IMAGE_CONTENT_TYPES.get(ext, "application/octet-stream")
+        raster = ref()
+        return None if raster is None else _encode_raster(raster)
 
     # --- system integration ------------------------------------------------
 

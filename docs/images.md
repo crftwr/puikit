@@ -188,7 +188,7 @@ nor changes costs nothing at all per frame — see `_emit_images`.
 |---|---|---|
 | macOS | ImageIO on a worker thread, sized to what is shown (§11); `NSImage` for what ImageIO cannot read (SVG). `NSImage.size` reports **points**, not pixels (see §3), so `image_size` reads the pixel size from `CGImageSourceCopyPropertiesAtIndex` instead, turned upright (§10) | `NSImage.imageFileTypes()`, minus the Classic OSType codes it mixes in |
 | Windows | WIC decode, then **manual alpha premultiply** with numpy — neither WIC's converter nor `CreateBitmap` will do it. See [`windows_backend.md`](windows_backend.md) §4 | the installed WIC decoders, enumerated (`CreateComponentEnumerator`) |
-| Web | The browser decodes; the replayer draws to canvas | a fixed list — the decoder is on the far end of the socket and cannot be asked |
+| Web | The browser decodes (the page fetches the file's own bytes, see [`web_backend.md`](web_backend.md) §3); the replayer draws to canvas | a fixed list — the decoder is on the far end of the socket and cannot be asked |
 | VT / curses | `_terminal_graphics.py`, or the alt glyph | Pillow's own registry, plugins included, **plus the OS decoder** (§9) |
 
 `image_formats()` answers **"which extensions do you draw from a path?"** and is
@@ -284,8 +284,10 @@ straight to the RGBA→BGRA swizzle, the premultiply and `CreateBitmap` — the
 second half of the path it already ran. The terminals wrap the buffer with
 `Image.frombuffer` instead of `Image.open`, which makes a re-crop of a magnified
 picture *cheaper* than the path case, where every zoom step re-decoded the file.
-The web backend is the one place a PNG encode is unavoidable: it is the wire
-format the browser reads.
+The web backend is the one place a raster is re-encoded, because the browser
+reads image files: PNG when the raster has transparency, JPEG otherwise. The
+encode runs on the request that fetches it, not the UI thread
+([`web_backend.md`](web_backend.md) §3).
 
 **The caches are budgeted.** The macOS and Windows decoded-image dicts used to be
 unbounded, which was defensible while only files could land in them. A raster
