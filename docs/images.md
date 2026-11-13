@@ -208,7 +208,17 @@ each step re-cropped and re-resampled the original. **iTerm2 gets JPEG** for an
 opaque picture (it reads any format macOS decodes). A screenful encodes in
 about 5 ms at 230-340 KB, so a step is 7-9 ms and a few hundred KB, where even
 the fastest PNG was 33-77 ms and 1.4-4 MB for the terminal to read and decode.
-kitty reads only PNG.
+**kitty keeps the picture and is told what part to show.** kitty (and Ghostty,
+WezTerm, Konsole, which speak its protocol) stores a transmitted image under an
+id. The prepared picture is sent once (`kitty_transmit`, `a=t`), and every frame
+after that places the visible rectangle of it (`kitty_place`, `a=p` with a
+source rect `x,y,w,h`). A placement with the same image and placement id
+replaces the old one where it stands, so a moved picture needs no delete
+(`_erase_stale_kitty`). Only a slot that shows another picture, or none, has its
+placement deleted (`d=i`). A scroll step is about 100 bytes and 0.3 ms, against
+37-87 ms and 2-6 MB of PNG per step. A stored image is freed (`d=I`) when its
+prepared picture is evicted, and eviction never takes a picture the screen is
+still showing.
 
 **A frame with pictures is wrapped in synchronized output** (DEC mode 2026). Moving a
 picture erases or overpaints the old one and draws the new one in separate

@@ -765,3 +765,43 @@ def test_iterm2_gets_an_opaque_picture_as_a_jpeg(backend, png):
         be.present()
         payload = re.search(r"\x1b\]1337;File=[^:]*:([^\x07\x1b]*)", "".join(con.written))
         assert base64.b64decode(payload.group(1))[:3] == b"\xff\xd8\xff"
+
+
+def test_kitty_transmits_a_picture_once_and_a_scroll_only_moves_it(backend, png):
+    be, con = backend
+    be._term_graphics = "kitty"
+    be.clear()
+    be.draw_image(0, 0, png, {"w": 4, "h": 3})
+    con.written.clear()
+    be.present()
+    first = "".join(con.written)
+    assert first.count("a=t,") == 1 and first.count("a=p,") == 1
+
+    be.clear()
+    be.draw_image(0, -1, png, {"w": 4, "h": 3})    # one row scrolled away
+    con.written.clear()
+    be.present()
+    step = "".join(con.written)
+    assert "a=t," not in step and "a=d," not in step   # no resend, no gap
+    assert step.count("a=p,") == 1 and ",y=" in step and ",y=0," not in step
+    assert len(step) < 300
+
+
+def test_kitty_deletes_only_the_placement_of_a_picture_that_left(backend, png):
+    be, con = backend
+    be._term_graphics = "kitty"
+    be.clear()
+    be.draw_image(0, 0, png, {"w": 4, "h": 3})
+    be.present()
+    be.clear()                                    # the picture scrolled off
+    con.written.clear()
+    be.present()
+    out = "".join(con.written)
+    assert "a=d,d=i," in out and ",p=1," in out   # the placement, not the image
+    # Back on screen: placed again from what the terminal still holds.
+    be.clear()
+    be.draw_image(0, 0, png, {"w": 4, "h": 3})
+    con.written.clear()
+    be.present()
+    out = "".join(con.written)
+    assert "a=t," not in out and "a=p," in out

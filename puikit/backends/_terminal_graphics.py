@@ -496,6 +496,41 @@ def clear(protocol: str, image_id: int = 1) -> str:
     return ""
 
 
+def kitty_transmit(png: bytes, image_id: int) -> str:
+    """kitty graphics: store a PNG in the terminal under ``image_id`` without
+    showing it (``a=t``), chunked like :func:`_kitty`. Placed afterwards, any
+    number of times and any part of it, by :func:`kitty_place`."""
+    payload = base64.b64encode(png).decode("ascii")
+    chunks = [payload[i:i + _KITTY_CHUNK] for i in range(0, len(payload), _KITTY_CHUNK)] or [""]
+    out = []
+    for index, chunk in enumerate(chunks):
+        more = 1 if index < len(chunks) - 1 else 0
+        head = f"a=t,f=100,i={image_id},q=2,m={more}" if index == 0 else f"m={more}"
+        out.append(f"\x1b_G{head};{chunk}\x1b\\")
+    return "".join(out)
+
+
+def kitty_place(image_id: int, placement_id: int, x: int, y: int, w: int, h: int,
+                cols: int, rows: int) -> str:
+    """kitty graphics: show the ``w`` x ``h`` pixel rectangle at ``x, y`` of a
+    stored image in a ``cols`` x ``rows`` cell box at the cursor (``a=p``).
+    A placement with the same image and placement id is replaced where it
+    stands, so moving a picture needs no delete and leaves no gap. ``C=1``
+    keeps the cursor put; ``q=2`` silences the replies."""
+    return (f"\x1b_Ga=p,i={image_id},p={placement_id},x={x},y={y},w={w},h={h},"
+            f"c={cols},r={rows},C=1,q=2\x1b\\")
+
+
+def kitty_delete(image_id: int, placement_id: int | None = None) -> str:
+    """kitty graphics: remove one placement of a stored image and keep the
+    image (``d=i`` with ``p``), or - with no ``placement_id`` - remove the
+    image and every placement of it, freeing its memory in the terminal
+    (``d=I``)."""
+    if placement_id is None:
+        return f"\x1b_Ga=d,d=I,i={image_id},q=2\x1b\\"
+    return f"\x1b_Ga=d,d=i,i={image_id},p={placement_id},q=2\x1b\\"
+
+
 def _kitty(png: bytes, cols: int, rows: int, image_id: int) -> str:
     """kitty graphics: transmit-and-display PNG (``f=100``) into a ``c`` x ``r``
     cell box, chunked at 4096 base64 bytes. ``C=1`` keeps the cursor put, and a
