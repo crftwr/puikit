@@ -1,7 +1,6 @@
 """Decoding image files off the UI thread on macOS (xefm#732)."""
 
 import sys
-import threading
 import time
 
 import pytest
@@ -12,10 +11,13 @@ pytestmark = pytest.mark.skipif(
 pytest.importorskip("AppKit", reason="pyobjc not installed")
 pytest.importorskip("Quartz", reason="pyobjc Quartz not installed")
 
-from puikit.backends import _macos_image_loader as loader  # noqa: E402
+from puikit.backends import _image_loader as loader  # noqa: E402
+from puikit.backends._macos_image_loader import decode  # noqa: E402
 from puikit.backends._image_cache import MISS  # noqa: E402
 from puikit.backends.macos_backend import MacOSBackend  # noqa: E402
 from puikit.image import source_key  # noqa: E402
+
+from conftest import Inbox  # noqa: E402
 
 
 def _png(path, w, h):
@@ -28,7 +30,7 @@ def _png(path, w, h):
 
 def test_decode_full_size_keeps_the_lazy_images_size(tmp_path):
     path = _png(tmp_path / "a.png", 300, 200)
-    entry = loader.decode(path)
+    entry = decode(path)
     assert (entry.pixels, entry.full) == (300, 300)
     assert entry.nbytes == 300 * 200 * 4
     size = entry.image.size()
@@ -37,7 +39,7 @@ def test_decode_full_size_keeps_the_lazy_images_size(tmp_path):
 
 def test_decode_to_a_side_shrinks_the_bitmap_not_the_size(tmp_path):
     path = _png(tmp_path / "a.png", 400, 200)
-    entry = loader.decode(path, 100)
+    entry = decode(path, 100)
     assert (entry.pixels, entry.full) == (100, 400)
     assert entry.nbytes == 100 * 50 * 4
     # The fit / src math keeps working in the source's own units.
@@ -47,7 +49,7 @@ def test_decode_to_a_side_shrinks_the_bitmap_not_the_size(tmp_path):
 
 def test_decode_never_enlarges(tmp_path):
     path = _png(tmp_path / "a.png", 40, 20)
-    assert loader.decode(path, 4000).pixels == 40
+    assert decode(path, 4000).pixels == 40
 
 
 def test_decode_applies_exif_orientation(tmp_path):
@@ -64,7 +66,7 @@ def test_decode_applies_exif_orientation(tmp_path):
     path = str(tmp_path / "o6.jpg")
     stored.save(path, "JPEG", quality=95, exif=exif)
 
-    entry = loader.decode(path, 32)
+    entry = decode(path, 32)
     size = entry.image.size()
     assert (size.width, size.height) == (32, 64)
     assert entry.pixels == 32
@@ -84,119 +86,19 @@ def test_decode_applies_exif_orientation(tmp_path):
 def test_decode_of_a_non_image_is_none(tmp_path):
     path = tmp_path / "a.txt"
     path.write_text("not a picture")
-    assert loader.decode(str(path)) is None
-    assert loader.decode(str(tmp_path / "missing.png")) is None
+    assert decode(str(path)) is None
+    assert decode(str(tmp_path / "missing.png")) is None
 
 
 def test_decode_of_what_only_nsimage_reads_stays_lazy(tmp_path):
     path = tmp_path / "a.svg"
     path.write_text('<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18">'
                     '<rect width="18" height="18" fill="red"/></svg>')
-    entry = loader.decode(str(path))
+    entry = decode(str(path))
     if entry is None:
         pytest.skip("this macOS's NSImage does not read SVG")
     assert (entry.pixels, entry.full) == (0, 0)
     assert not loader.wants_redecode(entry, 1000)
-
-
-# --- sizing -------------------------------------------------------------------
-
-def test_needed_side_follows_dest_scale_and_crop():
-    # 6000x4000 photo contained in 1500x1000 points on a 2x display.
-    assert loader.needed_side(1500, 1000, 6000, 4000, 6000, 4000, 2.0) == 3000
-    # Zoomed to its top-left quarter: four times the pixels per side... capped
-    # later by the caller at full size.
-    assert loader.needed_side(1500, 1000, 1500, 1000, 6000, 4000, 2.0) == 12000
-    assert loader.needed_side(0, 0, 0, 0, 10, 10, 1.0) == 0
-
-
-def test_wants_redecode_grows_at_once_and_shrinks_with_slack():
-    entry = loader.Decoded(image=None, pixels=2000, full=6000)
-    assert not loader.wants_redecode(entry, 2000)
-    assert loader.wants_redecode(entry, 2001)
-    assert not loader.wants_redecode(entry, 1500)
-    assert loader.wants_redecode(entry, 1000)
-    full = loader.Decoded(image=None, pixels=6000, full=6000)
-    assert not loader.wants_redecode(full, 12000)   # nothing more to give
-
-
-# --- the worker ---------------------------------------------------------------
-
-class _Inbox:
-    """Stands in for AppHelper.callAfter: collects what the worker posts, and
-    the test runs it on its own thread, as the UI thread would."""
-
-    def __init__(self):
-        self.items = []
-        self.cond = threading.Condition()
-
-    def __call__(self, fn, *args):
-        with self.cond:
-            self.items.append((fn, args))
-            self.cond.notify_all()
-
-    def run(self, count, timeout=10.0):
-        deadline = time.monotonic() + timeout
-        with self.cond:
-            while len(self.items) < count:
-                left = deadline - time.monotonic()
-                assert left > 0, "worker did not report back"
-                self.cond.wait(left)
-            items, self.items = self.items, []
-        for fn, args in items:
-            fn(*args)
-
-
-def test_loader_serves_newest_first_and_drops_the_oldest():
-    gate = threading.Event()
-    order = []
-
-    def decoder(path, side):
-        gate.wait(5)
-        order.append(path)
-        return path
-
-    done = []
-    inbox = _Inbox()
-    worker = loader.ImageLoader(lambda k, r: done.append((k, r)), inbox,
-                                decoder=decoder, limit=2)
-    worker.submit("a", "a", 0)      # picked up at once, blocks on the gate
-    time.sleep(0.05)
-    for name in "bcd":
-        worker.submit(name, name, 0)
-    gate.set()
-    inbox.run(4)
-    worker.close()
-    assert ("b", loader.DROPPED) in done
-    assert order == ["a", "d", "c"]
-
-
-def test_loader_wait_delivers_on_the_waiting_thread_once():
-    done = []
-    inbox = _Inbox()
-    worker = loader.ImageLoader(lambda k, r: done.append((k, r)), inbox,
-                                decoder=lambda path, side: f"{path}@{side}")
-    worker.submit("k", "p", 7)
-    assert worker.wait("k", 5.0)
-    assert done == [("k", "p@7")]
-    inbox.run(1)                     # the posted delivery finds nothing left
-    assert done == [("k", "p@7")]
-    assert not worker.wait("k", 0)
-    worker.close()
-
-
-def test_loader_wait_gives_up_at_the_timeout():
-    gate = threading.Event()
-    done = []
-    worker = loader.ImageLoader(lambda k, r: done.append(r), _Inbox(),
-                                decoder=lambda path, side: gate.wait(5))
-    worker.submit("k", "p", 0)
-    started = time.monotonic()
-    assert not worker.wait("k", 0.02)
-    assert time.monotonic() - started < 1.0
-    assert done == []
-    gate.set()
-    worker.close()
 
 
 def test_decode_takes_the_side_as_a_function_of_the_size(tmp_path):
@@ -207,30 +109,16 @@ def test_decode_takes_the_side_as_a_function_of_the_size(tmp_path):
         seen.append((w, h))
         return w // 4
 
-    assert loader.decode(path, side).pixels == 100
+    assert decode(path, side).pixels == 100
     assert seen == [(400, 200)]
-
-
-def test_loader_reports_a_failing_decoder_as_none():
-    def decoder(path, side):
-        raise OSError("boom")
-
-    done = []
-    inbox = _Inbox()
-    worker = loader.ImageLoader(lambda k, r: done.append((k, r)), inbox,
-                                decoder=decoder)
-    worker.submit("k", "p", 0)
-    inbox.run(1)
-    worker.close()
-    assert done == [("k", None)]
 
 
 # --- the backend --------------------------------------------------------------
 
 def _backend_with_inbox():
     backend = MacOSBackend()
-    inbox = _Inbox()
-    backend._image_loader = loader.ImageLoader(backend._image_decoded, inbox)
+    inbox = Inbox()
+    backend._image_loader = loader.ImageLoader(backend._image_decoded, inbox, decode)
     return backend, inbox
 
 

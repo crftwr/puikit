@@ -147,7 +147,8 @@ from ..backend import Backend, DEFAULT_STYLE, EventHandler, ScreenMarker, Style,
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..image import is_raster, source_key
 from ._image_cache import MISS, ImageCache
-from . import _macos_image_loader as _loader
+from . import _image_loader as _loader
+from ._macos_image_loader import decode as _decode_image
 from ._macos_image_loader import pixel_size as _imageio_pixel_size
 from ..easing import resolve as _resolve_easing
 from ..event import CONTROL_CHAR_KEYS, Event, EventType, char_key_event, is_typed_char
@@ -2104,7 +2105,7 @@ class MacOSBackend(Backend):
         self._image_loader: _loader.ImageLoader | None = None
         self._image_jobs: set[Any] = set()
         # When the frame being drawn stops waiting for the worker (see
-        # _macos_image_loader.FRAME_WAIT); None outside a frame.
+        # _image_loader.FRAME_WAIT); None outside a frame.
         self._image_wait_deadline: float | None = None
         self._animations: dict[int, Animation] = {}  # keyed by id(widget)
         self._anim_timer = None
@@ -4244,7 +4245,7 @@ class MacOSBackend(Backend):
 
     def _load_image(self, source: Any, x: int = 0, y: int = 0,
                     hints: dict[str, Any] | None = None) -> Any:
-        """The cached :class:`~puikit.backends._macos_image_loader.Decoded` for
+        """The cached :class:`~puikit.backends._image_loader.Decoded` for
         a path or a :class:`~puikit.image.RasterImage`, or ``None`` when it
         cannot be built *or is still being decoded* (xefm#732).
 
@@ -4318,7 +4319,7 @@ class MacOSBackend(Backend):
         self._image_jobs.add(key)
         if self._image_loader is None:
             self._image_loader = _loader.ImageLoader(
-                self._image_decoded, AppHelper.callAfter)
+                self._image_decoded, AppHelper.callAfter, _decode_image)
         self._image_loader.submit(key, source, side)
 
     def _image_decoded(self, key: Any, entry: Any) -> None:

@@ -193,6 +193,18 @@ a mandatory dependency, not an optional one). The result goes to `CreateBitmap`
 **directly** — not `CreateBitmapFromWicBitmap`, which would re-introduce the
 unpremultiplied path.
 
+**A file is decoded on a worker thread** (xefm#732; the shared design is
+[`images.md`](images.md) §11). `wic_decode_pixels` does everything slow there:
+it opens the file, puts an `IWICBitmapScaler` (Fant) right on the frame so the
+picture comes out at the size it is shown, converts, turns it upright and
+premultiplies. The worker uses a WIC factory of its own (`wic_thread_factory`),
+because COM apartments are per thread. The UI thread only copies the finished
+buffer into an `ID2D1Bitmap` (`rt_create_bitmap_from_premultiplied`), since the
+bitmap belongs to the render target. A result that arrives late invalidates
+the recorded command list and repaints every window. Measured in the ARM VM on
+a 6000x4000 photo, the UI thread went from 2.2 s (JPEG) and 3.0 s (PNG) to
+under 30 ms.
+
 ---
 
 ## 5. DPI

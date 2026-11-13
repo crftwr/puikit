@@ -1021,6 +1021,10 @@ _IDX_WIC_FACTORY_CREATE_COMPONENT_ENUMERATOR = 23
 # tests/test_image_orientation.py (all eight orientations, JPEG and TIFF).
 _IDX_WIC_FACTORY_CREATE_BITMAP_FLIP_ROTATOR = 13
 _IDX_WIC_FACTORY_CREATE_BITMAP_FROM_SOURCE = 18
+# CreateBitmapScaler[11], between CreateFormatConverter[10] and
+# CreateBitmapClipper[12] in wincodec.h. Serves wic_decode_pixels, which
+# decodes a picture at the size it is shown (xefm#732).
+_IDX_WIC_FACTORY_CREATE_BITMAP_SCALER = 11
 
 # IEnumUnknown (vtable: IUnknown[0-2], Next[3], Skip[4], Reset[5], Clone[6]).
 _IDX_ENUM_UNKNOWN_NEXT = 3
@@ -1061,6 +1065,13 @@ _IDX_WIC_FORMAT_CONVERTER_INITIALIZE = 8
 _IDX_WIC_FRAME_GET_METADATA_QUERY_READER = 8
 _IDX_WIC_QUERY_READER_GET_METADATA_BY_NAME = 5
 _IDX_WIC_FLIP_ROTATOR_INITIALIZE = 8
+# IWICBitmapScaler : IWICBitmapSource adds Initialize[8](source, width,
+#     height, WICBitmapInterpolationMode).
+_IDX_WIC_SCALER_INITIALIZE = 8
+
+#: WICBitmapInterpolationMode.WICBitmapInterpolationModeFant: an area average,
+#: the mode WIC recommends for shrinking a photo, and present on every Windows.
+WIC_INTERPOLATION_FANT = 3
 
 #: WICBitmapCreateCacheOption.WICBitmapCacheOnLoad: decode the whole picture
 #: into memory once. A flip-rotator turning a quarter pulls its source column
@@ -1338,6 +1349,112 @@ def _wic_upright(factory: ComPtr, source: ComPtr, orientation: int) -> ComPtr:
     return current
 
 
+_wic_thread = threading.local()
+
+
+def wic_thread_factory() -> ComPtr:
+    """A WIC factory for the calling thread, created on its first use there.
+
+    Per thread because a COM apartment is (see :data:`_com_state`): the image
+    decode worker (xefm#732) must not use the UI thread's factory."""
+    factory = getattr(_wic_thread, "factory", None)
+    if factory is None:
+        factory = _wic_thread.factory = create_wic_factory()
+    return factory
+
+
+def wic_decode_pixels(factory: ComPtr, path: str, side: Any = 0):
+    """Decode ``path`` upright with its long side at most ``side`` pixels (0:
+    full size), as premultiplied BGRA ready for :func:`rt_create_bitmap_from_premultiplied`.
+
+    ``(data, width, height, full_width, full_height)``: the pixels and their
+    size, then the upright size of the whole picture. ``None`` when WIC cannot
+    read the file. ``side`` may be a function of the full upright size instead,
+    for a caller that needs the aspect to know the size. Needs no render
+    target, so it runs on the decode worker (xefm#732); everything slow - the
+    file read, the decode, the scale, the premultiply - happens here.
+
+    The scaler sits right on the frame, so a JPEG decoder that can scale while
+    it decodes (``IWICBitmapSourceTransform``) does, and the orientation pass
+    after it turns the small picture rather than the large one."""
+    buf = ctypes.create_unicode_buffer(path)
+    decoder_out = ctypes.c_void_p()
+    hr = factory.call(
+        _IDX_WIC_FACTORY_CREATE_DECODER_FROM_FILENAME,
+        ctypes.c_int32,
+        [ctypes.c_wchar_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)],
+        buf, None, GENERIC_READ, WIC_DECODE_METADATA_CACHE_ON_DEMAND, ctypes.byref(decoder_out),
+    )
+    if not hresult_ok(hr) or not decoder_out.value:
+        return None
+    decoder = ComPtr(decoder_out.value)
+    frame = scaler = None
+    try:
+        frame_out = ctypes.c_void_p()
+        hr = decoder.call(
+            _IDX_WIC_DECODER_GET_FRAME, ctypes.c_int32,
+            [ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)], 0, ctypes.byref(frame_out))
+        if not hresult_ok(hr) or not frame_out.value:
+            return None
+        frame = ComPtr(frame_out.value)
+        stored_w, stored_h = wic_bitmap_size(frame)
+        if stored_w <= 0 or stored_h <= 0:
+            return None
+        orientation = _wic_frame_orientation(frame)
+        full_w, full_h = upright_size(stored_w, stored_h, orientation)
+        full_side = max(full_w, full_h)
+        if callable(side):
+            side = side(full_w, full_h)
+        want = full_side if not side or side <= 0 else max(1, min(int(side), full_side))
+        source = frame
+        if want < full_side:
+            # The long side is the same in either orientation, so the stored
+            # picture is scaled by the same factor the upright one needs.
+            k = want / full_side
+            scaler_out = ctypes.c_void_p()
+            hr = factory.call(
+                _IDX_WIC_FACTORY_CREATE_BITMAP_SCALER, ctypes.c_int32,
+                [ctypes.POINTER(ctypes.c_void_p)], ctypes.byref(scaler_out))
+            if hresult_ok(hr) and scaler_out.value:
+                scaler = ComPtr(scaler_out.value)
+                hr = scaler.call(
+                    _IDX_WIC_SCALER_INITIALIZE, ctypes.c_int32,
+                    [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32],
+                    frame.addr, max(1, round(stored_w * k)), max(1, round(stored_h * k)),
+                    WIC_INTERPOLATION_FANT)
+                if hresult_ok(hr):
+                    source = scaler
+        conv_out = ctypes.c_void_p()
+        hr = factory.call(
+            _IDX_WIC_FACTORY_CREATE_FORMAT_CONVERTER, ctypes.c_int32,
+            [ctypes.POINTER(ctypes.c_void_p)], ctypes.byref(conv_out))
+        if not hresult_ok(hr) or not conv_out.value:
+            return None
+        converter = ComPtr(conv_out.value)
+        hr = converter.call(
+            _IDX_WIC_FORMAT_CONVERTER_INITIALIZE, ctypes.c_int32,
+            [ctypes.c_void_p, ctypes.POINTER(GUID), ctypes.c_uint32, ctypes.c_void_p,
+             ctypes.c_double, ctypes.c_uint32],
+            source.addr, ctypes.byref(GUID_WICPixelFormat32bppPBGRA),
+            WIC_BITMAP_DITHER_TYPE_NONE, None, 0.0, WIC_BITMAP_PALETTE_TYPE_CUSTOM)
+        if not hresult_ok(hr):
+            converter.release()
+            return None
+        upright = _wic_upright(factory, converter, orientation)
+        try:
+            width, height = wic_bitmap_size(upright)
+            data = _premultiply_bgra(wic_copy_pixels_bgra(upright, width, height))
+        finally:
+            upright.release()
+        return data, width, height, full_w, full_h
+    finally:
+        if scaler is not None:
+            scaler.release()
+        if frame is not None:
+            frame.release()
+        decoder.release()
+
+
 def wic_decoder_extensions(factory: ComPtr) -> frozenset[str]:
     """Lowercase, dotted file extensions every **installed** WIC decoder claims.
 
@@ -1530,8 +1647,16 @@ def rt_create_bitmap_from_pixels(rt: ComPtr, source: ComPtr, width: int, height:
     return _rt_create_bitmap(rt, _premultiply_bgra(raw), width, height)
 
 
+def rt_create_bitmap_from_premultiplied(rt: ComPtr, premultiplied: bytes,
+                                        width: int, height: int) -> ComPtr | None:
+    """An ID2D1Bitmap over pixels :func:`wic_decode_pixels` already decoded
+    and premultiplied on another thread: only the copy into the bitmap is left
+    for the UI thread."""
+    return _rt_create_bitmap(rt, premultiplied, width, height)
+
+
 def _rt_create_bitmap(rt: ComPtr, premultiplied: bytes, width: int, height: int) -> ComPtr | None:
-    """CreateBitmap over a ready premultiplied-BGRA buffer. The tail both
+    """CreateBitmap over a ready premultiplied-BGRA buffer. The tail the
     bitmap builders share; only where the bytes came from differs."""
     buf = ctypes.create_string_buffer(premultiplied, len(premultiplied))
     props = D2D1_BITMAP_PROPERTIES(D2D1_PIXEL_FORMAT(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0, 96.0)

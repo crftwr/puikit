@@ -53,6 +53,7 @@ from ..backend import (
 from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..image import is_raster, source_key
 from ._image_cache import MISS, ImageCache
+from . import _image_loader as _loader
 from ..easing import resolve as _resolve_easing
 from ..event import CONTROL_CHAR_KEYS, Event, EventType, char_key_event, is_typed_char
 from ..font import Font, FontMetrics, default_face, grid_aligned
@@ -1051,6 +1052,12 @@ def _autosave_rect_on_screen(x: int, y: int, w: int, h: int) -> bool:
     return bool(native.user32.MonitorFromRect(ctypes.byref(rect), native.MONITOR_DEFAULTTONULL))
 
 
+def _decode_image_file(path: Any, side: Any) -> Any:
+    """The image worker's decode (xefm#732): WIC, with this thread's own
+    factory, down to premultiplied pixels — see ``native.wic_decode_pixels``."""
+    return native.wic_decode_pixels(native.wic_thread_factory(), str(path), side)
+
+
 class WindowsBackend(Backend):
     """Windows GUI backend (ctypes + Direct2D/DirectWrite). Coordinates stay
     base unit-based; this backend owns the base unit size and converts to
@@ -1322,8 +1329,14 @@ class WindowsBackend(Backend):
         # tens of megabytes each. Evicting releases the ID2D1Bitmap — a COM
         # reference nothing else is holding.
         self._image_cache = ImageCache(
-            on_evict=lambda cached: cached[0].release(),
+            on_evict=lambda cached: cached.image[0].release(),
             wake=self._wake_image_cache)
+        # Files decoded off the UI thread (xefm#732): the worker, created on the
+        # first file, the cache keys it is decoding right now, and when the
+        # frame being drawn stops waiting for it (_image_loader.FRAME_WAIT).
+        self._image_loader: _loader.ImageLoader | None = None
+        self._image_jobs: set[Any] = set()
+        self._image_wait_deadline: float | None = None
         # Active background behind the UI (set_background): a Shader (GPU), a
         # Wallpaper (static image), or None (solid). A Shader drives a per-frame
         # tick and is composited beneath the UI; a Wallpaper the render pass draws.
@@ -1568,6 +1581,9 @@ class WindowsBackend(Backend):
 
             _win32_menu.destroy_menu_recursive(self._menu_bar_hmenu)
             self._menu_bar_hmenu = 0
+        if self._image_loader is not None:
+            self._image_loader.close()
+            self._image_loader = None
         # Releases each held ID2D1Bitmap through the cache's own eviction hook.
         self._image_cache.clear()
         if self._wic_factory is not None:
@@ -2973,6 +2989,15 @@ class WindowsBackend(Backend):
             self._recreate_render_target()
 
     def _render_display_list(self, now: float) -> None:
+        """:meth:`_render_display_list_inner`, with the frame's allowance for
+        waiting on the image worker (see _image_loader.FRAME_WAIT) open."""
+        self._image_wait_deadline = time.perf_counter() + _loader.FRAME_WAIT
+        try:
+            self._render_display_list_inner(now)
+        finally:
+            self._image_wait_deadline = None
+
+    def _render_display_list_inner(self, now: float) -> None:
         """Rasterize the front display list to the current target (the swap-chain
         bitmap, or the frame command list when a CRT effect is active). Assumes an
         open BeginDraw and a cleared target."""
@@ -3638,39 +3663,119 @@ class WindowsBackend(Backend):
             self._wic_factory = native.create_wic_factory()
         return self._wic_factory
 
-    def _get_image(self, source: Any) -> tuple[Any, int, int] | None:
-        """The decoded (ID2D1Bitmap, natural_w, natural_h) for ``source``,
-        cached — including caching a failed decode as None, so a missing or
-        corrupt source is retried at most once rather than every frame.
+    def _get_image(self, source: Any, x: int = 0, y: int = 0,
+                   hints: dict[str, Any] | None = None) -> Any:
+        """The cached :class:`~puikit.backends._image_loader.Decoded` for
+        ``source`` — ``image`` is ``(ID2D1Bitmap, width, height)`` of the bitmap,
+        ``size`` the source's own upright size — or ``None`` when it cannot be
+        decoded *or is still being decoded* (xefm#732). A failed decode is
+        cached as ``None`` too, so a missing or corrupt source is retried at
+        most once rather than every frame.
 
         A :class:`~puikit.image.RasterImage` skips WIC entirely: its pixels are
         already decoded, and the half of this path that turns a buffer into an
         ID2D1Bitmap is the same either way (see
-        ``native.rt_create_bitmap_from_raster``)."""
+        ``native.rt_create_bitmap_from_raster``).
+
+        A file is never read on this thread. The worker reads, decodes, scales
+        to what the draw at ``x, y`` with ``hints`` shows, and premultiplies;
+        this thread only copies the result into an ID2D1Bitmap. The frame waits
+        for it out of a small allowance, enough for a small picture; otherwise
+        nothing is drawn for it until it arrives and the window repaints."""
         key = source_key(source)
         cached = self._image_cache.get(key)
         if cached is not MISS:
             return cached
-        result = None
         if is_raster(source):
+            entry = None
             bitmap = native.rt_create_bitmap_from_raster(self._render_target, source)
             if bitmap is not None:
-                result = (bitmap, source.width, source.height)
+                w, h = source.width, source.height
+                entry = _loader.Decoded((bitmap, w, h), nbytes=w * h * 4, size=(w, h))
+            self._image_cache.put(key, entry, 0 if entry is None else entry.nbytes,
+                                  owner=source)
+            return entry
+        self._request_image(source, self._side_for(x, y, hints or {}))
+        deadline = self._image_wait_deadline
+        if deadline is not None and self._image_loader is not None:
+            if self._image_loader.wait(key, deadline - time.perf_counter()):
+                cached = self._image_cache.get(key)
+                return None if cached is MISS else cached
+        return None
+
+    def _side_for(self, x: int, y: int, hints: dict[str, Any]):
+        """For a file not read yet: a function from its pixel size to the long
+        side to decode it at, called on the worker once the size is known. It
+        fills the box ``hints`` give, or is 0 (full size) when they give none,
+        since the box then follows the image's own size. Pure geometry over
+        values taken here, so it is safe on the worker."""
+        if "w" not in hints or "h" not in hints:
+            return 0
+        target = self._unit_rect(x, y, hints["w"], hints["h"])
+        fit, src = hints.get("fit", "fill"), hints.get("src")
+
+        def side(iw: int, ih: int) -> int:
+            dest, source_rect = self._fit_image_rects(fit, target, iw, ih, src)
+            return self._needed_side(dest, source_rect, iw, ih)
+        return side
+
+    @staticmethod
+    def _needed_side(dest: Any, source_rect: Any, iw: float, ih: float) -> int:
+        """Pixels the image's long side needs for ``source_rect`` of it (None:
+        all of it) to fill ``dest``. The render target is in device pixels, so
+        there is no backing scale to apply here."""
+        if source_rect is None:
+            sw, sh = iw, ih
         else:
-            wic = native.wic_load_bitmap_source(self._factory(), source)
-            if wic is not None:
-                try:
-                    iw, ih = native.wic_bitmap_size(wic)
-                    bitmap = native.rt_create_bitmap_from_pixels(
-                        self._render_target, wic, iw, ih)
-                finally:
-                    wic.release()
-                if bitmap is not None:
-                    result = (bitmap, iw, ih)
-        weight = 0 if result is None else result[1] * result[2] * 4
-        self._image_cache.put(key, result, weight,
-                              owner=source if is_raster(source) else None)
-        return result
+            sw = source_rect.right - source_rect.left
+            sh = source_rect.bottom - source_rect.top
+        return _loader.needed_side(dest.right - dest.left, dest.bottom - dest.top,
+                                   sw, sh, iw, ih, 1.0)
+
+    def _request_image(self, source: Any, side: Any) -> None:
+        """Queue a decode of ``source`` at ``side`` pixels on its long side,
+        unless one for it is already under way."""
+        key = source_key(source)
+        if key in self._image_jobs:
+            return
+        self._image_jobs.add(key)
+        if self._image_loader is None:
+            self._image_loader = _loader.ImageLoader(
+                self._image_decoded, self._post_image_result, _decode_image_file)
+        self._image_loader.submit(key, source, side)
+
+    def _post_image_result(self, fn: Callable[..., None], *args: Any) -> None:
+        self.call_on_main_thread(lambda: fn(*args))
+
+    def _image_decoded(self, key: Any, result: Any) -> None:
+        """A worker's result, on the UI thread: copy it into an ID2D1Bitmap,
+        cache it and repaint. Without a render target (lost, or not yet made)
+        nothing is cached, and the next draw that wants it asks again."""
+        self._image_jobs.discard(key)
+        if result is _loader.DROPPED:
+            return
+        if result is None:
+            self._image_cache.put(key, None, 0)
+        else:
+            if self._render_target is None:
+                return
+            data, w, h, full_w, full_h = result
+            bitmap = native.rt_create_bitmap_from_premultiplied(
+                self._render_target, data, w, h)
+            entry = None
+            if bitmap is not None:
+                entry = _loader.Decoded((bitmap, w, h), pixels=max(w, h),
+                                        full=max(full_w, full_h), nbytes=w * h * 4,
+                                        size=(full_w, full_h))
+            self._image_cache.put(key, entry, 0 if entry is None else entry.nbytes)
+        if self._image_wait_deadline is not None:
+            return   # delivered to the frame being drawn, which draws it
+        # The main window's recorded command list drew the picture as missing;
+        # every window repaints, since which of them shows it is in their lists.
+        self._invalidate_ui_cache()
+        for hwnd in [self._hwnd] + [h.hwnd for h in self._secondary_windows]:
+            if hwnd:
+                native.user32.InvalidateRect(hwnd, None, False)
 
     def _wake_image_cache(self) -> None:
         # Not call_on_main_thread: this can run inside a collection on any
@@ -3712,16 +3817,29 @@ class WindowsBackend(Backend):
         return self._formats_cache
 
     def _render_image(self, x: int, y: int, source: Any, hints: dict[str, Any]) -> None:
-        cached = self._get_image(source)
-        if cached is None:
-            return
-        bitmap, iw, ih = cached
+        entry = self._get_image(source, x, y, hints)
+        if entry is None:
+            return   # not decodable, or still decoding on the worker
+        (bitmap, bw, bh), (iw, ih) = entry.image, entry.size
         w_units = hints.get("w", max(1, round(iw / self._base_w)))
         h_units = hints.get("h", max(1, round(ih / self._base_h)))
         target = self._unit_rect(x, y, w_units, h_units)
         dest, source_rect = self._fit_image_rects(
             hints.get("fit", "fill"), target, iw, ih, hints.get("src")
         )
+        if entry.full:
+            # A zoom that needs more pixels than the bitmap has, or a zoom-out
+            # that needs far fewer, asks the worker for another size; this one
+            # is drawn until it arrives.
+            need = self._needed_side(dest, source_rect, iw, ih)
+            if _loader.wants_redecode(entry, need):
+                self._request_image(source, need)
+        if source_rect is not None and (bw, bh) != (iw, ih):
+            # The fit worked in the source's own pixels; the bitmap holds fewer.
+            sx, sy = bw / iw, bh / ih
+            source_rect = native.D2D1_RECT_F(
+                source_rect.left * sx, source_rect.top * sy,
+                source_rect.right * sx, source_rect.bottom * sy)
         opacity = float(hints.get("alpha", 1.0))
         native.rt_draw_bitmap(self._render_target, bitmap, dest, opacity, source_rect)
 

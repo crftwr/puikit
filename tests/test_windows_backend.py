@@ -606,16 +606,24 @@ def test_clipboard_roundtrip():
 # --- images (WIC decode -> ID2D1Bitmap) -------------------------------------
 
 
+def _in_frame(backend):
+    """Open the frame's allowance for waiting on the image worker, generously:
+    a test wants the picture, not the timing (_image_loader.FRAME_WAIT)."""
+    backend._image_wait_deadline = time.perf_counter() + 10.0
+
+
 def test_image_decodes_and_caches(tmp_path):
     backend = WindowsBackend()
     backend.open()
     try:
         path = _png(tmp_path / "test.png", 40, 20)
+        _in_frame(backend)
         cached = backend._get_image(path)
         assert cached is not None
-        bitmap, iw, ih = cached
-        assert (iw, ih) == (40, 20)
-        assert backend._get_image(path)[0] is bitmap  # cache hit, same bitmap
+        bitmap, bw, bh = cached.image
+        assert cached.size == (40, 20)
+        assert (bw, bh) == (40, 20)   # no box given: full size
+        assert backend._get_image(path).image[0] is bitmap  # cache hit, same bitmap
     finally:
         backend.close()
 
@@ -625,6 +633,7 @@ def test_image_missing_path_caches_as_failure(tmp_path):
     backend.open()
     try:
         missing = str(tmp_path / "does_not_exist.png")
+        _in_frame(backend)
         assert backend._get_image(missing) is None
         # Under the source's cache identity, not its bare path: a path names a
         # location, and source_key pins the pixels that were at it (puikit#144).
@@ -645,9 +654,87 @@ def test_draw_image_renders_without_error(tmp_path):
         path = _png(tmp_path / "test.png", 40, 20)
         backend.draw_image(1, 1, path, {"w": 10, "h": 5, "fit": "contain"})
         backend.present()
-        backend._render()  # exercises CreateBitmapFromWicBitmap + DrawBitmap
+        backend._render()  # the frame waits for the worker, then DrawBitmap
+        assert backend._image_cache.get(source_key(path)) is not MISS
     finally:
         backend.close()
+
+
+def test_image_file_is_decoded_on_the_worker_at_the_shown_size(tmp_path):
+    from conftest import Inbox
+    from puikit.backends import _image_loader
+
+    backend = WindowsBackend()
+    backend.open()
+    inbox = Inbox()
+    backend._image_loader = _image_loader.ImageLoader(
+        backend._image_decoded, inbox, windows_backend._decode_image_file)
+    try:
+        path = _png(tmp_path / "photo.png", 2400, 1200)
+        hints = {"w": 30, "h": 30, "fit": "contain"}
+        assert backend._get_image(path, 0, 0, hints) is None   # outside a frame
+        assert backend._get_image(path, 0, 0, hints) is None   # one job only
+        inbox.run(1)
+        entry = backend._get_image(path, 0, 0, hints)
+        target = backend._unit_rect(0, 0, 30, 30)
+        # Contained: the long side spans the box's width, in device pixels.
+        assert entry.pixels == round(target.right - target.left)
+        assert entry.full == 2400 and entry.size == (2400, 1200)
+        _bitmap, bw, bh = entry.image
+        assert bw == entry.pixels and bh == round(entry.pixels / 2)
+
+        # Zoomed to a quarter: more pixels are asked for, the old bitmap drawn
+        # meanwhile (its source rect scaled to the smaller bitmap).
+        backend.draw_image(0, 0, path, {**hints, "src": (0.0, 0.0, 0.25, 0.25)})
+        backend.present()
+        backend._render()
+        assert source_key(path) in backend._image_jobs
+        inbox.run(1)
+        zoomed = backend._get_image(path, 0, 0, hints)
+        assert zoomed.pixels == min(4 * entry.pixels, 2400)
+    finally:
+        backend.close()
+
+
+def test_wic_decode_pixels_scales_and_turns_upright(tmp_path):
+    Image = pytest.importorskip("PIL.Image")
+    # Stored 64x32, red left / blue right, orientation 6: shown 32x64, red on top.
+    stored = Image.new("RGB", (64, 32), (0, 0, 255))
+    stored.paste((255, 0, 0), (0, 0, 32, 32))
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    path = str(tmp_path / "o6.jpg")
+    stored.save(path, "JPEG", quality=95, exif=exif)
+
+    factory = native.wic_thread_factory()
+    data, w, h, full_w, full_h = native.wic_decode_pixels(factory, path, 32)
+    assert (w, h, full_w, full_h) == (16, 32, 32, 64)
+    assert len(data) == w * h * 4
+
+    def pixel(x, y):
+        b, g, r, _a = data[(y * w + x) * 4:(y * w + x) * 4 + 4]
+        return r, g, b
+
+    top, bottom = pixel(8, 4), pixel(8, 28)
+    assert top[0] > 200 and top[2] < 60
+    assert bottom[2] > 200 and bottom[0] < 60
+
+    seen = []
+    native.wic_decode_pixels(factory, path, lambda fw, fh: seen.append((fw, fh)) or 0)
+    assert seen == [(32, 64)]
+    assert native.wic_decode_pixels(factory, str(tmp_path / "missing.png")) is None
+
+
+def test_wic_decode_pixels_runs_on_another_thread(tmp_path):
+    # The worker has a COM apartment and a WIC factory of its own.
+    path = _png(tmp_path / "test.png", 40, 20)
+    result = []
+    thread = threading.Thread(
+        target=lambda: result.append(windows_backend._decode_image_file(path, 10)))
+    thread.start()
+    thread.join(30)
+    data, w, h, full_w, full_h = result[0]
+    assert (w, h, full_w, full_h) == (10, 5, 40, 20)
 
 
 def test_profile_supports_images():
