@@ -13,7 +13,7 @@ how an application learns which of the two a given file wants to be.
 `puikit/widgets/image.py` (`ImageView`) ·
 `puikit/backends/_terminal_graphics.py` (terminal protocols) ·
 `puikit/backends/_image_cache.py` (the GUI backends' budgeted LRU) ·
-`puikit/backends/_macos_image_loader.py` (macOS decode off the UI thread) · capability
+`puikit/backends/_image_loader.py` (decoding off the UI thread) · capability
 `images`
 
 ---
@@ -187,7 +187,7 @@ nor changes costs nothing at all per frame — see `_emit_images`.
 | Backend | Decoder | `image_formats()` comes from |
 |---|---|---|
 | macOS | ImageIO on a worker thread, sized to what is shown (§11); `NSImage` for what ImageIO cannot read (SVG). `NSImage.size` reports **points**, not pixels (see §3), so `image_size` reads the pixel size from `CGImageSourceCopyPropertiesAtIndex` instead, turned upright (§10) | `NSImage.imageFileTypes()`, minus the Classic OSType codes it mixes in |
-| Windows | WIC decode, then **manual alpha premultiply** with numpy — neither WIC's converter nor `CreateBitmap` will do it. See [`windows_backend.md`](windows_backend.md) §4 | the installed WIC decoders, enumerated (`CreateComponentEnumerator`) |
+| Windows | WIC decode on a worker thread, sized to what is shown (§11), then **manual alpha premultiply** with numpy — neither WIC's converter nor `CreateBitmap` will do it. See [`windows_backend.md`](windows_backend.md) §4 | the installed WIC decoders, enumerated (`CreateComponentEnumerator`) |
 | Web | The browser decodes (the page fetches the file's own bytes, see [`web_backend.md`](web_backend.md) §3); the replayer draws to canvas | a fixed list — the decoder is on the far end of the socket and cannot be asked |
 | VT / curses | `_terminal_graphics.py`, or the alt glyph | Pillow's own registry, plugins included, **plus the OS decoder** (§9) |
 
@@ -428,7 +428,7 @@ So both halves are needed: the decode moves to a worker, **and** it decodes to t
 pixel size the draw needs, because a full-size bitmap still costs its resample on
 the main thread.
 
-`_macos_image_loader.py` holds it:
+`_image_loader.py` holds the queue and the sizing, `_macos_image_loader.py` the ImageIO decode:
 
 - **Every file goes to one daemon worker** (`puikit-image-decode`), however
   small, and the UI thread does not even read its header. A 1 MP picture still
@@ -461,7 +461,12 @@ the main thread.
   `image_formats()` lists. A file ImageIO cannot read (SVG) keeps the lazy
   `NSImage`, which decodes on draw as before.
 
-Rasters (§8) are pixels already and are not affected. The Windows backend still
-decodes on the UI thread: WIC can decode on a worker, but the COM apartment on
-that thread and the thread the `ID2D1Bitmap` must be created on need checking
-first.
+Rasters (§8) are pixels already and are not affected.
+
+**Windows does the same.** The queue, the wait and the sizing rules are shared
+(`_image_loader.py`). The decode is WIC's: scaled on the frame, turned upright
+and premultiplied on the worker. The UI thread only makes the `ID2D1Bitmap`,
+which belongs to the render target ([`windows_backend.md`](windows_backend.md)
+§4). The render target is in device pixels, so there is no backing scale. The
+fit works in the source's own pixels, and the `src` rect is scaled down to the
+smaller bitmap when it is drawn.
