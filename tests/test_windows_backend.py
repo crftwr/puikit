@@ -608,7 +608,11 @@ def test_clipboard_roundtrip():
 
 def _in_frame(backend):
     """Open the frame's allowance for waiting on the image worker, generously:
-    a test wants the picture, not the timing (_image_loader.FRAME_WAIT)."""
+    a test wants the picture, not the timing (_image_loader.FRAME_WAIT).
+    With a render thread, its first frame (open()'s paint) ends first, or that
+    frame's end would close the allowance under the test."""
+    if backend._render_thread is not None:
+        assert backend._render_thread.wait_idle()
     backend._image_wait_deadline = time.perf_counter() + 10.0
 
 
@@ -2438,6 +2442,8 @@ def test_the_brush_colour_is_set_only_when_it_changes(monkeypatch):
     the colour the old one held."""
     backend = WindowsBackend(width=40, height=10, title="puikit-brush-key-test")
     backend.open()
+    if backend._render_thread is not None:   # open()'s paint sets the brush too
+        assert backend._render_thread.wait_idle()
     sets = []
     real = native.brush_set_color
     monkeypatch.setattr(native, "brush_set_color", lambda brush, colour: (sets.append(1), real(brush, colour)))
@@ -2487,3 +2493,96 @@ def test_grid_plans_follow_set_wide_chars():
     finally:
         text.set_wide_chars("")
     assert backend._grid_plan("a○", False)[0] == 2
+
+
+# --- the frame pipeline (xefm Discussion #901, _render_thread.py) ---
+
+
+def _pipelined(monkeypatch, **kw):
+    monkeypatch.setenv("PUIKIT_RENDER_THREAD", "1")
+    backend = WindowsBackend(**kw)
+    assert backend._pipeline
+    return backend
+
+
+def test_the_window_scope_is_per_thread():
+    # The UI thread scopes a secondary window while it handles that window's
+    # messages; the render thread, drawing the main window meanwhile, must
+    # still see the main window.
+    backend = WindowsBackend()
+    marker = object()
+    seen = {}
+    with backend._window_scope(marker):
+        assert backend._active_win is marker
+        t = threading.Thread(target=lambda: seen.setdefault("win", backend._active_win))
+        t.start()
+        t.join()
+    assert seen["win"] is None
+    assert backend._active_win is None
+
+
+def test_paint_hands_the_frame_to_the_render_thread(monkeypatch):
+    backend = _pipelined(monkeypatch, width=40, height=12, title="puikit-pipeline-test")
+    backend.open()
+    try:
+        thread = backend._render_thread
+        assert thread is not None
+        drawn_on = []
+        render = backend._render
+        monkeypatch.setattr(backend, "_render",
+                            lambda: (drawn_on.append(threading.get_ident()), render()))
+        backend.draw_text(1, 1, "hello")
+        backend.present()
+        backend._handle_message(backend._hwnd, native.WM_PAINT, 0, 0)
+        assert thread.wait_idle()
+        assert drawn_on and set(drawn_on) == {thread.ident}
+        # The recording is of the list just drawn; a newer list makes it stale
+        # without present() releasing it under the render thread.
+        front = backend._front_main
+        assert backend._ui_cache_front is front
+        backend.draw_text(1, 2, "again")
+        backend.present()
+        assert backend._ui_cache is not None    # not released by present()
+        backend._handle_message(backend._hwnd, native.WM_PAINT, 0, 0)
+        assert thread.wait_idle()
+        assert backend._ui_cache_front is backend._front_main
+        assert backend._ui_cache_front is not front
+    finally:
+        backend.close()
+    assert backend._render_thread is None
+    assert not thread._thread.is_alive()
+
+
+def test_resize_and_font_change_wait_for_the_frame(monkeypatch):
+    backend = _pipelined(monkeypatch, width=40, height=20, title="puikit-pipeline-resize")
+    backend.open()
+    try:
+        thread = backend._render_thread
+        for i in range(20):
+            backend.draw_text(1, 1, f"frame {i}")
+            backend.draw_text(1, 2, "日本語のファイル名")
+            backend.present()
+            backend._handle_message(backend._hwnd, native.WM_PAINT, 0, 0)
+            if i % 5 == 0:
+                lparam = ((60 + i) << 16) | (320 + i)
+                backend._handle_message(backend._hwnd, native.WM_SIZE, 0, lparam)
+            if i == 10:
+                backend.set_base_font(Font(size=16, monospace=True))
+        assert thread.wait_idle()
+        assert thread.frames >= 1
+        assert backend._target_bitmap is not None
+    finally:
+        backend.close()
+
+
+def test_a_direct_render_waits_for_the_render_thread(monkeypatch):
+    backend = _pipelined(monkeypatch, width=40, height=12, title="puikit-pipeline-direct")
+    backend.open()
+    try:
+        backend.draw_text(1, 1, "hello")
+        backend.present()
+        backend._handle_message(backend._hwnd, native.WM_PAINT, 0, 0)
+        backend._render()   # holds the same lock, so never inside its frame
+        assert backend._render_thread.wait_idle()
+    finally:
+        backend.close()

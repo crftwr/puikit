@@ -431,17 +431,23 @@ dwrite.DWriteCreateFactory.argtypes = [
 ]
 
 D2D1_FACTORY_TYPE_SINGLE_THREADED = 0
+D2D1_FACTORY_TYPE_MULTI_THREADED = 1
 DWRITE_FACTORY_TYPE_SHARED = 0
 
 
-def create_d2d_factory() -> ComPtr:
+def create_d2d_factory(multithreaded: bool = False) -> ComPtr:
     """An ID2D1Factory1 (not the plain ID2D1Factory the IID name suggests):
     everything this backend used the classic factory for still works
     unchanged (Factory1 is a strict superset), and CreateDeviceContext's
     device chain (create_d2d_device_context, below) additionally needs the
-    Factory1-only CreateDevice method on this same object."""
+    Factory1-only CreateDevice method on this same object.
+
+    ``multithreaded``: the backend draws on a render thread of its own
+    (_render_thread.py) while the UI thread may still create resources, so
+    Direct2D serializes access to the factory and its devices itself."""
     out = ctypes.c_void_p()
-    hr = d2d1.D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, ctypes.byref(IID_ID2D1Factory1), None, ctypes.byref(out))
+    kind = D2D1_FACTORY_TYPE_MULTI_THREADED if multithreaded else D2D1_FACTORY_TYPE_SINGLE_THREADED
+    hr = d2d1.D2D1CreateFactory(kind, ctypes.byref(IID_ID2D1Factory1), None, ctypes.byref(out))
     if not hresult_ok(hr):
         raise OSError(f"D2D1CreateFactory failed: 0x{hr & 0xFFFFFFFF:08x}")
     return ComPtr(out.value or 0)
@@ -1828,14 +1834,18 @@ def com_query_interface(ptr: ComPtr, iid: GUID) -> ComPtr:
     return ComPtr(out.value or 0)
 
 
-def create_d3d11_device() -> ComPtr:
+def create_d3d11_device(multithreaded: bool = False) -> ComPtr:
     """A hardware ID3D11Device with BGRA support (required for D2D interop),
     falling back to the WARP software rasterizer if no real adapter is
     available -- D3D11CreateDevice can fail to find one in some
     virtualized/RDP environments (this project already special-cases VM
     rendering behavior elsewhere, see swapchain_present below). Single-
-    threaded: this backend only ever renders from one thread."""
-    flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_SINGLETHREADED
+    threaded unless ``multithreaded``: without a render thread this backend
+    only ever renders from one thread; with one (_render_thread.py), the UI
+    thread still resizes the swap chain and builds resources on it."""
+    flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT
+    if not multithreaded:
+        flags |= D3D11_CREATE_DEVICE_SINGLETHREADED
 
     def _try(driver_type: int) -> tuple[int, ctypes.c_void_p]:
         dev = ctypes.c_void_p()

@@ -33,6 +33,81 @@ Window messages arrive at a module-level `_global_wndproc`, which looks the
 `_handle_message`. Cross-thread work is posted back to the UI thread as
 `_WM_CALL_ON_MAIN_THREAD` (`WM_APP + 1`).
 
+### The render thread (frame pipeline)
+
+A frame has three stages: the widgets' `draw()` build the display list (①),
+`_render` replays it into Direct2D (②), and `EndDraw` + `Present` flush it to
+the GPU (③). By default all three run one after another on the UI thread, so
+a frame costs their sum. With the **render thread**
+(`_render_thread.py`), `WM_PAINT` only hands the presented list over and
+returns; the render thread runs ② and ③ while the UI thread goes back to the
+queue and builds the next list. A burst of frames (a key held down) then
+runs at the pace of the slower side instead of the sum. A frame asked for
+while the thread is idle starts at once, so a single key press waits no
+longer than before; requests that arrive during a frame fold into one more
+frame of the newest list.
+
+`PUIKIT_RENDER_THREAD=1` turns it on, `0` off. Unset, it is on only on a
+free-threaded Python, where the two threads really run at the same time; on
+a GIL build they would take turns at the interpreter. The choice is made
+when the backend is created, because the Direct2D factory is then made
+multi-threaded and the D3D device without `SINGLETHREADED`.
+
+Measured in an ARM Windows VM (x64 Python, a flat view of thousands of files
+at font size 8, PageDown held at 30 Hz under an animated background): on
+3.15t the frames that show new content went from about 16 a second to about
+20, and the median key lag from about 30 ms to 0. Each replay costs more
+while the UI thread runs beside it (about 45 ms against 25), so the gain is
+the overlap, not a faster replay. On the 3.14 GIL build the same pipeline
+made replays three to seven times slower, which is why it stays off there.
+By hand on the same VM under the Shinagawa background, 3.15t went from about
+19 new frames a second to 31 (the key repeat's limit), while the sequential
+GIL and free-threaded builds were alike at about 20: the gain is the
+pipeline, which needs the GIL off.
+
+② and ③ share the thread rather than taking one each. Most of ③ is
+`EndDraw`, Direct2D turning its batch into D3D commands on the CPU, and a
+multi-threaded factory serializes every call on its objects under one lock,
+so a third thread's `EndDraw` would stall the next frame's ② anyway.
+`Present` returns at once (sync interval 0) unless the GPU's queue is full,
+and in the measurements above it never was: the GPU is not what limits the
+frame rate there, the render thread's CPU time is. Submitting the shader
+background with an early `Flush` was tried and changed nothing.
+
+`PUIKIT_FPS=1` logs a line a second (`_frame_stats.py`) to check this on a
+machine: frames drawn and new, the UI pass, the render thread's time, the
+time in `Present`, frames still on the GPU, and the GPU's own time from
+timestamp queries where the driver gives them (the VMware adapter reports
+every interval disjoint, so it shows none).
+
+What keeps the two threads apart:
+
+- **The display list is the hand-over.** `present()` swaps in a fresh `_back`
+  and never appends to a presented list again, so the render thread reads
+  `_front` without a copy. `_render` takes the list once at its start and
+  passes it down (`_prepare_shadows`, `_acquire_ui_cache`,
+  `_render_display_list`).
+- **The window scope is per thread.** `_active_win` (which secondary window
+  `_window_scope` has scoped) is a thread-local, so while the UI thread
+  handles a popup's messages the render thread still sees the main window's
+  list and size.
+- **The recorded command list is checked, not dropped.** Without a render
+  thread `present()` releases `_ui_cache`; with one, the render thread may be
+  replaying it right then, so the recording remembers the list it came from
+  and `_acquire_ui_cache` re-records when that is not the list being drawn.
+- **One lock for everything else.** The render thread draws holding
+  `RenderThread.lock` (reentrant). The UI thread takes it, through
+  `_exclusive()` or the `_holds_render_lock` decorator, around whatever
+  changes what a frame reads and does not swap atomically: the swap chain on
+  `WM_SIZE`, the text formats on a DPI or base-font change, the effect chain
+  and the background, the image cache (a decoded picture arriving, dead
+  rasters drained), a secondary window's render, screen marks. A direct
+  `_render()` call holds it too.
+- **Text formats are created once.** `_resolve_style_font` is check-then-create
+  on both threads (measuring on one, drawing on the other); `_format_lock`
+  stops two creations racing, which would leak a format and key caches by an
+  address then freed.
+
 ---
 
 ## 2. COM by vtable index, not by declared interface

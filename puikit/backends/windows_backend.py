@@ -27,6 +27,7 @@ remain deferred — see the PROFILE override below.
 from __future__ import annotations
 
 import ctypes
+import functools
 import math
 import os
 import random
@@ -36,7 +37,7 @@ import time
 from ctypes import wintypes
 from collections import OrderedDict
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -54,6 +55,8 @@ from ..capability import PROFILE_GUI_DESKTOP, CapabilityProfile
 from ..image import is_raster, source_key
 from ._image_cache import MISS, ImageCache
 from . import _image_loader as _loader
+from . import _frame_stats
+from ._render_thread import RenderThread, pipeline_wanted
 from ..easing import resolve as _resolve_easing
 from ..event import CONTROL_CHAR_KEYS, Event, EventType, char_key_event, is_typed_char
 from ..font import Font, FontMetrics, default_face, grid_aligned
@@ -107,6 +110,20 @@ _BG_IDLE_TIMEOUT = 15.0
 #: reading the fade exists to avoid — see MacOSBackend.
 _BG_RAMP_DOWN = 40.0
 _BG_RAMP_UP = 15.0
+
+
+#: _exclusive's stand-in when there is no render thread to hold off.
+_NO_LOCK = nullcontext()
+
+
+def _holds_render_lock(method: Callable) -> Callable:
+    """Run a WindowsBackend method holding off the render thread, for a method
+    that changes what a frame reads (see WindowsBackend._exclusive)."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._exclusive():
+            return method(self, *args, **kwargs)
+    return wrapper
 
 
 def _smoothstep(t: float) -> float:
@@ -1253,6 +1270,20 @@ class WindowsBackend(Backend):
         # to the active secondary window's own pair when one is scoped.
         self._back_main: list[tuple] = []
         self._front_main: list[tuple] = []
+        # The frame pipeline (xefm Discussion #901, _render_thread.py): with
+        # it, WM_PAINT hands the presented list to a render thread instead of
+        # replaying it here. Decided now because the D2D factory and the D3D
+        # device are created thread-safe for it; the thread starts in open().
+        self._pipeline = pipeline_wanted()
+        self._render_thread: RenderThread | None = None
+        # Creating a text format is check-then-create on both threads with a
+        # pipeline (measuring here, drawing there); two racing creations would
+        # leak one format and key caches by an address that is then freed.
+        self._format_lock = threading.RLock()
+        # PUIKIT_FPS=1: a frame-rate line logged once a second (_frame_stats.py).
+        self._stats = _frame_stats.FrameStats(self._pipeline) if _frame_stats.wanted() else None
+        self._gpu_timer = None
+        self._gpu_timer_failed = False
         # Secondary windows (capability multi_window), and the one currently
         # scoped by _window_scope (None == the main window).
         self._secondary_windows: list[WinWindowHandle] = []
@@ -1430,6 +1461,9 @@ class WindowsBackend(Backend):
         self._drop_target = _win32_dragdrop.register_drop_target(
             self._hwnd, self._dispatch_file_drop, self._query_file_drag)
 
+        if self._pipeline:
+            self._render_thread = RenderThread(self._render_on_thread, name="puikit-render")
+
         if not self._start_hidden:
             show_cmd = native.SW_SHOW if self._window_style.activates else native.SW_SHOWNA
             native.user32.ShowWindow(self._hwnd, show_cmd)
@@ -1452,6 +1486,7 @@ class WindowsBackend(Backend):
         # starts near the requested size (matches the old CreateWindow sizing).
         native.user32.SetWindowPos(self._hwnd, None, 100, 100, w_px + 16, h_px + 39, flags)
 
+    @_holds_render_lock
     def _rebuild_fonts(self) -> None:
         """Recreate every cached text format at the current DPI scale and
         re-derive the base unit from the rescaled base font. Called whenever
@@ -1482,7 +1517,7 @@ class WindowsBackend(Backend):
         effect that ride on top of it. Called from open() and, on device
         loss, from _recreate_render_target()."""
         cw, ch = self._client_size_px()
-        self._d3d_device = native.create_d3d11_device()
+        self._d3d_device = native.create_d3d11_device(multithreaded=self._pipeline)
         self._d2d_device, self._render_target = native.create_d2d_device_context(self._d2d_factory, self._d3d_device)
         self._swap_chain = native.create_swapchain_for_hwnd(self._d3d_device, self._hwnd, cw, ch)
         self._target_bitmap = native.swapchain_bind_target(self._render_target, self._swap_chain, cw, ch)
@@ -1526,6 +1561,9 @@ class WindowsBackend(Backend):
         if self._d3d_shader is not None:
             self._d3d_shader.close()
             self._d3d_shader = None
+        if self._gpu_timer is not None:
+            self._gpu_timer.release()
+            self._gpu_timer = None
         for attr in ("_shadow_effect", "_target_bitmap", "_brush", "_render_target", "_d2d_device", "_swap_chain", "_d3d_device"):
             obj = getattr(self, attr)
             if obj is not None:
@@ -1561,7 +1599,21 @@ class WindowsBackend(Backend):
             rect.bottom - rect.top,
         )
 
+    def _render_on_thread(self) -> None:
+        """One frame on the render thread (see _render_thread.py), holding its
+        lock. The window may have gone between the request and now."""
+        if self._hwnd and self._render_target is not None:
+            self._render()
+
+    def _stop_render_thread(self) -> None:
+        """Finish the frame being drawn and end the render thread; frames are
+        drawn on this thread from here on."""
+        thread, self._render_thread = self._render_thread, None
+        if thread is not None:
+            thread.stop()
+
     def _close_impl(self) -> None:
+        self._stop_render_thread()
         self._save_autosave_frame()
         if self._anim_timer_running and self._hwnd:
             native.user32.KillTimer(self._hwnd, _TIMER_ID)
@@ -1710,7 +1762,7 @@ class WindowsBackend(Backend):
 
     def _init_fonts(self) -> None:
         if self._d2d_factory is None:
-            self._d2d_factory = native.create_d2d_factory()
+            self._d2d_factory = native.create_d2d_factory(multithreaded=self._pipeline)
         self._fonts = {
             TextAttribute.NORMAL: self._create_text_format(self._base_font),
             TextAttribute.BOLD: self._create_text_format(self._base_font, bold=True),
@@ -1763,8 +1815,11 @@ class WindowsBackend(Backend):
         key = (font, bold, italic)
         fmt = self._style_fonts.get(key)
         if fmt is None:
-            fmt = self._create_text_format(font, bold=bold, italic=italic)
-            self._style_fonts[key] = fmt
+            with self._format_lock:
+                fmt = self._style_fonts.get(key)
+                if fmt is None:
+                    fmt = self._create_text_format(font, bold=bold, italic=italic)
+                    self._style_fonts[key] = fmt
         return fmt
 
     def _resolve_style_cjk_font(self, style: Style) -> Any:
@@ -1778,8 +1833,11 @@ class WindowsBackend(Backend):
         key = (font, bold, italic)
         fmt = self._style_cjk_fonts.get(key)
         if fmt is None:
-            fmt = self._create_cjk_text_format(font, bold=bold, italic=italic)
-            self._style_cjk_fonts[key] = fmt
+            with self._format_lock:
+                fmt = self._style_cjk_fonts.get(key)
+                if fmt is None:
+                    fmt = self._create_cjk_text_format(font, bold=bold, italic=italic)
+                    self._style_cjk_fonts[key] = fmt
         return fmt
 
     def _release_cjk_fonts(self) -> None:
@@ -2041,6 +2099,30 @@ class WindowsBackend(Backend):
     # --- multi-window routing ----------------------------------------------
 
     @property
+    def _active_win(self) -> "WinWindowHandle | None":
+        """The secondary window _window_scope has scoped, or None for the main
+        window - per thread. The UI thread scopes a secondary window while it
+        handles that window's messages, and the render thread (#901), drawing
+        the main window meanwhile, must still see the main window's display
+        list and size, so the scope is a thread-local."""
+        local = self.__dict__.get("_win_local")
+        return None if local is None else getattr(local, "win", None)
+
+    @_active_win.setter
+    def _active_win(self, value: "WinWindowHandle | None") -> None:
+        local = self.__dict__.get("_win_local")
+        if local is None:
+            local = self.__dict__["_win_local"] = threading.local()
+        local.win = value
+
+    def _exclusive(self):
+        """Hold off the render thread (when there is one) while the caller
+        changes what a frame reads: the swap chain, the text formats, the
+        effect chain, the image cache. A no-op without a pipeline."""
+        thread = self._render_thread
+        return thread.lock if thread is not None else _NO_LOCK
+
+    @property
     def _front(self) -> list:
         return self._active_win.front if self._active_win else self._front_main
 
@@ -2098,6 +2180,8 @@ class WindowsBackend(Backend):
 
     def clear(self) -> None:
         self._back = []
+        if self._stats is not None and self._active_win is None:
+            self._stats.ui_begin()
 
     def draw_text(self, x: int, y: int, text: str, style: Style = DEFAULT_STYLE) -> None:
         # A widget that positions glyphs itself (TextEdit, ComboBox) measures
@@ -2341,15 +2425,20 @@ class WindowsBackend(Backend):
     def present(self) -> None:
         self._front = self._back
         self._back = []
+        if self._stats is not None and self._active_win is None:
+            self._stats.ui_end()
         # The recorded command list caches the MAIN window's display list only;
         # a secondary window renders its list inline (see _render_window), so
         # presenting one must not throw the main window's recording away.
-        if self._active_win is None:
+        # A render thread may be replaying the recording right now; it sees
+        # for itself that the recording is of an older list (_acquire_ui_cache).
+        if self._active_win is None and self._render_thread is None:
             self._invalidate_ui_cache()  # a new display list to record
         hwnd = self._target_hwnd()
         if hwnd:
             native.user32.InvalidateRect(hwnd, None, False)
 
+    @_holds_render_lock
     def set_post_effect(self, effect: Any | None) -> None:
         """Composite a CRT / phosphor effect over the whole window, or clear it
         with ``None`` (see ``puikit.posteffect.PostEffect``).
@@ -2387,6 +2476,7 @@ class WindowsBackend(Backend):
 
     # --- background behind the UI (set_background) ---------------------------
 
+    @_holds_render_lock
     def set_background(self, background: Any | None) -> None:
         """Set the background behind the display list (see ``Backend.set_background``):
         a ``Shader`` (GPU), a ``Wallpaper`` (static image), or ``None`` (solid).
@@ -2408,6 +2498,7 @@ class WindowsBackend(Backend):
         if self._hwnd:
             native.user32.InvalidateRect(self._hwnd, None, False)
 
+    @_holds_render_lock
     def set_surface_opacity(self, opacity: float) -> None:
         """Opacity of UI surface fills so a background shows through (see the base
         ``Backend.set_surface_opacity``). Clamped 0..1 and read per fill by
@@ -2466,6 +2557,7 @@ class WindowsBackend(Backend):
             return 1.0
         return 1.0 if self._bg_user_active(now) else 0.0
 
+    @_holds_render_lock
     def _on_reduced_motion_changed(self) -> None:
         """Re-arm the ticker so the ramp (down or back up) runs now, and re-sync
         the roll band. Mirrors the macOS backend."""
@@ -2861,6 +2953,15 @@ class WindowsBackend(Backend):
     _ui_cache: Any = None
     #: The (colour, alpha) the shared brush holds now; see _set_brush.
     _brush_key: Any = None
+    #: The display list _ui_cache was recorded from (see _acquire_ui_cache).
+    _ui_cache_front: Any = None
+    #: No frame pipeline unless __init__ decides on one (see _render_thread).
+    _pipeline = False
+    _render_thread: Any = None
+    #: No frame stats unless PUIKIT_FPS asks (see _frame_stats).
+    _stats: Any = None
+    _gpu_timer: Any = None
+    _gpu_timer_failed = False
 
     def _invalidate_ui_cache(self) -> None:
         """Drop the recorded display list, so the next frame re-runs the Python
@@ -2870,8 +2971,9 @@ class WindowsBackend(Backend):
         if self._ui_cache is not None:
             self._ui_cache.release()
             self._ui_cache = None
+        self._ui_cache_front = None
 
-    def _acquire_ui_cache(self, now: float) -> Any:
+    def _acquire_ui_cache(self, now: float, front: list | None = None) -> Any:
         """The display list recorded as a replayable ID2D1CommandList, recording
         it first if needed — or None when this frame must run the Python pass.
 
@@ -2888,18 +2990,25 @@ class WindowsBackend(Backend):
         _begin_group_render reads ``now`` through self._animations, so the pass is
         time-dependent then and a recording would freeze the transition mid-fade.
         """
+        if front is None:
+            front = self._front
         if self._animations:
             self._invalidate_ui_cache()
             return None
         if self._ui_cache is not None:
-            return self._ui_cache
+            # Recorded from another list: present() drops the recording when it
+            # swaps lists, except with a render thread, which may be replaying
+            # it right then - there the list it was made from says it is stale.
+            if self._ui_cache_front is front:
+                return self._ui_cache
+            self._invalidate_ui_cache()
         rt = self._render_target
         cl = native.dc_create_command_list(rt)
         native.dc_set_target(rt, cl)
         self._frame_target = cl
         native.rt_begin_draw(rt)
         native.rt_set_antialias_mode(rt, native.D2D1_ANTIALIAS_MODE_PER_PRIMITIVE)
-        self._render_display_list(now)
+        self._render_display_list(now, front)
         hr = native.rt_end_draw(rt)
         native.command_list_close(cl)
         native.dc_set_target(rt, self._target_bitmap)
@@ -2908,13 +3017,20 @@ class WindowsBackend(Backend):
             cl.release()
             return None
         self._ui_cache = cl
+        self._ui_cache_front = front
         return cl
 
+    @_holds_render_lock
     def _render(self) -> None:
         if self._render_target is None:
             return
         rt = self._render_target
         now = time.monotonic()
+        started = time.perf_counter()
+        gpu_ms = self._stats_begin_frame() if self._stats is not None else []
+        # The list this frame draws, taken once: on the render thread the UI
+        # thread presents the next one meanwhile (see _render_thread.py).
+        front = self._front
         # With a CRT effect active, the frame is drawn into a command list first
         # so the composite pass (below) can run it through the Direct2D effect
         # chain before it reaches the swap chain. Without one, the display list
@@ -2935,11 +3051,11 @@ class WindowsBackend(Backend):
                 pixel_scale=self._dpi_scale * scale)
         # Both passes below (the recording and the frame itself) may draw shadows,
         # and neither may retarget the device context once its batch is open.
-        self._prepare_shadows()
+        self._prepare_shadows(front)
         # Record (or reuse) the display list before the frame's own BeginDraw —
         # recording retargets the device context, which is illegal inside an open
         # draw batch. None means this frame runs the Python pass inline.
-        ui_cl = self._acquire_ui_cache(now)
+        ui_cl = self._acquire_ui_cache(now, front)
         frame_cl = None
         if use_effect:
             frame_cl = native.dc_create_command_list(rt)
@@ -2960,7 +3076,7 @@ class WindowsBackend(Backend):
         if ui_cl is not None:
             native.dc_draw_image(rt, ui_cl)
         else:
-            self._render_display_list(now)
+            self._render_display_list(now, front)
         hr = native.rt_end_draw(rt)
         device_lost = (hr & 0xFFFFFFFF) == 0x8899000C  # D2DERR_RECREATE_TARGET
         if use_effect and not device_lost:
@@ -2982,22 +3098,51 @@ class WindowsBackend(Backend):
             native.dc_set_target(rt, self._target_bitmap)
             self._frame_target = self._target_bitmap
             frame_cl.release()
+        render_ms = (time.perf_counter() - started) * 1000.0
+        if self._gpu_timer is not None:
+            self._gpu_timer.end()
+        present_ms = None
         if not device_lost:
+            presented = time.perf_counter()
             present_hr = native.swapchain_present(self._swap_chain) & 0xFFFFFFFF
+            present_ms = (time.perf_counter() - presented) * 1000.0
             device_lost = present_hr in (0x887A0005, 0x887A0007)  # DXGI_ERROR_DEVICE_REMOVED / _RESET
+        if self._stats is not None:
+            timer = self._gpu_timer
+            note = ("(no timer)" if timer is None else
+                    "(" + " ".join(f"{k} {v}" for k, v in sorted(timer.misses.items())) + ")")
+            self._stats.frame(front, render_ms, gpu_ms, note, present_ms,
+                              None if timer is None else timer.inflight)
         if device_lost:
             self._recreate_render_target()
 
-    def _render_display_list(self, now: float) -> None:
+    def _stats_begin_frame(self) -> list[float]:
+        """PUIKIT_FPS: read back the GPU times of earlier frames and open this
+        frame's timestamps, before the shader background issues the frame's
+        first D3D commands."""
+        timer = self._gpu_timer
+        if timer is None and self._d3d_device is not None and not self._gpu_timer_failed:
+            try:
+                timer = self._gpu_timer = _frame_stats.GpuTimer(native, self._d3d_device)
+            except OSError as e:
+                _frame_stats.logger.warning(f"frame stats: no GPU timer ({e})")
+                self._gpu_timer_failed = True
+        if timer is None:
+            return []
+        done = timer.collect()
+        timer.begin()
+        return done
+
+    def _render_display_list(self, now: float, front: list | None = None) -> None:
         """:meth:`_render_display_list_inner`, with the frame's allowance for
         waiting on the image worker (see _image_loader.FRAME_WAIT) open."""
         self._image_wait_deadline = time.perf_counter() + _loader.FRAME_WAIT
         try:
-            self._render_display_list_inner(now)
+            self._render_display_list_inner(now, self._front if front is None else front)
         finally:
             self._image_wait_deadline = None
 
-    def _render_display_list_inner(self, now: float) -> None:
+    def _render_display_list_inner(self, now: float, front: list | None = None) -> None:
         """Rasterize the front display list to the current target (the swap-chain
         bitmap, or the frame command list when a CRT effect is active). Assumes an
         open BeginDraw and a cleared target."""
@@ -3009,7 +3154,7 @@ class WindowsBackend(Backend):
         # count nesting so a widget's own groups inside the layer inherit it.
         self._reveal_exempt_depth = 0
         starts = self._text_shadow_starts
-        for index, command in enumerate(self._front):
+        for index, command in enumerate(self._front if front is None else front):
             kind = command[0]
             if kind == "text":
                 self._render_text(*command[1:], shadow=starts.get(index))
@@ -3048,6 +3193,7 @@ class WindowsBackend(Backend):
             elif kind == "clip_pop":
                 native.rt_pop_axis_aligned_clip(rt)
 
+    @_holds_render_lock
     def _recreate_render_target(self) -> None:
         self._release_render_resources()
         self._create_render_resources()
@@ -3460,7 +3606,7 @@ class WindowsBackend(Backend):
         blur, not the caster."""
         return (x, y, w, h, radius)
 
-    def _prepare_shadows(self) -> None:
+    def _prepare_shadows(self, front: list | None = None) -> None:
         """Record each shadow's caster silhouette into a command list, ready for
         :meth:`_render_shadow` to blur without touching the device context.
 
@@ -3488,15 +3634,17 @@ class WindowsBackend(Backend):
         """
         if self._render_target is None:
             return
-        self._prepare_text_shadows()
-        needed = {self._shadow_key(*cmd[1:]) for cmd in self._front if cmd[0] == "shadow"}
+        if front is None:
+            front = self._front
+        self._prepare_text_shadows(front)
+        needed = {self._shadow_key(*cmd[1:]) for cmd in front if cmd[0] == "shadow"}
         for key in [k for k in self._shadow_casters if k not in needed]:
             self._shadow_casters.pop(key).release()
         for key in needed:
             if key not in self._shadow_casters:
                 self._shadow_casters[key] = self._record_shadow_caster(*key)
 
-    def _prepare_text_shadows(self) -> None:
+    def _prepare_text_shadows(self, front: list | None = None) -> None:
         """Record the drop shadow of each batch of the display list's text (see
         _text_shadow_batches) as an ink silhouette, for _render_text to blur and
         draw under the batch's first command.
@@ -3517,7 +3665,7 @@ class WindowsBackend(Backend):
         if self._drop_shadow is None or self._render_target is None:
             return
         cache = self._text_shadows.setdefault(self._window_key(), {})
-        batches = _text_shadow_batches(self._front)
+        batches = _text_shadow_batches(self._front if front is None else front)
         needed = {key for _index, key in batches}
         for key in [k for k in cache if k not in needed]:
             cache.pop(key).release()
@@ -3563,6 +3711,7 @@ class WindowsBackend(Backend):
         native.dc_draw_image(self._render_target, image)
         image.release()
 
+    @_holds_render_lock
     def _drop_text_shadows(self) -> None:
         # getattr: safe on an instance that skipped __init__ (see _ui_cache).
         for shadows in getattr(self, "_text_shadows", {}).values():
@@ -3747,6 +3896,7 @@ class WindowsBackend(Backend):
     def _post_image_result(self, fn: Callable[..., None], *args: Any) -> None:
         self.call_on_main_thread(lambda: fn(*args))
 
+    @_holds_render_lock
     def _image_decoded(self, key: Any, result: Any) -> None:
         """A worker's result, on the UI thread: copy it into an ID2D1Bitmap,
         cache it and repaint. Without a render target (lost, or not yet made)
@@ -4415,6 +4565,7 @@ class WindowsBackend(Backend):
                 obj.release()
                 setattr(self, attr, None)
 
+    @_holds_render_lock
     def _draw_mark(self, marker: WinScreenMarker) -> None:
         """Repaint one mark and hand the pixels to the compositor."""
         if marker.closed or self._d2d_factory is None:
@@ -4540,6 +4691,7 @@ class WindowsBackend(Backend):
         handle.show()
         return handle
 
+    @_holds_render_lock
     def _create_window_surface(self, handle: WinWindowHandle) -> None:
         """Build (or rebuild) a secondary window's swap chain + target bitmap on
         the backend's current D3D device."""
@@ -4561,6 +4713,7 @@ class WindowsBackend(Backend):
                 obj.release()
                 setattr(handle, attr, None)
 
+    @_holds_render_lock
     def _forget_window(self, handle: WinWindowHandle) -> None:
         """Drop a secondary window's GPU surfaces and registrations. Called from
         WinWindowHandle.close() before the HWND is destroyed."""
@@ -4582,6 +4735,7 @@ class WindowsBackend(Backend):
         if self._active_win is handle:
             self._active_win = None
 
+    @_holds_render_lock
     def _render_window(self, handle: WinWindowHandle) -> None:
         """Rasterize a secondary window's display list by retargeting the shared
         device context at its swap-chain bitmap.
@@ -4980,7 +5134,13 @@ class WindowsBackend(Backend):
                 return self._handle_secondary_message(handle, hwnd, msg, wparam, lparam)
         if msg == native.WM_PAINT:
             self._last_paint = time.monotonic()
-            self._render()
+            if self._render_thread is not None:
+                # The frame pipeline (#901): the render thread replays the
+                # presented list and presents it, while this thread goes back
+                # to the queue and builds the next one.
+                self._render_thread.request()
+            else:
+                self._render()
             native.user32.ValidateRect(hwnd, None)
             return 0
         if msg == native.WM_ERASEBKGND:
@@ -4988,8 +5148,9 @@ class WindowsBackend(Backend):
         if msg == native.WM_SIZE:
             cw, ch = native.loword(lparam), native.hiword(lparam)
             if self._render_target is not None and cw and ch:
-                self._invalidate_ui_cache()  # target bitmap is being replaced
-                self._target_bitmap = native.swapchain_resize(self._render_target, self._swap_chain, self._target_bitmap, cw, ch)
+                with self._exclusive():
+                    self._invalidate_ui_cache()  # target bitmap is being replaced
+                    self._target_bitmap = native.swapchain_resize(self._render_target, self._swap_chain, self._target_bitmap, cw, ch)
             sw, sh = self.size
             self._dispatch(Event(type=EventType.RESIZE, hints={"w": sw, "h": sh}))
             return 0
@@ -4999,11 +5160,12 @@ class WindowsBackend(Backend):
             # RECT* with the suggested new window frame. Rescale the fonts and
             # accept the suggested frame — the resulting WM_SIZE resizes the
             # swap chain and re-resolves the layout at the new base unit.
-            self._dpi_scale = native.loword(wparam) / 96.0
-            self._rebuild_fonts()
-            # The drop shadow's offset and blur are in pixels.
-            self._invalidate_ui_cache()
-            self._drop_text_shadows()
+            with self._exclusive():
+                self._dpi_scale = native.loword(wparam) / 96.0
+                self._rebuild_fonts()
+                # The drop shadow's offset and blur are in pixels.
+                self._invalidate_ui_cache()
+                self._drop_text_shadows()
             rect = ctypes.cast(lparam, ctypes.POINTER(wintypes.RECT)).contents
             native.user32.SetWindowPos(
                 hwnd, None, rect.left, rect.top,
@@ -5031,6 +5193,7 @@ class WindowsBackend(Backend):
             native.user32.DestroyWindow(hwnd)
             return 0
         if msg == native.WM_DESTROY:
+            self._stop_render_thread()
             self.quit()
             return 0
         if msg == native.WM_TIMER:
@@ -5055,7 +5218,8 @@ class WindowsBackend(Backend):
             return 0
         if msg == _WM_CALL_ON_MAIN_THREAD:
             self._drain_main_thread_callbacks()
-            self._image_cache.drain()
+            with self._exclusive():   # releases bitmaps a frame may be drawing
+                self._image_cache.drain()
             return 0
         if msg == _WM_TRAY_CALLBACK:
             if lparam == native.NIN_BALLOONUSERCLICK:
