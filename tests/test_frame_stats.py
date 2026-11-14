@@ -42,3 +42,25 @@ def test_no_gpu_time_shows_why():
     stats.frame([], 10.0, [], "(disjoint 3)")
     assert "gpu - (disjoint 3)" in stats.text
     assert "| seq " in stats.text
+
+
+def test_latency_runs_from_present_to_the_first_frame_that_shows_it():
+    import time
+    stats = FrameStats(pipeline=True)
+    a, b, c = [], [], []
+    stats.ui_end(a)
+    stats._presented[id(a)] -= 0.030          # presented 30 ms ago
+    stats.frame(a, 5.0, [], started=time.perf_counter() - 0.010)
+    stats.frame(a, 5.0, [])                   # a repaint of a: not a new latency
+    stats.ui_end(b)                           # b replaced before any frame drew it
+    stats.ui_end(c)
+    stats._presented[id(c)] -= 0.020
+    stats._since -= 10.0
+    stats.frame(c, 5.0, [], started=time.perf_counter() - 0.015)
+    text = stats.text
+    lat = text.split("lat ")[1]
+    median, worst = float(lat.split("ms")[0]), float(lat.split("max ")[1].split()[0])
+    assert 20.0 <= median < 35.0              # of 30 and 20
+    assert 30.0 <= worst < 40.0
+    wait = float(lat.split("wait ")[1].split()[0])
+    assert 5.0 <= wait < 25.0                 # of 20 and 5

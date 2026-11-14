@@ -2,8 +2,8 @@
 
 A line logged once a second (logger ``puikit.backends._frame_stats``, INFO):
 
-    draw 41.5/s new 30.6 | ui 29.6/s 18.6ms | render 24.7ms | present 0.4ms max 0.6 |
-    inflight 0.88 max 1 | gpu 11.8ms | pipe nogil
+    draw 41.5/s new 30.6 | ui 29.6/s 18.6ms | render 24.7ms | lat 27.1ms max 40.2 wait 1.8 |
+    present 0.4ms max 0.6 | inflight 0.88 max 1 | gpu 11.8ms | pipe nogil
 
 - ``draw``: frames presented per second; ``new``: those showing a display list
   the previous frame had not (an animated background repaints the same list).
@@ -12,6 +12,11 @@ A line logged once a second (logger ``puikit.backends._frame_stats``, INFO):
 - ``render``: median time of one frame on the thread that draws it, from the
   start of ``_render`` to the last EndDraw (Present excluded). Wall time, so
   a wait inside it (the render lock, the driver) counts.
+- ``lat``: median and worst time from ``present()`` of a display list to the
+  end of the Present that first shows it, and ``wait``, the median part of it
+  before the frame started drawing (the hand-over: WM_PAINT's place in the
+  queue, the render thread finishing the frame before). A list replaced
+  before any frame drew it is not counted (``ui`` minus ``new`` says how many).
 - ``present``: median and worst time in Present. It returns at once unless the
   queue of frames waiting for the GPU is full, so a GPU that limits the frame
   rate shows here first.
@@ -180,21 +185,41 @@ class FrameStats:
         self._present: list[float] = []
         self._inflight: list[int] = []
         self._last_front: int | None = None
+        self._presented: dict[int, float] = {}
+        self._latency: list[float] = []
+        self._wait: list[float] = []
         self._since = time.perf_counter()
         self.text = f"measuring... | {self._mode} {self._gil}"
 
     def ui_begin(self) -> None:
         self._ui_start = time.perf_counter()
 
-    def ui_end(self) -> None:
+    def ui_end(self, front: Any = None) -> None:
+        """The UI thread presented ``front``: end its draw pass, and note when
+        it was presented for the latency to the screen."""
+        now = time.perf_counter()
         start, self._ui_start = self._ui_start, None
-        if start is not None:
-            with self._lock:
-                self._ui.append((time.perf_counter() - start) * 1000.0)
+        with self._lock:
+            if start is not None:
+                self._ui.append((now - start) * 1000.0)
+            if front is not None:
+                presented = self._presented
+                if len(presented) > 64:   # lists replaced before a frame drew them
+                    presented.clear()
+                presented[id(front)] = now
 
     def frame(self, front: Any, render_ms: float, gpu_ms: list[float], gpu_note: str = "",
-              present_ms: float | None = None, inflight: int | None = None) -> None:
+              present_ms: float | None = None, inflight: int | None = None,
+              started: float | None = None) -> None:
+        """A frame drew ``front`` and has been presented; ``started`` is when
+        it began (perf_counter), for the hand-over's share of the latency."""
+        now = time.perf_counter()
         with self._lock:
+            presented = self._presented.pop(id(front), None)
+            if presented is not None:
+                self._latency.append((now - presented) * 1000.0)
+                if started is not None:
+                    self._wait.append(max(0.0, started - presented) * 1000.0)
             self._frames += 1
             if id(front) != self._last_front:
                 self._new += 1
@@ -205,18 +230,20 @@ class FrameStats:
                 self._present.append(present_ms)
             if inflight is not None:
                 self._inflight.append(inflight)
-            now = time.perf_counter()
             span = now - self._since
             if span < self.WINDOW:
                 return
             ui, render, gpu = self._ui, self._render, self._gpu
             present, inflight = self._present, self._inflight
+            latency, wait = self._latency, self._wait
 
             def med(values: list[float]) -> str:
                 return f"{statistics.median(values):.1f}ms" if values else "-"
 
             self.text = (f"draw {self._frames / span:.1f}/s new {self._new / span:.1f} | "
                          f"ui {len(ui) / span:.1f}/s {med(ui)} | render {med(render)} | "
+                         f"lat {med(latency)} max {max(latency, default=0):.1f} "
+                         f"wait {statistics.median(wait) if wait else 0:.1f} | "
                          f"present {med(present)} max {max(present, default=0):.1f} | "
                          f"inflight {sum(inflight) / len(inflight) if inflight else 0:.2f} max {max(inflight, default=0)} | "
                          f"gpu {med(gpu) if gpu else ('- ' + gpu_note).strip()} | {self._mode} {self._gil}")
@@ -224,4 +251,5 @@ class FrameStats:
             self._frames = self._new = 0
             self._ui, self._render, self._gpu = [], [], []
             self._present, self._inflight = [], []
+            self._latency, self._wait = [], []
             self._since = now

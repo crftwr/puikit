@@ -26,7 +26,7 @@ from puikit.font import Font, FontWeight  # noqa: E402
 from puikit.backends._image_cache import MISS  # noqa: E402
 from puikit.image import source_key  # noqa: E402
 from puikit.backends.windows_backend import (  # noqa: E402
-    Animation, WindowsBackend, _drop_shadow_params, _glow_matrix, _text_shadow_batches,
+    Animation, WindowsBackend, _drop_shadow_params, _glow_matrix,
     _roll_band_top, _roll_falloff, _tint_matrix,
 )
 from puikit.backends import _win32_native as native  # noqa: E402
@@ -1279,34 +1279,12 @@ def test_drop_shadow_params_grow_and_cap():
     # Pure mapping, mirroring the roll-helper coverage above.
     assert _drop_shadow_params(0.0) is None          # off at/below zero
     assert _drop_shadow_params(-1.0) is None
-    dx, dy, peak, sigma = _drop_shadow_params(0.6)
+    dx, dy, peak = _drop_shadow_params(0.6)
     assert dy > dx > 0                               # offset down-right, deeper than wide
-    assert sigma == pytest.approx(0.6 * 1.6 / 2)     # NSShadow's blur radius, halved
     assert peak == pytest.approx(min(0.6, 0.2 + 0.6 * 0.45))
-    dx2, dy2, peak2, sigma2 = _drop_shadow_params(1.0)   # a deeper shadow spreads further
-    assert dx2 > dx and dy2 > dy and sigma2 > sigma
+    dx2, dy2, peak2 = _drop_shadow_params(1.0)       # a deeper shadow reaches further
+    assert dx2 > dx and dy2 > dy
     assert peak2 == pytest.approx(0.6)               # and its alpha saturates at the cap
-
-
-def test_text_shadow_batches_are_runs_of_text():
-    # One shadow per run of consecutive text commands; any other command ends
-    # the run, and a text with a background of its own starts a new one (its
-    # shadow must land on that background, not under it).
-    plain, boxed = Style(fg=(1, 1, 1)), Style(fg=(1, 1, 1), bg=(9, 9, 9))
-    front = [
-        ("fill", 0, 0, 4, 1, plain),
-        ("text", 0, 0, "a", plain), ("text", 1, 0, "b", plain),
-        ("clip_push", 0, 0, 9, 9),
-        ("text", 0, 1, "c", plain), ("text", 1, 1, "d", boxed), ("text", 2, 1, "e", plain),
-        ("clip_pop",),
-    ]
-    batches = _text_shadow_batches(front)
-    assert [(i, [c[3] for c in cmds]) for i, cmds in batches] == [
-        (1, ["a", "b"]), (4, ["c"]), (5, ["d", "e"])]
-    # A reversed style paints its fg as a background.
-    from puikit.backend import TextAttribute
-    rev = Style(fg=(1, 1, 1), attr=TextAttribute.REVERSE)
-    assert len(_text_shadow_batches([("text", 0, 0, "a", plain), ("text", 1, 0, "b", rev)])) == 2
 
 
 def test_drop_shadow_only_effect_skips_the_composite_pass():
@@ -1322,39 +1300,79 @@ def test_drop_shadow_only_effect_skips_the_composite_pass():
     assert be._drop_shadow is None
 
 
-def test_drop_shadow_draws_each_run_once_more_and_only_when_it_changes(monkeypatch):
-    """The text drop shadow costs one silhouette per changed batch, not a
-    kernel of copies per glyph: the first frame draws each row twice (its
-    recorded silhouette and itself), an unchanged repaint once, and a frame
-    where one row changed re-records only that row's batch. A grid row is one
-    draw call (see test_a_grid_run_is_one_draw_call)."""
+def _settled(backend):
+    """Wait out the render thread's paint from open(), if there is one."""
+    if backend._render_thread is not None:
+        assert backend._render_thread.wait_idle()
+
+
+def test_drop_shadow_draws_each_run_once_more_offset_under_itself(monkeypatch):
+    """xefm#901: the text drop shadow is one more draw of each run, offset
+    down-right by the shadow's offset and drawn first, so it lies under the
+    run - not a recorded, blurred silhouette per batch of text. A repaint of
+    the same list (a background tick) draws no text at all: the UI layer is
+    reused. A grid row is one draw call (see test_a_grid_run_is_one_draw_call)."""
     backend = WindowsBackend(width=40, height=16, title="puikit-text-shadow-test")
     backend.open()
+    _settled(backend)
     calls = []
-    real_text, real_layout = native.rt_draw_text, native.rt_draw_text_layout
-    monkeypatch.setattr(native, "rt_draw_text",
-                        lambda *a: (calls.append(a[1]), real_text(*a))[1])
+    real_layout = native.rt_draw_text_layout
     monkeypatch.setattr(native, "rt_draw_text_layout",
-                        lambda rt, x, y, layout, brush, *o: (calls.append(round(y)), real_layout(rt, x, y, layout, brush, *o))[1])
+                        lambda rt, x, y, layout, brush, *o: (calls.append((x, y)), real_layout(rt, x, y, layout, brush, *o))[1])
     try:
         backend.set_post_effect(PostEffect(drop_shadow=0.6))
+        backend.clear()
+        for y, text in enumerate(("abc", "de")):
+            backend.draw_box(0, y, 20, 1, hints={"fill": True}, style=Style(bg=(200, 210, 190)))
+            backend.draw_text(1, y, text, style=Style(fg=(22, 32, 22)))
+        backend.present()
+        calls.clear()
+        backend._render()
+        assert len(calls) == 4                     # each row: its shadow, then itself
+        dx, dy, _peak = backend._drop_shadow
+        s = backend._dpi_scale
+        for (sx, sy), (x, y) in (calls[0:2], calls[2:4]):
+            assert (sx, sy) == pytest.approx((x + dx * s, y + dy * s))
+        calls.clear()
+        backend._render()
+        assert calls == []                          # the UI layer, drawn again
+        backend.set_post_effect(None)
+        backend._render()
+        assert len(calls) == 2                      # no shadow: each row once
+    finally:
+        backend.close()
 
-        def frame(rows):
-            backend.clear()
-            for y, (text, bg) in enumerate(rows):
-                if bg is not None:
-                    backend.draw_box(0, y, 20, 1, hints={"fill": True}, style=Style(bg=bg))
-                backend.draw_text(1, y, text, style=Style(fg=(22, 32, 22)))
-            backend.present()
-            calls.clear()
-            backend._render()
-            return len(calls)
 
-        rows = [("abc", (200, 210, 190)), ("de", (200, 210, 190))]
-        assert frame(rows) == 4                    # two silhouettes, two rows
-        assert frame(rows) == 2                    # silhouettes kept
-        rows[1] = ("xy", (200, 210, 190))
-        assert frame(rows) == 3                    # one silhouette re-recorded
+def test_the_ui_layer_is_kept_until_the_list_changes(monkeypatch):
+    """xefm#901: the display list is drawn into an offscreen bitmap once, and a
+    frame that does not change it (a background tick) draws that bitmap; a new
+    list, or a resize, draws the layer again."""
+    backend = WindowsBackend(width=40, height=16, title="puikit-ui-layer-test")
+    backend.open()
+    _settled(backend)
+    passes = []
+    real = backend._render_display_list
+    monkeypatch.setattr(backend, "_render_display_list",
+                        lambda now, front=None: (passes.append(front), real(now, front))[1])
+    try:
+        backend.clear()
+        backend.draw_text(1, 1, "hello")
+        backend.present()
+        backend._render()
+        backend._render()
+        assert len(passes) == 1
+        layer = backend._ui_layer_bitmap
+        assert layer is not None and backend._ui_cache is layer
+        backend.clear()
+        backend.draw_text(1, 1, "world")
+        backend.present()
+        backend._render()
+        assert len(passes) == 2
+        assert backend._ui_layer_bitmap is layer    # the same bitmap, drawn over
+        backend._recreate_render_target()
+        backend._render()
+        assert len(passes) == 3                      # a new device, a new layer
+        assert backend._ui_layer_bitmap is not layer
     finally:
         backend.close()
 
@@ -1389,8 +1407,8 @@ def test_a_grid_run_is_one_draw_call_on_the_grid(monkeypatch):
 
 def test_render_with_drop_shadow_effect():
     """The real draw path for the Segment LCD look: text (grid and flow fonts)
-    drawn over its recorded, blurred silhouette against a live swap chain. A
-    wrong offset or a missing brush reset would fault or fail EndDraw here."""
+    drawn over its offset copy against a live swap chain. A wrong offset or a
+    missing brush reset would fault or fail EndDraw here."""
     backend = WindowsBackend(width=40, height=16, title="puikit-lcd-test")
     backend.open()
     try:
@@ -1402,7 +1420,7 @@ def test_render_with_drop_shadow_effect():
         backend.draw_text(1, 3, "segment", style=Style(                   # flow path
             fg=(22, 32, 22), font=Font(family="Consolas", size=16)))
         backend.present()
-        backend._render()   # records the silhouettes, blurs and draws them
+        backend._render()   # draws each run's shadow copy, then the run
     finally:
         backend.close()
 
@@ -2437,26 +2455,42 @@ def test_grid_plans_are_bounded(monkeypatch):
     assert [key[0] for key in backend._grid_plans] == ["row 2", "row 3", "row 4"]
 
 
-def test_the_brush_colour_is_set_only_when_it_changes(monkeypatch):
-    """puikit#203: SetColor runs for a new colour only, and a new brush forgets
-    the colour the old one held."""
-    backend = WindowsBackend(width=40, height=10, title="puikit-brush-key-test")
+def test_a_brush_is_made_once_per_colour(monkeypatch):
+    """xefm#901: each (colour, alpha) gets a brush of its own, made on first
+    use and kept, so switching colours costs no SetColor; a new render target
+    starts the table again, and a table grown past _BRUSH_CACHE (an alpha that
+    animated) is emptied between frames."""
+    from puikit.backends import windows_backend as wb
+    backend = WindowsBackend(width=40, height=10, title="puikit-brush-table-test")
     backend.open()
-    if backend._render_thread is not None:   # open()'s paint sets the brush too
-        assert backend._render_thread.wait_idle()
-    sets = []
-    real = native.brush_set_color
-    monkeypatch.setattr(native, "brush_set_color", lambda brush, colour: (sets.append(1), real(brush, colour)))
+    _settled(backend)
+    made, sets = [], []
+    real_make, real_set = native.rt_create_solid_color_brush, native.brush_set_color
+    monkeypatch.setattr(native, "rt_create_solid_color_brush",
+                        lambda rt, colour: (made.append(1), real_make(rt, colour))[1])
+    monkeypatch.setattr(native, "brush_set_color", lambda brush, colour: (sets.append(1), real_set(brush, colour)))
     try:
+        backend._drop_brushes()
         backend._set_brush((10, 20, 30))
+        first = backend._brush
         backend._set_brush((10, 20, 30))
-        assert len(sets) == 1
+        assert len(made) == 1
         backend._set_brush((10, 20, 30), 0.5)
+        assert backend._brush is not first and len(made) == 2
+        backend._set_brush((10, 20, 30))
+        assert backend._brush is first and len(made) == 2
         backend._set_brush((10, 20, 30, 128))
-        assert len(sets) == 3
+        assert len(made) == 3
+        assert sets == []
         backend._recreate_render_target()
-        backend._set_brush((10, 20, 30, 128))
-        assert len(sets) == 4
+        assert backend._brushes == {}
+        backend._set_brush((10, 20, 30))
+        assert backend._brush is not first
+        monkeypatch.setattr(wb, "_BRUSH_CACHE", 4)
+        for i in range(5):
+            backend._set_brush((10, 20, 30), i / 10)
+        backend._render()
+        assert len(backend._brushes) <= 4
     finally:
         backend.close()
 

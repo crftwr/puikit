@@ -2070,6 +2070,28 @@ def dc_create_command_list(dc: ComPtr) -> ComPtr:
     return ComPtr(out.value or 0)
 
 
+_IDX_DC_CREATE_BITMAP = 57
+
+
+def dc_create_target_bitmap(dc: ComPtr, width: int, height: int) -> ComPtr:
+    """A premultiplied BGRA bitmap the device context can draw into (and then
+    draw from): an offscreen layer, kept on the GPU."""
+    props = D2D1_BITMAP_PROPERTIES1(
+        D2D1_PIXEL_FORMAT(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.0, 96.0, D2D1_BITMAP_OPTIONS_TARGET, None,
+    )
+    out = ctypes.c_void_p()
+    hr = dc.call(
+        _IDX_DC_CREATE_BITMAP, ctypes.c_int32,
+        [D2D1_SIZE_U, ctypes.c_void_p, ctypes.c_uint32,
+         ctypes.POINTER(D2D1_BITMAP_PROPERTIES1), ctypes.POINTER(ctypes.c_void_p)],
+        D2D1_SIZE_U(max(1, width), max(1, height)), None, 0, ctypes.byref(props), ctypes.byref(out),
+    )
+    if not hresult_ok(hr):
+        raise OSError(f"ID2D1DeviceContext.CreateBitmap failed: 0x{hr & 0xFFFFFFFF:08x}")
+    return ComPtr(out.value or 0)
+
+
 def command_list_close(command_list: ComPtr) -> None:
     hr = command_list.call(_IDX_COMMAND_LIST_CLOSE, ctypes.c_int32, [])
     if not hresult_ok(hr):

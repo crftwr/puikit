@@ -72,13 +72,27 @@ so a third thread's `EndDraw` would stall the next frame's ② anyway.
 `Present` returns at once (sync interval 0) unless the GPU's queue is full,
 and in the measurements above it never was: the GPU is not what limits the
 frame rate there, the render thread's CPU time is. Submitting the shader
-background with an early `Flush` was tried and changed nothing.
+background with an early `Flush` was tried and changed nothing. What did cut
+that time is drawing less: the UI layer (§9), a brush per colour (§3) and the
+offset text shadow ([`post_effects.md`](post_effects.md) §3). By hand under
+Shinagawa in a wider window, they took the render thread's frame from about 30
+ms to 20, and the frames drawn from about 30 a second to 50. New frames stayed
+at the key repeat's 30.
 
 `PUIKIT_FPS=1` logs a line a second (`_frame_stats.py`) to check this on a
 machine: frames drawn and new, the UI pass, the render thread's time, the
-time in `Present`, frames still on the GPU, and the GPU's own time from
-timestamp queries where the driver gives them (the VMware adapter reports
-every interval disjoint, so it shows none).
+latency from `present()` to the Present that shows the list, the time in
+`Present`, frames still on the GPU, and the GPU's own time from timestamp
+queries where the driver gives them (the VMware adapter reports every
+interval disjoint, so it shows none).
+
+The hand-over goes through `WM_PAINT`, which Windows delivers only after
+input and posted messages. With a key held, a list could have waited there
+while the render thread idled. Measured, it does not: from `present()` to
+the frame starting took 0.1-0.2 ms, and the latency was the frame's own
+draw time (about 19 ms, Down and PageDown held, xefm#901). A `present()` that
+asked the render thread directly was tried and measured the same, so the
+paint message stays the one path.
 
 What keeps the two threads apart:
 
@@ -91,10 +105,10 @@ What keeps the two threads apart:
   `_window_scope` has scoped) is a thread-local, so while the UI thread
   handles a popup's messages the render thread still sees the main window's
   list and size.
-- **The recorded command list is checked, not dropped.** Without a render
-  thread `present()` releases `_ui_cache`; with one, the render thread may be
-  replaying it right then, so the recording remembers the list it came from
-  and `_acquire_ui_cache` re-records when that is not the list being drawn.
+- **The UI layer is checked, not dropped.** Without a render thread
+  `present()` marks the layer (§9) stale; with one, the render thread may be
+  drawing it right then, so the layer remembers the list it holds and
+  `_acquire_ui_cache` draws it again when that is not the list being drawn.
 - **One lock for everything else.** The render thread draws holding
   `RenderThread.lock` (reentrant). The UI thread takes it, through
   `_exclusive()` or the `_holds_render_lock` decorator, around whatever
@@ -221,9 +235,13 @@ things take that Python cost out, and none changes what is drawn:
   were three ctypes round trips on every call, about 700 calls a frame
   (puikit#203). Functions bound to one slot are shared between objects of an
   interface (`_bound_cache`), and `release` drops the pointer's own.
-- **`_set_brush` skips `SetColor`** when the brush already holds that colour
-  and alpha. Rows come in long runs of one colour. Only `_set_brush` sets the
-  shared brush's colour, and a new brush starts with no key.
+- **A brush per colour.** `_set_brush` keeps a solid brush for each colour and
+  alpha it is asked for (up to `_BRUSH_CACHE`) and only points `_brush` at it,
+  so switching colour costs no `SetColor`; a run of one colour does not even
+  look the brush up. It used to re-colour one shared brush, a few hundred
+  `SetColor` calls a frame on a file list (about 1.5 ms in the ARM VM,
+  xefm#901). The table goes with the render target, and is emptied between
+  frames if an animating alpha has grown it past the limit.
 - **Attribute bits are tested on an int.** `style.attr & TextAttribute.BOLD`
   goes through the enum's Python-level `__and__`; `_render_text` and the font
   resolvers convert `style.attr` once and test module-level ints.
@@ -275,8 +293,8 @@ picture comes out at the size it is shown, converts, turns it upright and
 premultiplies. The worker uses a WIC factory of its own (`wic_thread_factory`),
 because COM apartments are per thread. The UI thread only copies the finished
 buffer into an `ID2D1Bitmap` (`rt_create_bitmap_from_premultiplied`), since the
-bitmap belongs to the render target. A result that arrives late invalidates
-the recorded command list and repaints every window. Measured in the ARM VM on
+bitmap belongs to the render target. A result that arrives late marks the UI
+layer (§9) stale and repaints every window. Measured in the ARM VM on
 a 6000x4000 photo, the UI thread went from 2.2 s (JPEG) and 3.0 s (PNG) to
 under 30 ms.
 
@@ -413,6 +431,28 @@ Two forced differences from Metal:
   bitmap and draws as the frame's backdrop (`_render_shader_backdrop`). The
   texture is created on the backend's **own** D3D device precisely so D2D can
   wrap it with no copy.
+
+**The UI layer** keeps the rest of the macOS arrangement. There the view's
+backing store stays put while the shader layer behind it advances; here the
+display list is drawn into an offscreen bitmap (`_acquire_ui_cache`, a
+premultiplied `D2D1_BITMAP_OPTIONS_TARGET` bitmap at the client size), and
+every frame draws the backdrop and then that bitmap with one `DrawImage`. The
+layer is drawn again only when the list changes, a transition is running
+(the pass then depends on the time), or the target or DPI changes.
+
+It replaced a recorded `ID2D1CommandList`. Replaying a command list re-runs
+every draw in it, text and blurs included, so a background-only tick still
+cost most of a full pass. Measured in the ARM VM (2400x2000, Shinagawa, a flat
+file list), a tick fell from about 12 ms to 1.5. A frame with a new list costs
+the same as before: the replay's work had only moved from `EndDraw` into the
+draw calls. Details in xefm#901.
+
+Text in the layer is grayscale-antialiased. ClearType needs the pixels under
+a glyph, and the layer is transparent. The swap-chain target is premultiplied
+and was getting grayscale text already: a readback of the default mode
+matched forced grayscale pixel for pixel. The device context now asks for
+grayscale outright, so a transition frame, drawn straight into the frame,
+matches the layer. macOS has drawn grayscale text since 10.14.
 
 The `background_shader` capability is declared only when the shader-compile path
 is actually usable (`HAVE_D3D_SHADER` — `d3dcompiler` present), the same gate
