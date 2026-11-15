@@ -129,6 +129,11 @@ class Widget:
     #: source). Only ``TextEdit``/``ComboBox`` set this True.
     wants_text_input = False
 
+    #: Whether this widget, while it is the focused leaf, receives Tab and
+    #: Shift+Tab as ordinary keys instead of the Panel walking focus with them.
+    #: Only ``TerminalView`` sets it (prototype, xefm#900).
+    captures_tab = False
+
     def draw(self, ctx: DrawContext) -> None:
         """Draw the widget into its assigned rectangle."""
 

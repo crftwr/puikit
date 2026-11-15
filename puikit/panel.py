@@ -3179,7 +3179,12 @@ class Panel:
         # Tab / Shift+Tab walk the whole focus tree from the root, crossing
         # container boundaries and wrapping at the ends — one mechanism instead
         # of each container cycling on its own.
-        if event.type is EventType.KEY and event.key == "tab":
+        # A focused leaf that declares ``captures_tab`` (a terminal, where Tab is
+        # completion) takes Tab itself; focus then leaves it by mouse or by a
+        # key the app reserves (prototype, xefm#900).
+        if event.type is EventType.KEY and event.key == "tab" and not getattr(
+            self.focused_leaf(), "captures_tab", False
+        ):
             return self.focus_tab(-1 if "shift" in event.modifiers else 1)
 
         if event.type in (
