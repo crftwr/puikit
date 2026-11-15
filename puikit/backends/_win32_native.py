@@ -164,6 +164,7 @@ D2D1_DRAW_TEXT_OPTIONS_CLIP = 0x00000002
 DWRITE_MEASURING_MODE_NATURAL = 0
 DWRITE_WORD_WRAPPING_NO_WRAP = 1
 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE = 0
+D2D1_ANTIALIAS_MODE_ALIASED = 1
 
 D2D1_LAYER_OPTIONS_NONE = 0
 
@@ -320,6 +321,7 @@ _IDX_RT_POP_LAYER = 41
 _IDX_RT_PUSH_AXIS_ALIGNED_CLIP = 45
 _IDX_RT_POP_AXIS_ALIGNED_CLIP = 46
 _IDX_RT_CLEAR = 47
+_IDX_RT_FLUSH = 42
 _IDX_RT_BEGIN_DRAW = 48
 _IDX_RT_END_DRAW = 49
 _IDX_RT_GET_SIZE = 53
@@ -431,17 +433,23 @@ dwrite.DWriteCreateFactory.argtypes = [
 ]
 
 D2D1_FACTORY_TYPE_SINGLE_THREADED = 0
+D2D1_FACTORY_TYPE_MULTI_THREADED = 1
 DWRITE_FACTORY_TYPE_SHARED = 0
 
 
-def create_d2d_factory() -> ComPtr:
+def create_d2d_factory(multithreaded: bool = False) -> ComPtr:
     """An ID2D1Factory1 (not the plain ID2D1Factory the IID name suggests):
     everything this backend used the classic factory for still works
     unchanged (Factory1 is a strict superset), and CreateDeviceContext's
     device chain (create_d2d_device_context, below) additionally needs the
-    Factory1-only CreateDevice method on this same object."""
+    Factory1-only CreateDevice method on this same object.
+
+    ``multithreaded``: the backend draws on a render thread of its own
+    (_render_thread.py) while the UI thread may still create resources, so
+    Direct2D serializes access to the factory and its devices itself."""
     out = ctypes.c_void_p()
-    hr = d2d1.D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, ctypes.byref(IID_ID2D1Factory1), None, ctypes.byref(out))
+    kind = D2D1_FACTORY_TYPE_MULTI_THREADED if multithreaded else D2D1_FACTORY_TYPE_SINGLE_THREADED
+    hr = d2d1.D2D1CreateFactory(kind, ctypes.byref(IID_ID2D1Factory1), None, ctypes.byref(out))
     if not hresult_ok(hr):
         raise OSError(f"D2D1CreateFactory failed: 0x{hr & 0xFFFFFFFF:08x}")
     return ComPtr(out.value or 0)
@@ -536,6 +544,13 @@ def rt_begin_draw(rt: ComPtr) -> None:
 def rt_end_draw(rt: ComPtr) -> int:
     return rt.call(_IDX_RT_END_DRAW, ctypes.c_int32, [ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_uint64)], None, None)
 
+
+
+def rt_flush(rt: ComPtr) -> int:
+    """ID2D1RenderTarget::Flush: queue the batch's draws for the GPU and keep
+    the batch open (its clips, layers and transform stay). It does not wait
+    for the GPU. Returns the HRESULT."""
+    return rt.call(_IDX_RT_FLUSH, ctypes.c_int32, [ctypes.c_void_p, ctypes.c_void_p], None, None)
 
 def rt_clear(rt: ComPtr, color: D2D1_COLOR_F) -> None:
     rt.call(_IDX_RT_CLEAR, None, [ctypes.POINTER(D2D1_COLOR_F)], ctypes.byref(color))
@@ -984,6 +999,7 @@ WIC_DECODE_METADATA_CACHE_ON_DEMAND = 0
 WIC_BITMAP_DITHER_TYPE_NONE = 0
 WIC_BITMAP_PALETTE_TYPE_CUSTOM = 0
 DXGI_FORMAT_B8G8R8A8_UNORM = 87
+DXGI_FORMAT_A8_UNORM = 65
 D2D1_ALPHA_MODE_PREMULTIPLIED = 1
 D2D1_ALPHA_MODE_STRAIGHT = 2
 D2D1_BITMAP_INTERPOLATION_MODE_LINEAR = 1
@@ -1677,6 +1693,22 @@ def _rt_create_bitmap(rt: ComPtr, premultiplied: bytes, width: int, height: int)
     return ComPtr(out.value)
 
 
+_IDX_RT_FILL_OPACITY_MASK = 25
+
+
+def rt_fill_opacity_mask(rt: ComPtr, mask: ComPtr, brush: ComPtr, dest_rect: "D2D1_RECT_F",
+                         source_rect: "D2D1_RECT_F") -> None:
+    """ID2D1RenderTarget::FillOpacityMask[25]: paint ``brush`` through the
+    alpha of ``mask``'s ``source_rect`` into ``dest_rect``. Direct2D requires
+    the aliased antialias mode while it is called."""
+    rt.call(
+        _IDX_RT_FILL_OPACITY_MASK, None,
+        [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32,
+         ctypes.POINTER(D2D1_RECT_F), ctypes.POINTER(D2D1_RECT_F)],
+        mask.addr, brush.addr, 0, ctypes.byref(dest_rect), ctypes.byref(source_rect),
+    )
+
+
 def rt_draw_bitmap(
     rt: ComPtr,
     bitmap: ComPtr,
@@ -1828,14 +1860,18 @@ def com_query_interface(ptr: ComPtr, iid: GUID) -> ComPtr:
     return ComPtr(out.value or 0)
 
 
-def create_d3d11_device() -> ComPtr:
+def create_d3d11_device(multithreaded: bool = False) -> ComPtr:
     """A hardware ID3D11Device with BGRA support (required for D2D interop),
     falling back to the WARP software rasterizer if no real adapter is
     available -- D3D11CreateDevice can fail to find one in some
     virtualized/RDP environments (this project already special-cases VM
     rendering behavior elsewhere, see swapchain_present below). Single-
-    threaded: this backend only ever renders from one thread."""
-    flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_SINGLETHREADED
+    threaded unless ``multithreaded``: without a render thread this backend
+    only ever renders from one thread; with one (_render_thread.py), the UI
+    thread still resizes the swap chain and builds resources on it."""
+    flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT
+    if not multithreaded:
+        flags |= D3D11_CREATE_DEVICE_SINGLETHREADED
 
     def _try(driver_type: int) -> tuple[int, ctypes.c_void_p]:
         dev = ctypes.c_void_p()
@@ -1887,6 +1923,20 @@ def create_d2d_device_context(factory1: ComPtr, d3d_device: ComPtr) -> tuple[Com
         return d2d_device, ComPtr(out.value or 0)
     finally:
         dxgi_device.release()
+
+
+def d2d_device_create_context(d2d_device: ComPtr) -> ComPtr:
+    """Another ID2D1DeviceContext on ``d2d_device``: it shares the device's
+    resources (bitmaps, brushes, effects) with the first, and keeps a batch of
+    its own, so it can draw into a bitmap while the other is mid-batch."""
+    out = ctypes.c_void_p()
+    hr = d2d_device.call(
+        _IDX_DEVICE_CREATE_DEVICE_CONTEXT, ctypes.c_int32,
+        [ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)], D2D1_DEVICE_CONTEXT_OPTIONS_NONE, ctypes.byref(out),
+    )
+    if not hresult_ok(hr):
+        raise OSError(f"ID2D1Device.CreateDeviceContext failed: 0x{hr & 0xFFFFFFFF:08x}")
+    return ComPtr(out.value or 0)
 
 
 # --- IDXGIFactory2 (adds, after IDXGIObject[0-6]/IDXGIFactory[7-11]/
@@ -2057,6 +2107,30 @@ def dc_create_command_list(dc: ComPtr) -> ComPtr:
     hr = dc.call(_IDX_DC_CREATE_COMMAND_LIST, ctypes.c_int32, [ctypes.POINTER(ctypes.c_void_p)], ctypes.byref(out))
     if not hresult_ok(hr):
         raise OSError(f"CreateCommandList failed: 0x{hr & 0xFFFFFFFF:08x}")
+    return ComPtr(out.value or 0)
+
+
+_IDX_DC_CREATE_BITMAP = 57
+
+
+def dc_create_target_bitmap(dc: ComPtr, width: int, height: int, alpha_only: bool = False) -> ComPtr:
+    """A premultiplied BGRA bitmap the device context can draw into (and then
+    draw from): an offscreen layer, kept on the GPU. ``alpha_only``: an A8
+    bitmap instead, a quarter the size, for a mask (rt_fill_opacity_mask)."""
+    props = D2D1_BITMAP_PROPERTIES1(
+        D2D1_PIXEL_FORMAT(DXGI_FORMAT_A8_UNORM if alpha_only else DXGI_FORMAT_B8G8R8A8_UNORM,
+                          D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.0, 96.0, D2D1_BITMAP_OPTIONS_TARGET, None,
+    )
+    out = ctypes.c_void_p()
+    hr = dc.call(
+        _IDX_DC_CREATE_BITMAP, ctypes.c_int32,
+        [D2D1_SIZE_U, ctypes.c_void_p, ctypes.c_uint32,
+         ctypes.POINTER(D2D1_BITMAP_PROPERTIES1), ctypes.POINTER(ctypes.c_void_p)],
+        D2D1_SIZE_U(max(1, width), max(1, height)), None, 0, ctypes.byref(props), ctypes.byref(out),
+    )
+    if not hresult_ok(hr):
+        raise OSError(f"ID2D1DeviceContext.CreateBitmap failed: 0x{hr & 0xFFFFFFFF:08x}")
     return ComPtr(out.value or 0)
 
 

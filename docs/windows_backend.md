@@ -33,6 +33,95 @@ Window messages arrive at a module-level `_global_wndproc`, which looks the
 `_handle_message`. Cross-thread work is posted back to the UI thread as
 `_WM_CALL_ON_MAIN_THREAD` (`WM_APP + 1`).
 
+### The render thread (frame pipeline)
+
+A frame has three stages: the widgets' `draw()` build the display list (①),
+`_render` replays it into Direct2D (②), and `EndDraw` + `Present` flush it to
+the GPU (③). By default all three run one after another on the UI thread, so
+a frame costs their sum. With the **render thread**
+(`_render_thread.py`), `WM_PAINT` only hands the presented list over and
+returns; the render thread runs ② and ③ while the UI thread goes back to the
+queue and builds the next list. A burst of frames (a key held down) then
+runs at the pace of the slower side instead of the sum. A frame asked for
+while the thread is idle starts at once, so a single key press waits no
+longer than before; requests that arrive during a frame fold into one more
+frame of the newest list.
+
+`PUIKIT_RENDER_THREAD=1` turns it on, `0` off. Unset, it is on only on a
+free-threaded Python, where the two threads really run at the same time; on
+a GIL build they would take turns at the interpreter. The choice is made
+when the backend is created, because the Direct2D factory is then made
+multi-threaded and the D3D device without `SINGLETHREADED`.
+
+Measured in an ARM Windows VM (x64 Python, a flat view of thousands of files
+at font size 8, PageDown held at 30 Hz under an animated background): on
+3.15t the frames that show new content went from about 16 a second to about
+20, and the median key lag from about 30 ms to 0. Each replay costs more
+while the UI thread runs beside it (about 45 ms against 25), so the gain is
+the overlap, not a faster replay. On the 3.14 GIL build the same pipeline
+made replays three to seven times slower, which is why it stays off there.
+By hand on the same VM under the Shinagawa background, 3.15t went from about
+19 new frames a second to 31 (the key repeat's limit), while the sequential
+GIL and free-threaded builds were alike at about 20: the gain is the
+pipeline, which needs the GIL off.
+
+② and ③ share the thread rather than taking one each. Most of ③ is
+`EndDraw`, Direct2D turning its batch into D3D commands on the CPU, and a
+multi-threaded factory serializes every call on its objects under one lock,
+so a third thread's `EndDraw` would stall the next frame's ② anyway.
+`Present` returns at once (sync interval 0) unless the GPU's queue is full,
+and in the measurements above it never was: the GPU is not what limits the
+frame rate there, the render thread's CPU time is. Submitting the shader
+background with an early `Flush` was tried and changed nothing. What did cut
+that time is drawing less: the UI bitmap (§9), a brush per colour (§3) and a
+cheaper text shadow (§3, "The text drop shadow"). By hand under Shinagawa in
+a wider window, the first three took the render thread's frame from about 30
+ms to 20, and the frames drawn from about 30 a second to 50. New frames stayed
+at the key repeat's 30.
+
+`PUIKIT_FPS=1` logs a line a second (`_frame_stats.py`) to check this on a
+machine: frames drawn and new, the UI pass, the render thread's time, the
+latency from `present()` to the Present that shows the list, the time in
+`Present`, frames still on the GPU, and the GPU's own time from timestamp
+queries where the driver gives them (the VMware adapter reports every
+interval disjoint, so it shows none).
+
+The hand-over goes through `WM_PAINT`, which Windows delivers only after
+input and posted messages. With a key held, a list could have waited there
+while the render thread idled. Measured, it does not: from `present()` to
+the frame starting took 0.1-0.2 ms, and the latency was the frame's own
+draw time (about 19 ms, Down and PageDown held, xefm#901). A `present()` that
+asked the render thread directly was tried and measured the same, so the
+paint message stays the one path.
+
+What keeps the two threads apart:
+
+- **The display list is the hand-over.** `present()` swaps in a fresh `_back`
+  and never appends to a presented list again, so the render thread reads
+  `_front` without a copy. `_render` takes the list once at its start and
+  passes it down (`_prepare_shadows`, `_acquire_ui_cache`,
+  `_render_display_list`).
+- **The window scope is per thread.** `_active_win` (which secondary window
+  `_window_scope` has scoped) is a thread-local, so while the UI thread
+  handles a popup's messages the render thread still sees the main window's
+  list and size.
+- **The UI bitmap is checked, not dropped.** Without a render thread
+  `present()` marks the layer (§9) stale; with one, the render thread may be
+  drawing it right then, so the layer remembers the list it holds and
+  `_acquire_ui_cache` draws it again when that is not the list being drawn.
+- **One lock for everything else.** The render thread draws holding
+  `RenderThread.lock` (reentrant). The UI thread takes it, through
+  `_exclusive()` or the `_holds_render_lock` decorator, around whatever
+  changes what a frame reads and does not swap atomically: the swap chain on
+  `WM_SIZE`, the text formats on a DPI or base-font change, the effect chain
+  and the background, the image cache (a decoded picture arriving, dead
+  rasters drained), a secondary window's render, screen marks. A direct
+  `_render()` call holds it too.
+- **Text formats are created once.** `_resolve_style_font` is check-then-create
+  on both threads (measuring on one, drawing on the other); `_format_lock`
+  stops two creations racing, which would leak a format and key caches by an
+  address then freed.
+
 ---
 
 ## 2. COM by vtable index, not by declared interface
@@ -135,6 +224,68 @@ a frame, the layouts built a frame from 113 to about one, and a held key's
 list stopped 0.15–0.5 s after release instead of 1.5 s. The panes' pixels
 were the same before and after. Details in xefm#866.
 
+### The text drop shadow
+
+macOS draws a theme's `drop_shadow` with the glyphs (an `NSShadow`
+attribute); Direct2D has no per-draw shadow. Each run of text (consecutive
+text commands, broken by any other command and by a text with a background of
+its own; `_text_shadow_runs`) is drawn once, into a text buffer: a
+transparent bitmap the size of the window (`_TextBuffer`).
+
+1. Before the frame opens a batch, `_prepare_text_shadows` draws the list's
+   runs into the buffer, as many as fit (a page, `_pack_text_page`; the rest
+   below), packed in rows (tallest first), each in a slot of
+   its own, in one batch of the buffer's own device context (a second
+   context on the same Direct2D device; it shares the bitmaps and brushes).
+   Then that context blurs the whole buffer once, through a `GaussianBlur`
+   and a `ColorMatrix` that keeps only alpha times the shadow's peak, into an
+   alpha-only (A8) bitmap of the same size: every run's shadow at once.
+2. Where a run stands in the display list, the frame draws its own
+   background, then its shadow (`FillOpacityMask` of its slot of the A8
+   bitmap, black, at the shadow's offset, clipped to the run's rect), then
+   the run out of its slot on top (`_shadow_run`). All of it lands under the
+   clip, transform and group opacity in force at the run, so the shadow keeps
+   its place in the display list.
+
+A run's rect (`_text_shadow_plan`) is its cells padded by the shadow's reach
+(offset plus three sigmas) and the glyphs' overhang, cut to the clip in force;
+without the cut, a file name past its pane's edge reaches into the other pane.
+The padding also keeps the blur of one slot from picking up the next.
+
+The runs go in before the frame because Direct2D flushes one context's batch
+whenever another context on the device draws. Drawing each run into the
+buffer as the frame reached it took a flush of both batches a run, about 7 ms
+a frame of a file list in the ARM VM; blurring each run in the frame (an
+effect draw a run) cost about 3 ms more than the one blur. None of this
+waits for the GPU: Direct2D queues a batch's draws when it flushes or ends,
+and the buffer's batches end before the frame's begins. Measured in the ARM
+VM at 2400x2000 (Shinagawa, a frame with a new file list), the shadow costs
+about 3-4 ms over none (8.5-10.5 ms against 5.7-6.3).
+
+A list whose runs do not fit in the buffer at once (a dialog over the file
+list, or a cursor row splitting a pane's run, can make the runs together
+larger than the window) is drawn in pages. At the first run the page does
+not hold, the frame flushes its batch, which queues its reads of the page so
+far, and the buffer is filled again from that run on, blurred again in one
+pass (`_pack_text_page`); a secondary window's list starts that way. So there
+is no limit past which the shadow changes, and a list that does not fit
+costs a flush and a blur a page, not a run. The buffer's batches always end
+before the frame draws what they drew: an earlier version drew each run that
+did not fit as the frame reached it, with the buffer's batch left open, and
+the frame then read slots still holding the runs drawn there before (file
+names landed on other rows, xefm#901).
+
+The two bitmaps (the window's size, 5 bytes a pixel together: about 24 MB
+at 2400x2000) exist only while a shadow is on: `set_post_effect` releases
+them when the shadow goes, as does device loss, and they grow to the largest
+window drawn. The runs are kept while the list is, so a background tick or a
+transition draws nothing into them. Blits under a fractional transform (a
+transition) are resampled, which softens the text for those frames.
+
+Two earlier versions drew the text twice: a recorded silhouette per run, each
+through its own blur (over half of a scrolling frame, xefm#901), and then an
+unblurred offset copy.
+
 ### The Python side of a draw call
 
 With the layouts kept, the Direct2D pass is mostly Python, not Direct2D: in
@@ -146,9 +297,23 @@ things take that Python cost out, and none changes what is drawn:
   were three ctypes round trips on every call, about 700 calls a frame
   (puikit#203). Functions bound to one slot are shared between objects of an
   interface (`_bound_cache`), and `release` drops the pointer's own.
-- **`_set_brush` skips `SetColor`** when the brush already holds that colour
-  and alpha. Rows come in long runs of one colour. Only `_set_brush` sets the
-  shared brush's colour, and a new brush starts with no key.
+- **A brush per colour.** `_set_brush` keeps a solid brush for each colour and
+  alpha it is asked for (up to `_BRUSH_CACHE`) and only points `_brush` at it,
+  so switching colour costs no `SetColor`; a run of one colour does not even
+  look the brush up. It used to re-colour one shared brush, a few hundred
+  `SetColor` calls a frame on a file list (about 1.5 ms in the ARM VM,
+  xefm#901). The table goes with the render target, and is emptied between
+  frames if an animating alpha has grown it past the limit.
+- **A font resolves by identity first.** Every text command looks its font
+  up (`_resolve_style_font`, `_resolve_style_cjk_font`, and for a grid run its
+  baselines, `_grid_run_fonts`), and the lookup by value hashes the `Font`, a
+  dataclass whose enum fields hash in Python, several times a command: about a
+  tenth of a file list's pass (xefm#901). A widget's `Font` is usually one
+  long-lived object, so `_font_by_identity` finds it by `id()` first; the
+  entry holds the `Font`, so the id cannot be reused while it lives, and is
+  checked against it anyway. Emptied wherever the formats go. A flow run also
+  measures its width and line height only when a background or a rule needs
+  them.
 - **Attribute bits are tested on an int.** `style.attr & TextAttribute.BOLD`
   goes through the enum's Python-level `__and__`; `_render_text` and the font
   resolvers convert `style.attr` once and test module-level ints.
@@ -200,8 +365,8 @@ picture comes out at the size it is shown, converts, turns it upright and
 premultiplies. The worker uses a WIC factory of its own (`wic_thread_factory`),
 because COM apartments are per thread. The UI thread only copies the finished
 buffer into an `ID2D1Bitmap` (`rt_create_bitmap_from_premultiplied`), since the
-bitmap belongs to the render target. A result that arrives late invalidates
-the recorded command list and repaints every window. Measured in the ARM VM on
+bitmap belongs to the render target. A result that arrives late marks the UI
+layer (§9) stale and repaints every window. Measured in the ARM VM on
 a 6000x4000 photo, the UI thread went from 2.2 s (JPEG) and 3.0 s (PNG) to
 under 30 ms.
 
@@ -338,6 +503,28 @@ Two forced differences from Metal:
   bitmap and draws as the frame's backdrop (`_render_shader_backdrop`). The
   texture is created on the backend's **own** D3D device precisely so D2D can
   wrap it with no copy.
+
+**The UI bitmap** keeps the rest of the macOS arrangement. There the view's
+backing store stays put while the shader layer behind it advances; here the
+display list is drawn into an offscreen bitmap (`_acquire_ui_cache`, a
+premultiplied `D2D1_BITMAP_OPTIONS_TARGET` bitmap at the client size), and
+every frame draws the backdrop and then that bitmap with one `DrawImage`. The
+layer is drawn again only when the list changes, a transition is running
+(the pass then depends on the time), or the target or DPI changes.
+
+It replaced a recorded `ID2D1CommandList`. Replaying a command list re-runs
+every draw in it, text and blurs included, so a background-only tick still
+cost most of a full pass. Measured in the ARM VM (2400x2000, Shinagawa, a flat
+file list), a tick fell from about 12 ms to 1.5. A frame with a new list costs
+the same as before: the replay's work had only moved from `EndDraw` into the
+draw calls. Details in xefm#901.
+
+Text in the layer is grayscale-antialiased. ClearType needs the pixels under
+a glyph, and the layer is transparent. The swap-chain target is premultiplied
+and was getting grayscale text already: a readback of the default mode
+matched forced grayscale pixel for pixel. The device context now asks for
+grayscale outright, so a transition frame, drawn straight into the frame,
+matches the layer. macOS has drawn grayscale text since 10.14.
 
 The `background_shader` capability is declared only when the shader-compile path
 is actually usable (`HAVE_D3D_SHADER` — `d3dcompiler` present), the same gate

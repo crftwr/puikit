@@ -74,13 +74,19 @@ rectangular shadows read as ugly boxes. A grid backend (no sub-pixel offset)
 ignores it.
 
 macOS draws it with the glyphs (an `NSShadow` attribute). Direct2D has no
-per-draw shadow, so the Windows backend records each run of consecutive text
-commands as a silhouette — offset, in the shadow's colour — before the frame,
-and draws it through a Gaussian blur (σ = half the `NSShadow` blur radius)
-under the run's first command. A silhouette is kept while its run is
-unchanged, so a repaint costs one extra glyph draw only for the rows that
-changed. A text command with its own background starts a new run, so the
-shadow lands on that background, not under it.
+per-draw shadow, so the Windows backend draws each run of text (consecutive
+text commands) once into a transparent buffer, and where the run stands in the
+frame draws the buffer's blurred alpha in the shadow's colour, offset, then
+the run itself on top. The blur matches the `NSShadow` one (σ is half its
+radius), and the shadow keeps its place in the display list: over the run's
+own background, under what comes after, inside the clip. A theme without a
+shadow makes no buffer. The details are in
+[`windows_backend.md`](windows_backend.md) §3.
+
+The stand-ins before it drew the text twice. A recorded silhouette per run,
+each through its own blur, was over half of a scrolling frame (xefm#901, about
+15 ms of 28 in the ARM VM); an unblurred offset copy cost about 8 and lost the
+blur.
 
 **`without_motion()` defines what "motion" means, once.** Under reduced motion a
 backend composites `effect.without_motion()`, which drops only `flicker` and
