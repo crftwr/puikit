@@ -141,7 +141,8 @@ class GpuWatch:
         start, end = command.GPUStartTime(), command.GPUEndTime()
         gpu_ms = (end - start) * 1000.0 if end > start else 0.0
         if command.status() != Metal.MTLCommandBufferStatusError:
-            self._history.append(gpu_ms)
+            with self._lock:               # list(self._history) below copies it
+                self._history.append(gpu_ms)
             return
         with self._lock:
             self.failures += 1

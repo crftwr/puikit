@@ -1057,7 +1057,7 @@ class WebBackend(Backend):
         with self._tick_lock:
             if callback not in self._tick_callbacks:
                 self._tick_callbacks.append(callback)
-        self._ensure_ticker()
+            self._ensure_ticker()
 
     # 30 fps: smooth enough for a spinner / caret blink / geometry transition,
     # but half the full-frame re-render + WebSocket traffic of 60 fps — a
@@ -1066,7 +1066,10 @@ class WebBackend(Backend):
     _TICK_INTERVAL = 1 / 30.0
 
     def _ensure_ticker(self) -> None:
-        if self._ticker is not None and self._ticker.is_alive():
+        # Under _tick_lock, which _tick_loop holds when it decides to exit and
+        # clears _ticker: a ticker still alive but on its way out would
+        # otherwise take no new callback, and the animation would freeze.
+        if self._ticker is not None:
             return
         self._ticker = threading.Thread(target=self._tick_loop, daemon=True)
         self._ticker.start()
@@ -1079,6 +1082,7 @@ class WebBackend(Backend):
         while not self._quit:
             with self._tick_lock:
                 if not self._tick_callbacks:
+                    self._ticker = None
                     return
             self._queue.put(_TICK)
             time.sleep(self._TICK_INTERVAL)
