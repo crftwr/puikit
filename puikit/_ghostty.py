@@ -59,6 +59,7 @@ RS_DATA_COLORS = 19
 RS_OPT_DIRTY = 1
 ROW_DATA_DIRTY = 1
 ROW_DATA_CELLS = 3
+ROW_DATA_CELLS_RAW = 5
 ROW_OPT_DIRTY = 1
 CELL_RAW = 1
 CELL_STYLE = 2
@@ -67,6 +68,7 @@ CELL_FG = 6
 CELL_HAS_STYLING = 8
 CELL_UTF8 = 9
 CELL_DATA_WIDE = 3
+CONTENT_CODEPOINT, CONTENT_GRAPHEME, CONTENT_BG_PALETTE, CONTENT_BG_RGB = 0, 1, 2, 3
 WIDE_NARROW, WIDE_WIDE, WIDE_SPACER_TAIL, WIDE_SPACER_HEAD = 0, 1, 2, 3
 
 STYLE_BOLD = 1 << 0
@@ -165,6 +167,10 @@ class _ScrollValue(C.Union):
                 ("delta_prompt", C.c_ssize_t), ("_padding", C.c_uint64 * 2)]
 
 
+class CellsView(C.Structure):
+    _fields_ = [("ptr", C.POINTER(C.c_uint64)), ("len", C.c_size_t)]
+
+
 class ScrollViewport(C.Structure):
     _fields_ = [("tag", C.c_int), ("value", _ScrollValue)]
 
@@ -203,6 +209,8 @@ def _bind(lib) -> None:
     _sig(lib, "ghostty_render_state_row_cells_free", None, _H)
     _sig(lib, "ghostty_render_state_row_cells_next", B, _H)
     _sig(lib, "ghostty_render_state_row_cells_get", R, _H, I, P)
+    _sig(lib, "ghostty_render_state_row_cells_select", R, _H, C.c_uint16)
+    _sig(lib, "ghostty_type_json", C.c_char_p)
     _sig(lib, "ghostty_render_state_row_cells_get_multi", R, _H, C.c_size_t,
          C.POINTER(C.c_int), C.POINTER(C.c_void_p), C.POINTER(C.c_size_t))
     _sig(lib, "ghostty_cell_get", R, C.c_uint64, I, P)
@@ -220,6 +228,44 @@ def _bind(lib) -> None:
     _sig(lib, "ghostty_key_event_set_consumed_mods", R, _H, C.c_uint16)
     _sig(lib, "ghostty_key_event_set_utf8", R, _H, GString)
     _sig(lib, "ghostty_key_event_set_unshifted_codepoint", R, _H, C.c_uint32)
+
+
+@dataclass(frozen=True)
+class CellLayout:
+    """Bit positions of the packed GhosttyCell fields this binding decodes,
+    read from the library's own manifest (``ghostty_type_json``) — the header
+    says hard-coding them is unsupported."""
+
+    tag: tuple[int, int]
+    codepoint: tuple[int, int]   # within the cell, lsb already offset
+    palette: tuple[int, int]
+    rgb: tuple[int, int]
+    style_id: tuple[int, int]
+    wide: tuple[int, int]
+
+
+def cell_layout(lib) -> CellLayout | None:
+    import json
+    try:
+        bits = json.loads(lib.ghostty_type_json())["types"]["GhosttyCell"]["bits"]
+        content = bits["content"]
+        base = content["lsb"]
+        arms = content["arms"]
+
+        def field(f, off=0):
+            return (f["lsb"] + off, (1 << f["width"]) - 1)
+
+        return CellLayout(
+            tag=field(bits["content_tag"]),
+            codepoint=field(arms["CODEPOINT"]["bits"]["codepoint"], base),
+            palette=field(arms["BG_COLOR_PALETTE"]["bits"]["index"], base),
+            rgb=(arms["BG_COLOR_RGB"]["bits"]["r"]["lsb"] + base, 0xFFFFFF),
+            style_id=field(bits["style_id"]),
+            wide=field(bits["wide"]),
+        )
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        log.warning("libghostty cell manifest unreadable (%s); using the slow path", exc)
+        return None
 
 
 # --- loading ----------------------------------------------------------------------
@@ -349,6 +395,8 @@ class Terminal:
         self._wide = C.c_int()
         self.row_cache: list[list[Cell]] = [[] for _ in range(rows)]
         self.stats_rows_rebuilt = 0
+        self._layout = cell_layout(lib)
+        self._view = CellsView()
 
     @staticmethod
     def _check(res: int, what: str) -> None:
@@ -446,7 +494,8 @@ class Terminal:
             while lib.ghostty_render_state_row_iterator_next(self._rows_it):
                 lib.ghostty_render_state_row_get(self._rows_it, ROW_DATA_DIRTY, C.byref(row_dirty))
                 if (full or row_dirty.value) and y < len(self.row_cache):
-                    self.row_cache[y] = self._build_row()
+                    self.row_cache[y] = (self._build_row_fast(colors) if self._layout
+                                         else self._build_row())
                     rebuilt += 1
                     lib.ghostty_render_state_row_set(self._rows_it, ROW_OPT_DIRTY, C.byref(false))
                 y += 1
@@ -454,6 +503,109 @@ class Terminal:
             lib.ghostty_render_state_set(self._rs, RS_OPT_DIRTY, C.byref(clean))
         self.stats_rows_rebuilt += rebuilt
         return rebuilt, cursor, colors
+
+    def _build_row_fast(self, colors: "RenderColors") -> list[Cell]:
+        """The row from one bulk read of its packed cells, decoded here.
+
+        libghostty is asked again only once per distinct style in the row
+        (its resolved colours and flags) and for multi-codepoint graphemes;
+        everything else — text, width, cell-carried background — comes out
+        of the 64-bit values. Style ids are only meaningful within a page, so
+        the style cache lives for one row."""
+        lib = self._lib
+        L = self._layout
+        if lib.ghostty_render_state_row_get(self._rows_it, ROW_DATA_CELLS_RAW,
+                                            C.byref(self._view)) != SUCCESS:
+            return self._build_row()
+        n = self._view.len
+        raw = C.string_at(self._view.ptr, n * 8)
+        import array
+        values = array.array("Q")
+        values.frombytes(raw)
+        cells = self._cells
+        have_cells = False
+        styles: dict[int, tuple] = {}
+        rgb = self._rgb
+        style = self._style
+        palette = colors.palette
+        t_sh, t_m = L.tag
+        c_sh, c_m = L.codepoint
+        p_sh, p_m = L.palette
+        r_sh = L.rgb[0]
+        s_sh, s_m = L.style_id
+        w_sh, w_m = L.wide
+        runs: list[Cell] = []
+        texts: list[str] = []      # pending narrow run text, joined at the end
+        cur: Cell | None = None
+        for col, v in enumerate(values):
+            wide = (v >> w_sh) & w_m
+            if wide >= WIDE_SPACER_TAIL:
+                continue
+            tag = (v >> t_sh) & t_m
+            sid = (v >> s_sh) & s_m
+            fg = bg = None
+            flags = 0
+            if sid:
+                look = styles.get(sid)
+                if look is None:
+                    if not have_cells:
+                        lib.ghostty_render_state_row_get(self._rows_it, ROW_DATA_CELLS, C.byref(cells))
+                        have_cells = True
+                    lib.ghostty_render_state_row_cells_select(cells, col)
+                    lib.ghostty_render_state_row_cells_get(cells, CELL_STYLE, C.byref(style))
+                    f = b = None
+                    if lib.ghostty_render_state_row_cells_get(cells, CELL_FG, C.byref(rgb)) == SUCCESS:
+                        f = rgb.tuple()
+                    if lib.ghostty_render_state_row_cells_get(cells, CELL_BG, C.byref(rgb)) == SUCCESS:
+                        b = rgb.tuple()
+                    look = styles[sid] = (f, b, style.flags)
+                fg, bg, flags = look
+            if tag == CONTENT_CODEPOINT:
+                cp = (v >> c_sh) & c_m
+                text = chr(cp) if cp else " "
+            elif tag == CONTENT_GRAPHEME:
+                if not have_cells:
+                    lib.ghostty_render_state_row_get(self._rows_it, ROW_DATA_CELLS, C.byref(cells))
+                    have_cells = True
+                lib.ghostty_render_state_row_cells_select(cells, col)
+                self._buf.cap = 64
+                if lib.ghostty_render_state_row_cells_get(cells, CELL_UTF8, C.byref(self._buf)) == SUCCESS:
+                    text = bytes(self._utf8[: self._buf.len]).decode("utf-8", "replace")
+                else:
+                    text = "\ufffd"
+            else:
+                text = " "
+                if tag == CONTENT_BG_PALETTE:
+                    bg = palette[(v >> p_sh) & p_m].tuple()
+                else:
+                    c = (v >> r_sh) & 0xFFFFFF
+                    bg = (c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF)
+            if wide == WIDE_WIDE:
+                if cur is not None:
+                    cur.text = "".join(texts)
+                    cur = None
+                runs.append(Cell(col, text, 2, fg, bg, flags, wide=True))
+                continue
+            if cur is not None and cur.fg == fg and cur.bg == bg and cur.flags == flags \
+                    and cur.col + cur.width == col:
+                texts.append(text)
+                cur.width += 1
+            else:
+                if cur is not None:
+                    cur.text = "".join(texts)
+                cur = Cell(col, "", 1, fg, bg, flags)
+                texts = [text]
+                runs.append(cur)
+        if cur is not None:
+            cur.text = "".join(texts)
+        while runs and not runs[-1].wide and runs[-1].bg is None and not runs[-1].flags:
+            stripped = runs[-1].text.rstrip(" ")
+            if stripped:
+                runs[-1].width -= len(runs[-1].text) - len(stripped)
+                runs[-1].text = stripped
+                break
+            runs.pop()
+        return runs
 
     def _build_row(self) -> list[Cell]:
         lib = self._lib
