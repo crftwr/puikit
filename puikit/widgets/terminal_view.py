@@ -34,6 +34,7 @@ from ..event import Event, EventType
 from ..font import Font
 from ..panel import DrawContext
 from ..text import display_width
+from . import _cell_glyphs
 from .base import Widget
 
 
@@ -88,6 +89,11 @@ class TerminalView(Widget):
         self._preedit = ""
         self._preedit_caret = 0
         self._glyph_w: dict[str, float] = {}
+        self._cw = 1.0
+        self._pitch = 1.0
+        self._scroll_acc = 0.0          # sub-row trackpad scroll not yet sent
+        self._mouse_button: int | None = None   # button the program saw pressed
+        self._mouse_up_at = 0.0
         self._exit_pending: Callable[[], None] | None = None
         self._gen = 0  # bumps per child, so a dead child's late exit is ignored
         # Prototype instrumentation, shown by the demo page.
@@ -217,6 +223,7 @@ class TerminalView(Widget):
         pitch = ctx.line_height(mono) or 1.0
         cw = (ctx.measure_text("M" * 16, mono) / 16) or 1.0
         self._cw = cw
+        self._pitch = pitch
         w_units, h_units = ctx.size_units
         cols = max(2, int(w_units / cw + 1e-6))
         rows = max(2, int(h_units / pitch + 1e-6))
@@ -238,11 +245,29 @@ class TerminalView(Widget):
         t1 = time.perf_counter()
         dfg = colors.foreground.tuple()
         dbg = colors.background.tuple()
-        ctx.fill_rect(0, 0, w_units, h_units, Style(bg=dbg))
+        # Over an animated / image background (ctx.wallpaper) the terminal's
+        # default background is left unpainted so the scene shows through, the
+        # way the host's own panes do; cells with a colour of their own still
+        # fill. Elsewhere the page is the terminal's background colour.
+        reveal = ctx.wallpaper
+        page_bg = None if reveal else dbg
+        if not reveal:
+            ctx.fill_rect(0, 0, w_units, h_units, Style(bg=dbg))
+        # On pixel backends box drawing and block elements are drawn as shapes
+        # filling the cell; from the font they leave gaps between rows.
+        shapes = ctx.pixel_layout
+        bw, bh = ctx.base_size
+        px = (1.0 / bw if bw else 0.1, 1.0 / bh if bh else 0.05)
+        # The text system leaves a run of only spaces un-underlined (and puts a
+        # run's rule where its own glyphs say), so on pixel backends the
+        # underline is a rule drawn here, the same for every run in the row.
+        if shapes:
+            fm = ctx.font_metrics(mono)
+            ul_y = fm.ascent + max(px[1] * 1.5, fm.descent * 0.35)
         for y, runs in enumerate(self._term.row_cache):
             ty = y * pitch
             for run in runs:
-                style = self._style(run, dfg, dbg)
+                style = self._style(run, dfg, dbg, page_bg)
                 x = run.col * cw
                 if run.bg is not None or run.flags & G.STYLE_INVERSE:
                     ctx.fill_rect(x, ty, run.width * cw, pitch, Style(bg=style.bg))
@@ -253,7 +278,18 @@ class TerminalView(Widget):
                     if gw is None:
                         gw = self._glyph_w[run.text] = ctx.measure_text(run.text, style)
                     x += max(0.0, (2 * cw - gw) / 2)
-                ctx.draw_text(x, ty, run.text, style)
+                if shapes and run.flags & G.STYLE_UNDERLINE_MASK:
+                    thick = (run.flags & G.STYLE_UNDERLINE_MASK) >> G.STYLE_UNDERLINE_SHIFT >= 2
+                    ctx.fill_rect(run.col * cw, ty + ul_y, run.width * cw,
+                                  px[1] * (2 if thick else 1),
+                                  Style(bg=style.underline_color or style.fg))
+                    style = Style(fg=style.fg, bg=style.bg, font=style.font,
+                                  attr=style.attr & ~(TextAttribute.UNDERLINE
+                                                      | TextAttribute.UNDERLINE_THICK))
+                if shapes and _cell_glyphs.SPECIAL.search(run.text):
+                    self._draw_with_shapes(ctx, run, style, x, ty, cw, pitch, px, dbg)
+                else:
+                    ctx.draw_text(x, ty, run.text, style)
         self._draw_cursor(ctx, cursor, colors, pitch, cw, dfg, dbg)
         if self._exited is not False:
             msg = f" [process exited ({self._exited}) - {self.exit_hint}] "
@@ -267,7 +303,26 @@ class TerminalView(Widget):
         st["last_draw_ms"] = (t2 - t1) * 1000
 
     @staticmethod
-    def _style(run: G.Cell, dfg, dbg) -> Style:
+    def _draw_with_shapes(ctx, run, style, x, ty, cw, pitch, px, dbg) -> None:
+        """A run holding box-drawing / block glyphs: those drawn as shapes, the
+        text between them as text, each at its own column."""
+        start = 0
+        text = run.text
+        for m in _cell_glyphs.SPECIAL.finditer(text):
+            i = m.start()
+            if i > start:
+                ctx.draw_text(x + start * cw, ty, text[start:i], style)
+            # A shade mixes fg into the cell's background; a see-through cell
+            # (over a wallpaper) mixes into the terminal's own background.
+            if not _cell_glyphs.draw(ctx, text[i], x + i * cw, ty, cw, pitch,
+                                     style.fg, style.bg or dbg, px):
+                ctx.draw_text(x + i * cw, ty, text[i], style)
+            start = i + 1
+        if start < len(text):
+            ctx.draw_text(x + start * cw, ty, text[start:], style)
+
+    @staticmethod
+    def _style(run: G.Cell, dfg, dbg, page_bg=None) -> Style:
         f = run.flags
         fg = run.fg or dfg
         bg = run.bg
@@ -282,13 +337,18 @@ class TerminalView(Widget):
             attr |= TextAttribute.STRIKETHROUGH
         if f & G.STYLE_UNDERLINE_MASK:
             attr |= TextAttribute.UNDERLINE
+            # Double / curly / dotted / dashed: the one heavier rule PuiKit has.
+            if (f & G.STYLE_UNDERLINE_MASK) >> G.STYLE_UNDERLINE_SHIFT >= 2:
+                attr |= TextAttribute.UNDERLINE_THICK
         if f & G.STYLE_INVERSE:
             fg, bg = (bg or dbg), fg
         if f & G.STYLE_INVISIBLE:
             fg = bg or dbg
         # An explicit bg even when it is the default: on a character grid a None
-        # bg would inherit the pane surface, not the terminal's background.
-        return Style(fg=fg, bg=bg or dbg, attr=attr, font=_MONO)
+        # bg would inherit the pane surface, not the terminal's background. Over
+        # a wallpaper ``page_bg`` is None and default cells stay see-through.
+        return Style(fg=fg, bg=bg or page_bg, attr=attr, font=_MONO,
+                     underline_color=run.ul)
 
     def _char_at(self, x: int, y: int) -> tuple[str, G.Cell | None]:
         rows = self._term.row_cache if self._term else []
@@ -341,12 +401,11 @@ class TerminalView(Widget):
             self._preedit = event.hints.get("preedit", "")
             self._preedit_caret = event.hints.get("caret", len(self._preedit))
             return True
-        if event.type is EventType.MOUSE_SCROLL:
-            if self._term is not None and not self._term.mouse_tracking():
-                self._term.scroll(-3 * event.scroll)
+        if event.type in (EventType.MOUSE_SCROLL, EventType.MOUSE_DOWN, EventType.MOUSE_UP,
+                          EventType.MOUSE_DRAG, EventType.MOUSE_CLICK):
+            if self._term is not None and self._exited is False:
+                self._mouse(event)
             return True
-        if event.type in (EventType.MOUSE_DOWN, EventType.MOUSE_CLICK, EventType.MOUSE_UP):
-            return True  # focus is taken by the Panel; selection is not built yet
         if event.type is not EventType.KEY:
             return False
         if self._exited is not False:
@@ -366,6 +425,71 @@ class TerminalView(Widget):
         if data:
             self.send(data)
         return True
+
+    _BUTTONS = {"left": G.MOUSE_LEFT, "right": G.MOUSE_RIGHT, "middle": G.MOUSE_MIDDLE}
+
+    def _mouse(self, event: Event) -> None:
+        """A program that turned on mouse tracking gets presses, releases,
+        drags and the wheel, encoded in the mode and format it asked for;
+        otherwise the wheel scrolls the scrollback and clicks only focus."""
+        term = self._term
+        assert term is not None
+        tracking = term.mouse_tracking()
+        if event.type is EventType.MOUSE_SCROLL:
+            if event.scroll:
+                rows = 3 * event.scroll
+            else:
+                self._scroll_acc += float(event.hints.get("scroll_units", 0.0)) / self._pitch
+                rows = int(self._scroll_acc)
+                self._scroll_acc -= rows
+            if not rows:
+                return
+            if not tracking:
+                term.scroll(-rows)
+                return
+            button = G.MOUSE_WHEEL_UP if rows > 0 else G.MOUSE_WHEEL_DOWN
+            data = b"".join(self._mouse_bytes(G.MOUSE_PRESS, button, event)
+                            for _ in range(min(abs(rows), 10)))
+            if data:
+                self.send_raw(data)
+            return
+        if not tracking:
+            return
+        button = self._BUTTONS.get(event.button or "left", G.MOUSE_LEFT)
+        if event.type is EventType.MOUSE_DOWN:
+            self._mouse_button = button
+            self.send_raw(self._mouse_bytes(G.MOUSE_PRESS, button, event))
+        elif event.type is EventType.MOUSE_UP:
+            self.send_raw(self._mouse_bytes(G.MOUSE_RELEASE, self._mouse_button or button, event))
+            self._mouse_button = None
+            self._mouse_up_at = time.monotonic()
+        elif event.type is EventType.MOUSE_DRAG:
+            self.send_raw(self._mouse_bytes(G.MOUSE_MOTION, self._mouse_button or button,
+                                            event, pressed=True))
+        elif event.type is EventType.MOUSE_CLICK:
+            # The Panel synthesizes a left click after the down/up already sent;
+            # right / middle (and a backend without press/release) arrive only
+            # as a click, so they become a press and a release here.
+            if button == G.MOUSE_LEFT and time.monotonic() - self._mouse_up_at < 0.5:
+                return
+            self.send_raw(self._mouse_bytes(G.MOUSE_PRESS, button, event)
+                          + self._mouse_bytes(G.MOUSE_RELEASE, button, event))
+
+    def _mouse_bytes(self, action: int, button: int, event: Event,
+                     pressed: bool = False) -> bytes:
+        mods = 0
+        for name, bit in _MODS.items():
+            if name in event.modifiers:
+                mods |= bit
+        col = max(0.0, (event.x or 0.0) / self._cw)
+        row = max(0.0, (event.y or 0.0) / self._pitch)
+        assert self._term is not None
+        return self._term.encode_mouse(action, button, col, row, mods, pressed)
+
+    def send_raw(self, data: bytes) -> None:
+        """Bytes to the program without moving the viewport (mouse reports)."""
+        if data and self._proc is not None and self._exited is False:
+            self._proc.write(data)
 
     def _encode(self, event: Event) -> bytes:
         key, char = event.key, event.char

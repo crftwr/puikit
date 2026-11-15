@@ -85,6 +85,16 @@ CURSOR_BAR, CURSOR_BLOCK, CURSOR_UNDERLINE, CURSOR_BLOCK_HOLLOW = 0, 1, 2, 3
 
 SCROLL_TOP, SCROLL_BOTTOM, SCROLL_DELTA = 0, 1, 2
 
+# --- mouse ----------------------------------------------------------------------
+MOUSE_PRESS, MOUSE_RELEASE, MOUSE_MOTION = 0, 1, 2
+MOUSE_LEFT, MOUSE_RIGHT, MOUSE_MIDDLE, MOUSE_WHEEL_UP, MOUSE_WHEEL_DOWN = 1, 2, 3, 4, 5
+MENC_OPT_SIZE = 3
+MENC_OPT_ANY_BUTTON_PRESSED = 4
+MENC_OPT_TRACK_LAST_CELL = 5
+#: The mouse encoder works in pixels; this binding hands it a virtual cell of
+#: this size and positions in cells times it, so no real pixel size is needed.
+_MCELL_W, _MCELL_H = 10, 20
+
 # --- keys -------------------------------------------------------------------------
 MODS_SHIFT = 1 << 0
 MODS_CTRL = 1 << 1
@@ -175,6 +185,18 @@ class ScrollViewport(C.Structure):
     _fields_ = [("tag", C.c_int), ("value", _ScrollValue)]
 
 
+class MousePosition(C.Structure):
+    _fields_ = [("x", C.c_float), ("y", C.c_float)]
+
+
+class MouseEncoderSize(C.Structure):
+    _fields_ = [("size", C.c_size_t), ("screen_width", C.c_uint32),
+                ("screen_height", C.c_uint32), ("cell_width", C.c_uint32),
+                ("cell_height", C.c_uint32), ("padding_top", C.c_uint32),
+                ("padding_bottom", C.c_uint32), ("padding_right", C.c_uint32),
+                ("padding_left", C.c_uint32)]
+
+
 _H = C.c_void_p  # every handle is an opaque pointer
 WritePtyFn = C.CFUNCTYPE(None, _H, C.c_void_p, C.POINTER(C.c_uint8), C.c_size_t)
 SimpleFn = C.CFUNCTYPE(None, _H, C.c_void_p)
@@ -228,6 +250,19 @@ def _bind(lib) -> None:
     _sig(lib, "ghostty_key_event_set_consumed_mods", R, _H, C.c_uint16)
     _sig(lib, "ghostty_key_event_set_utf8", R, _H, GString)
     _sig(lib, "ghostty_key_event_set_unshifted_codepoint", R, _H, C.c_uint32)
+    _sig(lib, "ghostty_mouse_encoder_new", R, P, C.POINTER(_H))
+    _sig(lib, "ghostty_mouse_encoder_free", None, _H)
+    _sig(lib, "ghostty_mouse_encoder_set", R, _H, I, P)
+    _sig(lib, "ghostty_mouse_encoder_set_from_terminal", R, _H, _H)
+    _sig(lib, "ghostty_mouse_encoder_encode", R, _H, _H, C.POINTER(C.c_uint8),
+         C.c_size_t, C.POINTER(C.c_size_t))
+    _sig(lib, "ghostty_mouse_event_new", R, P, C.POINTER(_H))
+    _sig(lib, "ghostty_mouse_event_free", None, _H)
+    _sig(lib, "ghostty_mouse_event_set_action", R, _H, I)
+    _sig(lib, "ghostty_mouse_event_set_button", R, _H, I)
+    _sig(lib, "ghostty_mouse_event_clear_button", R, _H)
+    _sig(lib, "ghostty_mouse_event_set_mods", R, _H, C.c_uint16)
+    _sig(lib, "ghostty_mouse_event_set_position", R, _H, MousePosition)
 
 
 @dataclass(frozen=True)
@@ -335,6 +370,7 @@ class Cell:
     bg: tuple[int, int, int] | None
     flags: int          # STYLE_* bits (underline folded into STYLE_UNDERLINE_MASK)
     wide: bool = False  # a single wide glyph drawn on its own
+    ul: tuple[int, int, int] | None = None  # underline colour (SGR 58), None = fg
 
 
 class Terminal:
@@ -363,6 +399,12 @@ class Terminal:
         self._check(lib.ghostty_key_encoder_new(None, C.byref(self._enc)), "key_encoder_new")
         self._kev = _H()
         self._check(lib.ghostty_key_event_new(None, C.byref(self._kev)), "key_event_new")
+        self._menc = _H()
+        self._check(lib.ghostty_mouse_encoder_new(None, C.byref(self._menc)), "mouse_encoder_new")
+        self._mev = _H()
+        self._check(lib.ghostty_mouse_event_new(None, C.byref(self._mev)), "mouse_event_new")
+        track = C.c_bool(True)
+        lib.ghostty_mouse_encoder_set(self._menc, MENC_OPT_TRACK_LAST_CELL, C.byref(track))
         alt = C.c_int(OPTION_AS_ALT_TRUE)
         lib.ghostty_key_encoder_set(self._enc, ENC_OPT_MACOS_OPTION_AS_ALT, C.byref(alt))
 
@@ -412,6 +454,8 @@ class Terminal:
     def close(self) -> None:
         lib = self._lib
         if self._h:
+            lib.ghostty_mouse_event_free(self._mev)
+            lib.ghostty_mouse_encoder_free(self._menc)
             lib.ghostty_key_event_free(self._kev)
             lib.ghostty_key_encoder_free(self._enc)
             lib.ghostty_render_state_row_cells_free(self._cells)
@@ -469,6 +513,33 @@ class Terminal:
             return b""
         return bytes(out[: n.value])
 
+    def encode_mouse(self, action: int, button: int | None, col: float, row: float,
+                     mods: int = 0, any_pressed: bool = False) -> bytes:
+        """Encode a mouse event at (``col``, ``row``) — cells, fractional — in
+        the tracking mode and format the running program asked for; empty when
+        it asked for none, or for none of this kind (motion without a button
+        in button-event mode)."""
+        lib = self._lib
+        enc, ev = self._menc, self._mev
+        lib.ghostty_mouse_encoder_set_from_terminal(enc, self._h)
+        size = MouseEncoderSize(C.sizeof(MouseEncoderSize), self.cols * _MCELL_W,
+                                self.rows * _MCELL_H, _MCELL_W, _MCELL_H, 0, 0, 0, 0)
+        lib.ghostty_mouse_encoder_set(enc, MENC_OPT_SIZE, C.byref(size))
+        pressed = C.c_bool(any_pressed)
+        lib.ghostty_mouse_encoder_set(enc, MENC_OPT_ANY_BUTTON_PRESSED, C.byref(pressed))
+        lib.ghostty_mouse_event_set_action(ev, action)
+        if button:
+            lib.ghostty_mouse_event_set_button(ev, button)
+        else:
+            lib.ghostty_mouse_event_clear_button(ev)
+        lib.ghostty_mouse_event_set_mods(ev, mods)
+        lib.ghostty_mouse_event_set_position(ev, MousePosition(col * _MCELL_W, row * _MCELL_H))
+        out = (C.c_uint8 * 64)()
+        n = C.c_size_t()
+        if lib.ghostty_mouse_encoder_encode(enc, ev, out, 64, C.byref(n)) != SUCCESS:
+            return b""
+        return bytes(out[: n.value])
+
     # --- rendering ---------------------------------------------------------------
     def update(self) -> tuple[int, RenderCursor, RenderColors]:
         """Snapshot the terminal and rebuild only the rows that changed.
@@ -482,6 +553,7 @@ class Terminal:
         cursor = RenderCursor()
         cursor.size = C.sizeof(RenderCursor)
         lib.ghostty_render_state_get(self._rs, RS_DATA_CURSOR, C.byref(cursor))
+        self._palette = colors.palette
         dirty = C.c_int()
         lib.ghostty_render_state_get(self._rs, RS_DATA_DIRTY, C.byref(dirty))
         rebuilt = 0
@@ -503,6 +575,15 @@ class Terminal:
             lib.ghostty_render_state_set(self._rs, RS_OPT_DIRTY, C.byref(clean))
         self.stats_rows_rebuilt += rebuilt
         return rebuilt, cursor, colors
+
+    @staticmethod
+    def _ul_color(style: "GStyle", palette) -> tuple[int, int, int] | None:
+        c = style.underline_color
+        if c.tag == 1:  # GHOSTTY_STYLE_COLOR_PALETTE
+            return palette[c.value.palette].tuple()
+        if c.tag == 2:  # GHOSTTY_STYLE_COLOR_RGB
+            return c.value.rgb.tuple()
+        return None
 
     def _build_row_fast(self, colors: "RenderColors") -> list[Cell]:
         """The row from one bulk read of its packed cells, decoded here.
@@ -543,7 +624,7 @@ class Terminal:
                 continue
             tag = (v >> t_sh) & t_m
             sid = (v >> s_sh) & s_m
-            fg = bg = None
+            fg = bg = ul = None
             flags = 0
             if sid:
                 look = styles.get(sid)
@@ -558,8 +639,8 @@ class Terminal:
                         f = rgb.tuple()
                     if lib.ghostty_render_state_row_cells_get(cells, CELL_BG, C.byref(rgb)) == SUCCESS:
                         b = rgb.tuple()
-                    look = styles[sid] = (f, b, style.flags)
-                fg, bg, flags = look
+                    look = styles[sid] = (f, b, style.flags, self._ul_color(style, palette))
+                fg, bg, flags, ul = look
             if tag == CONTENT_CODEPOINT:
                 cp = (v >> c_sh) & c_m
                 text = chr(cp) if cp else " "
@@ -584,16 +665,16 @@ class Terminal:
                 if cur is not None:
                     cur.text = "".join(texts)
                     cur = None
-                runs.append(Cell(col, text, 2, fg, bg, flags, wide=True))
+                runs.append(Cell(col, text, 2, fg, bg, flags, wide=True, ul=ul))
                 continue
             if cur is not None and cur.fg == fg and cur.bg == bg and cur.flags == flags \
-                    and cur.col + cur.width == col:
+                    and cur.ul == ul and cur.col + cur.width == col:
                 texts.append(text)
                 cur.width += 1
             else:
                 if cur is not None:
                     cur.text = "".join(texts)
-                cur = Cell(col, "", 1, fg, bg, flags)
+                cur = Cell(col, "", 1, fg, bg, flags, ul=ul)
                 texts = [text]
                 runs.append(cur)
         if cur is not None:
@@ -628,11 +709,12 @@ class Terminal:
             if wide in (WIDE_SPACER_TAIL, WIDE_SPACER_HEAD):
                 col += 1
                 continue
-            fg = bg = None
+            fg = bg = ul = None
             flags = 0
             if self._has_style.value:
                 lib.ghostty_render_state_row_cells_get(cells, CELL_STYLE, C.byref(style))
                 flags = style.flags
+                ul = self._ul_color(style, self._palette)
                 if lib.ghostty_render_state_row_cells_get(cells, CELL_FG, C.byref(rgb)) == SUCCESS:
                     fg = rgb.tuple()
             if lib.ghostty_render_state_row_cells_get(cells, CELL_BG, C.byref(rgb)) == SUCCESS:
@@ -641,16 +723,16 @@ class Terminal:
                 text = " "
             if wide == WIDE_WIDE:
                 # Its spacer tail follows as its own cell and adds the 2nd column.
-                runs.append(Cell(col, text, 2, fg, bg, flags, wide=True))
+                runs.append(Cell(col, text, 2, fg, bg, flags, wide=True, ul=ul))
                 cur = None
                 col += 1
                 continue
-            if cur is not None and (cur.fg, cur.bg, cur.flags) == (fg, bg, flags) \
+            if cur is not None and (cur.fg, cur.bg, cur.flags, cur.ul) == (fg, bg, flags, ul) \
                     and cur.col + cur.width == col:
                 cur.text += text
                 cur.width += 1
             else:
-                cur = Cell(col, text, 1, fg, bg, flags)
+                cur = Cell(col, text, 1, fg, bg, flags, ul=ul)
                 runs.append(cur)
             col += 1
         # Trailing blanks with no look of their own draw nothing.
