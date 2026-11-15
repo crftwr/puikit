@@ -73,9 +73,9 @@ so a third thread's `EndDraw` would stall the next frame's ② anyway.
 and in the measurements above it never was: the GPU is not what limits the
 frame rate there, the render thread's CPU time is. Submitting the shader
 background with an early `Flush` was tried and changed nothing. What did cut
-that time is drawing less: the UI layer (§9), a brush per colour (§3) and the
-offset text shadow ([`post_effects.md`](post_effects.md) §3). By hand under
-Shinagawa in a wider window, they took the render thread's frame from about 30
+that time is drawing less: the UI bitmap (§9), a brush per colour (§3) and a
+cheaper text shadow (§3, "The text drop shadow"). By hand under Shinagawa in
+a wider window, the first three took the render thread's frame from about 30
 ms to 20, and the frames drawn from about 30 a second to 50. New frames stayed
 at the key repeat's 30.
 
@@ -105,7 +105,7 @@ What keeps the two threads apart:
   `_window_scope` has scoped) is a thread-local, so while the UI thread
   handles a popup's messages the render thread still sees the main window's
   list and size.
-- **The UI layer is checked, not dropped.** Without a render thread
+- **The UI bitmap is checked, not dropped.** Without a render thread
   `present()` marks the layer (§9) stale; with one, the render thread may be
   drawing it right then, so the layer remembers the list it holds and
   `_acquire_ui_cache` draws it again when that is not the list being drawn.
@@ -224,6 +224,68 @@ a frame, the layouts built a frame from 113 to about one, and a held key's
 list stopped 0.15–0.5 s after release instead of 1.5 s. The panes' pixels
 were the same before and after. Details in xefm#866.
 
+### The text drop shadow
+
+macOS draws a theme's `drop_shadow` with the glyphs (an `NSShadow`
+attribute); Direct2D has no per-draw shadow. Each run of text (consecutive
+text commands, broken by any other command and by a text with a background of
+its own; `_text_shadow_runs`) is drawn once, into a text buffer: a
+transparent bitmap the size of the window (`_TextBuffer`).
+
+1. Before the frame opens a batch, `_prepare_text_shadows` draws the list's
+   runs into the buffer, as many as fit (a page, `_pack_text_page`; the rest
+   below), packed in rows (tallest first), each in a slot of
+   its own, in one batch of the buffer's own device context (a second
+   context on the same Direct2D device; it shares the bitmaps and brushes).
+   Then that context blurs the whole buffer once, through a `GaussianBlur`
+   and a `ColorMatrix` that keeps only alpha times the shadow's peak, into an
+   alpha-only (A8) bitmap of the same size: every run's shadow at once.
+2. Where a run stands in the display list, the frame draws its own
+   background, then its shadow (`FillOpacityMask` of its slot of the A8
+   bitmap, black, at the shadow's offset, clipped to the run's rect), then
+   the run out of its slot on top (`_shadow_run`). All of it lands under the
+   clip, transform and group opacity in force at the run, so the shadow keeps
+   its place in the display list.
+
+A run's rect (`_text_shadow_plan`) is its cells padded by the shadow's reach
+(offset plus three sigmas) and the glyphs' overhang, cut to the clip in force;
+without the cut, a file name past its pane's edge reaches into the other pane.
+The padding also keeps the blur of one slot from picking up the next.
+
+The runs go in before the frame because Direct2D flushes one context's batch
+whenever another context on the device draws. Drawing each run into the
+buffer as the frame reached it took a flush of both batches a run, about 7 ms
+a frame of a file list in the ARM VM; blurring each run in the frame (an
+effect draw a run) cost about 3 ms more than the one blur. None of this
+waits for the GPU: Direct2D queues a batch's draws when it flushes or ends,
+and the buffer's batches end before the frame's begins. Measured in the ARM
+VM at 2400x2000 (Shinagawa, a frame with a new file list), the shadow costs
+about 3-4 ms over none (8.5-10.5 ms against 5.7-6.3).
+
+A list whose runs do not fit in the buffer at once (a dialog over the file
+list, or a cursor row splitting a pane's run, can make the runs together
+larger than the window) is drawn in pages. At the first run the page does
+not hold, the frame flushes its batch, which queues its reads of the page so
+far, and the buffer is filled again from that run on, blurred again in one
+pass (`_pack_text_page`); a secondary window's list starts that way. So there
+is no limit past which the shadow changes, and a list that does not fit
+costs a flush and a blur a page, not a run. The buffer's batches always end
+before the frame draws what they drew: an earlier version drew each run that
+did not fit as the frame reached it, with the buffer's batch left open, and
+the frame then read slots still holding the runs drawn there before (file
+names landed on other rows, xefm#901).
+
+The two bitmaps (the window's size, 5 bytes a pixel together: about 24 MB
+at 2400x2000) exist only while a shadow is on: `set_post_effect` releases
+them when the shadow goes, as does device loss, and they grow to the largest
+window drawn. The runs are kept while the list is, so a background tick or a
+transition draws nothing into them. Blits under a fractional transform (a
+transition) are resampled, which softens the text for those frames.
+
+Two earlier versions drew the text twice: a recorded silhouette per run, each
+through its own blur (over half of a scrolling frame, xefm#901), and then an
+unblurred offset copy.
+
 ### The Python side of a draw call
 
 With the layouts kept, the Direct2D pass is mostly Python, not Direct2D: in
@@ -242,6 +304,16 @@ things take that Python cost out, and none changes what is drawn:
   `SetColor` calls a frame on a file list (about 1.5 ms in the ARM VM,
   xefm#901). The table goes with the render target, and is emptied between
   frames if an animating alpha has grown it past the limit.
+- **A font resolves by identity first.** Every text command looks its font
+  up (`_resolve_style_font`, `_resolve_style_cjk_font`, and for a grid run its
+  baselines, `_grid_run_fonts`), and the lookup by value hashes the `Font`, a
+  dataclass whose enum fields hash in Python, several times a command: about a
+  tenth of a file list's pass (xefm#901). A widget's `Font` is usually one
+  long-lived object, so `_font_by_identity` finds it by `id()` first; the
+  entry holds the `Font`, so the id cannot be reused while it lives, and is
+  checked against it anyway. Emptied wherever the formats go. A flow run also
+  measures its width and line height only when a background or a rule needs
+  them.
 - **Attribute bits are tested on an int.** `style.attr & TextAttribute.BOLD`
   goes through the enum's Python-level `__and__`; `_render_text` and the font
   resolvers convert `style.attr` once and test module-level ints.
@@ -432,7 +504,7 @@ Two forced differences from Metal:
   texture is created on the backend's **own** D3D device precisely so D2D can
   wrap it with no copy.
 
-**The UI layer** keeps the rest of the macOS arrangement. There the view's
+**The UI bitmap** keeps the rest of the macOS arrangement. There the view's
 backing store stays put while the shader layer behind it advances; here the
 display list is drawn into an offscreen bitmap (`_acquire_ui_cache`, a
 premultiplied `D2D1_BITMAP_OPTIONS_TARGET` bitmap at the client size), and

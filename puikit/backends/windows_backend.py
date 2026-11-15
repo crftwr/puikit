@@ -239,6 +239,9 @@ _FLOW_LAYOUT_CACHE = 4096
 _A_BOLD, _A_ITALIC = int(TextAttribute.BOLD), int(TextAttribute.ITALIC)
 _A_REVERSE, _A_DIM = int(TextAttribute.REVERSE), int(TextAttribute.DIM)
 _A_UNDERLINE, _A_STRIKE = int(TextAttribute.UNDERLINE), int(TextAttribute.STRIKETHROUGH)
+_A_BOLD_ITALIC = _A_BOLD | _A_ITALIC
+# Entries in _fonts_by_id before it starts over (see _font_by_identity).
+_FONTS_BY_ID_MAX = 256
 
 
 # PeekMessage ranges for input_pending: every key message, and the mouse
@@ -259,19 +262,94 @@ def _repeat_count(lparam: int) -> int:
     return max(1, lparam & 0xFFFF)
 
 
-def _drop_shadow_params(strength: float) -> "tuple[float, float, float] | None":
-    """Down-right offset ``(dx, dy)`` in dip and ``peak`` alpha for a text
-    ``drop_shadow`` of ``strength`` (0..1), or ``None`` when off — the
-    reflective-LCD "segments cast a shadow" look (see set_post_effect /
-    _offset_shadow). Both follow MacOSBackend._drop_shadow_ns: its offset and
-    color. Its NSShadow blur (``strength * 1.6`` pt radius) is left out - under
-    a pixel, see _offset_shadow. Pure, for unit tests. The dip values are
-    scaled by _dpi_scale at draw."""
+def _drop_shadow_params(strength: float) -> "tuple[float, float, float, float] | None":
+    """Down-right offset ``(dx, dy)``, ``peak`` alpha, and blur ``sigma`` (all dip
+    except the unitless alpha) for a text ``drop_shadow`` of ``strength`` (0..1),
+    or ``None`` when off — the reflective-LCD "segments cast a shadow" look (see
+    set_post_effect / _shadow_run). All three follow
+    MacOSBackend._drop_shadow_ns: its offset and color, and its NSShadow blur
+    radius (``strength * 1.6`` pt) as a Gaussian of half that deviation. Pure,
+    for unit tests. The dip values are scaled by _dpi_scale at draw."""
     if strength <= 0:
         return None
     depth = 0.6 + strength * 1.4                 # dip; grows with the strength
     peak = min(0.6, 0.2 + strength * 0.45)       # darker/denser as it deepens
-    return (depth * 0.5, depth, peak)            # offset down-right (y is down)
+    sigma = strength * 1.6 / 2.0                 # dip; NSShadow's blur radius / 2
+    return (depth * 0.5, depth, peak, sigma)     # offset down-right (y is down)
+
+
+def _text_shadow_runs(front: list) -> "list[tuple[int, int, tuple | None]]":
+    """The display list's text grouped for the drop shadow, as ``(ordinal of
+    the run's first text command, how many text commands it holds, the clip in
+    force)``, where the clip is the intersection of the ``clip_push`` rects
+    around it in base units ``(x0, y0, x1, y1)``, or None. A run is
+    consecutive ``text`` commands: it breaks at any other command (a fill, a
+    clip, a group boundary), so its shadow is drawn where the text was, over
+    what came before and under what comes after, and a text with a background
+    of its own starts a new one, so the shadow lands on that background. Pure,
+    for unit tests."""
+    runs: list = []
+    current: "list | None" = None
+    clips: list = []
+    ordinal = 0
+    for command in front:
+        kind = command[0]
+        if kind == "text":
+            if current is None or _text_bg(command[4]) is not None:
+                current = [ordinal, 0, clips[-1] if clips else None]
+                runs.append(current)
+            current[1] += 1
+            ordinal += 1
+            continue
+        current = None
+        if kind == "clip_push":
+            x, y, w, h = command[1:5]
+            rect = (x, y, x + w, y + h)
+            if clips:
+                outer = clips[-1]
+                rect = (max(rect[0], outer[0]), max(rect[1], outer[1]),
+                        min(rect[2], outer[2]), min(rect[3], outer[3]))
+            clips.append(rect)
+        elif kind == "clip_pop" and clips:
+            clips.pop()
+    return [(first, count, clip) for first, count, clip in runs]
+
+
+class _TextBuffer:
+    """The text drop shadow's buffer (see _shadow_run): a transparent bitmap
+    runs of text are drawn into, packed in rows, with its own device context,
+    and ``shadow``, an alpha-only bitmap of the same size holding the runs'
+    shadows, blurred once for all of them by ``blur`` / ``tint`` (effects of
+    the buffer's context). What it holds is a page of ``front``, the display
+    list: ``placed`` maps the ordinal of a run's first text command to the
+    run's slot ``(x, y, w, h)``, for the runs from the ``start``-th text
+    command on that fit (_pack_text_page). ``params`` are the shadow and DPI
+    the effects were set for."""
+
+    __slots__ = ("dc", "bitmap", "size", "shadow", "blur", "tint", "params",
+                 "front", "start", "placed")
+
+    def __init__(self) -> None:
+        self.dc: Any = None
+        self.bitmap: Any = None
+        self.size: "tuple[int, int]" = (0, 0)
+        self.shadow: Any = None
+        self.blur: Any = None
+        self.tint: Any = None
+        self.params: Any = None
+        self.front: Any = None
+        self.start = 0
+        self.placed: dict = {}
+
+    def release(self) -> None:
+        for resource in (self.tint, self.blur, self.shadow, self.bitmap, self.dc):
+            if resource is not None:
+                resource.release()
+        self.dc = self.bitmap = self.shadow = self.blur = self.tint = None
+        self.size = (0, 0)
+        self.params = None
+        self.front = None
+        self.placed = {}
 
 
 def _color_f(color: tuple, alpha: float = 1.0) -> "native.D2D1_COLOR_F":
@@ -1198,19 +1276,24 @@ class WindowsBackend(Backend):
         # effect (or before the target exists). Holds the ID2D1Effect objects
         # (reconfigured, not recreated, each frame) — a dict of ComPtrs.
         self._crt: dict[str, Any] | None = None
-        # Text drop-shadow params (offset dx, dy; core alpha — see
+        # Text drop-shadow params (offset dx, dy; core alpha; blur sigma — see
         # _drop_shadow_params) from the active effect's ``drop_shadow``, or None.
         # Unlike the CRT composite this is not a full-frame pass — each text run
-        # is drawn once more under itself, offset (_offset_shadow), so a
+        # is drawn through the text buffer under itself (_shadow_run), so a
         # drop-shadow-only theme needs no composite.
-        self._drop_shadow: tuple[float, float, float] | None = None
+        self._drop_shadow: tuple[float, float, float, float] | None = None
+        # The text drop shadow's buffer (_shadow_run): made on the first run
+        # with a shadow, released when the shadow goes. And the run plans of
+        # the last few display lists (_text_shadow_plan).
+        self._text_buffer: "_TextBuffer | None" = None
+        self._shadow_plans: dict[int, tuple] = {}
         # The current frame's render target: the swap-chain bitmap normally, or a
         # command list while the CRT pass captures the frame for compositing.
         self._frame_target: Any = None
-        # The UI layer: the display list drawn into an offscreen bitmap, drawn
+        # The UI bitmap: the display list drawn into an offscreen bitmap, drawn
         # over the background on every frame until the list changes (see
         # _acquire_ui_cache). _ui_cache is that bitmap while it holds the
-        # current list, else None; _ui_layer_bitmap keeps the bitmap itself.
+        # current list, else None; _ui_bitmap keeps the bitmap itself.
         self._ui_cache: Any = None
         # A solid brush per (colour, alpha) the frames draw with (see _set_brush).
         self._brushes: dict[tuple, Any] = {}
@@ -1277,6 +1360,9 @@ class WindowsBackend(Backend):
         # Baseline shift (px) per (primary_fmt, cjk_fmt) pair, so a CJK segment
         # sits on the primary font's baseline (see _cjk_baseline_dy).
         self._cjk_dy_cache: dict[tuple, float] = {}
+        # What a run's font resolves to, by the Font object's identity (see
+        # _font_by_identity): the formats, and for grid text its baselines.
+        self._fonts_by_id: dict[tuple, tuple] = {}
         self._line_height_cache: dict[int, float] = {}
         self._font_metrics_cache: dict[int, tuple[float, float]] = {}
         self._width_cache: dict[tuple, float] = {}
@@ -1473,13 +1559,14 @@ class WindowsBackend(Backend):
         for fmt in self._style_fonts.values():
             fmt.release()
         self._style_fonts.clear()
+        self._forget_fonts_by_id()
         self._release_cjk_fonts()  # rebuilt by _init_fonts() below at the new DPI
         self._width_cache.clear()
         self._line_height_cache.clear()
         self._measure_memo.clear()
         self._measure_epoch += 1  # and the Panels' default-style memos (DrawContext.measure_text)
         self._font_metrics_cache.clear()
-        self._invalidate_ui_cache()  # the UI layer's glyphs are at the old DPI
+        self._invalidate_ui_cache()  # the UI bitmap's glyphs are at the old DPI
         self._init_fonts()
 
     def _create_render_resources(self) -> None:
@@ -1495,7 +1582,7 @@ class WindowsBackend(Backend):
         self._brush = native.rt_create_solid_color_brush(self._render_target, native.D2D1_COLOR_F(1, 1, 1, 1))
         self._brush_shared = self._brush
         self._brush_key = None
-        # Grayscale text, said rather than left to the default: the UI layer
+        # Grayscale text, said rather than left to the default: the UI bitmap
         # is transparent, and ClearType needs the pixels under a glyph. The
         # premultiplied swap-chain target was getting grayscale already (a
         # pixel readback matched it exactly, xefm#901), so this changes
@@ -1529,7 +1616,8 @@ class WindowsBackend(Backend):
         for handle in self._secondary_windows:
             self._release_window_surface(handle)
         # Made on this device context, so they cannot outlive it.
-        self._release_ui_layer()
+        self._release_ui_bitmap()
+        self._release_text_buffer()
         for caster in self._shadow_casters.values():
             caster.release()
         self._shadow_casters.clear()
@@ -1607,6 +1695,7 @@ class WindowsBackend(Backend):
         for fmt in self._style_fonts.values():
             fmt.release()
         self._style_fonts.clear()
+        self._forget_fonts_by_id()
         self._release_cjk_fonts()
         if self._menu_bar_hmenu:
             from . import _win32_menu
@@ -1741,6 +1830,7 @@ class WindowsBackend(Backend):
             self._dwrite_factory, family, weight, style, size, collection=self._ensure_font_collection())
 
     def _init_fonts(self) -> None:
+        self._forget_fonts_by_id()   # names the formats replaced below
         if self._d2d_factory is None:
             self._d2d_factory = native.create_d2d_factory(multithreaded=self._pipeline)
         self._fonts = {
@@ -1787,9 +1877,42 @@ class WindowsBackend(Backend):
         self._line_ascent = max(mono_ascent, ui_ascent)
         self._base_h = max(1.0, math.ceil(self._line_ascent + max(mono_descent, ui_descent)))
 
+    def _font_by_identity(self, kind: str, font: Any, bits: int) -> Any:
+        """What ``kind`` resolved to for this very ``font`` object with these
+        bold/italic ``bits``, or None.
+
+        Every text command resolves its font, and the lookups by value hash
+        the Font - a dataclass whose enum fields hash in Python - several
+        times over: about a tenth of a file list's draw pass (xefm#901). A
+        widget's Font is usually one long-lived object, so its identity finds
+        the answer first. The entry holds the Font, so its id cannot be
+        reused while the entry lives, and is checked against it anyway.
+        Emptied with the formats (_forget_fonts_by_id)."""
+        hit = self._fonts_by_id.get((kind, id(font), bits))
+        if hit is not None and hit[0] is font:
+            return hit[1]
+        return None
+
+    def _keep_font_by_identity(self, kind: str, font: Any, bits: int, value: Any) -> None:
+        cache = self._fonts_by_id
+        if len(cache) >= _FONTS_BY_ID_MAX:
+            cache.clear()   # fonts made per draw (a dialog's Font()) never repeat
+        cache[(kind, id(font), bits)] = (font, value)
+
+    def _forget_fonts_by_id(self) -> None:
+        self._fonts_by_id.clear()
+
     def _resolve_style_font(self, style: Style) -> Any:
         font = style.font
         a = int(style.attr)
+        fmt = self._font_by_identity("text", font, a & _A_BOLD_ITALIC)
+        if fmt is not None:
+            return fmt
+        fmt = self._resolve_style_font_by_value(font, a)
+        self._keep_font_by_identity("text", font, a & _A_BOLD_ITALIC, fmt)
+        return fmt
+
+    def _resolve_style_font_by_value(self, font: Any, a: int) -> Any:
         bold = bool(a & _A_BOLD)
         italic = bool(a & _A_ITALIC)
         key = (font, bold, italic)
@@ -1808,6 +1931,14 @@ class WindowsBackend(Backend):
         CJK segments so they render/measure in the embedded face."""
         font = style.font
         a = int(style.attr)
+        fmt = self._font_by_identity("cjk", font, a & _A_BOLD_ITALIC)
+        if fmt is not None:
+            return fmt
+        fmt = self._resolve_style_cjk_font_by_value(font, a)
+        self._keep_font_by_identity("cjk", font, a & _A_BOLD_ITALIC, fmt)
+        return fmt
+
+    def _resolve_style_cjk_font_by_value(self, font: Any, a: int) -> Any:
         bold = bool(a & _A_BOLD)
         italic = bool(a & _A_ITALIC)
         key = (font, bold, italic)
@@ -1830,6 +1961,7 @@ class WindowsBackend(Backend):
         for fmt in self._style_cjk_fonts.values():
             fmt.release()
         self._style_cjk_fonts.clear()
+        self._forget_fonts_by_id()
         # Keyed by format ids that just went stale (and the primary formats are
         # torn down alongside every caller of this), so drop the shifts too.
         self._cjk_dy_cache.clear()
@@ -2407,7 +2539,7 @@ class WindowsBackend(Backend):
         self._back = []
         if self._stats is not None and self._active_win is None:
             self._stats.ui_end(self._front)
-        # The UI layer holds the MAIN window's display list only; a secondary
+        # The UI bitmap holds the MAIN window's display list only; a secondary
         # window renders its list inline (see _render_window), so presenting
         # one must not mark the main window's layer stale. A render thread may
         # be drawing the layer right now; it sees for itself that the layer
@@ -2436,7 +2568,7 @@ class WindowsBackend(Backend):
 
         ``drop_shadow`` is the exception: it is *not* a full-frame composite (a
         rect's rectangular shadow would read as ugly boxes behind the text) but a
-        copy of the text alone under the text (see ``_offset_shadow``), matching
+        blurred copy of the text alone under the text (see ``_shadow_run``), matching
         MacOSBackend's text-scoped NSShadow.
         An effect that asks only for it therefore skips the capture pass entirely
         (see ``_build_crt_chain``)."""
@@ -2447,7 +2579,9 @@ class WindowsBackend(Backend):
         )
         self._build_crt_chain()
         self._sync_roll()
-        # The UI layer holds the old shadow.
+        if self._drop_shadow is None:
+            self._release_text_buffer()   # no shadow, no window-sized bitmap
+        # The UI bitmap holds the old shadow.
         self._invalidate_ui_cache()
         if self._hwnd:
             native.user32.InvalidateRect(self._hwnd, None, False)
@@ -2951,9 +3085,11 @@ class WindowsBackend(Backend):
     _brush_key: Any = None
     #: The display list _ui_cache holds (see _acquire_ui_cache).
     _ui_cache_front: Any = None
-    #: The UI layer's bitmap and the client size it was made at.
-    _ui_layer_bitmap: Any = None
-    _ui_layer_size: Any = None
+    #: The UI bitmap's bitmap and the client size it was made at.
+    _ui_bitmap: Any = None
+    _text_buffer: Any = None
+    _shadow_plans: Any = None
+    _ui_bitmap_size: Any = None
     #: Per-colour brushes, and the brush made with the render target.
     _brushes: Any = None
     _brush_shared: Any = None
@@ -2965,16 +3101,26 @@ class WindowsBackend(Backend):
     _gpu_timer: Any = None
     _gpu_timer_failed = False
 
-    def _invalidate_ui_cache(self) -> None:
-        """Mark the UI layer stale, so the next frame draws the display list
+    def _invalidate_ui_cache(self, shadows: bool = True) -> None:
+        """Mark the UI bitmap stale, so the next frame draws the display list
         into it again. Called from every place its pixels would otherwise go
         stale (a new display list, a change to how it paints, the device
-        context going away). The bitmap itself is kept and drawn over."""
+        context going away). The bitmap itself is kept and drawn over.
+
+        The text shadow's run plans (their rects follow the fonts) go with
+        it, except for ``shadows=False``: _acquire_ui_cache finding a layer of
+        another list, none to keep during a transition, or a new size - a plan
+        is kept by its list and needs nothing more."""
         self._ui_cache = None
         self._ui_cache_front = None
+        if shadows:
+            if self._shadow_plans:
+                self._shadow_plans.clear()
+            if self._text_buffer is not None:
+                self._text_buffer.front = None
 
     def _acquire_ui_cache(self, now: float, front: list | None = None) -> Any:
-        """The UI layer: an offscreen bitmap holding ``front`` drawn over
+        """The UI bitmap: an offscreen bitmap holding ``front`` drawn over
         transparency, drawn into first if it holds another list — or None when
         this frame must draw the display list straight into the frame.
 
@@ -2999,7 +3145,7 @@ class WindowsBackend(Backend):
         if front is None:
             front = self._front
         if self._animations:
-            self._invalidate_ui_cache()
+            self._invalidate_ui_cache(shadows=False)
             return None
         if self._ui_cache is not None:
             # Drawn from another list: present() marks the layer stale when it
@@ -3007,14 +3153,14 @@ class WindowsBackend(Backend):
             # it right then - there the list it was made from says it is stale.
             if self._ui_cache_front is front:
                 return self._ui_cache
-            self._invalidate_ui_cache()
+            self._invalidate_ui_cache(shadows=False)
         rt = self._render_target
         size = self._client_size_px()
-        if self._ui_layer_bitmap is None or self._ui_layer_size != size:
-            self._release_ui_layer()
-            self._ui_layer_bitmap = native.dc_create_target_bitmap(rt, *size)
-            self._ui_layer_size = size
-        layer = self._ui_layer_bitmap
+        if self._ui_bitmap is None or self._ui_bitmap_size != size:
+            self._release_ui_bitmap()
+            self._ui_bitmap = native.dc_create_target_bitmap(rt, *size)
+            self._ui_bitmap_size = size
+        layer = self._ui_bitmap
         native.dc_set_target(rt, layer)
         self._frame_target = layer
         native.rt_begin_draw(rt)
@@ -3032,12 +3178,12 @@ class WindowsBackend(Backend):
         self._ui_cache_front = front
         return layer
 
-    def _release_ui_layer(self) -> None:
-        self._invalidate_ui_cache()
-        if self._ui_layer_bitmap is not None:
-            self._ui_layer_bitmap.release()
-            self._ui_layer_bitmap = None
-            self._ui_layer_size = None
+    def _release_ui_bitmap(self) -> None:
+        self._invalidate_ui_cache(shadows=False)
+        if self._ui_bitmap is not None:
+            self._ui_bitmap.release()
+            self._ui_bitmap = None
+            self._ui_bitmap_size = None
 
     @_holds_render_lock
     def _render(self) -> None:
@@ -3070,10 +3216,11 @@ class WindowsBackend(Backend):
                 _smoothstep(self._bg_fade), seed=self._bg_seeds.seed,
                 seed_prev=self._bg_seeds.prev, seed_mix=self._bg_seeds.mix,
                 pixel_scale=self._dpi_scale * scale)
-        # Both passes below (the UI layer and the frame itself) may draw shadows,
+        # Both passes below (the UI bitmap and the frame itself) may draw shadows,
         # and neither may retarget the device context once its batch is open.
         self._prepare_shadows(front)
-        # Draw (or reuse) the UI layer before the frame's own BeginDraw — drawing
+        self._prepare_text_shadows(front)
+        # Draw (or reuse) the UI bitmap before the frame's own BeginDraw — drawing
         # it retargets the device context, which is illegal inside an open draw
         # batch. None means this frame runs the Python pass inline.
         ui_cl = self._acquire_ui_cache(now, front)
@@ -3085,19 +3232,14 @@ class WindowsBackend(Backend):
         else:
             self._frame_target = self._target_bitmap
         native.rt_begin_draw(rt)
-        native.rt_set_antialias_mode(rt, native.D2D1_ANTIALIAS_MODE_PER_PRIMITIVE)
-        # Clear to the background's backdrop when it names one, so the opacity-
-        # dissolved surface fills (and bare gaps) fall back to that color instead of
-        # the neutral dark default — matching MacOSBackend._render_into_view.
-        clear = _DEFAULT_BG
-        if self._background is not None and getattr(self._background, "backdrop", None) is not None:
-            clear = self._background.backdrop
-        native.rt_clear(rt, native.D2D1_COLOR_F(clear[0] / 255, clear[1] / 255, clear[2] / 255, 1.0))
-        self._render_background(now, shader_tex)
-        if ui_cl is not None:
-            native.dc_draw_image(rt, ui_cl)
-        else:
-            self._render_display_list(now, front)
+        try:
+            self._draw_frame(now, rt, ui_cl, shader_tex, front)
+        except BaseException:
+            # Close the batch, so the next frame can open one: a frame that
+            # raises is dropped (_render_thread), and a batch left open fails
+            # every BeginDraw after it - the window stops, or goes black.
+            native.rt_end_draw(rt)
+            raise
         hr = native.rt_end_draw(rt)
         device_lost = (hr & 0xFFFFFFFF) == 0x8899000C  # D2DERR_RECREATE_TARGET
         if use_effect and not device_lost:
@@ -3137,6 +3279,22 @@ class WindowsBackend(Backend):
         if device_lost:
             self._recreate_render_target()
 
+    def _draw_frame(self, now: float, rt: Any, ui_cl: Any, shader_tex: Any, front: list) -> None:
+        """The frame's draws, inside its open batch (_render)."""
+        native.rt_set_antialias_mode(rt, native.D2D1_ANTIALIAS_MODE_PER_PRIMITIVE)
+        # Clear to the background's backdrop when it names one, so the opacity-
+        # dissolved surface fills (and bare gaps) fall back to that color instead of
+        # the neutral dark default — matching MacOSBackend._render_into_view.
+        clear = _DEFAULT_BG
+        if self._background is not None and getattr(self._background, "backdrop", None) is not None:
+            clear = self._background.backdrop
+        native.rt_clear(rt, native.D2D1_COLOR_F(clear[0] / 255, clear[1] / 255, clear[2] / 255, 1.0))
+        self._render_background(now, shader_tex)
+        if ui_cl is not None:
+            native.dc_draw_image(rt, ui_cl)
+        else:
+            self._render_display_list(now, front)
+
     def _stats_begin_frame(self) -> list[float]:
         """PUIKIT_FPS: read back the GPU times of earlier frames and open this
         frame's timestamps, before the shader background issues the frame's
@@ -3174,9 +3332,19 @@ class WindowsBackend(Backend):
         # surface fills occlude rather than dissolve under an active surface reveal;
         # count nesting so a widget's own groups inside the layer inherit it.
         self._reveal_exempt_depth = 0
-        for command in (self._front if front is None else front):
+        if front is None:
+            front = self._front
+        plan = self._text_shadow_plan(front) if self._drop_shadow is not None else None
+        ordinal = 0
+        for command in front:
             kind = command[0]
             if kind == "text":
+                if plan is not None:
+                    step = plan[ordinal]
+                    ordinal += 1
+                    if step:
+                        self._shadow_run(front, ordinal - 1, *step)
+                    continue
                 self._render_text(*command[1:])
             elif kind == "box":
                 self._render_box(*command[1:])
@@ -3218,9 +3386,10 @@ class WindowsBackend(Backend):
         self._release_render_resources()
         self._create_render_resources()
 
-    def _render_text(self, x: int, y: int, text: str, style: Style) -> None:
-        """Draw one text command: its background, its drop shadow (when the
-        effect asks for one, see _offset_shadow), its glyphs, its rules."""
+    def _render_text(self, x: int, y: int, text: str, style: Style, glyphs_only: bool = False) -> None:
+        """Draw one text command: its background, its glyphs, its rules.
+        ``glyphs_only`` draws the glyphs and rules alone - how a run goes into
+        the text buffer (_shadow_run)."""
         fg = style.fg or _DEFAULT_FG
         bg = style.bg
         a = int(style.attr)
@@ -3238,27 +3407,11 @@ class WindowsBackend(Backend):
         # did) let a wide CJK glyph land at 1.67 columns, so the mono block
         # rendered identically to the proportional one instead of grid-locked.
         if not grid_aligned(style.font):
-            self._render_flow_text(x, y, text, style, fg, bg, alpha, underline, strike)
+            self._render_flow_text(x, y, text, style, fg, None if glyphs_only else bg,
+                                   alpha, underline, strike)
             return
 
-        weight = TextAttribute.BOLD if a & _A_BOLD else TextAttribute.NORMAL
-        # font=None uses the prebuilt base (mono/grid) formats; an explicit
-        # grid-aligned monospace Font resolves its own format so its weight/slant
-        # are honored (mirrors the macOS grid path). Both resolve to the same
-        # fixed-advance face, so the column grid stays exact either way.
-        if style.font is None:
-            text_format = self._fonts[weight]
-            cjk_format = self._cjk_fonts.get(weight) if self._cjk_fonts else None
-        else:
-            text_format = self._resolve_style_font(style)
-            cjk_format = self._resolve_style_cjk_font(style) if self._cjk_available else None
-        # A grid face is a default face: drop it onto the row's shared baseline
-        # (0 for a metrics-matched pair; docs/font_system.md §3.1).
-        line_dy = self._line_ascent - self._font_line_metrics(text_format)[0]
-        # Baseline shift for CJK cells so they sit on the primary font's baseline
-        # (Noto CJK's ascent is taller); 0 for Latin cells and when CJK is absent.
-        cjk_dy = line_dy + (self._cjk_baseline_dy(text_format, cjk_format)
-                            if cjk_format is not None else 0.0)
+        text_format, cjk_format, line_dy, cjk_dy = self._grid_run_fonts(style.font, a)
 
         # Grid-locked text: locked to the base-unit grid without a call per
         # glyph - the macOS grid path's approach. A run of single-column glyphs
@@ -3271,61 +3424,285 @@ class WindowsBackend(Backend):
         # per widget slot), and a per-cell clip flat-cut descenders (g/j/p/q/y).
         # Where the run splits is kept between frames (_grid_plan).
         total, plan = self._grid_plan(text, cjk_format is not None)
-        if bg is not None and not is_transparent(bg):
+        if bg is not None and not glyphs_only and not is_transparent(bg):
             # A text run's own background is a surface fill: it composites at
             # the surface opacity (see MacOSBackend._fill_text_bg).
             self._set_brush(bg, self._ui_fill_alpha())
             native.rt_fill_rectangle(self._render_target, self._unit_rect(x, y, total, 1), self._brush)
 
-        # Drop shadow (Segment LCD look): over this command's bg fill and under
-        # its glyphs. Scoped to the text like macOS's NSShadow — the fills are
-        # deliberately left unshadowed.
-        offset = self._offset_shadow(alpha)
-        if offset is not None:
-            self._draw_grid_plan(x, y, plan, text_format, cjk_format, line_dy, cjk_dy, offset)
         self._set_brush(fg, alpha)
         self._draw_grid_plan(x, y, plan, text_format, cjk_format, line_dy, cjk_dy)
         self._render_text_rules(x, y, total, style, fg, alpha, underline, strike)
 
-    def _offset_shadow(self, alpha: float) -> "tuple[float, float] | None":
-        """With a text drop shadow on, set the brush to the shadow's colour and
-        return the offset (px) to draw the run at once more, under itself; else
-        None.
+    def _grid_run_fonts(self, font: Any, a: int) -> tuple:
+        """``(text_format, cjk_format, line_dy, cjk_dy)`` for a grid run in
+        ``font`` with attributes ``a``, kept by the font's identity (see
+        _font_by_identity).
 
-        macOS draws the shadow with the glyphs (an NSShadow attribute); Direct2D
-        has no per-draw shadow. The NSShadow's blur is under a pixel (a
-        Gaussian of sigma <= 0.8 dip), so one offset copy in the shadow's colour reads as
-        the same shadow. It used to be a recorded silhouette per run of text,
-        Gaussian-blurred: re-recording the silhouettes of the rows that changed
-        and running the blur were over half of a scrolling frame (xefm#901:
-        ~15 ms of 28 in the ARM VM at 2400x2000; the copy costs ~8)."""
-        params = self._drop_shadow
-        if params is None:
-            return None
-        dx, dy, peak = params
-        self._set_brush((0, 0, 0), alpha * peak)
+        font=None uses the prebuilt base (mono/grid) formats; an explicit
+        grid-aligned monospace Font resolves its own format so its weight/slant
+        are honored (mirrors the macOS grid path). Both resolve to the same
+        fixed-advance face, so the column grid stays exact either way.
+        ``line_dy`` drops a grid face, a default face, onto the row's shared
+        baseline (0 for a metrics-matched pair; docs/font_system.md §3.1);
+        ``cjk_dy`` also moves a CJK cell onto the primary font's baseline
+        (Noto CJK's ascent is taller)."""
+        bits = a & _A_BOLD_ITALIC
+        hit = self._font_by_identity("grid", font, bits)
+        if hit is not None:
+            return hit
+        if font is None:
+            weight = TextAttribute.BOLD if a & _A_BOLD else TextAttribute.NORMAL
+            text_format = self._fonts[weight]
+            cjk_format = self._cjk_fonts.get(weight) if self._cjk_fonts else None
+        else:
+            text_format = self._resolve_style_font_by_value(font, a)
+            cjk_format = self._resolve_style_cjk_font_by_value(font, a) if self._cjk_available else None
+        line_dy = self._line_ascent - self._font_line_metrics(text_format)[0]
+        cjk_dy = line_dy + (self._cjk_baseline_dy(text_format, cjk_format)
+                            if cjk_format is not None else 0.0)
+        hit = (text_format, cjk_format, line_dy, cjk_dy)
+        self._keep_font_by_identity("grid", font, bits, hit)
+        return hit
+
+    def _text_shadow_plan(self, front: list) -> list:
+        """Per text command of ``front``, in order: ``(commands, rect)`` at the
+        first command of a run (_text_shadow_runs), the run's commands and its
+        rect in pixels, or 0 (inside a run, or a run clipped away whole). The
+        rect is the run's cells padded by the shadow's reach (its offset and
+        three sigmas) and the glyphs' overhang, cut to the clip in force: a
+        file name past its pane's edge would otherwise reach into the other
+        pane. Kept for the last few lists drawn."""
+        hit = self._shadow_plans.get(id(front))
+        if hit is not None and hit[0] is front:
+            return hit[1]
+        dx, dy, _peak, sigma = self._drop_shadow
         s = self._dpi_scale
-        return dx * s, dy * s
+        bw, bh = self._base_w, self._base_h
+        reach_x = math.ceil(abs(dx * s) + 3 * sigma * s) + 2
+        reach_y = math.ceil(abs(dy * s) + 3 * sigma * s) + math.ceil(0.25 * bh)
+        texts = [command for command in front if command[0] == "text"]
+        plan: list = [0] * len(texts)
+        for first, count, clip in _text_shadow_runs(front):
+            commands = tuple(texts[first:first + count])
+            x0 = y0 = math.inf
+            x1 = y1 = -math.inf
+            for command in commands:
+                x, y, text, style = command[1:5]
+                x0, y0 = min(x0, x * bw), min(y0, y * bh)
+                x1 = max(x1, (x + self._text_width(text, style)) * bw)
+                y1 = max(y1, (y + 1) * bh)
+            rect = (math.floor(x0 - reach_x), math.floor(y0 - reach_y),
+                    math.ceil(x1 + reach_x), math.ceil(y1 + reach_y))
+            if clip is not None:
+                rect = (max(rect[0], math.floor(clip[0] * bw)), max(rect[1], math.floor(clip[1] * bh)),
+                        min(rect[2], math.ceil(clip[2] * bw)), min(rect[3], math.ceil(clip[3] * bh)))
+            if rect[0] < rect[2] and rect[1] < rect[3]:
+                plan[first] = (commands, rect)
+        if len(self._shadow_plans) >= 4:
+            self._shadow_plans.clear()
+        self._shadow_plans[id(front)] = (front, plan)
+        return plan
 
-    def _draw_grid_plan(self, x, y, plan, text_format, cjk_format, line_dy, cjk_dy,
-                        offset: "tuple[float, float]" = (0.0, 0.0)) -> None:
-        """Draw a grid run's plan (see _grid_plan) with the current brush,
-        ``offset`` px away from its cells (the drop shadow's copy)."""
+    def _text_width(self, text: str, style: Style) -> float:
+        """A text command's width in base units, as it draws."""
+        if grid_aligned(style.font):
+            return self._grid_plan(text, self._grid_run_fonts(style.font, int(style.attr))[1] is not None)[0]
+        return self.measure_text(text, style)
+
+    def _prepare_text_shadows(self, front: list) -> None:
+        """Draw the first page of ``front``'s runs (the main window's list)
+        into the text buffer before the frame opens a batch (_pack_text_page).
+        _shadow_run then only reads them, and the frame's batch runs on its
+        own: Direct2D flushes one context's batch whenever another context on
+        the device draws, so drawing the runs as the frame reaches them cost a
+        flush of each (about 7 ms a frame of a file list in the ARM VM,
+        xefm#901).
+
+        Kept while the list is: a background tick or a transition draws
+        nothing here."""
+        if self._drop_shadow is None or self._render_target is None or self._active_win is not None:
+            return
+        plan = self._text_shadow_plan(front)
+        buffer = self._ensure_text_buffer()
+        if buffer.front is front and buffer.start == 0:
+            return
+        self._pack_text_page(buffer, front, plan, 0)
+
+    def _pack_text_page(self, buffer: "_TextBuffer", front: list, plan: list, start: int,
+                        first: bool = False) -> None:
+        """Fill the buffer with a page of runs: those of ``plan`` from the
+        ``start``-th text command on, as many as fit, packed in rows tallest
+        first (in display order a file list's two panes, as tall as the window
+        and each about half as wide, land in different rows and the second
+        does not fit); with ``first``, the run at ``start`` goes first, so it
+        is on the page whatever else is. Then every placed run's shadow at
+        once: the buffer blurred into the alpha-only bitmap. All in the
+        buffer's own context, whose batches end here, so its draws are queued
+        before any draw of the frame that reads them."""
+        buffer.front, buffer.start, buffer.placed = None, start, {}
+        width, height = buffer.size
+        runs = sorted(((index, step) for index, step in enumerate(plan) if step and index >= start),
+                      key=lambda item: item[1][1][1] - item[1][1][3])
+        if first:
+            runs.remove((start, plan[start]))
+            runs.insert(0, (start, plan[start]))
+        dc = buffer.dc
+        x = y = row = 0
+        native.rt_begin_draw(dc)
+        for index, (commands, rect) in runs:
+            w, h = min(rect[2] - rect[0], width), min(rect[3] - rect[1], height)
+            if x + w > width:
+                x, y, row = 0, y + row, 0
+            if y + h > height:
+                continue                 # on a later page (_shadow_run)
+            self._draw_run_into_buffer(buffer, commands, rect, x, y, w, h)
+            buffer.placed[index] = (x, y, w, h)
+            x += w
+            row = max(row, h)
+        native.rt_end_draw(dc)
+        native.dc_set_target(dc, buffer.shadow)
+        native.rt_begin_draw(dc)
+        native.rt_set_transform(dc, native.D2D1_MATRIX_3X2_F.identity())
+        native.rt_clear(dc, native.D2D1_COLOR_F(0.0, 0.0, 0.0, 0.0))
+        shadow = native.effect_get_output(buffer.tint)
+        native.dc_draw_image(dc, shadow)
+        shadow.release()
+        native.rt_end_draw(dc)
+        native.dc_set_target(dc, buffer.bitmap)
+        buffer.front = front
+
+    def _draw_run_into_buffer(self, buffer: "_TextBuffer", commands: tuple, rect: tuple,
+                              bx: int, by: int, w: int, h: int) -> None:
+        """A run's glyphs and rules into its slot of the buffer, moved from
+        the rect's corner to ``(bx, by)`` and cut to the slot, which is cleared
+        first (it held a run of an earlier pass). The buffer's batch is open."""
+        dc, rt = buffer.dc, self._render_target
+        x0, y0 = rect[0], rect[1]
+        native.rt_set_transform(dc, native.D2D1_MATRIX_3X2_F.translation(bx - x0, by - y0))
+        native.rt_push_axis_aligned_clip(dc, native.D2D1_RECT_F(x0, y0, x0 + w, y0 + h))
+        native.rt_clear(dc, native.D2D1_COLOR_F(0.0, 0.0, 0.0, 0.0))
+        self._render_target = dc
+        try:
+            for command in commands:
+                self._render_text(*command[1:5], glyphs_only=True)
+        finally:
+            self._render_target = rt
+        native.rt_pop_axis_aligned_clip(dc)
+
+    def _shadow_run(self, front: list, index: int, commands: tuple, rect: tuple) -> None:
+        """Draw a run of text with its drop shadow, where its first command
+        (the ``index``-th text command of ``front``) stands in the display list.
+
+        macOS draws the shadow with the glyphs (an NSShadow attribute);
+        Direct2D has no per-draw shadow. So the run's glyphs and rules are in
+        the text buffer (_TextBuffer), drawn there before the frame
+        (_prepare_text_shadows). Here the frame draws the run's own
+        background; the buffer through a Gaussian blur and a ColorMatrix that
+        keeps only alpha times the shadow's peak, at the shadow's offset and
+        clipped to the run's rect; and the run itself, out of the buffer, on
+        top. The blur matches the NSShadow one, the text is drawn once, and
+        all of it lands under the clip, transform and group opacity in force
+        at the run, so the shadow keeps its place in the display list.
+
+        Every run gets its blur, however many come before it: at a run the
+        page does not hold (past a full buffer, or in a secondary window), the
+        frame flushes its batch, queueing its reads of the page so far, and
+        the buffer is filled again from that run on. A list that fits takes
+        no flush; one that does not takes one a page, not one a run.
+
+        Two earlier versions drew the text twice: a recorded silhouette per
+        run, each through its own blur (over half of a scrolling frame), then
+        an unblurred offset copy (xefm#901)."""
+        rt = self._render_target
+        x, y, text, style = commands[0][1:5]
+        bg = _text_bg(style)
+        if bg is not None:
+            self._set_brush(bg, self._ui_fill_alpha())
+            native.rt_fill_rectangle(rt, native.D2D1_RECT_F(
+                x * self._base_w, y * self._base_h,
+                (x + self._text_width(text, style)) * self._base_w, (y + 1) * self._base_h), self._brush)
+        buffer = self._text_buffer
+        slot = buffer.placed.get(index) if buffer is not None and buffer.front is front else None
+        if slot is None:
+            native.rt_flush(rt)                   # its reads of the page so far
+            buffer = self._ensure_text_buffer()
+            self._pack_text_page(buffer, front, self._text_shadow_plan(front), index, first=True)
+            slot = buffer.placed[index]
+        bx, by, w, h = slot
+        x0, y0 = rect[0], rect[1]
+        dx, dy, _peak, _sigma = self._drop_shadow
+        s = self._dpi_scale
+        here = native.D2D1_RECT_F(x0, y0, x0 + w, y0 + h)
+        slot_rect = native.D2D1_RECT_F(bx, by, bx + w, by + h)
+        native.rt_push_axis_aligned_clip(rt, here)
+        self._set_brush((0, 0, 0))
+        native.rt_set_antialias_mode(rt, native.D2D1_ANTIALIAS_MODE_ALIASED)
+        native.rt_fill_opacity_mask(rt, buffer.shadow, self._brush, native.D2D1_RECT_F(
+            x0 + dx * s, y0 + dy * s, x0 + w + dx * s, y0 + h + dy * s), slot_rect)
+        native.rt_set_antialias_mode(rt, native.D2D1_ANTIALIAS_MODE_PER_PRIMITIVE)
+        native.rt_pop_axis_aligned_clip(rt)
+        native.rt_draw_bitmap(rt, buffer.bitmap, here, 1.0, slot_rect)
+
+    def _ensure_text_buffer(self) -> "_TextBuffer":
+        """The text buffer, at least the size of the window being drawn (a
+        run's rect never exceeds it), made or grown on demand, its effects set
+        for the current shadow and DPI."""
+        buffer = self._text_buffer
+        if buffer is None:
+            buffer = self._text_buffer = _TextBuffer()
+        width, height = self._client_size_px()
+        if buffer.bitmap is None or width > buffer.size[0] or height > buffer.size[1]:
+            width, height = max(width, buffer.size[0]), max(height, buffer.size[1])
+            buffer.release()
+            rt = self._render_target
+            buffer.dc = native.d2d_device_create_context(self._d2d_device)
+            native.rt_set_text_antialias_mode(buffer.dc, native.D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE)
+            native.rt_set_antialias_mode(buffer.dc, native.D2D1_ANTIALIAS_MODE_PER_PRIMITIVE)
+            buffer.bitmap = native.dc_create_target_bitmap(rt, width, height)
+            native.dc_set_target(buffer.dc, buffer.bitmap)
+            buffer.size = (width, height)
+            buffer.shadow = native.dc_create_target_bitmap(rt, width, height, alpha_only=True)
+            # Effects of the buffer's context, which draws the shadows.
+            buffer.blur = native.dc_create_effect(buffer.dc, native.CLSID_D2D1GaussianBlur)
+            buffer.tint = native.dc_create_effect(buffer.dc, native.CLSID_D2D1ColorMatrix)
+            native.effect_set_input(buffer.blur, 0, buffer.bitmap)
+            blurred = native.effect_get_output(buffer.blur)
+            native.effect_set_input(buffer.tint, 0, blurred)
+            blurred.release()
+            buffer.front, buffer.placed = None, {}
+        params = (self._drop_shadow, self._dpi_scale)
+        if params != buffer.params:
+            _dx, _dy, peak, sigma = self._drop_shadow
+            native.effect_set_value_float(buffer.blur, native.D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
+                                          max(0.01, sigma * self._dpi_scale))
+            # Only alpha survives, as the shadow's: (0, 0, 0, a * peak).
+            native.effect_set_value_matrix_5x4(buffer.tint, native.D2D1_COLORMATRIX_PROP_COLOR_MATRIX,
+                                               native.D2D1_MATRIX_5X4_F(*([0.0] * 15 + [peak, 0.0, 0.0, 0.0, 0.0])))
+            buffer.params = params
+        return buffer
+
+    def _release_text_buffer(self) -> None:
+        if self._text_buffer is not None:
+            self._text_buffer.release()
+            self._text_buffer = None
+
+    def _draw_grid_plan(self, x, y, plan, text_format, cjk_format, line_dy, cjk_dy) -> None:
+        """Draw a grid run's plan (see _grid_plan) with the current brush."""
         rt, brush = self._render_target, self._brush
-        ox, oy = offset
+        bw = self._base_w
+        top = y * self._base_h + line_dy
         for col, segment, cells in plan:
             if segment is not None:
                 layout = self._grid_segment_layout(segment, text_format, len(cells))
                 if layout is not None:
-                    rect = self._unit_rect(x + col, y, len(cells), 1)
-                    native.rt_draw_text_layout(rt, rect.left + ox, rect.top + line_dy + oy, layout, brush)
+                    native.rt_draw_text_layout(rt, (x + col) * bw, top, layout, brush)
                     continue
             for glyph, width, cjk in cells:
                 rect = self._unit_rect(x + col, y, width, 1)
                 gfmt, gdy = (cjk_format, cjk_dy) if cjk else (text_format, line_dy)
-                if gdy or ox or oy:
-                    rect = native.D2D1_RECT_F(rect.left + ox, rect.top + gdy + oy,
-                                              rect.right + ox, rect.bottom + gdy + oy)
+                if gdy:
+                    rect = native.D2D1_RECT_F(rect.left, rect.top + gdy, rect.right, rect.bottom + gdy)
                 native.rt_draw_text(rt, glyph, gfmt, rect, brush)
                 col += width
 
@@ -3458,9 +3835,13 @@ class WindowsBackend(Backend):
         Text) — no per-segment loop, no manual baseline nudge."""
         origin_x = x * self._base_w
         origin_y = y * self._base_h
-        line_h = self._base_h * self.measure_line_height(style)
-        width = self.measure_text(text, style) * self._base_w
-        if bg is not None and not is_transparent(bg):
+        # The run's width and line height only serve its background and its
+        # rules; most runs have neither, and both are lookups keyed by the
+        # Style, which hashes in Python.
+        ruled = underline or strike
+        filled = bg is not None and not is_transparent(bg)
+        width = self.measure_text(text, style) * self._base_w if filled or ruled else 0.0
+        if filled:
             # A text run's own background is a surface fill: it composites at
             # the surface opacity (see MacOSBackend._fill_text_bg).
             self._set_brush(bg, self._ui_fill_alpha())
@@ -3489,13 +3870,11 @@ class WindowsBackend(Backend):
         # primary font alone, like an adjacent column; and a default face sits on
         # the row's shared baseline, not its own.
         origin_y -= self._flow_baseline_fix(line_baseline, style)
-        # The drop shadow, over the bg and under the run (see _render_text).
-        offset = self._offset_shadow(alpha)
-        if offset is not None:
-            native.rt_draw_text_layout(self._render_target, origin_x + offset[0], origin_y + offset[1],
-                                       layout, self._brush)
         self._set_brush(fg, alpha)
         native.rt_draw_text_layout(self._render_target, origin_x, origin_y, layout, self._brush)
+        if not ruled:
+            return
+        line_h = self._base_h * self.measure_line_height(style)
         # A default face's rules belong to the row (its line box is the unit),
         # wherever the baseline put its glyphs.
         rule_top = row_top if default_face(style.font) else origin_y
@@ -3658,7 +4037,7 @@ class WindowsBackend(Backend):
         :meth:`_render_shadow` to blur without touching the device context.
 
         Called once per frame *before* any BeginDraw, for the same reason
-        _acquire_ui_cache draws the UI layer there: retargeting the device context is illegal
+        _acquire_ui_cache draws the UI bitmap there: retargeting the device context is illegal
         inside an open draw batch. The shadow path used to split the frame's batch
         instead — EndDraw, retarget, record, retarget back, BeginDraw — which held
         as long as a shadow was drawn at rest, and broke the moment one was drawn
@@ -3886,7 +4265,7 @@ class WindowsBackend(Backend):
             self._image_cache.put(key, entry, 0 if entry is None else entry.nbytes)
         if self._image_wait_deadline is not None:
             return   # delivered to the frame being drawn, which draws it
-        # The main window's UI layer drew the picture as missing;
+        # The main window's UI bitmap drew the picture as missing;
         # every window repaints, since which of them shows it is in their lists.
         self._invalidate_ui_cache()
         for hwnd in [self._hwnd] + [h.hwnd for h in self._secondary_windows]:
@@ -4705,7 +5084,7 @@ class WindowsBackend(Backend):
         device context at its swap-chain bitmap.
 
         Deliberately the simple path: no CRT composite, no shader background and
-        no UI layer — those stay main-window features (see
+        no UI bitmap — those stay main-window features (see
         docs/window_management.md), and a secondary window is a small popup
         whose list is cheap to replay inline.
         """
@@ -5127,7 +5506,7 @@ class WindowsBackend(Backend):
             with self._exclusive():
                 self._dpi_scale = native.loword(wparam) / 96.0
                 self._rebuild_fonts()
-                # The UI layer's glyphs and shadow offset are in pixels.
+                # The UI bitmap's glyphs and shadow offset are in pixels.
                 self._invalidate_ui_cache()
             rect = ctypes.cast(lparam, ctypes.POINTER(wintypes.RECT)).contents
             native.user32.SetWindowPos(

@@ -27,6 +27,7 @@ from puikit.backends._image_cache import MISS  # noqa: E402
 from puikit.image import source_key  # noqa: E402
 from puikit.backends.windows_backend import (  # noqa: E402
     Animation, WindowsBackend, _drop_shadow_params, _glow_matrix,
+    _text_shadow_runs,
     _roll_band_top, _roll_falloff, _tint_matrix,
 )
 from puikit.backends import _win32_native as native  # noqa: E402
@@ -106,6 +107,29 @@ def test_style_font_is_cached():
         style = Style(font=Font(family="Georgia", size=18))
         first = backend._resolve_style_font(style)
         assert backend._resolve_style_font(style) is first
+    finally:
+        backend.close()
+
+
+def test_a_font_resolves_by_identity_and_by_value_alike():
+    # The identity fast path (xefm#901) answers what the lookup by value would:
+    # an equal Font made anew gets the same format, and the answers go with
+    # the formats when the fonts are rebuilt.
+    backend = WindowsBackend()
+    backend._init_fonts()
+    try:
+        font = Font(family="Georgia", size=18)
+        first = backend._resolve_style_font(Style(font=font))
+        assert backend._resolve_style_font(Style(font=font)) is first
+        assert backend._resolve_style_font(Style(font=Font(family="Georgia", size=18))) is first
+        bold = backend._resolve_style_font(Style(font=font, attr=TextAttribute.BOLD))
+        assert bold is not first
+        grid = backend._grid_run_fonts(None, int(TextAttribute.NORMAL))
+        assert grid[0] is backend._fonts[TextAttribute.NORMAL]
+        assert backend._fonts_by_id
+        backend._rebuild_fonts()
+        assert all(entry[0] is not font for entry in backend._fonts_by_id.values())
+        assert backend._grid_run_fonts(None, int(TextAttribute.NORMAL))[0] is backend._fonts[TextAttribute.NORMAL]
     finally:
         backend.close()
 
@@ -658,7 +682,14 @@ def test_draw_image_renders_without_error(tmp_path):
         path = _png(tmp_path / "test.png", 40, 20)
         backend.draw_image(1, 1, path, {"w": 10, "h": 5, "fit": "contain"})
         backend.present()
+        # The frame waits for the worker only FRAME_WAIT (4 ms); a slow VM
+        # misses that now and then, and the decode lands for a later frame.
+        deadline = time.monotonic() + 5.0
         backend._render()  # the frame waits for the worker, then DrawBitmap
+        while backend._image_cache.get(source_key(path)) is MISS and time.monotonic() < deadline:
+            time.sleep(0.01)
+            backend._invalidate_ui_cache()   # draw the list again, not the kept UI bitmap
+            backend._render()
         assert backend._image_cache.get(source_key(path)) is not MISS
     finally:
         backend.close()
@@ -1279,11 +1310,12 @@ def test_drop_shadow_params_grow_and_cap():
     # Pure mapping, mirroring the roll-helper coverage above.
     assert _drop_shadow_params(0.0) is None          # off at/below zero
     assert _drop_shadow_params(-1.0) is None
-    dx, dy, peak = _drop_shadow_params(0.6)
+    dx, dy, peak, sigma = _drop_shadow_params(0.6)
     assert dy > dx > 0                               # offset down-right, deeper than wide
+    assert sigma == pytest.approx(0.6 * 1.6 / 2)     # NSShadow's blur radius, halved
     assert peak == pytest.approx(min(0.6, 0.2 + 0.6 * 0.45))
-    dx2, dy2, peak2 = _drop_shadow_params(1.0)       # a deeper shadow reaches further
-    assert dx2 > dx and dy2 > dy
+    dx2, dy2, peak2, sigma2 = _drop_shadow_params(1.0)   # a deeper shadow spreads further
+    assert dx2 > dx and dy2 > dy and sigma2 > sigma
     assert peak2 == pytest.approx(0.6)               # and its alpha saturates at the cap
 
 
@@ -1306,48 +1338,245 @@ def _settled(backend):
         assert backend._render_thread.wait_idle()
 
 
-def test_drop_shadow_draws_each_run_once_more_offset_under_itself(monkeypatch):
-    """xefm#901: the text drop shadow is one more draw of each run, offset
-    down-right by the shadow's offset and drawn first, so it lies under the
-    run - not a recorded, blurred silhouette per batch of text. A repaint of
-    the same list (a background tick) draws no text at all: the UI layer is
-    reused. A grid row is one draw call (see test_a_grid_run_is_one_draw_call)."""
+def test_text_shadow_runs_break_at_other_commands_and_own_backgrounds():
+    plain, filled = Style(fg=(1, 2, 3)), Style(fg=(1, 2, 3), bg=(9, 9, 9))
+    front = [
+        ("clip_push", 0, 0, 10, 5),
+        ("text", 0, 0, "a", plain), ("text", 0, 1, "b", plain),
+        ("text", 0, 2, "c", filled),                    # its own bg: a new run
+        ("fill", 0, 3, 10, 1, plain),
+        ("clip_push", 2, 0, 20, 2),
+        ("text", 0, 3, "d", plain),                     # after a fill, inside both clips
+        ("clip_pop",), ("clip_pop",),
+        ("text", 0, 4, "e", plain),                     # no clip in force
+    ]
+    assert _text_shadow_runs(front) == [
+        (0, 2, (0, 0, 10, 5)), (2, 1, (0, 0, 10, 5)), (3, 1, (2, 0, 10, 2)), (4, 1, None)]
+
+
+def _text_and_blits(monkeypatch):
+    """Count text draws (into the text buffer or the frame) and bitmap draws
+    (a run out of the buffer), and the frame's flushes."""
+    calls = {"text": [], "blit": 0, "flush": 0}
+    real_layout, real_bitmap, real_flush = native.rt_draw_text_layout, native.rt_draw_bitmap, native.rt_flush
+    monkeypatch.setattr(native, "rt_draw_text_layout",
+                        lambda rt, x, y, layout, brush, *o: (calls["text"].append((x, y)),
+                                                             real_layout(rt, x, y, layout, brush, *o))[1])
+
+    def bitmap(*a, **k):
+        calls["blit"] += 1
+        return real_bitmap(*a, **k)
+
+    def flush(rt):
+        calls["flush"] += 1
+        return real_flush(rt)
+    monkeypatch.setattr(native, "rt_draw_bitmap", bitmap)
+    monkeypatch.setattr(native, "rt_flush", flush)
+    return calls
+
+
+def _shadowed_rows(backend, texts):
+    backend.clear()
+    for y, text in enumerate(texts):
+        backend.draw_box(0, y, 20, 1, hints={"fill": True}, style=Style(bg=(200, 210, 190)))
+        backend.draw_text(1, y, text, style=Style(fg=(22, 32, 22)))
+    backend.present()
+    _settled(backend)
+
+
+def _reset(calls):
+    calls["text"].clear()
+    calls["blit"] = calls["flush"] = 0
+
+
+def test_drop_shadow_draws_the_text_once_through_the_buffer(monkeypatch):
+    """xefm#901: with a text drop shadow, each run is drawn once, into the
+    text buffer; the frame blurs the buffer for the shadow and draws the run
+    out of it (one bitmap draw a run). A repaint of the same list draws
+    neither: the UI bitmap is reused. Without a shadow the buffer goes."""
     backend = WindowsBackend(width=40, height=16, title="puikit-text-shadow-test")
     backend.open()
     _settled(backend)
-    calls = []
-    real_layout = native.rt_draw_text_layout
-    monkeypatch.setattr(native, "rt_draw_text_layout",
-                        lambda rt, x, y, layout, brush, *o: (calls.append((x, y)), real_layout(rt, x, y, layout, brush, *o))[1])
+    calls = _text_and_blits(monkeypatch)
     try:
         backend.set_post_effect(PostEffect(drop_shadow=0.6))
-        backend.clear()
-        for y, text in enumerate(("abc", "de")):
-            backend.draw_box(0, y, 20, 1, hints={"fill": True}, style=Style(bg=(200, 210, 190)))
-            backend.draw_text(1, y, text, style=Style(fg=(22, 32, 22)))
-        backend.present()
-        calls.clear()
+        _shadowed_rows(backend, ("abc", "de"))
+        _reset(calls)
         backend._render()
-        assert len(calls) == 4                     # each row: its shadow, then itself
-        dx, dy, _peak = backend._drop_shadow
-        s = backend._dpi_scale
-        for (sx, sy), (x, y) in (calls[0:2], calls[2:4]):
-            assert (sx, sy) == pytest.approx((x + dx * s, y + dy * s))
-        calls.clear()
+        assert len(calls["text"]) == 2              # each row once, into the buffer
+        assert calls["blit"] == 2                   # a run per row (the box breaks it)
+        assert calls["flush"] == 0                  # both fit: no wait for the frame
+        assert backend._text_buffer.size == backend._client_size_px()
+        _reset(calls)
         backend._render()
-        assert calls == []                          # the UI layer, drawn again
+        assert calls["text"] == [] and calls["blit"] == 0   # the UI bitmap, drawn again
+        # A new list while the UI bitmap holds the old one.
+        _shadowed_rows(backend, ("fgh", "ij"))
+        backend._ui_cache, backend._ui_cache_front = backend._ui_bitmap, object()
+        _reset(calls)
+        backend._render()
+        assert len(calls["text"]) == 2 and calls["blit"] == 2
         backend.set_post_effect(None)
+        assert backend._text_buffer is None       # no shadow, no window-sized bitmap
+        _reset(calls)
         backend._render()
-        assert len(calls) == 2                      # no shadow: each row once
+        assert len(calls["text"]) == 2 and calls["blit"] == 0
     finally:
         backend.close()
 
 
-def test_the_ui_layer_is_kept_until_the_list_changes(monkeypatch):
+def test_a_full_text_buffer_costs_a_flush_not_the_blur(monkeypatch):
+    """More runs than the buffer holds: at the first run past the page, the
+    frame flushes and the buffer takes the rest, as a new page. Every run
+    still goes through the buffer - blurred, drawn once."""
+    backend = WindowsBackend(width=40, height=16, title="puikit-text-shadow-full-test")
+    backend.open()
+    _settled(backend)
+    calls = _text_and_blits(monkeypatch)
+    try:
+        backend.set_post_effect(PostEffect(drop_shadow=0.6))
+        # A run a row, each as wide as the window and padded taller than a row:
+        # one per row of the buffer, so sixteen do not fit.
+        rows = [f"{i:02d} " + "x" * 36 for i in range(16)]
+        _shadowed_rows(backend, rows)
+        _reset(calls)
+        backend._render()
+        assert len(calls["text"]) == len(rows)
+        assert calls["blit"] == len(rows)
+        assert calls["flush"] >= 1
+    finally:
+        backend.close()
+
+
+def _read_back(dc, bitmap, w: int, h: int) -> bytes:
+    """A target bitmap's BGRA pixels, through a CPU-readable copy."""
+    import ctypes
+
+    from puikit.backends._win32_native import (
+        ComPtr, D2D1_SIZE_U, D2D1_PIXEL_FORMAT, D2D1_BITMAP_PROPERTIES1, hresult_ok,
+        DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED,
+    )
+
+    class _MappedRect(ctypes.Structure):
+        _fields_ = [("pitch", ctypes.c_uint32), ("bits", ctypes.POINTER(ctypes.c_uint8))]
+
+    props = D2D1_BITMAP_PROPERTIES1(
+        D2D1_PIXEL_FORMAT(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.0, 96.0, 2 | 4, None)                     # CANNOT_DRAW | CPU_READ
+    out = ctypes.c_void_p()
+    hr = dc.call(57, ctypes.c_int32,
+                 [D2D1_SIZE_U, ctypes.c_void_p, ctypes.c_uint32,
+                  ctypes.POINTER(D2D1_BITMAP_PROPERTIES1), ctypes.POINTER(ctypes.c_void_p)],
+                 D2D1_SIZE_U(w, h), None, 0, ctypes.byref(props), ctypes.byref(out))
+    assert hresult_ok(hr), hex(hr & 0xFFFFFFFF)
+    staging = ComPtr(out.value or 0)
+    try:
+        hr = staging.call(8, ctypes.c_int32, [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p],
+                          None, bitmap.addr, None)
+        assert hresult_ok(hr), "CopyFromBitmap " + hex(hr & 0xFFFFFFFF)
+        mapped = _MappedRect()
+        hr = staging.call(14, ctypes.c_int32, [ctypes.c_uint32, ctypes.POINTER(_MappedRect)],
+                          1, ctypes.byref(mapped))
+        assert hresult_ok(hr), "Map " + hex(hr & 0xFFFFFFFF)
+        raw = bytes(ctypes.cast(mapped.bits, ctypes.POINTER(ctypes.c_uint8 * (mapped.pitch * h)))[0])
+        staging.call(15, None, [])                   # Unmap
+        return b"".join(raw[y * mapped.pitch:y * mapped.pitch + w * 4] for y in range(h))
+    finally:
+        staging.release()
+
+
+def _paged_and_roomy(monkeypatch, draw):
+    """Render the list ``draw`` makes, with a drop shadow, from a buffer
+    roomy enough for every run and from the window-sized one: the frame's
+    flushes and the UI bitmap's pixels of each."""
+    pixels, flushes, heights = [], [], []
+    for roomy in (True, False):
+        backend = WindowsBackend(width=40, height=16, title="puikit-text-shadow-page-test")
+        backend.open()
+        _settled(backend)
+        calls = _text_and_blits(monkeypatch)
+        try:
+            backend.set_post_effect(PostEffect(drop_shadow=0.6))
+            if roomy:
+                with backend._exclusive():
+                    w, h = backend._client_size_px()
+                    backend._client_size_px = lambda: (w, h * 4)
+                    backend._ensure_text_buffer()
+                    del backend._client_size_px
+            backend.clear()
+            draw(backend)
+            backend.present()
+            _settled(backend)
+            with backend._exclusive():
+                backend._invalidate_ui_cache()
+                _reset(calls)
+                backend._render()
+                flushes.append(calls["flush"])
+                pixels.append(_read_back(backend._render_target, backend._ui_bitmap,
+                                         *backend._ui_bitmap_size))
+                heights.append(backend._ui_bitmap_size[1])
+        finally:
+            backend.close()
+    diffs = [abs(a - b) for a, b in zip(pixels[0], pixels[1])]
+    # A slot's blur reaches a little past the padding: a few levels where the
+    # two buffers put different runs beside it. A wrong run is a hundred.
+    big = [i for i, d in enumerate(diffs) if d > 4]
+    stride = len(pixels[0]) // heights[0]
+    return flushes, (len(big), max(diffs), sorted({i // stride for i in big})[:40])
+
+
+def test_runs_placed_during_the_frame_draw_as_runs_placed_before_it(monkeypatch):
+    """xefm#901 hand check: runs past what the buffer took before the frame
+    are drawn into it while the frame's batch is open, over the slots of runs
+    the frame has already drawn. Each must be read after it is drawn: the
+    frame's pixels match the same list drawn from a buffer roomy enough to
+    take every run before the frame. (They did not when each such run was
+    drawn as the frame reached it, with the buffer's batch left open: the
+    frame read slots still holding the earlier runs, and file names landed
+    on other rows.)"""
+    def draw(backend):
+        for y in range(16):
+            backend.draw_box(0, y, 20, 1, hints={"fill": True}, style=Style(bg=(200, 210, 190)))
+            backend.draw_text(1, y, f"{y:02d} " + "x" * 36, style=Style(fg=(22, 32, 22)))
+    flushes, (count, worst, rows) = _paged_and_roomy(monkeypatch, draw)
+    assert flushes[0] == 0 and flushes[1] >= 1      # all before the frame; some during it
+    assert count == 0, (count, worst, rows)
+
+
+def test_a_page_always_holds_the_run_it_starts_at(monkeypatch):
+    """xefm#901 hand check: the first page, packed tallest first, can leave
+    out the list's first run (a short one, behind a run as tall as the
+    window); the page started at that run must hold it, or the frame stops
+    mid-batch and the window goes black."""
+    def draw(backend):
+        backend.draw_text(1, 0, "menu", style=Style(fg=(22, 32, 22)))
+        backend.draw_box(0, 1, 40, 1, hints={"fill": True}, style=Style(bg=(200, 210, 190)))
+        for y in range(1, 16):                       # one run, as tall as the window
+            backend.draw_text(0, y, f"{y:02d} " + "y" * 36, style=Style(fg=(22, 32, 22)))
+    flushes, (count, worst, rows) = _paged_and_roomy(monkeypatch, draw)
+    assert flushes[0] == 0 and flushes[1] >= 1
+    assert count == 0, (count, worst, rows)
+
+
+def test_no_text_buffer_without_a_drop_shadow(monkeypatch):
+    backend = WindowsBackend(width=40, height=16, title="puikit-text-shadow-off-test")
+    backend.open()
+    _settled(backend)
+    try:
+        backend.clear()
+        backend.draw_text(1, 0, "abc", style=Style(fg=(22, 32, 22)))
+        backend.present()
+        backend._render()
+        assert backend._text_buffer is None
+    finally:
+        backend.close()
+
+
+def test_the_ui_bitmap_is_kept_until_the_list_changes(monkeypatch):
     """xefm#901: the display list is drawn into an offscreen bitmap once, and a
     frame that does not change it (a background tick) draws that bitmap; a new
     list, or a resize, draws the layer again."""
-    backend = WindowsBackend(width=40, height=16, title="puikit-ui-layer-test")
+    backend = WindowsBackend(width=40, height=16, title="puikit-ui-bitmap-test")
     backend.open()
     _settled(backend)
     passes = []
@@ -1361,18 +1590,18 @@ def test_the_ui_layer_is_kept_until_the_list_changes(monkeypatch):
         backend._render()
         backend._render()
         assert len(passes) == 1
-        layer = backend._ui_layer_bitmap
+        layer = backend._ui_bitmap
         assert layer is not None and backend._ui_cache is layer
         backend.clear()
         backend.draw_text(1, 1, "world")
         backend.present()
         backend._render()
         assert len(passes) == 2
-        assert backend._ui_layer_bitmap is layer    # the same bitmap, drawn over
+        assert backend._ui_bitmap is layer    # the same bitmap, drawn over
         backend._recreate_render_target()
         backend._render()
         assert len(passes) == 3                      # a new device, a new layer
-        assert backend._ui_layer_bitmap is not layer
+        assert backend._ui_bitmap is not layer
     finally:
         backend.close()
 
@@ -1407,8 +1636,9 @@ def test_a_grid_run_is_one_draw_call_on_the_grid(monkeypatch):
 
 def test_render_with_drop_shadow_effect():
     """The real draw path for the Segment LCD look: text (grid and flow fonts)
-    drawn over its offset copy against a live swap chain. A wrong offset or a
-    missing brush reset would fault or fail EndDraw here."""
+    drawn into the text buffer by its own device context, blurred, and drawn
+    back out against a live swap chain. A wrong target or an unbalanced batch
+    would fault or fail EndDraw here."""
     backend = WindowsBackend(width=40, height=16, title="puikit-lcd-test")
     backend.open()
     try:
@@ -1420,7 +1650,8 @@ def test_render_with_drop_shadow_effect():
         backend.draw_text(1, 3, "segment", style=Style(                   # flow path
             fg=(22, 32, 22), font=Font(family="Consolas", size=16)))
         backend.present()
-        backend._render()   # draws each run's shadow copy, then the run
+        backend._render()   # each run through the text buffer
+        assert backend._text_buffer is not None
     finally:
         backend.close()
 
@@ -2500,6 +2731,7 @@ def test_a_com_method_is_resolved_once_per_pointer(monkeypatch):
     not on every call, and a released pointer keeps nothing."""
     backend = WindowsBackend(width=40, height=10, title="puikit-com-bound-test")
     backend.open()
+    _settled(backend)                               # the render thread's first frame reads too
     reads = []
     real = native._read_ptr
     monkeypatch.setattr(native, "_read_ptr", lambda address: (reads.append(address), real(address))[1])
