@@ -73,6 +73,9 @@ class TerminalView(Widget):
         self.on_exit = on_exit
         self.title = ""
         self.pwd = ""
+        #: What the bar shown after the child exits tells the user to do;
+        #: Enter restarts the child unless a subclass handles it first.
+        self.exit_hint = "press Enter to restart"
         self._term: G.Terminal | None = None
         self._proc: _pty.PtyProcess | None = None
         self._panel = None
@@ -253,7 +256,7 @@ class TerminalView(Widget):
                 ctx.draw_text(x, ty, run.text, style)
         self._draw_cursor(ctx, cursor, colors, pitch, cw, dfg, dbg)
         if self._exited is not False:
-            msg = f" [process exited ({self._exited}) - press Enter to restart] "
+            msg = f" [process exited ({self._exited}) - {self.exit_hint}] "
             ctx.draw_text(0.0, (rows - 1) * pitch, msg[:cols],
                           Style(fg=dbg, bg=dfg, attr=TextAttribute.BOLD, font=_MONO))
         t2 = time.perf_counter()
