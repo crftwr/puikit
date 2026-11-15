@@ -5159,11 +5159,14 @@ class WindowsBackend(Backend):
         if msg == native.WM_SIZE:
             cw, ch = native.loword(lparam), native.hiword(lparam)
             if self._render_target is not None and handle.swap_chain is not None and cw and ch:
-                handle.target_bitmap = native.swapchain_resize(
-                    self._render_target, handle.swap_chain, handle.target_bitmap, cw, ch)
-                # swapchain_resize leaves the DC bound to the resized bitmap.
-                native.dc_set_target(self._render_target, self._target_bitmap)
-                self._frame_target = self._target_bitmap
+                # The device context is the main window's too: hold off its
+                # render thread, which may be mid-frame on it.
+                with self._exclusive():
+                    handle.target_bitmap = native.swapchain_resize(
+                        self._render_target, handle.swap_chain, handle.target_bitmap, cw, ch)
+                    # swapchain_resize leaves the DC bound to the resized bitmap.
+                    native.dc_set_target(self._render_target, self._target_bitmap)
+                    self._frame_target = self._target_bitmap
             sw, sh = self.size
             self._dispatch(Event(type=EventType.RESIZE, hints={"w": sw, "h": sh}))
             return 0

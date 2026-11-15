@@ -473,6 +473,10 @@ class D3DShaderBackground:
         self._generation = 0
         self._pending: "tuple | None" = None
         self._compiled_result: "tuple | None" = None
+        # Orders a compile's "still current?" check and its store against the
+        # next set_shader: a superseded compile must never overwrite the
+        # result of the one that replaced it.
+        self._result_lock = threading.Lock()
         #: Called from the compiling thread when a background compile finishes,
         #: so the owner can repaint (the next render_to_texture adopts it).
         self.on_ready: "Callable[[], None] | None" = None
@@ -554,8 +558,9 @@ class D3DShaderBackground:
         the UI thread must not stop for them.
         """
         self._last_frame = None
-        self._generation += 1
-        self._pending = self._compiled_result = None
+        with self._result_lock:
+            self._generation += 1
+            self._pending = self._compiled_result = None
         if not self.available or shader is None:
             self._plan = None
             return False
@@ -590,9 +595,10 @@ class D3DShaderBackground:
 
         def run() -> None:
             results = _compile_all(jobs)
-            if generation != self._generation:
-                return                     # superseded while compiling
-            self._compiled_result = (generation, results)
+            with self._result_lock:
+                if generation != self._generation:
+                    return                 # superseded while compiling
+                self._compiled_result = (generation, results)
             callback = self.on_ready
             if callback is not None:
                 try:

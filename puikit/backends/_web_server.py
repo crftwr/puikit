@@ -207,7 +207,8 @@ class WebServer:
         handler.wfile.flush()
 
         conn = handler.connection
-        self._conn = conn
+        with self._send_lock:
+            self._conn = conn
         self._on_connect()
         # This request's thread becomes the reader loop for the connection's life.
         # All reads go through the handler's buffered rfile so no bytes are lost
@@ -217,8 +218,7 @@ class WebServer:
         except OSError:
             pass
         finally:
-            if self._conn is conn:
-                self._conn = None
+            self._forget(conn)
 
     def _read_loop(self, handler: BaseHTTPRequestHandler) -> None:
         rfile = handler.rfile
@@ -261,8 +261,16 @@ class WebServer:
             self._send_frame(conn, _OP_TEXT, text.encode("utf-8"))
             return True
         except OSError:
-            self._conn = None
+            self._forget(conn)
             return False
+
+    def _forget(self, conn) -> None:
+        """Drop ``conn`` if it is still the live connection. A send that
+        fails on the old socket of a reloaded page must not drop the new
+        one, which its handler set meanwhile."""
+        with self._send_lock:
+            if self._conn is conn:
+                self._conn = None
 
     def _send_frame(self, conn, opcode: int, payload: bytes) -> None:
         header = bytearray([0x80 | opcode])  # FIN set, server frames are unmasked
