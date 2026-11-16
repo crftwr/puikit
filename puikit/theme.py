@@ -105,6 +105,13 @@ class Theme:
     # palette here). Empty for a theme that names none; ``derive_theme`` passes an
     # ``extras=`` keyword straight through.
     extras: dict[str, Any] = field(default_factory=dict)
+    # The hover fill of a row in a popup (a menu pulldown). ``hover_bg`` is a
+    # tint of the page, and a popup sits a step off the page, so on the popup
+    # it landed at the popup's own shade - ΔE well under the fills' floor on
+    # every built-in theme - and a hovered menu row could not be told apart.
+    # ``derive_theme`` sets it a visible distance off ``popup_bg``; None (a
+    # theme built by hand) falls back to ``hover_bg``, as before.
+    popup_hover_bg: Color | None = None
 
     def surface_bg(self, role: str) -> Color | None:
         return self.surfaces.get(role)
@@ -316,6 +323,11 @@ def derive_theme(
             ("text_selection_inactive_bg", (page, field), FILL_MIN_DE_INACTIVE)):
         derived[name] = ensure_fill_distinct(derived[name], under, gap,
                                              text=derived["text"])
+    # A popup row's hover: a step off the popup itself, as hover_bg is off the
+    # page - at least the inactive selection's distance, so a hovered row reads
+    # without matching the cursor row's stronger fill.
+    derived["popup_hover_bg"] = ensure_fill_distinct(
+        lift(popup, 0.07), (popup,), FILL_MIN_DE_INACTIVE, text=derived["text"])
     return Theme(**derived)
 
 

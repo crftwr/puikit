@@ -105,6 +105,8 @@ class MenuPopup(Widget):
         self._width = 0.0
         self._abs: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
         self._child: "MenuPopup | None" = None
+        self._child_row = -1      # the row whose submenu is open
+        self._hover_cancel: Callable[[], None] | None = None  # pending submenu open
         self.cursor = self._first_selectable()
 
     # --- selection helpers ----------------------------------------------------
@@ -146,6 +148,13 @@ class MenuPopup(Widget):
     def draw(self, ctx: DrawContext) -> None:
         self._panel = ctx.panel
         self._abs = ctx.screen_rect
+        if self._child is None:
+            # The deepest popup of the chain is the modal layer, so it takes the
+            # pointer for the whole window and routes it: the bar it hangs from,
+            # itself, or a popup further up the chain (_pointer_moved).
+            sw, sh = ctx.panel.backend.size_units
+            ctx.request_pointer_motion(
+                self._pointer_moved, region=(-self._abs[0], -self._abs[1], sw, sh))
         theme = ctx.theme or DEFAULT_THEME
         wu, hu = ctx.size_units
         self._width = wu
@@ -175,7 +184,7 @@ class MenuPopup(Widget):
             if i == self.cursor:
                 row_bg = theme.selection_bg
             elif i == hover and enabled:
-                row_bg = theme.hover_bg
+                row_bg = getattr(theme, "popup_hover_bg", None) or theme.hover_bg
             else:
                 row_bg = theme.popup_bg
             if row_bg != theme.popup_bg:
@@ -207,6 +216,7 @@ class MenuPopup(Widget):
     def _back(self) -> None:
         """Close just this level, returning to the parent (or finishing the
         whole menu when this is the root)."""
+        self._cancel_hover_open()
         self._pop_if_top()
         if self.parent is not None:
             self.parent._child = None
@@ -215,6 +225,7 @@ class MenuPopup(Widget):
 
     def _dismiss(self) -> None:
         """Tear down the whole chain from this (active) popup up to the root."""
+        self._cancel_hover_open()
         self._pop_if_top()
         if self.parent is not None:
             self.parent._dismiss()
@@ -230,6 +241,7 @@ class MenuPopup(Widget):
         w, h, row_h = popup_geometry(entry.submenu, self._panel.backend.measure_text, vector)
         child = MenuPopup(entry.submenu, row_h=row_h, parent=self)
         self._child = child
+        self._child_row = index
         # Open to the right of this row; the Panel nudges it on-screen.
         sw, sh = self._panel.backend.size_units
         x = min(rx + rw, max(0.0, sw - w))
@@ -289,6 +301,84 @@ class MenuPopup(Widget):
             return
         after = [i for i in matches if i > self.cursor]
         self.cursor = after[0] if after else matches[0]
+
+    # --- hover (motion with no button held) ------------------------------------
+
+    #: How long the pointer rests on a row before its submenu opens, so a sweep
+    #: across the rows does not open and close every submenu on the way.
+    SUBMENU_HOVER_DELAY = 0.25
+
+    def _chain(self) -> list["MenuPopup"]:
+        """This popup and its parents, innermost first."""
+        out, p = [], self
+        while p is not None:
+            out.append(p)
+            p = p.parent
+        return out
+
+    def _pointer_moved(self, event: Event) -> bool:
+        """Bare motion, taken by the deepest popup for the whole window: over a
+        bar title, switch to that pulldown; over a row of a popup in the chain,
+        hover it (_hover_row_at). Returns whether the frame changes."""
+        sx = self._abs[0] + (event.x or 0.0)
+        sy = self._abs[1] + (event.y or 0.0)
+        bar = self._bar()
+        if bar is not None:
+            index = bar._title_at(sx, sy)
+            if index is not None and index != bar._index:
+                self._dismiss()
+                bar._do_open(index)
+                return True
+        for popup in self._chain():
+            rx, ry, rw, rh = popup._abs
+            if rx <= sx < rx + rw and ry <= sy < ry + rh:
+                return popup._hover_row_at(int((sy - ry) / popup._row_h))
+        return False
+
+    def _hover_row_at(self, row: int) -> bool:
+        """The pointer rests on ``row`` of this popup: the cursor follows it, a
+        submenu open on another row closes, and this row's submenu opens once
+        the pointer has stayed SUBMENU_HOVER_DELAY."""
+        if not (0 <= row < len(self.menu.items)) or not self._selectable(row):
+            self._cancel_hover_open()
+            return False
+        changed = self.cursor != row
+        self.cursor = row
+        if self._child is not None and row != self._child_row:
+            self._close_children()
+            changed = True
+        entry = self.menu.items[row]
+        if entry.submenu is not None and self._child is None:
+            self._schedule_hover_open(row)
+        elif entry.submenu is None:
+            self._cancel_hover_open()
+        return changed
+
+    def _close_children(self) -> None:
+        while self._child is not None:
+            deepest = self._child
+            while deepest._child is not None:
+                deepest = deepest._child
+            deepest._cancel_hover_open()
+            deepest._back()
+
+    def _schedule_hover_open(self, row: int) -> None:
+        if self._panel is None:
+            return
+        self._cancel_hover_open()
+
+        def fire() -> None:
+            self._hover_cancel = None
+            if self._child is None and self.cursor == row and self._panel is not None:
+                self._open_submenu(row)
+                self._panel.render()
+
+        self._hover_cancel = self._panel.call_later(self.SUBMENU_HOVER_DELAY, fire)
+
+    def _cancel_hover_open(self) -> None:
+        if self._hover_cancel is not None:
+            self._hover_cancel()
+            self._hover_cancel = None
 
     # --- events --------------------------------------------------------------
 
@@ -539,6 +629,17 @@ class MenuBar(Widget):
 
     def _pulldown_closed(self) -> None:
         self._open = False
+
+    def _title_at(self, sx: float, sy: float) -> int | None:
+        """The enabled bar entry under screen point (sx, sy), or None."""
+        rx, ry, _rw, rh = self._abs
+        if not (ry <= sy < ry + rh):
+            return None
+        lx = sx - rx
+        for i, (x0, x1, item) in enumerate(self._entry_x):
+            if x0 <= lx < x1 and item.is_enabled():
+                return i
+        return None
 
     def _navigate(self, direction: int) -> None:
         """←/→ handed up from the open pulldown, which has already dismissed
