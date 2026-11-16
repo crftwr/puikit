@@ -82,6 +82,9 @@ class TerminalView(Widget):
         #: top gap) and centres a full-screen program; "top-left" keeps the
         #: plain origin. An unknown value behaves as "top-left".
         self.anchor = anchor
+        #: Carry a full-screen program's outermost colours into the margins.
+        self.extend_edges = True
+        self._extend = False
         self.title = ""
         self.pwd = ""
         #: What the bar shown after the child exits tells the user to do;
@@ -298,6 +301,10 @@ class TerminalView(Widget):
         primary = self._term.active_screen() == G.SCREEN_PRIMARY
         free_x = max(0.0, w_units - 2 * pad_x - cols * cw)
         free_y = max(0.0, h_units - 2 * pad_y - rows * pitch)
+        # A full-screen program's outermost colours are carried into the
+        # margins (see _extend_edges); a shell's are not - its last line is
+        # whatever was printed last, not a frame.
+        self._extend = ctx.pixel_layout and not primary
         if self.anchor == "auto" and primary:
             ox, oy = pad_x, pad_y + free_y
             self._term.set_overscan_above(1 if ctx.pixel_layout else 0)
@@ -346,18 +353,23 @@ class TerminalView(Widget):
             ul_y = fm.ascent + max(px[1] * 1.5, fm.descent * 0.35)
         def draw_row(runs, ty):
             for run in runs:
-                style = self._style(run, dfg, dbg, page_bg)
-                if run.sel:
-                    # The selection: the theme's selection fill (reverse video
-                    # where the theme has none).
-                    style = (Style(fg=style.fg, bg=sel_bg, attr=style.attr, font=style.font,
-                                   underline_color=style.underline_color)
-                             if sel_bg is not None else
-                             Style(fg=style.bg or dbg, bg=style.fg, attr=style.attr,
-                                   font=style.font, underline_color=style.underline_color))
+                style = self._run_style(run, dfg, dbg, page_bg, sel_bg)
                 x = ox + run.col * cw
+                special = shapes and _cell_glyphs.SPECIAL.search(run.text)
                 if run.sel or run.bg is not None or run.flags & G.STYLE_INVERSE:
-                    ctx.fill_rect(x, ty, run.width * cw, pitch, Style(bg=style.bg))
+                    if special and not run.wide:
+                        # Block elements paint their own background (see
+                        # _cell_glyphs.draw): fill only between them, so no
+                        # cell is painted twice on a translucent surface.
+                        start = 0
+                        for i, ch in enumerate(run.text + "\u2580"):
+                            if i == len(run.text) or _cell_glyphs.is_block(ch):
+                                if i > start:
+                                    ctx.fill_rect(x + start * cw, ty, (i - start) * cw, pitch,
+                                                  Style(bg=style.bg))
+                                start = i + 1
+                    else:
+                        ctx.fill_rect(x, ty, run.width * cw, pitch, Style(bg=style.bg))
                 if run.wide:
                     # A fallback CJK face is rarely exactly two cells wide;
                     # centre the glyph in its two-cell slot.
@@ -373,11 +385,14 @@ class TerminalView(Widget):
                     style = Style(fg=style.fg, bg=style.bg, font=style.font,
                                   attr=style.attr & ~(TextAttribute.UNDERLINE
                                                       | TextAttribute.UNDERLINE_THICK))
-                if shapes and _cell_glyphs.SPECIAL.search(run.text):
+                if special:
                     self._draw_with_shapes(ctx, run, style, x, ty, cw, pitch, px, dbg)
                 else:
                     ctx.draw_text(x, ty, run.text, style)
 
+        if self._extend and self.extend_edges:
+            self._extend_edges(ctx, ox, oy, cw, pitch, w_units, h_units,
+                               dfg, dbg, page_bg, sel_bg)
         for y, runs in enumerate(self._term.row_cache):
             draw_row(runs, oy + y * pitch)
         # The rows above the viewport, into the top gap (clipped at the edge).
@@ -400,6 +415,74 @@ class TerminalView(Widget):
         st["last_update_ms"] = (t1 - t0) * 1000
         st["last_draw_ms"] = (t2 - t1) * 1000
 
+    def _run_style(self, run, dfg, dbg, page_bg, sel_bg) -> Style:
+        style = self._style(run, dfg, dbg, page_bg)
+        if run.sel:
+            # The selection: the theme's selection fill (reverse video where
+            # the theme has none).
+            if sel_bg is not None:
+                return Style(fg=style.fg, bg=sel_bg, attr=style.attr, font=style.font,
+                             underline_color=style.underline_color)
+            return Style(fg=style.bg or dbg, bg=style.fg, attr=style.attr,
+                         font=style.font, underline_color=style.underline_color)
+        return style
+
+    def _extend_edges(self, ctx, ox, oy, cw, pitch, w_units, h_units,
+                      dfg, dbg, page_bg, sel_bg) -> None:
+        """Carry the outermost cells' colours out into the margins, so a
+        full-screen program's picture reaches the window edge instead of
+        stopping a fraction of a cell short of it.
+
+        Each margin strip takes, segment by segment, the colour its cell shows
+        along that side (``_cell_glyphs.side_colors``): a cell's background for
+        text, but for a block element the part it paints - a half-block shadow
+        continues as fg on one half and bg on the other, and a page painted
+        with full blocks in fg continues as fg, where copying the cell's bg
+        would have broken it. A see-through default background (over a
+        wallpaper) is left unpainted."""
+        term = self._term
+        cols, rows = term.cols, term.rows
+        x1 = ox + cols * cw          # right edge of the grid
+        y1 = oy + rows * pitch       # bottom edge of the grid
+        right_w, bottom_h = w_units - x1, h_units - y1
+
+        def cell(c: int, r: int):
+            ch, run = self._char_at(c, r)
+            if run is None:
+                return " ", dfg, page_bg
+            st = self._run_style(run, dfg, dbg, page_bg, sel_bg)
+            return (ch if not run.wide else " "), st.fg, st.bg
+
+        def sides(c: int, r: int, side: str):
+            ch, fg, bg = cell(c, r)
+            return _cell_glyphs.side_colors(ch, side, fg, bg)
+
+        def fill(x, y, w, h, color) -> None:
+            if color is not None and w > 0 and h > 0:
+                ctx.fill_rect(x, y, w, h, Style(bg=color))
+
+        for r in range(rows):
+            for side, x, w in (("l", 0.0, ox), ("r", x1, right_w)):
+                if w <= 0:
+                    continue
+                c = 0 if side == "l" else cols - 1
+                for a, b, color in sides(c, r, side):
+                    fill(x, oy + (r + a) * pitch, w, (b - a) * pitch, color)
+        for c in range(cols):
+            for side, y, h in (("t", 0.0, oy), ("b", y1, bottom_h)):
+                if h <= 0:
+                    continue
+                r = 0 if side == "t" else rows - 1
+                for a, b, color in sides(c, r, side):
+                    fill(ox + (c + a) * cw, y, (b - a) * cw, h, color)
+        # Corners: the colour at the corner of the corner cell.
+        for (c, r, side, pick, x, y, w, h) in (
+                (0, 0, "l", 0, 0.0, 0.0, ox, oy),
+                (cols - 1, 0, "r", 0, x1, 0.0, right_w, oy),
+                (0, rows - 1, "l", -1, 0.0, y1, ox, bottom_h),
+                (cols - 1, rows - 1, "r", -1, x1, y1, right_w, bottom_h)):
+            fill(x, y, w, h, sides(c, r, side)[pick][2])
+
     @staticmethod
     def _draw_with_shapes(ctx, run, style, x, ty, cw, pitch, px, dbg) -> None:
         """A run holding box-drawing / block glyphs: those drawn as shapes, the
@@ -413,7 +496,7 @@ class TerminalView(Widget):
             # A shade mixes fg into the cell's background; a see-through cell
             # (over a wallpaper) mixes into the terminal's own background.
             if not _cell_glyphs.draw(ctx, text[i], x + i * cw, ty, cw, pitch,
-                                     style.fg, style.bg or dbg, px):
+                                     style.fg, style.bg or dbg, px, bg_fill=style.bg):
                 ctx.draw_text(x + i * cw, ty, text[i], style)
             start = i + 1
         if start < len(text):
@@ -452,7 +535,7 @@ class TerminalView(Widget):
         rows = self._term.row_cache if self._term else []
         if 0 <= y < len(rows):
             for run in rows[y]:
-                if run.wide and run.col == x:
+                if run.wide and run.col <= x <= run.col + 1:
                     return run.text, run
                 if not run.wide and run.col <= x < run.col + run.width:
                     i = x - run.col

@@ -75,40 +75,52 @@ def _mix(a, b, t: float):
     return tuple(round(a[i] + (b[i] - a[i]) * t) for i in range(3))
 
 
+def is_block(ch: str) -> bool:
+    """A block element: it paints an area of its cell, not a stroke."""
+    return "\u2580" <= ch <= "\u259f"
+
+
+def _complement(rects) -> list[tuple[float, float, float, float]]:
+    """The parts of the unit cell ``rects`` leave uncovered, as rects."""
+    xs = sorted({0.0, 1.0, *(r[0] for r in rects), *(r[2] for r in rects)})
+    ys = sorted({0.0, 1.0, *(r[1] for r in rects), *(r[3] for r in rects)})
+    out = []
+    for i in range(len(ys) - 1):
+        for j in range(len(xs) - 1):
+            cx, cy = (xs[j] + xs[j + 1]) / 2, (ys[i] + ys[i + 1]) / 2
+            if not any(r[0] <= cx <= r[2] and r[1] <= cy <= r[3] for r in rects):
+                out.append((xs[j], ys[i], xs[j + 1], ys[i + 1]))
+    return out
+
+
 def draw(ctx, ch: str, x: float, y: float, w: float, h: float, fg, bg,
-         px: tuple[float, float]) -> bool:
+         px: tuple[float, float], bg_fill=None) -> bool:
     """Draw ``ch`` filling the cell at (x, y) of size w x h (base units) in
     ``fg``; False when it is not one this module draws. ``px`` is one device
-    pixel in base units (x, y), the unit of a line's thickness."""
+    pixel in base units (x, y), the unit of a line's thickness.
+
+    A block element also paints the part of the cell it leaves uncovered in
+    ``bg_fill`` when one is given, so the caller need not fill the cell's
+    background first: on a translucent surface a fill laid over another
+    shows both layers, and a thumb cap or a half-block shadow came out in a
+    third colour. ``bg`` is what a shade mixes into."""
     o = ord(ch)
-    fill = Style(bg=fg)
-    if 0x2580 <= o <= 0x259F:
-        if o == 0x2580:                                   # ▀ upper half
-            ctx.fill_rect(x, y, w, h / 2, fill)
-        elif 0x2581 <= o <= 0x2588:                       # ▁..█ lower eighths
-            n = o - 0x2580
-            ctx.fill_rect(x, y + h * (1 - n / 8), w, h * n / 8, fill)
-        elif 0x2589 <= o <= 0x258F:                       # ▉..▏ left eighths
-            n = 0x2590 - o
-            ctx.fill_rect(x, y, w * n / 8, h, fill)
-        elif o == 0x2590:                                 # ▐ right half
-            ctx.fill_rect(x + w / 2, y, w / 2, h, fill)
-        elif 0x2591 <= o <= 0x2593:                       # ░▒▓ shades
+    if is_block(ch):
+        if 0x2591 <= o <= 0x2593:                         # ░▒▓ shades: one mixed fill
             ctx.fill_rect(x, y, w, h, Style(bg=_mix(bg, fg, (o - 0x2590) / 4)))
-        elif o == 0x2594:                                 # ▔ upper eighth
-            ctx.fill_rect(x, y, w, h / 8, fill)
-        elif o == 0x2595:                                 # ▕ right eighth
-            ctx.fill_rect(x + w * 7 / 8, y, w / 8, h, fill)
-        else:
-            ul, ur, ll, lr = _QUAD[ch]
-            hw, hh = w / 2, h / 2
-            for on, qx, qy in ((ul, x, y), (ur, x + hw, y), (ll, x, y + hh), (lr, x + hw, y + hh)):
-                if on:
-                    ctx.fill_rect(qx, qy, hw, hh, fill)
+            return True
+        rects = _covered(ch) or []
+        for x0, y0, x1, y1 in rects:
+            ctx.fill_rect(x + x0 * w, y + y0 * h, (x1 - x0) * w, (y1 - y0) * h, Style(bg=fg))
+        if bg_fill is not None:
+            for x0, y0, x1, y1 in _complement(rects):
+                ctx.fill_rect(x + x0 * w, y + y0 * h, (x1 - x0) * w, (y1 - y0) * h,
+                              Style(bg=bg_fill))
         return True
     arms = _BOX.get(ch)
     if arms is None:
         return False
+    fill = Style(bg=fg)
     left, right, up, down = arms
     pw, ph = px
     cx, cy = x + w / 2, y + h / 2
@@ -139,3 +151,66 @@ def draw(ctx, ch: str, x: float, y: float, w: float, h: float, fg, bg,
     if down:
         vline(cy - ph * 1.5, y + h, down)
     return True
+
+
+# --- the colour a cell shows along each of its sides -------------------------
+
+def _covered(ch: str):
+    """The parts of the cell a block element paints in its foreground colour,
+    as (x0, y0, x1, y1) in cell fractions; None when the glyph paints no area
+    (text, box drawing: thin strokes that do not reach the cell's sides)."""
+    o = ord(ch)
+    if o == 0x2580:
+        return [(0.0, 0.0, 1.0, 0.5)]
+    if 0x2581 <= o <= 0x2588:
+        n = (o - 0x2580) / 8
+        return [(0.0, 1.0 - n, 1.0, 1.0)]
+    if 0x2589 <= o <= 0x258F:
+        return [(0.0, 0.0, (0x2590 - o) / 8, 1.0)]
+    if o == 0x2590:
+        return [(0.5, 0.0, 1.0, 1.0)]
+    if o == 0x2594:
+        return [(0.0, 0.0, 1.0, 0.125)]
+    if o == 0x2595:
+        return [(0.875, 0.0, 1.0, 1.0)]
+    q = _QUAD.get(ch)
+    if q is not None:
+        ul, ur, ll, lr = q
+        return [r for on, r in ((ul, (0, 0, .5, .5)), (ur, (.5, 0, 1, .5)),
+                                (ll, (0, .5, .5, 1)), (lr, (.5, .5, 1, 1))) if on]
+    return None
+
+
+def side_colors(ch: str, side: str, fg, bg) -> list[tuple[float, float, object]]:
+    """What a cell shows along one side ("l", "r", "t", "b"): segments
+    (start, end, colour) in fractions along that side (top to bottom for
+    l/r, left to right for t/b), covering 0..1.
+
+    A host extending the outermost cells into a margin reads it so a block
+    picture continues past the grid: a half-block shadow is its fg on one
+    side and bg on the other, and a TUI that paints a background in fg (a
+    full block the colour of the page) extends as that colour, not as the
+    cell's bg. Text and box drawing show their bg; a shade its mix."""
+    o = ord(ch) if ch else 0
+    if 0x2591 <= o <= 0x2593 and fg is not None and bg is not None:
+        return [(0.0, 1.0, _mix(bg, fg, (o - 0x2590) / 4))]
+    rects = _covered(ch) if ch else None
+    if not rects:
+        return [(0.0, 1.0, bg)]
+    eps = 1e-6
+    if side in ("l", "r"):
+        spans = sorted((y0, y1) for x0, y0, x1, y1 in rects
+                       if (x0 <= eps if side == "l" else x1 >= 1 - eps))
+    else:
+        spans = sorted((x0, x1) for x0, y0, x1, y1 in rects
+                       if (y0 <= eps if side == "t" else y1 >= 1 - eps))
+    out: list[tuple[float, float, object]] = []
+    at = 0.0
+    for a, b in spans:
+        if a > at + eps:
+            out.append((at, a, bg))
+        out.append((max(a, at), b, fg))
+        at = max(at, b)
+    if at < 1 - eps:
+        out.append((at, 1.0, bg))
+    return out
