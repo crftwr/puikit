@@ -983,6 +983,23 @@ class _PuiKitView(NSView, protocols=[_NS_TEXT_INPUT_CLIENT]):
             if event is not None:
                 self._pk_dispatch(event)
             return
+        # A Control chord outside a composition is a command, never text: send it
+        # past the input context. Through it, Cocoa's text system reads Ctrl-Q as
+        # "insert the next key literally" and swallows it, and an unbound chord
+        # (Ctrl-C, Ctrl-Q's neighbours) comes back to insertText: as a bare
+        # control character with no key name - both lost to a terminal widget
+        # (xefm#900: an editor's Ctrl-Q quit). A bound one (Ctrl-A ->
+        # moveToBeginningOfLine:) was re-translated into this same event anyway.
+        # During a composition the chord stays the IME's: a Japanese IME converts
+        # with Ctrl-J / K / L.
+        self._ensure_ime_state()
+        flags = ns_event.modifierFlags()
+        if (flags & NSEventModifierFlagControl and not flags & NSEventModifierFlagCommand
+                and not self.marked_text):
+            event = translate_key(ns_event.charactersIgnoringModifiers(), flags)
+            if event is not None:
+                self._pk_dispatch(event)
+            return
         # A text widget holds focus: hand the key to the input context. It either
         # composes (setMarkedText:), commits text (insertText:), or issues an
         # editing command (doCommandBySelector:) — never a raw key here.
