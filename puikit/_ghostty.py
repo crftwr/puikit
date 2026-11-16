@@ -50,6 +50,11 @@ OPT_RENDER_HOLD = 42
 OPT_SELECTION = 22
 DATA_SCROLLBAR = 9
 DATA_SELECTION = 31
+DATA_ACTIVE_SCREEN = 6
+SCREEN_PRIMARY, SCREEN_ALTERNATE = 0, 1
+RS_OPT_OVERSCAN = 2
+RS_DATA_OVERSCAN = 20
+ROW_DATA_VIEWPORT_Y = 6
 ROW_DATA_SELECTION = 4
 POINT_VIEWPORT = 1
 GESTURE_PRESS, GESTURE_RELEASE, GESTURE_DRAG = 0, 1, 2
@@ -222,6 +227,10 @@ class GestureGeometry(C.Structure):
 
 class RowSelection(C.Structure):
     _fields_ = [("size", C.c_size_t), ("start_x", C.c_uint16), ("end_x", C.c_uint16)]
+
+
+class Overscan(C.Structure):
+    _fields_ = [("above", C.c_uint16), ("below", C.c_uint16)]
 
 
 class Scrollbar(C.Structure):
@@ -515,6 +524,10 @@ class Terminal:
         self._rgb = Rgb()
         self._wide = C.c_int()
         self.row_cache: list[list[Cell]] = [[] for _ in range(rows)]
+        #: Rows captured above the viewport (see :meth:`set_overscan_above`),
+        #: topmost first; fewer than requested near the top of the scrollback.
+        self.above_rows: list[list[Cell]] = []
+        self._overscan_above = 0
         self.stats_rows_rebuilt = 0
         self._layout = cell_layout(lib)
         self._view = CellsView()
@@ -648,6 +661,22 @@ class Terminal:
         full = C.c_int(RS_DIRTY_FULL)
         self._lib.ghostty_render_state_set(self._rs, RS_OPT_DIRTY, C.byref(full))
 
+    def active_screen(self) -> int:
+        """SCREEN_PRIMARY (a shell's line-by-line screen, with scrollback) or
+        SCREEN_ALTERNATE (a full-screen program's)."""
+        v = C.c_int(SCREEN_PRIMARY)
+        self._lib.ghostty_terminal_get(self._h, DATA_ACTIVE_SCREEN, C.byref(v))
+        return v.value
+
+    def set_overscan_above(self, n: int) -> None:
+        """Capture ``n`` rows above the viewport on each update (into
+        ``above_rows``) for an owner that draws the row peeking in above."""
+        if n == self._overscan_above:
+            return
+        self._overscan_above = n
+        o = Overscan(n, 0)
+        self._lib.ghostty_render_state_set(self._rs, RS_OPT_OVERSCAN, C.byref(o))
+
     def scrollbar(self) -> tuple[int, int, int]:
         """(total rows, viewport offset, visible rows) of the scrollable area."""
         sb = Scrollbar()
@@ -735,18 +764,33 @@ class Terminal:
         rebuilt = 0
         if dirty.value != RS_DIRTY_FALSE:
             full = dirty.value == RS_DIRTY_FULL
+            got = Overscan()
+            lib.ghostty_render_state_get(self._rs, RS_DATA_OVERSCAN, C.byref(got))
+            if len(self.above_rows) != got.above:
+                self.above_rows = [[] for _ in range(got.above)]
+                full = True
             lib.ghostty_render_state_get(self._rs, RS_DATA_ROW_ITERATOR, C.byref(self._rows_it))
             row_dirty = C.c_bool()
             false = C.c_bool(False)
-            y = 0
+            vy = C.c_int32()
             while lib.ghostty_render_state_row_iterator_next(self._rows_it):
+                lib.ghostty_render_state_row_get(self._rows_it, ROW_DATA_VIEWPORT_Y, C.byref(vy))
+                y = vy.value
+                if y < 0:  # an overscan row above the viewport
+                    i = len(self.above_rows) + y
+                    if 0 <= i < len(self.above_rows):
+                        lib.ghostty_render_state_row_get(self._rows_it, ROW_DATA_DIRTY, C.byref(row_dirty))
+                        if full or row_dirty.value:
+                            self.above_rows[i] = (self._build_row_fast(colors) if self._layout
+                                                  else self._build_row())
+                            lib.ghostty_render_state_row_set(self._rows_it, ROW_OPT_DIRTY, C.byref(false))
+                    continue
                 lib.ghostty_render_state_row_get(self._rows_it, ROW_DATA_DIRTY, C.byref(row_dirty))
                 if (full or row_dirty.value) and y < len(self.row_cache):
                     self.row_cache[y] = (self._build_row_fast(colors) if self._layout
                                          else self._build_row())
                     rebuilt += 1
                     lib.ghostty_render_state_row_set(self._rows_it, ROW_OPT_DIRTY, C.byref(false))
-                y += 1
             clean = C.c_int(RS_DIRTY_FALSE)
             lib.ghostty_render_state_set(self._rs, RS_OPT_DIRTY, C.byref(clean))
         self.stats_rows_rebuilt += rebuilt

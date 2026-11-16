@@ -66,7 +66,7 @@ class TerminalView(Widget):
                  on_title: Callable[[str], None] | None = None,
                  on_pwd: Callable[[str], None] | None = None,
                  on_exit: Callable[[int | None], None] | None = None,
-                 padding_px: float = 0.0) -> None:
+                 padding_px: float = 0.0, anchor: str = "auto") -> None:
         self.argv = argv or default_shell()
         self.cwd = cwd
         self.env = env
@@ -77,6 +77,11 @@ class TerminalView(Widget):
         #: backends (a character grid has no sub-cell and stays flush) - the
         #: breathing room a host gives its other panes.
         self.padding_px = padding_px
+        #: Where the grid sits in the space it does not fill: "auto" pins a
+        #: shell's screen to the bottom left (drawing the row above into the
+        #: top gap) and centres a full-screen program; "top-left" keeps the
+        #: plain origin. An unknown value behaves as "top-left".
+        self.anchor = anchor
         self.title = ""
         self.pwd = ""
         #: What the bar shown after the child exits tells the user to do;
@@ -258,19 +263,18 @@ class TerminalView(Widget):
         self._pitch = pitch
         w_units, h_units = ctx.size_units
         bw, bh = ctx.base_size
-        ox = oy = 0.0
+        pad_x = pad_y = 0.0
         if ctx.pixel_layout and self.padding_px:
-            ox = self.padding_px / bw if bw else 0.0
-            oy = self.padding_px / bh if bh else 0.0
-        self._ox, self._oy = ox, oy
+            pad_x = self.padding_px / bw if bw else 0.0
+            pad_y = self.padding_px / bh if bh else 0.0
         # The scrollbar takes no columns: the program inside sees the same grid
         # it would in a terminal. On pixel backends it is overlaid on the right
         # edge while the view is scrolled (see _scrollbar_visible); a character
         # grid has none (the host terminal has its own scrollback).
         self._sb_w = float(ctx.panel.backend.scrollbar_units) if ctx.pixel_layout else 0.0
         self._w_units, self._h_units = w_units, h_units
-        cols = max(2, int((w_units - 2 * ox) / cw + 1e-6))
-        rows = max(2, int((h_units - 2 * oy) / pitch + 1e-6))
+        cols = max(2, int((w_units - 2 * pad_x) / cw + 1e-6))
+        rows = max(2, int((h_units - 2 * pad_y) / pitch + 1e-6))
         if self._term is None and self._exited is False:
             self._start(ctx, cols, rows)
         if self._term is None:
@@ -283,6 +287,27 @@ class TerminalView(Widget):
         if self._use_ticks and not self._ticking and self._exited is False:
             self._ticking = ctx.panel.request_animation_ticks(self._tick)
         self._drain()
+
+        # Where the grid sits in the window. The window sizes in pixels, the
+        # grid in whole cells, so up to a cell is left over each way; padding
+        # is the least margin and the leftover goes where it reads best
+        # (``anchor``). A shell's screen ("primary") is pinned to the bottom
+        # left, so the prompt keeps its place as the window resizes, and the
+        # row above the top peeks in instead of a gap; a full-screen program
+        # ("alternate") is centred.
+        primary = self._term.active_screen() == G.SCREEN_PRIMARY
+        free_x = max(0.0, w_units - 2 * pad_x - cols * cw)
+        free_y = max(0.0, h_units - 2 * pad_y - rows * pitch)
+        if self.anchor == "auto" and primary:
+            ox, oy = pad_x, pad_y + free_y
+            self._term.set_overscan_above(1 if ctx.pixel_layout else 0)
+        else:
+            if self.anchor == "auto":
+                ox, oy = pad_x + free_x / 2, pad_y + free_y / 2
+            else:
+                ox, oy = pad_x, pad_y
+            self._term.set_overscan_above(0)
+        self._ox, self._oy = ox, oy
 
         t0 = time.perf_counter()
         held = (self._held_since is not None and self._last_frame is not None
@@ -319,8 +344,7 @@ class TerminalView(Widget):
         if shapes:
             fm = ctx.font_metrics(mono)
             ul_y = fm.ascent + max(px[1] * 1.5, fm.descent * 0.35)
-        for y, runs in enumerate(self._term.row_cache):
-            ty = oy + y * pitch
+        def draw_row(runs, ty):
             for run in runs:
                 style = self._style(run, dfg, dbg, page_bg)
                 if run.sel:
@@ -353,6 +377,13 @@ class TerminalView(Widget):
                     self._draw_with_shapes(ctx, run, style, x, ty, cw, pitch, px, dbg)
                 else:
                     ctx.draw_text(x, ty, run.text, style)
+
+        for y, runs in enumerate(self._term.row_cache):
+            draw_row(runs, oy + y * pitch)
+        # The rows above the viewport, into the top gap (clipped at the edge).
+        above = self._term.above_rows
+        for i, runs in enumerate(above):
+            draw_row(runs, oy - (len(above) - i) * pitch)
         self._draw_cursor(ctx, cursor, colors, pitch, cw, dfg, dbg, ox, oy)
         if self._scrollbar_visible():
             total, offset, length = self._term.scrollbar()
