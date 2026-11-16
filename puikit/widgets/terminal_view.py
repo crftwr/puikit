@@ -17,7 +17,7 @@ rebuilt from libghostty (one ctypes walk over its cells) only when its dirty
 flag says it changed. ``stats`` reports both.
 
 Not in the prototype: selection and copy, mouse reporting to the program,
-bracketed paste through libghostty's paste encoder, ConPTY (Windows).
+bracketed paste through libghostty's paste encoder.
 """
 
 from __future__ import annotations
@@ -41,11 +41,13 @@ from .base import Widget
 def available() -> str | None:
     """None when an embedded terminal can run here, else why not."""
     if not _pty.SUPPORTED:
-        return "no pty on this platform yet (ConPTY not implemented)"
+        return _pty.UNSUPPORTED_REASON
     return G.load_error()
 
 
 def default_shell() -> list[str]:
+    if os.name == "nt":
+        return [os.environ.get("COMSPEC") or "cmd.exe"]
     return [os.environ.get("SHELL") or "/bin/sh", "-l"]
 
 
@@ -137,11 +139,21 @@ class TerminalView(Widget):
         self._exited = False
         self._gen += 1
         gen = self._gen
-        self._proc = _pty.PtyProcess(self.argv, cols=cols, rows=rows, cwd=self.cwd,
-                                     env=self.env, on_output=self._on_output,
-                                     on_exit=lambda code: self._on_child_exit(gen, code))
+        try:
+            self._proc = _pty.PtyProcess(self.argv, cols=cols, rows=rows, cwd=self.cwd,
+                                         env=self.env, on_output=self._on_output,
+                                         on_exit=lambda code: self._on_child_exit(gen, code))
+        except OSError as exc:
+            # A program that cannot start (not found, on Windows - on POSIX the
+            # forked child exits 127 instead) ends the same way: its reason on
+            # screen and the exit bar under it.
+            self._term.write(f"{self.argv[0]}: {exc.strerror or exc}\r\n".encode("utf-8"))
+            self._on_child_exit(gen, 127)
 
     def close(self) -> None:
+        # A child hung up here exits later; that exit is not news to whoever
+        # closed it.
+        self._gen += 1
         if self._proc is not None:
             self._proc.close()
             self._proc = None
