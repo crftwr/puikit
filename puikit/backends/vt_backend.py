@@ -398,6 +398,10 @@ class VTBackend(Backend):
             detected["colored_underlines"] = True
         if getattr(self._console, "ctrl_letters", False):
             detected["ctrl_letter_keys"] = True
+        # The pointer without a button held: the Windows console reports it in
+        # its input records; a POSIX terminal under all-motion tracking.
+        if getattr(self._console, "reports_hover", True):
+            detected["hover"] = True
         if detected:
             self.PROFILE = CapabilityProfile({**PROFILE_TUI, **detected})
 
@@ -1308,11 +1312,15 @@ class VTBackend(Backend):
             return [Event(EventType.MOUSE_UP, x=x, y=y, button=button, modifiers=mods)]
         if action == "drag":
             return [Event(EventType.MOUSE_DRAG, x=x, y=y, button=button, modifiers=mods)]
-        # Bare motion ("move"). The profile leaves ``hover`` off — a terminal
-        # app re-renders the whole frame to show a hover cue, and motion arrives
-        # for every cell crossed — so this is dropped rather than flooding the
-        # loop with repaints nothing is listening for.
-        return []
+        # Bare motion ("move"): the pointer with no button held, for hover
+        # cues and for a widget that passes motion on (a nested terminal). It
+        # arrives for every cell crossed; _coalesce keeps the newest of a run,
+        # and the Panel answers whether a move changes the frame at all, so a
+        # host repaints only when a hover cue moves. Dropped when the console
+        # does not report hover (PUIKIT_VT_HOVER=0), as it always was before.
+        if not getattr(self._console, "reports_hover", True):
+            return []
+        return [Event(EventType.MOUSE_MOVE, x=x, y=y, modifiers=mods)]
 
     def _to_event(self, record: dict) -> Event | None:
         kind = record.get("type")
@@ -1437,7 +1445,8 @@ def _coalesce(events: list[Event]) -> list[Event]:
     A wheel spin or a quick drag delivers a run of records at once, and rendering
     per record caps the wheel's speed and lags the drag behind the pointer. Runs
     of scrolls on one axis sum their notches; runs of drags keep the last
-    position. Order is preserved and nothing of another kind is dropped.
+    position, as do runs of bare moves. Order is preserved and nothing of
+    another kind is dropped.
     """
     out: list[Event] = []
     for event in events:
@@ -1460,6 +1469,9 @@ def _coalesce(events: list[Event]) -> list[Event]:
                 and last.type is EventType.MOUSE_DRAG
                 and last.button == event.button):
             out[-1] = event  # only the newest position matters
+        elif (event.type is EventType.MOUSE_MOVE
+                and last.type is EventType.MOUSE_MOVE):
+            out[-1] = event  # hover: likewise
         else:
             out.append(event)
     return out

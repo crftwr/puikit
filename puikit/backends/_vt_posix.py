@@ -49,11 +49,18 @@ import time
 
 from ._vt_input import parse_vt_input, strip_late_tail
 
-#: DECSET modes: 1000 click, 1002 motion-while-held (no hover flood — hover is
-#: off in the TUI profile), 1006 SGR encoding. The same modes the curses
-#: backend has to drive by hand because macOS ncurses will not.
-_MOUSE_ON = "\x1b[?1000h\x1b[?1002h\x1b[?1006h"
-_MOUSE_OFF = "\x1b[?1006l\x1b[?1002l\x1b[?1000l"
+#: Whether the pointer is tracked without a button held (hover). On by
+#: default: a widget's hover cue and a host's pointer shapes need it, and the
+#: backend coalesces a burst of motion into one event per frame.
+#: ``PUIKIT_VT_HOVER=0`` falls back to motion-while-held only, for a link
+#: where every report costs (a slow SSH session).
+HOVER = os.environ.get("PUIKIT_VT_HOVER", "").strip().lower() not in ("0", "false", "no", "off")
+#: DECSET modes: 1000 click, 1003 any motion (or 1002 motion-while-held, with
+#: hover off), 1006 SGR encoding. The same modes the curses backend has to drive
+#: by hand because macOS ncurses will not. Turning off resets both motion
+#: modes, whichever was on.
+_MOUSE_ON = f"\x1b[?1000h\x1b[?{1003 if HOVER else 1002}h\x1b[?1006h"
+_MOUSE_OFF = "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l"
 #: Alternate screen + hidden cursor, and the way back out (attributes reset so
 #: nothing leaks into the shell).
 _ENTER = "\x1b[?1049h\x1b[?25l"
@@ -76,6 +83,10 @@ def _raise_system_exit(signum, _frame):
 
 class PosixConsole:
     """The tty half: termios modes, size, batched output, and parsed input."""
+
+    #: Whether bare pointer motion is reported (all-motion tracking): read by
+    #: VTBackend for its ``hover`` capability.
+    reports_hover = HOVER
 
     def __init__(self, in_fd: "int | None" = None, out_fd: "int | None" = None) -> None:
         # sys.__stdin__/__stdout__, not sys.stdin/stdout: a host app that

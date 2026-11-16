@@ -141,12 +141,14 @@ def test_motion_with_a_button_held_is_a_drag(backend):
     assert (events[1].x, events[1].y) == (4.0, 2.0)
 
 
-def test_bare_motion_is_dropped(backend):
-    # hover is off in the profile: a terminal repaints the whole frame to show a
-    # hover cue, and motion arrives for every cell crossed.
+def test_bare_motion_is_a_hover_move(backend):
+    # The pointer with no button held is hover (MOUSE_MOVE), for hover cues and
+    # for a nested terminal; a burst keeps its newest position.
     be, con = backend
-    con.push_mouse(mouse(x=2, y=2, flags=0x0001))
-    assert drain(be, con) == []
+    con.push_mouse(mouse(x=2, y=2, flags=0x0001), mouse(x=5, y=3, flags=0x0001))
+    events = drain(be, con)
+    assert [e.type for e in events] == [EventType.MOUSE_MOVE]
+    assert (events[0].x, events[0].y) == (5.0, 3.0)
 
 
 def test_a_drag_burst_collapses_to_its_newest_position(backend):

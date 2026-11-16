@@ -656,6 +656,29 @@ class DrawContext:
         if self._panel is not None:
             self._panel.request_pointer_shape(shape)
 
+    def request_pointer_motion(self, handler: Callable[[Event], bool],
+                               region: tuple[float, float, float, float] | None = None) -> None:
+        """Ask for bare pointer motion over this widget: while the pointer moves
+        over its visible rect with no button held, ``handler`` gets the
+        MOUSE_MOVE in widget-local coordinates and returns whether that wants
+        a redraw. Call it during draw, every frame it applies. Hover styling
+        needs none of this (``hovered`` is pure geometry); it is for a widget
+        that passes motion on - a terminal reporting it to the program inside.
+        Only the active modal layer's widgets (or the base's, with none open)
+        receive it, the way every other event is routed. ``region`` (local
+        x, y, w, h) widens or narrows where motion counts; by default it is the
+        widget's visible rect."""
+        if self._panel is None:
+            return
+        target = self._hit_rect
+        if region is not None:
+            # A region of the widget's choosing, in its local coordinates and
+            # free to reach past its rect: a menu pulldown follows the pointer
+            # over the bar it hangs from and over its parent popups.
+            x, y, w, h = region
+            target = Rect(self._rect.x + x, self._rect.y + y, w, h)
+        self._panel._note_motion_target(target, (self._rect.x, self._rect.y), handler)
+
     @property
     def pressed(self) -> bool:
         """True while the active press both *began* inside this widget and the
@@ -1823,6 +1846,11 @@ class Panel:
         # What the last frame's drawing read of the pointer (see
         # _note_pointer_region): a move that changes none of it needs no redraw.
         self._pointer_regions: list[tuple[Rect | None, bool]] = []
+        # Widgets that asked, during the last frame, for bare pointer motion
+        # (DrawContext.request_pointer_motion): (visible rect, local origin,
+        # handler, the layer slot being drawn or None for the base).
+        self._motion_targets: list = []
+        self._drawing_layer: "_Slot | None" = None
         self._rendering = False
         # Frames put off while input waits in the backend's queue (see
         # _defer_for_input): when the last frame was drawn, whether one is owed,
@@ -2057,6 +2085,24 @@ class Panel:
         if self._rendering and region is not None:
             self._pointer_regions.append((region, follow))
 
+    def _note_motion_target(self, region: "Rect | None", origin: tuple[float, float],
+                            handler: Any) -> None:
+        if self._rendering and region is not None:
+            self._motion_targets.append((region, origin, handler, self._drawing_layer))
+
+    def _deliver_motion(self, event: Event) -> bool:
+        """Hand bare pointer motion to the widget under the pointer that asked
+        for it in the last frame, in its local coordinates - one in the active
+        modal layer, or in the base when none is open. Returns the handler's
+        answer (whether it wants a redraw)."""
+        if event.x is None or event.y is None:
+            return False
+        top = self._top_interactive_slot()
+        for region, (ox, oy), handler, layer in reversed(self._motion_targets):
+            if layer is top and region.contains(event.x, event.y):
+                return bool(handler(event.translated(-ox, -oy)))
+        return False
+
     def _pointer_move_matters(self, old: "tuple[float, float] | None",
                               new: "tuple[float, float] | None") -> bool:
         """True when moving the pointer from ``old`` to ``new`` changes what the
@@ -2200,6 +2246,8 @@ class Panel:
 
     def _render_impl(self) -> None:
         self._pointer_regions = []
+        self._motion_targets = []
+        self._drawing_layer = None
         self._rendering = True
         try:
             self._render_frame()
@@ -2262,7 +2310,9 @@ class Panel:
             # own request, gated on its hover, then survives.
             if i == len(self._layers) - 1:
                 self._pointer_shape = None
+            self._drawing_layer = slot
             self._render_layer(slot)
+            self._drawing_layer = None
         # Push the resolved shape to the backend once per frame. Gated on the
         # capability so the intent is a silent no-op everywhere else.
         if self.backend.capabilities.supports("pointer_shape"):
@@ -3165,7 +3215,8 @@ class Panel:
         # re-renders only then: redrawing a whole window for every mouse move
         # that crosses nothing starves the frame of time on a slow machine.
         if event.type is EventType.MOUSE_MOVE:
-            return self._pointer_move_matters(before, self._pointer)
+            delivered = self._deliver_motion(event)
+            return self._pointer_move_matters(before, self._pointer) or delivered
 
         # The topmost INTERACTIVE layer gets events exclusively (modal behavior);
         # it owns its own focus traversal (e.g. a dialog cycles its buttons), so
