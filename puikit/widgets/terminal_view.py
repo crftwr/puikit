@@ -89,11 +89,17 @@ class TerminalView(Widget):
         self._preedit = ""
         self._preedit_caret = 0
         self._glyph_w: dict[str, float] = {}
+        self._w_units = self._h_units = 0.0
         self._cw = 1.0
         self._pitch = 1.0
         self._scroll_acc = 0.0          # sub-row trackpad scroll not yet sent
         self._mouse_button: int | None = None   # button the program saw pressed
         self._mouse_up_at = 0.0
+        self._held_since: float | None = None   # synchronized output in progress
+        self._last_frame = None                 # (cursor, colors) of the last update
+        self._sb_w = 0.0                        # scrollbar width; 0 on a grid
+        self._sb_drag = False
+        self._sb_until = 0.0                    # keep the bar up until (monotonic)
         self._exit_pending: Callable[[], None] | None = None
         self._gen = 0  # bumps per child, so a dead child's late exit is ignored
         # Prototype instrumentation, shown by the demo page.
@@ -108,7 +114,8 @@ class TerminalView(Widget):
         bg = tuple(bg_c[:3]) if bg_c else None
         self._term = G.Terminal(cols, rows, write_pty=self._write_pty,
                                 on_title=self._title_changed,
-                                on_pwd=self._pwd_changed, fg=fg, bg=bg)
+                                on_pwd=self._pwd_changed, fg=fg, bg=bg,
+                                on_render_hold=self._render_hold)
         # Probe once, on the UI thread: a backend without main-thread dispatch
         # gets its pty output drained on the animation tick instead.
         self._use_ticks = not ctx.panel.call_on_main_thread(lambda: None)
@@ -186,6 +193,22 @@ class TerminalView(Widget):
             self._ticking = False
         return alive
 
+    #: Longest a synchronized-output hold keeps the last frame up: a program
+    #: that sets mode 2026 and never resets it must not freeze the view.
+    HOLD_MAX_SECONDS = 0.2
+
+    def _render_hold(self, held: bool) -> None:
+        """Mode 2026 began or ended (called inside a vt write, on the UI
+        thread). While held, frames show the screen as it was before the
+        program started its redraw — eosh clears the line and writes it
+        again, and a frame in between showed it blank."""
+        if held:
+            self._held_since = time.monotonic()
+            if self._panel is not None:
+                self._panel.call_later(self.HOLD_MAX_SECONDS + 0.01, self._panel.render)
+        else:
+            self._held_since = None
+
     def _write_pty(self, data: bytes) -> None:
         if self._proc is not None:
             self._proc.write(data)
@@ -225,6 +248,12 @@ class TerminalView(Widget):
         self._cw = cw
         self._pitch = pitch
         w_units, h_units = ctx.size_units
+        # The scrollbar takes no columns: the program inside sees the same grid
+        # it would in a terminal. On pixel backends it is overlaid on the right
+        # edge while the view is scrolled (see _scrollbar_visible); a character
+        # grid has none (the host terminal has its own scrollback).
+        self._sb_w = float(ctx.panel.backend.scrollbar_units) if ctx.pixel_layout else 0.0
+        self._w_units, self._h_units = w_units, h_units
         cols = max(2, int(w_units / cw + 1e-6))
         rows = max(2, int(h_units / pitch + 1e-6))
         if self._term is None and self._exited is False:
@@ -241,7 +270,14 @@ class TerminalView(Widget):
         self._drain()
 
         t0 = time.perf_counter()
-        rebuilt, cursor, colors = self._term.update()
+        held = (self._held_since is not None and self._last_frame is not None
+                and time.monotonic() - self._held_since < self.HOLD_MAX_SECONDS)
+        if held:
+            rebuilt = 0
+            cursor, colors = self._last_frame
+        else:
+            rebuilt, cursor, colors = self._term.update()
+            self._last_frame = (cursor, colors)
         t1 = time.perf_counter()
         dfg = colors.foreground.tuple()
         dbg = colors.background.tuple()
@@ -291,6 +327,10 @@ class TerminalView(Widget):
                 else:
                     ctx.draw_text(x, ty, run.text, style)
         self._draw_cursor(ctx, cursor, colors, pitch, cw, dfg, dbg)
+        if self._scrollbar_visible():
+            total, offset, length = self._term.scrollbar()
+            ctx.draw_scrollbar(w_units - self._sb_w, 0, h_units,
+                               offset / (total - length), length / total)
         if self._exited is not False:
             msg = f" [process exited ({self._exited}) - {self.exit_hint}] "
             ctx.draw_text(0.0, (rows - 1) * pitch, msg[:cols],
@@ -431,9 +471,12 @@ class TerminalView(Widget):
     def _mouse(self, event: Event) -> None:
         """A program that turned on mouse tracking gets presses, releases,
         drags and the wheel, encoded in the mode and format it asked for;
-        otherwise the wheel scrolls the scrollback and clicks only focus."""
+        otherwise the wheel scrolls the scrollback and clicks only focus. The
+        scrollbar takes its own presses and drags before either."""
         term = self._term
         assert term is not None
+        if self._scrollbar_mouse(event):
+            return
         tracking = term.mouse_tracking()
         if event.type is EventType.MOUSE_SCROLL:
             if event.scroll:
@@ -446,6 +489,7 @@ class TerminalView(Widget):
                 return
             if not tracking:
                 term.scroll(-rows)
+                self._scrolled()
                 return
             button = G.MOUSE_WHEEL_UP if rows > 0 else G.MOUSE_WHEEL_DOWN
             data = b"".join(self._mouse_bytes(G.MOUSE_PRESS, button, event)
@@ -474,6 +518,51 @@ class TerminalView(Widget):
                 return
             self.send_raw(self._mouse_bytes(G.MOUSE_PRESS, button, event)
                           + self._mouse_bytes(G.MOUSE_RELEASE, button, event))
+
+    #: How long the overlaid scrollbar stays up after the last scroll.
+    SCROLLBAR_LINGER_SECONDS = 1.0
+
+    def _scrollbar_visible(self) -> bool:
+        """The overlay shows while it is in use: the view scrolled back from
+        the bottom, a drag on it, or a scroll a moment ago."""
+        if not self._sb_w or self._term is None:
+            return False
+        total, offset, length = self._term.scrollbar()
+        if total <= length:
+            return False
+        return (self._sb_drag or offset + length < total
+                or time.monotonic() < self._sb_until)
+
+    def _scrolled(self) -> None:
+        """Note a scroll: keep the overlay up a moment, and redraw once that
+        moment is over so it goes away."""
+        self._sb_until = time.monotonic() + self.SCROLLBAR_LINGER_SECONDS
+        if self._panel is not None:
+            self._panel.call_later(self.SCROLLBAR_LINGER_SECONDS + 0.05, self._panel.render)
+
+    def _scrollbar_mouse(self, event: Event) -> bool:
+        if not self._sb_drag and not self._scrollbar_visible():
+            return False  # hidden: the right column belongs to the program
+        on_bar = (event.x is not None and event.x >= self._w_units - self._sb_w)
+        if event.type is EventType.MOUSE_DOWN and on_bar:
+            self._sb_drag = True
+        elif event.type is EventType.MOUSE_UP and self._sb_drag:
+            self._sb_drag = False
+            self._mouse_up_at = time.monotonic()
+            self._scrolled()
+            return True
+        elif event.type is EventType.MOUSE_CLICK and on_bar:
+            return True
+        if not (self._sb_drag and event.type in (EventType.MOUSE_DOWN, EventType.MOUSE_DRAG)):
+            return False
+        total, _offset, length = self._term.scrollbar()
+        if total > length and self._h_units > 0:
+            # The thumb is centred on the pointer, the way a click on the
+            # track jumps there and a drag carries it.
+            y = event.hints.get("pointer_y", event.y) or 0.0
+            frac = min(1.0, max(0.0, y / self._h_units))
+            self._term.scroll_to_row(round(frac * total - length / 2))
+        return True
 
     def _mouse_bytes(self, action: int, button: int, event: Event,
                      pressed: bool = False) -> bytes:

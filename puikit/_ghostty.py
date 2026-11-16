@@ -46,6 +46,8 @@ OPT_TITLE_CHANGED = 6
 OPT_COLOR_FOREGROUND = 12
 OPT_COLOR_BACKGROUND = 13
 OPT_PWD_CHANGED = 26
+OPT_RENDER_HOLD = 42
+DATA_SCROLLBAR = 9
 DATA_TITLE = 12
 DATA_PWD = 13
 DATA_MOUSE_TRACKING = 11
@@ -83,7 +85,7 @@ STYLE_UNDERLINE_MASK = 0x7 << STYLE_UNDERLINE_SHIFT
 
 CURSOR_BAR, CURSOR_BLOCK, CURSOR_UNDERLINE, CURSOR_BLOCK_HOLLOW = 0, 1, 2, 3
 
-SCROLL_TOP, SCROLL_BOTTOM, SCROLL_DELTA = 0, 1, 2
+SCROLL_TOP, SCROLL_BOTTOM, SCROLL_DELTA, SCROLL_ROW = 0, 1, 2, 3
 
 # --- mouse ----------------------------------------------------------------------
 MOUSE_PRESS, MOUSE_RELEASE, MOUSE_MOTION = 0, 1, 2
@@ -177,6 +179,10 @@ class _ScrollValue(C.Union):
                 ("delta_prompt", C.c_ssize_t), ("_padding", C.c_uint64 * 2)]
 
 
+class Scrollbar(C.Structure):
+    _fields_ = [("total", C.c_uint64), ("offset", C.c_uint64), ("len", C.c_uint64)]
+
+
 class CellsView(C.Structure):
     _fields_ = [("ptr", C.POINTER(C.c_uint64)), ("len", C.c_size_t)]
 
@@ -200,6 +206,7 @@ class MouseEncoderSize(C.Structure):
 _H = C.c_void_p  # every handle is an opaque pointer
 WritePtyFn = C.CFUNCTYPE(None, _H, C.c_void_p, C.POINTER(C.c_uint8), C.c_size_t)
 SimpleFn = C.CFUNCTYPE(None, _H, C.c_void_p)
+HoldFn = C.CFUNCTYPE(None, _H, C.c_void_p, C.c_bool)
 
 
 def _sig(lib, name, res, *args):
@@ -380,6 +387,7 @@ class Terminal:
                  on_title: Callable[[str], None] | None = None,
                  on_pwd: Callable[[str], None] | None = None,
                  on_bell: Callable[[], None] | None = None,
+                 on_render_hold: Callable[[bool], None] | None = None,
                  fg: tuple[int, int, int] | None = None,
                  bg: tuple[int, int, int] | None = None) -> None:
         lib = load()
@@ -419,6 +427,10 @@ class Terminal:
         lib.ghostty_terminal_set(self._h, OPT_PWD_CHANGED, C.cast(self._cb_pwd, C.c_void_p))
         self._cb_bell = SimpleFn(lambda _t, _u: on_bell and on_bell())
         lib.ghostty_terminal_set(self._h, OPT_BELL, C.cast(self._cb_bell, C.c_void_p))
+        # Synchronized output (mode 2026): the program brackets a redraw so no
+        # half-drawn state is shown; the owner holds its frames in between.
+        self._cb_hold = HoldFn(lambda _t, _u, held: on_render_hold and on_render_hold(bool(held)))
+        lib.ghostty_terminal_set(self._h, OPT_RENDER_HOLD, C.cast(self._cb_hold, C.c_void_p))
         if fg is not None:
             lib.ghostty_terminal_set(self._h, OPT_COLOR_FOREGROUND, C.byref(Rgb(*fg)))
         if bg is not None:
@@ -484,6 +496,20 @@ class Terminal:
         else:
             sv.tag = SCROLL_DELTA
             sv.value.delta = delta_rows
+        self._lib.ghostty_terminal_scroll_viewport(self._h, sv)
+
+    def scrollbar(self) -> tuple[int, int, int]:
+        """(total rows, viewport offset, visible rows) of the scrollable area."""
+        sb = Scrollbar()
+        if self._lib.ghostty_terminal_get(self._h, DATA_SCROLLBAR, C.byref(sb)) != SUCCESS:
+            return (self.rows, 0, self.rows)
+        return (sb.total, sb.offset, sb.len)
+
+    def scroll_to_row(self, row: int) -> None:
+        """Make ``row`` (scrollbar offset space) the first visible row."""
+        sv = ScrollViewport()
+        sv.tag = SCROLL_ROW
+        sv.value.row = max(0, row)
         self._lib.ghostty_terminal_scroll_viewport(self._h, sv)
 
     def mouse_tracking(self) -> bool:
