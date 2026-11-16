@@ -601,6 +601,13 @@ class TerminalView(Widget):
         if event.key == "c" and ("cmd" in mods or {"ctrl", "shift"} <= mods):
             if self.copy_selection():
                 return True
+        if event.key == "v" and ("cmd" in mods or {"ctrl", "shift"} <= mods) \
+                and self._panel is not None:
+            # Paste: Cmd-V (macOS), Ctrl+Shift+V elsewhere.
+            text = self._panel.get_clipboard()
+            if text:
+                self.send(text.replace("\r\n", "\r").replace("\n", "\r"))
+            return True
         if "cmd" in mods:
             if event.key == "v" and self._panel is not None:
                 text = self._panel.get_clipboard()
