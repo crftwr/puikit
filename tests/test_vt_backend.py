@@ -317,6 +317,19 @@ def test_terminals_that_implement_sgr_58_are(env):
     assert _supports_underline_color(env, windows=False)
 
 
+@pytest.mark.parametrize("windows", [False, True])
+def test_puikit_s_own_terminal_is_sent_sgr_58(windows):
+    # A TUI nested in TerminalView (xefm in xefm's terminal): libghostty draws
+    # it, and the system ConPTY forwards the colon form in between on Windows.
+    # Before _pty named it, only a WT_SESSION leaked from the host's own
+    # terminal got the rule there, and its absence gave brackets.
+    from puikit import _pty
+    env = _pty._child_env({"TERM": "xterm-256color"}, ("XeFM", "1.16.0"))
+    assert _supports_underline_color(env, windows=windows)
+    # The name alone is the app's and says nothing about what draws.
+    assert not _supports_underline_color({"TERM_PROGRAM": "PuiKit"}, windows=True)
+
+
 def test_on_windows_only_windows_terminal_is_sent_sgr_58():
     # Everything else reaches the emulator through a ConPTY that may drop it —
     # WezTerm 20240203 lost the cursor row's rule entirely (xefm#629).

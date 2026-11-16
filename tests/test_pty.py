@@ -64,10 +64,20 @@ def test_the_host_terminal_s_variables_stay_out(monkeypatch):
     monkeypatch.setenv("WT_SESSION", "1234")
     monkeypatch.setenv("TERM_PROGRAM", "iTerm.app")
     env = _pty._child_env(None)
-    assert "WT_SESSION" not in env and "TERM_PROGRAM" not in env
+    assert "WT_SESSION" not in env and env["TERM_PROGRAM"] == "PuiKit"
     assert env["PATH"] == os.environ["PATH"]
     env = _pty._child_env({"WT_SESSION": "x", "FOO": "bar"})
     assert env.get("FOO") == "bar" and "WT_SESSION" not in env
+    assert env["TERM_PROGRAM"] == "PuiKit" and env["TERM_PROGRAM_VERSION"]
+
+
+def test_the_app_names_the_terminal_and_puikit_marks_it():
+    # As VS Code's terminal says vscode, not the library drawing it; the
+    # marker beside the name is PuiKit's, whatever the app calls it.
+    from puikit import __version__
+    env = _pty._child_env({"TERM_PROGRAM": "iTerm.app"}, ("XeFM", "1.16.0"))
+    assert (env["TERM_PROGRAM"], env["TERM_PROGRAM_VERSION"]) == ("XeFM", "1.16.0")
+    assert env[_pty.TERMINAL_MARKER] == __version__
 
 
 @pytest.mark.parametrize("split", range(0, 16))

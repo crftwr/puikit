@@ -68,10 +68,15 @@ class TerminalView(Widget):
                  on_title: Callable[[str], None] | None = None,
                  on_pwd: Callable[[str], None] | None = None,
                  on_exit: Callable[[int | None], None] | None = None,
-                 padding_px: float = 0.0, anchor: str = "auto") -> None:
+                 padding_px: float = 0.0, anchor: str = "auto",
+                 term_program: tuple[str, str] | None = None) -> None:
         self.argv = argv or default_shell()
         self.cwd = cwd
         self.env = env
+        #: ``(name, version)`` the programs in here see as ``TERM_PROGRAM`` /
+        #: ``TERM_PROGRAM_VERSION``: the app's, as VS Code's terminal says
+        #: ``vscode``. None says PuiKit. ``PUIKIT_TERMINAL`` is set either way.
+        self.term_program = term_program
         self.on_title = on_title
         self.on_pwd = on_pwd
         self.on_exit = on_exit
@@ -113,6 +118,7 @@ class TerminalView(Widget):
         self._mouse_button: int | None = None   # button the program saw pressed
         self._mouse_up_at = 0.0
         self._held_since: float | None = None   # synchronized output in progress
+        self._settle_until: float | None = None  # hold kept past its end until
         self._last_frame = None                 # (cursor, colors) of the last update
         self._sb_w = 0.0                        # scrollbar width; 0 on a grid
         self._sb_drag = False
@@ -141,7 +147,8 @@ class TerminalView(Widget):
         gen = self._gen
         try:
             self._proc = _pty.PtyProcess(self.argv, cols=cols, rows=rows, cwd=self.cwd,
-                                         env=self.env, on_output=self._on_output,
+                                         env=self.env, term_program=self.term_program,
+                                         on_output=self._on_output,
                                          on_exit=lambda code: self._on_child_exit(gen, code))
         except OSError as exc:
             # A program that cannot start (not found, on Windows - on POSIX the
@@ -201,7 +208,11 @@ class TerminalView(Widget):
             return False
         data = b"".join(chunks)
         self.stats["bytes"] += len(data)
+        settling = self._settle_until is not None
         self._term.write(data)
+        if settling and self._settle_until is not None:
+            # Output after the hold ended: the redraw it was waiting for.
+            self._end_hold()
         return True
 
     def _drain_and_render(self) -> None:
@@ -231,10 +242,24 @@ class TerminalView(Widget):
         again, and a frame in between showed it blank."""
         if held:
             self._held_since = time.monotonic()
+            self._settle_until = None
             if self._panel is not None:
                 self._panel.call_later(self.HOLD_MAX_SECONDS + 0.01, self._panel.render)
-        else:
-            self._held_since = None
+            return
+        settle = getattr(self._proc, "sync_settle_seconds", 0.0)
+        if settle <= 0 or self._held_since is None:
+            self._end_hold()
+            return
+        # The pty's renderer may still owe the frame (ConPTY: see
+        # PtyProcess.sync_settle_seconds) - keep the held one up until its
+        # next output, or ``settle`` seconds without any.
+        self._settle_until = time.monotonic() + settle
+        if self._panel is not None:
+            self._panel.call_later(settle + 0.005, self._panel.render)
+
+    def _end_hold(self) -> None:
+        self._held_since = None
+        self._settle_until = None
 
     def _write_pty(self, data: bytes) -> None:
         if self._proc is not None:
@@ -332,8 +357,11 @@ class TerminalView(Widget):
         self._ox, self._oy = ox, oy
 
         t0 = time.perf_counter()
+        now = time.monotonic()
+        if self._settle_until is not None and now >= self._settle_until:
+            self._end_hold()
         held = (self._held_since is not None and self._last_frame is not None
-                and time.monotonic() - self._held_since < self.HOLD_MAX_SECONDS)
+                and now - self._held_since < self.HOLD_MAX_SECONDS)
         if held:
             rebuilt = 0
             cursor, colors = self._last_frame
@@ -392,11 +420,11 @@ class TerminalView(Widget):
                     if gw is None:
                         gw = self._glyph_w[run.text] = ctx.measure_text(run.text, style)
                     x += max(0.0, (2 * cw - gw) / 2)
+                rule = None
                 if shapes and run.flags & G.STYLE_UNDERLINE_MASK:
                     thick = (run.flags & G.STYLE_UNDERLINE_MASK) >> G.STYLE_UNDERLINE_SHIFT >= 2
-                    ctx.fill_rect(ox + run.col * cw, ty + ul_y, run.width * cw,
-                                  px[1] * (2 if thick else 1),
-                                  Style(bg=style.underline_color or style.fg))
+                    rule = (px[1] * (2 if thick else 1),
+                            Style(bg=style.underline_color or style.fg))
                     style = Style(fg=style.fg, bg=style.bg, font=style.font,
                                   attr=style.attr & ~(TextAttribute.UNDERLINE
                                                       | TextAttribute.UNDERLINE_THICK))
@@ -404,6 +432,11 @@ class TerminalView(Widget):
                     self._draw_with_shapes(ctx, run, style, x, ty, cw, pitch, px, dbg)
                 else:
                     ctx.draw_text(x, ty, run.text, style)
+                if rule is not None:
+                    # After the text: a run's text carries its cell background
+                    # (the page's, at least), which would paint over the rule.
+                    ctx.fill_rect(ox + run.col * cw, ty + ul_y, run.width * cw,
+                                  rule[0], rule[1])
 
         if self._extend and self.extend_edges:
             self._extend_edges(ctx, ox, oy, cw, pitch, w_units, h_units,
