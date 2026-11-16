@@ -282,8 +282,8 @@ def _sgr_mouse_records(seq: str) -> list[dict]:
     button = {0: "left", 1: "middle", 2: "right"}.get(low)
     if b & _SGR_MOTION:
         if button is None:
-            # Bare motion arrives only under all-motion tracking (mode 1003),
-            # which the VT backend never enables; tolerate a stray.
+            # Bare motion: all-motion tracking (mode 1003), the POSIX
+            # console's default (hover; see _vt_posix.HOVER).
             return [{"type": "mouse", "action": "move", "x": x, "y": y,
                      "mods": mods}]
         return [{"type": "mouse", "action": "drag", "x": x, "y": y,
