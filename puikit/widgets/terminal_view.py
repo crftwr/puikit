@@ -65,13 +65,18 @@ class TerminalView(Widget):
                  env: dict[str, str] | None = None,
                  on_title: Callable[[str], None] | None = None,
                  on_pwd: Callable[[str], None] | None = None,
-                 on_exit: Callable[[int | None], None] | None = None) -> None:
+                 on_exit: Callable[[int | None], None] | None = None,
+                 padding_px: float = 0.0) -> None:
         self.argv = argv or default_shell()
         self.cwd = cwd
         self.env = env
         self.on_title = on_title
         self.on_pwd = on_pwd
         self.on_exit = on_exit
+        #: Inset of the grid from the widget's edges, in device pixels, on pixel
+        #: backends (a character grid has no sub-cell and stays flush) - the
+        #: breathing room a host gives its other panes.
+        self.padding_px = padding_px
         self.title = ""
         self.pwd = ""
         #: What the bar shown after the child exits tells the user to do;
@@ -90,6 +95,8 @@ class TerminalView(Widget):
         self._preedit_caret = 0
         self._glyph_w: dict[str, float] = {}
         self._w_units = self._h_units = 0.0
+        self._ox = self._oy = 0.0      # grid origin inside the widget (padding)
+        self._selecting = False        # a selection drag is in progress
         self._cw = 1.0
         self._pitch = 1.0
         self._scroll_acc = 0.0          # sub-row trackpad scroll not yet sent
@@ -230,6 +237,8 @@ class TerminalView(Widget):
         if self._proc is not None and self._exited is False:
             if self._term is not None:
                 self._term.scroll(None)
+                if self._term.has_selection():
+                    self._term.clear_selection()
             self._proc.write(data)
 
     # --- drawing -------------------------------------------------------------------------
@@ -248,14 +257,20 @@ class TerminalView(Widget):
         self._cw = cw
         self._pitch = pitch
         w_units, h_units = ctx.size_units
+        bw, bh = ctx.base_size
+        ox = oy = 0.0
+        if ctx.pixel_layout and self.padding_px:
+            ox = self.padding_px / bw if bw else 0.0
+            oy = self.padding_px / bh if bh else 0.0
+        self._ox, self._oy = ox, oy
         # The scrollbar takes no columns: the program inside sees the same grid
         # it would in a terminal. On pixel backends it is overlaid on the right
         # edge while the view is scrolled (see _scrollbar_visible); a character
         # grid has none (the host terminal has its own scrollback).
         self._sb_w = float(ctx.panel.backend.scrollbar_units) if ctx.pixel_layout else 0.0
         self._w_units, self._h_units = w_units, h_units
-        cols = max(2, int(w_units / cw + 1e-6))
-        rows = max(2, int(h_units / pitch + 1e-6))
+        cols = max(2, int((w_units - 2 * ox) / cw + 1e-6))
+        rows = max(2, int((h_units - 2 * oy) / pitch + 1e-6))
         if self._term is None and self._exited is False:
             self._start(ctx, cols, rows)
         if self._term is None:
@@ -292,8 +307,12 @@ class TerminalView(Widget):
         # On pixel backends box drawing and block elements are drawn as shapes
         # filling the cell; from the font they leave gaps between rows.
         shapes = ctx.pixel_layout
-        bw, bh = ctx.base_size
         px = (1.0 / bw if bw else 0.1, 1.0 / bh if bh else 0.05)
+        theme = ctx.theme
+        sel_bg = None
+        if theme is not None:
+            sel_bg = getattr(theme, "selection_active_bg" if ctx.focused
+                             else "selection_inactive_bg", None)
         # The text system leaves a run of only spaces un-underlined (and puts a
         # run's rule where its own glyphs say), so on pixel backends the
         # underline is a rule drawn here, the same for every run in the row.
@@ -301,11 +320,19 @@ class TerminalView(Widget):
             fm = ctx.font_metrics(mono)
             ul_y = fm.ascent + max(px[1] * 1.5, fm.descent * 0.35)
         for y, runs in enumerate(self._term.row_cache):
-            ty = y * pitch
+            ty = oy + y * pitch
             for run in runs:
                 style = self._style(run, dfg, dbg, page_bg)
-                x = run.col * cw
-                if run.bg is not None or run.flags & G.STYLE_INVERSE:
+                if run.sel:
+                    # The selection: the theme's selection fill (reverse video
+                    # where the theme has none).
+                    style = (Style(fg=style.fg, bg=sel_bg, attr=style.attr, font=style.font,
+                                   underline_color=style.underline_color)
+                             if sel_bg is not None else
+                             Style(fg=style.bg or dbg, bg=style.fg, attr=style.attr,
+                                   font=style.font, underline_color=style.underline_color))
+                x = ox + run.col * cw
+                if run.sel or run.bg is not None or run.flags & G.STYLE_INVERSE:
                     ctx.fill_rect(x, ty, run.width * cw, pitch, Style(bg=style.bg))
                 if run.wide:
                     # A fallback CJK face is rarely exactly two cells wide;
@@ -316,7 +343,7 @@ class TerminalView(Widget):
                     x += max(0.0, (2 * cw - gw) / 2)
                 if shapes and run.flags & G.STYLE_UNDERLINE_MASK:
                     thick = (run.flags & G.STYLE_UNDERLINE_MASK) >> G.STYLE_UNDERLINE_SHIFT >= 2
-                    ctx.fill_rect(run.col * cw, ty + ul_y, run.width * cw,
+                    ctx.fill_rect(ox + run.col * cw, ty + ul_y, run.width * cw,
                                   px[1] * (2 if thick else 1),
                                   Style(bg=style.underline_color or style.fg))
                     style = Style(fg=style.fg, bg=style.bg, font=style.font,
@@ -326,14 +353,14 @@ class TerminalView(Widget):
                     self._draw_with_shapes(ctx, run, style, x, ty, cw, pitch, px, dbg)
                 else:
                     ctx.draw_text(x, ty, run.text, style)
-        self._draw_cursor(ctx, cursor, colors, pitch, cw, dfg, dbg)
+        self._draw_cursor(ctx, cursor, colors, pitch, cw, dfg, dbg, ox, oy)
         if self._scrollbar_visible():
             total, offset, length = self._term.scrollbar()
             ctx.draw_scrollbar(w_units - self._sb_w, 0, h_units,
                                offset / (total - length), length / total)
         if self._exited is not False:
             msg = f" [process exited ({self._exited}) - {self.exit_hint}] "
-            ctx.draw_text(0.0, (rows - 1) * pitch, msg[:cols],
+            ctx.draw_text(ox, oy + (rows - 1) * pitch, msg[:cols],
                           Style(fg=dbg, bg=dfg, attr=TextAttribute.BOLD, font=_MONO))
         t2 = time.perf_counter()
         st = self.stats
@@ -401,12 +428,13 @@ class TerminalView(Widget):
                     return (run.text[i] if i < len(run.text) else " "), run
         return " ", None
 
-    def _draw_cursor(self, ctx: DrawContext, cursor, colors, pitch, cw, dfg, dbg) -> None:
+    def _draw_cursor(self, ctx: DrawContext, cursor, colors, pitch, cw, dfg, dbg,
+                     ox: float = 0.0, oy: float = 0.0) -> None:
         if not cursor.viewport_has_value:
             return
         col, cy = cursor.viewport_x, cursor.viewport_y
-        cx = col * cw
-        ty = cy * pitch
+        cx = ox + col * cw
+        ty = oy + cy * pitch
         sx, sy, _sw, _sh = ctx.screen_rect
         if self._preedit:
             # The composition is drawn over the cells at the cursor, underlined;
@@ -454,6 +482,11 @@ class TerminalView(Widget):
                 return True
             return False
         mods = event.modifiers
+        # Copy: Cmd-C (macOS), Ctrl+Shift+C elsewhere - only with a selection,
+        # so Ctrl+C still interrupts and an unused Cmd-C stays the app's.
+        if event.key == "c" and ("cmd" in mods or {"ctrl", "shift"} <= mods):
+            if self.copy_selection():
+                return True
         if "cmd" in mods:
             if event.key == "v" and self._panel is not None:
                 text = self._panel.get_clipboard()
@@ -496,6 +529,23 @@ class TerminalView(Widget):
                             for _ in range(min(abs(rows), 10)))
             if data:
                 self.send_raw(data)
+            return
+        # Selection: the plain drag of a program that does not track the mouse
+        # (a shell), Shift+drag over one that does (the usual terminal escape),
+        # Alt for a rectangle. libghostty's gesture decides cell / word / line
+        # from the click count.
+        select = self._selecting or not tracking or "shift" in event.modifiers
+        if select and (event.button or "left") == "left":
+            if event.type is EventType.MOUSE_DOWN:
+                self._selecting = True
+                term.select(G.GESTURE_PRESS, *self._cell_at(event))
+            elif event.type is EventType.MOUSE_DRAG and self._selecting:
+                term.select(G.GESTURE_DRAG, *self._cell_at(event),
+                            rectangle="alt" in event.modifiers)
+            elif event.type is EventType.MOUSE_UP and self._selecting:
+                term.select(G.GESTURE_RELEASE, *self._cell_at(event))
+                self._selecting = False
+                self._mouse_up_at = time.monotonic()
             return
         if not tracking:
             return
@@ -570,10 +620,25 @@ class TerminalView(Widget):
         for name, bit in _MODS.items():
             if name in event.modifiers:
                 mods |= bit
-        col = max(0.0, (event.x or 0.0) / self._cw)
-        row = max(0.0, (event.y or 0.0) / self._pitch)
+        col, row = self._cell_at(event)
         assert self._term is not None
         return self._term.encode_mouse(action, button, col, row, mods, pressed)
+
+    def _cell_at(self, event: Event) -> tuple[float, float]:
+        """Viewport cell (fractional) under a mouse event, padding removed."""
+        col = max(0.0, ((event.x or 0.0) - self._ox) / self._cw)
+        row = max(0.0, ((event.y or 0.0) - self._oy) / self._pitch)
+        return col, row
+
+    def copy_selection(self) -> bool:
+        """Put the selected text on the clipboard; False when nothing is
+        selected (so the key can mean something else)."""
+        if self._term is None or self._panel is None or not self._term.has_selection():
+            return False
+        text = self._term.selection_text()
+        if text:
+            self._panel.set_clipboard(text)
+        return True
 
     def send_raw(self, data: bytes) -> None:
         """Bytes to the program without moving the viewport (mouse reports)."""

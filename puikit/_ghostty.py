@@ -47,7 +47,19 @@ OPT_COLOR_FOREGROUND = 12
 OPT_COLOR_BACKGROUND = 13
 OPT_PWD_CHANGED = 26
 OPT_RENDER_HOLD = 42
+OPT_SELECTION = 22
 DATA_SCROLLBAR = 9
+DATA_SELECTION = 31
+ROW_DATA_SELECTION = 4
+POINT_VIEWPORT = 1
+GESTURE_PRESS, GESTURE_RELEASE, GESTURE_DRAG = 0, 1, 2
+GEV_OPT_REF, GEV_OPT_POSITION, GEV_OPT_TIME_NS, GEV_OPT_RECTANGLE, GEV_OPT_GEOMETRY = 1, 2, 4, 8, 9
+GEV_OPT_REPEAT_DISTANCE, GEV_OPT_REPEAT_INTERVAL_NS = 3, 5
+#: Double / triple click: within this long and this far (virtual pixels: a
+#: little under one cell) of the previous press.
+REPEAT_INTERVAL_NS = 500_000_000
+REPEAT_DISTANCE = 8.0
+FMT_OPT_UNWRAP, FMT_OPT_TRIM, FMT_OPT_SELECTION = 2, 3, 4
 DATA_TITLE = 12
 DATA_PWD = 13
 DATA_MOUSE_TRACKING = 11
@@ -179,6 +191,39 @@ class _ScrollValue(C.Union):
                 ("delta_prompt", C.c_ssize_t), ("_padding", C.c_uint64 * 2)]
 
 
+class GridRef(C.Structure):
+    _fields_ = [("node", C.c_void_p), ("x", C.c_uint16), ("y", C.c_uint16)]
+
+
+class PointCoordinate(C.Structure):
+    _fields_ = [("x", C.c_uint16), ("y", C.c_uint32)]
+
+
+class _PointValue(C.Union):
+    _fields_ = [("coordinate", PointCoordinate), ("_padding", C.c_uint64 * 2)]
+
+
+class Point(C.Structure):
+    _fields_ = [("tag", C.c_int), ("value", _PointValue)]
+
+
+class Selection(C.Structure):
+    _fields_ = [("start", GridRef), ("end", GridRef), ("rectangle", C.c_bool)]
+
+
+class SurfacePosition(C.Structure):
+    _fields_ = [("x", C.c_double), ("y", C.c_double)]
+
+
+class GestureGeometry(C.Structure):
+    _fields_ = [("columns", C.c_uint32), ("cell_width", C.c_uint32),
+                ("padding_left", C.c_uint32), ("screen_height", C.c_uint32)]
+
+
+class RowSelection(C.Structure):
+    _fields_ = [("size", C.c_size_t), ("start_x", C.c_uint16), ("end_x", C.c_uint16)]
+
+
 class Scrollbar(C.Structure):
     _fields_ = [("total", C.c_uint64), ("offset", C.c_uint64), ("len", C.c_uint64)]
 
@@ -257,6 +302,20 @@ def _bind(lib) -> None:
     _sig(lib, "ghostty_key_event_set_consumed_mods", R, _H, C.c_uint16)
     _sig(lib, "ghostty_key_event_set_utf8", R, _H, GString)
     _sig(lib, "ghostty_key_event_set_unshifted_codepoint", R, _H, C.c_uint32)
+    _sig(lib, "ghostty_terminal_grid_ref", R, _H, Point, C.POINTER(GridRef))
+    _sig(lib, "ghostty_selection_gesture_new", R, P, C.POINTER(_H))
+    _sig(lib, "ghostty_selection_gesture_free", None, _H, _H)
+    _sig(lib, "ghostty_selection_gesture_reset", None, _H, _H)
+    _sig(lib, "ghostty_selection_gesture_event_new", R, P, C.POINTER(_H), I)
+    _sig(lib, "ghostty_selection_gesture_event_free", None, _H)
+    _sig(lib, "ghostty_selection_gesture_event_set", R, _H, I, P)
+    _sig(lib, "ghostty_selection_gesture_event", R, _H, _H, _H, C.POINTER(Selection))
+    _sig(lib, "ghostty_formatter_terminal_new", R, P, C.POINTER(_H), _H)
+    _sig(lib, "ghostty_formatter_set", R, _H, I, P)
+    _sig(lib, "ghostty_formatter_format_alloc", R, _H, P, C.POINTER(C.POINTER(C.c_uint8)),
+         C.POINTER(C.c_size_t))
+    _sig(lib, "ghostty_formatter_free", None, _H)
+    _sig(lib, "ghostty_free", None, P, C.POINTER(C.c_uint8), C.c_size_t)
     _sig(lib, "ghostty_mouse_encoder_new", R, P, C.POINTER(_H))
     _sig(lib, "ghostty_mouse_encoder_free", None, _H)
     _sig(lib, "ghostty_mouse_encoder_set", R, _H, I, P)
@@ -378,6 +437,7 @@ class Cell:
     flags: int          # STYLE_* bits (underline folded into STYLE_UNDERLINE_MASK)
     wide: bool = False  # a single wide glyph drawn on its own
     ul: tuple[int, int, int] | None = None  # underline colour (SGR 58), None = fg
+    sel: bool = False   # inside the user's selection
 
 
 class Terminal:
@@ -411,6 +471,13 @@ class Terminal:
         self._check(lib.ghostty_mouse_encoder_new(None, C.byref(self._menc)), "mouse_encoder_new")
         self._mev = _H()
         self._check(lib.ghostty_mouse_event_new(None, C.byref(self._mev)), "mouse_event_new")
+        self._gesture = _H()
+        self._check(lib.ghostty_selection_gesture_new(None, C.byref(self._gesture)), "gesture_new")
+        self._gev = {}
+        for kind in (GESTURE_PRESS, GESTURE_RELEASE, GESTURE_DRAG):
+            ev = _H()
+            self._check(lib.ghostty_selection_gesture_event_new(None, C.byref(ev), kind), "gesture_event_new")
+            self._gev[kind] = ev
         track = C.c_bool(True)
         lib.ghostty_mouse_encoder_set(self._menc, MENC_OPT_TRACK_LAST_CELL, C.byref(track))
         alt = C.c_int(OPTION_AS_ALT_TRUE)
@@ -466,6 +533,9 @@ class Terminal:
     def close(self) -> None:
         lib = self._lib
         if self._h:
+            for ev in self._gev.values():
+                lib.ghostty_selection_gesture_event_free(ev)
+            lib.ghostty_selection_gesture_free(self._gesture, self._h)
             lib.ghostty_mouse_event_free(self._mev)
             lib.ghostty_mouse_encoder_free(self._menc)
             lib.ghostty_key_event_free(self._kev)
@@ -497,6 +567,86 @@ class Terminal:
             sv.tag = SCROLL_DELTA
             sv.value.delta = delta_rows
         self._lib.ghostty_terminal_scroll_viewport(self._h, sv)
+
+    # --- selection -------------------------------------------------------------
+    def select(self, kind: int, col: float, row: float, *, rectangle: bool = False) -> None:
+        """Feed a pointer press / drag / release at viewport (``col``, ``row``)
+        to libghostty's selection gesture, which decides cell, word or line
+        selection from the click count and installs the result."""
+        lib = self._lib
+        c = min(max(int(col), 0), self.cols - 1)
+        r = min(max(int(row), 0), self.rows - 1)
+        pt = Point(POINT_VIEWPORT)
+        pt.value.coordinate.x, pt.value.coordinate.y = c, r
+        ref = GridRef()
+        ev = self._gev[kind]
+        if lib.ghostty_terminal_grid_ref(self._h, pt, C.byref(ref)) == SUCCESS:
+            lib.ghostty_selection_gesture_event_set(ev, GEV_OPT_REF, C.byref(ref))
+        elif kind != GESTURE_RELEASE:
+            return
+        else:
+            lib.ghostty_selection_gesture_event_set(ev, GEV_OPT_REF, None)
+        if kind != GESTURE_RELEASE:
+            pos = SurfacePosition(col * _MCELL_W, row * _MCELL_H)
+            lib.ghostty_selection_gesture_event_set(ev, GEV_OPT_POSITION, C.byref(pos))
+        if kind == GESTURE_PRESS:
+            import time as _time
+            t = C.c_uint64(_time.monotonic_ns())
+            lib.ghostty_selection_gesture_event_set(ev, GEV_OPT_TIME_NS, C.byref(t))
+            iv = C.c_uint64(REPEAT_INTERVAL_NS)
+            lib.ghostty_selection_gesture_event_set(ev, GEV_OPT_REPEAT_INTERVAL_NS, C.byref(iv))
+            dist = C.c_double(REPEAT_DISTANCE)
+            lib.ghostty_selection_gesture_event_set(ev, GEV_OPT_REPEAT_DISTANCE, C.byref(dist))
+        if kind == GESTURE_DRAG:
+            geo = GestureGeometry(self.cols, _MCELL_W, 0, self.rows * _MCELL_H)
+            lib.ghostty_selection_gesture_event_set(ev, GEV_OPT_GEOMETRY, C.byref(geo))
+            rect = C.c_bool(rectangle)
+            lib.ghostty_selection_gesture_event_set(ev, GEV_OPT_RECTANGLE, C.byref(rect))
+        sel = Selection()
+        res = lib.ghostty_selection_gesture_event(self._gesture, self._h, ev, C.byref(sel))
+        if res == SUCCESS:
+            lib.ghostty_terminal_set(self._h, OPT_SELECTION, C.byref(sel))
+        elif kind == GESTURE_PRESS:
+            lib.ghostty_terminal_set(self._h, OPT_SELECTION, None)
+        self._force_full()
+
+    def clear_selection(self) -> None:
+        self._lib.ghostty_terminal_set(self._h, OPT_SELECTION, None)
+        self._force_full()
+
+    def has_selection(self) -> bool:
+        return self._lib.ghostty_terminal_get(self._h, DATA_SELECTION,
+                                              C.byref(Selection())) == SUCCESS
+
+    def selection_text(self) -> str:
+        """The selected text as Ghostty copies it: wrapped lines joined,
+        trailing spaces trimmed. Empty without a selection."""
+        lib = self._lib
+        sel = Selection()
+        if lib.ghostty_terminal_get(self._h, DATA_SELECTION, C.byref(sel)) != SUCCESS:
+            return ""
+        fmt = _H()
+        if lib.ghostty_formatter_terminal_new(None, C.byref(fmt), self._h) != SUCCESS:
+            return ""
+        try:
+            on = C.c_bool(True)
+            lib.ghostty_formatter_set(fmt, FMT_OPT_UNWRAP, C.byref(on))
+            lib.ghostty_formatter_set(fmt, FMT_OPT_TRIM, C.byref(on))
+            lib.ghostty_formatter_set(fmt, FMT_OPT_SELECTION, C.byref(sel))
+            ptr = C.POINTER(C.c_uint8)()
+            n = C.c_size_t()
+            if lib.ghostty_formatter_format_alloc(fmt, None, C.byref(ptr), C.byref(n)) != SUCCESS:
+                return ""
+            text = C.string_at(ptr, n.value).decode("utf-8", "replace")
+            lib.ghostty_free(None, ptr, n.value)
+            return text
+        finally:
+            lib.ghostty_formatter_free(fmt)
+
+    def _force_full(self) -> None:
+        """Mark every row for rebuild: the selection is drawn into the runs."""
+        full = C.c_int(RS_DIRTY_FULL)
+        self._lib.ghostty_render_state_set(self._rs, RS_OPT_DIRTY, C.byref(full))
 
     def scrollbar(self) -> tuple[int, int, int]:
         """(total rows, viewport offset, visible rows) of the scrollable area."""
@@ -602,6 +752,14 @@ class Terminal:
         self.stats_rows_rebuilt += rebuilt
         return rebuilt, cursor, colors
 
+    def _row_selection(self) -> tuple[int, int]:
+        """The current row's selected columns (inclusive), or an empty range."""
+        rs = RowSelection(C.sizeof(RowSelection))
+        if self._lib.ghostty_render_state_row_get(self._rows_it, ROW_DATA_SELECTION,
+                                                  C.byref(rs)) == SUCCESS:
+            return rs.start_x, rs.end_x
+        return 1, 0
+
     @staticmethod
     def _ul_color(style: "GStyle", palette) -> tuple[int, int, int] | None:
         c = style.underline_color
@@ -641,6 +799,7 @@ class Terminal:
         r_sh = L.rgb[0]
         s_sh, s_m = L.style_id
         w_sh, w_m = L.wide
+        sel_lo, sel_hi = self._row_selection()
         runs: list[Cell] = []
         texts: list[str] = []      # pending narrow run text, joined at the end
         cur: Cell | None = None
@@ -687,25 +846,27 @@ class Terminal:
                 else:
                     c = (v >> r_sh) & 0xFFFFFF
                     bg = (c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF)
+            sel = sel_lo <= col <= sel_hi
             if wide == WIDE_WIDE:
                 if cur is not None:
                     cur.text = "".join(texts)
                     cur = None
-                runs.append(Cell(col, text, 2, fg, bg, flags, wide=True, ul=ul))
+                runs.append(Cell(col, text, 2, fg, bg, flags, wide=True, ul=ul, sel=sel))
                 continue
             if cur is not None and cur.fg == fg and cur.bg == bg and cur.flags == flags \
-                    and cur.ul == ul and cur.col + cur.width == col:
+                    and cur.ul == ul and cur.sel == sel and cur.col + cur.width == col:
                 texts.append(text)
                 cur.width += 1
             else:
                 if cur is not None:
                     cur.text = "".join(texts)
-                cur = Cell(col, "", 1, fg, bg, flags, ul=ul)
+                cur = Cell(col, "", 1, fg, bg, flags, ul=ul, sel=sel)
                 texts = [text]
                 runs.append(cur)
         if cur is not None:
             cur.text = "".join(texts)
-        while runs and not runs[-1].wide and runs[-1].bg is None and not runs[-1].flags:
+        while runs and not runs[-1].wide and runs[-1].bg is None and not runs[-1].flags \
+                and not runs[-1].sel:
             stripped = runs[-1].text.rstrip(" ")
             if stripped:
                 runs[-1].width -= len(runs[-1].text) - len(stripped)
@@ -718,6 +879,7 @@ class Terminal:
         lib = self._lib
         cells = self._cells
         lib.ghostty_render_state_row_get(self._rows_it, ROW_DATA_CELLS, C.byref(cells))
+        sel_lo, sel_hi = self._row_selection()
         runs: list[Cell] = []
         cur: Cell | None = None
         col = 0
@@ -747,22 +909,24 @@ class Terminal:
                 bg = rgb.tuple()
             if not text:
                 text = " "
+            sel = sel_lo <= col <= sel_hi
             if wide == WIDE_WIDE:
                 # Its spacer tail follows as its own cell and adds the 2nd column.
-                runs.append(Cell(col, text, 2, fg, bg, flags, wide=True, ul=ul))
+                runs.append(Cell(col, text, 2, fg, bg, flags, wide=True, ul=ul, sel=sel))
                 cur = None
                 col += 1
                 continue
-            if cur is not None and (cur.fg, cur.bg, cur.flags, cur.ul) == (fg, bg, flags, ul) \
+            if cur is not None and (cur.fg, cur.bg, cur.flags, cur.ul, cur.sel) == (fg, bg, flags, ul, sel) \
                     and cur.col + cur.width == col:
                 cur.text += text
                 cur.width += 1
             else:
-                cur = Cell(col, text, 1, fg, bg, flags, ul=ul)
+                cur = Cell(col, text, 1, fg, bg, flags, ul=ul, sel=sel)
                 runs.append(cur)
             col += 1
         # Trailing blanks with no look of their own draw nothing.
-        while runs and not runs[-1].wide and runs[-1].bg is None and not runs[-1].flags:
+        while runs and not runs[-1].wide and runs[-1].bg is None and not runs[-1].flags \
+                and not runs[-1].sel:
             stripped = runs[-1].text.rstrip(" ")
             if stripped:
                 runs[-1].width -= len(runs[-1].text) - len(stripped)
