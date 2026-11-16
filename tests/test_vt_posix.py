@@ -251,6 +251,48 @@ def test_parsed_records_drive_the_engine():
     assert (events[4].key, events[4].modifiers) == ("left", frozenset({"ctrl"}))
 
 
+def _scripted_events(raw: str, reports_hover: bool = True):
+    import io
+    from puikit.backends.vt_backend import VTBackend, _StreamConsole
+
+    class Scripted(_StreamConsole):
+        def __init__(self):
+            super().__init__(stream=io.StringIO(), size=(40, 10))
+            self.queue = []
+            self.reports_hover = reports_hover
+
+        def size(self):
+            return (40, 10)
+
+        def read_input(self, timeout_ms):
+            return self.queue.pop(0) if self.queue else []
+
+    con = Scripted()
+    be = VTBackend(console=con)
+    be.open()
+    con.queue.append(records(raw))
+    events = []
+    for _ in range(10):
+        be.run_event_loop_iteration(events.append, 0)
+    be.close()
+    return events
+
+
+def test_bare_motion_becomes_one_hover_move_per_burst():
+    # Hover (mode 1003): three cells crossed in one read are one move, at the
+    # newest position; a click after it keeps its own events.
+    events = _scripted_events("\x1b[<35;3;2M\x1b[<35;4;2M\x1b[<35;6;3M"
+                              "\x1b[<0;6;3M\x1b[<0;6;3m")
+    assert [e.type for e in events] == [
+        EventType.MOUSE_MOVE, EventType.MOUSE_DOWN, EventType.MOUSE_UP]
+    assert (events[0].x, events[0].y) == (5.0, 2.0)
+
+
+def test_bare_motion_is_dropped_with_hover_off():
+    events = _scripted_events("\x1b[<35;3;2M\x1b[<0;3;2M", reports_hover=False)
+    assert [e.type for e in events] == [EventType.MOUSE_DOWN]
+
+
 # --- the pty console --------------------------------------------------------
 
 
