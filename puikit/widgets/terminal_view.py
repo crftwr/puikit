@@ -290,6 +290,9 @@ class TerminalView(Widget):
         if self._use_ticks and not self._ticking and self._exited is False:
             self._ticking = ctx.panel.request_animation_ticks(self._tick)
         self._drain()
+        # Bare pointer motion, for a program that tracks all motion (a TUI's
+        # hover); the encoder sends nothing in any other mode.
+        ctx.request_pointer_motion(self._pointer_motion)
 
         # Where the grid sits in the window. The window sizes in pixels, the
         # grid in whole cells, so up to a cell is left over each way; padding
@@ -710,6 +713,17 @@ class TerminalView(Widget):
         self._sb_until = time.monotonic() + self.SCROLLBAR_LINGER_SECONDS
         if self._panel is not None:
             self._panel.call_later(self.SCROLLBAR_LINGER_SECONDS + 0.05, self._panel.render)
+
+    def _pointer_motion(self, event: Event) -> bool:
+        """MOUSE_MOVE with no button held (Panel.request_pointer_motion): a
+        motion report when the program asked for all-motion tracking (mode
+        1003) - libghostty's encoder decides, and skips a move within the cell
+        it last reported. Never a redraw of ours."""
+        if self._term is None or self._exited is not False or self._selecting:
+            return False
+        if self._term.mouse_tracking():
+            self.send_raw(self._mouse_bytes(G.MOUSE_MOTION, 0, event))
+        return False
 
     def _scrollbar_mouse(self, event: Event) -> bool:
         if not self._sb_drag and not self._scrollbar_visible():
