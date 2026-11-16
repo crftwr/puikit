@@ -12,13 +12,11 @@ caller moves it to its own thread (``TerminalView`` posts to the UI thread).
 from __future__ import annotations
 
 import errno
-import fcntl
 import logging
 import os
 import signal
 import struct
 import sys
-import termios
 import threading
 import warnings
 from collections.abc import Callable
@@ -26,6 +24,13 @@ from collections.abc import Callable
 log = logging.getLogger(__name__)
 
 SUPPORTED = sys.platform != "win32"
+
+# POSIX-only modules, imported only where they exist: the module must still
+# import on Windows, so that TerminalView's ``available()`` can say why it
+# cannot run there instead of the import failing first.
+if SUPPORTED:
+    import fcntl
+    import termios
 
 
 class PtyProcess:
