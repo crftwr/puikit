@@ -786,6 +786,10 @@ class TerminalView(Widget):
         for name, bit in _MODS.items():
             if name in event.modifiers:
                 mods |= bit
+        # A bare control character with no key name (a text system that turned
+        # an unbound Ctrl chord into its C0 code): it already is the byte.
+        if char and len(char) == 1 and ord(char) < 0x20 and not key:
+            return char.encode("ascii")
         # IME commit or any multi-character text: straight through as UTF-8.
         if char and (key is None or len(char) > 1) and not mods & (G.MODS_CTRL | G.MODS_ALT):
             return char.encode("utf-8")

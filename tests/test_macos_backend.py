@@ -1650,3 +1650,51 @@ def test_a_permission_given_since_is_seen_by_the_next_call_not_this_one(notifyin
     assert center.requests == []
     assert backend.post_notification("Third") is True
     assert len(center.requests) == 1
+
+
+def _key_view(monkeypatch):
+    """A text-input view whose dispatched events and input-context hand-offs
+    are recorded."""
+    view, _spy = _view_with_spy()
+    view.backend._text_input_active = True
+    got, interpreted = [], []
+    view.backend._dispatch = got.append
+    monkeypatch.setattr(view, "interpretKeyEvents_", lambda evs: interpreted.extend(evs),
+                        raising=False)
+    return view, got, interpreted
+
+
+def _key(chars, plain, flags, code):
+    from AppKit import NSEvent, NSEventTypeKeyDown
+    return NSEvent.keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode_(
+        NSEventTypeKeyDown, (0, 0), flags, 0, 0, None, chars, plain, False, code)
+
+
+def test_a_ctrl_chord_in_text_input_is_a_key_not_text(monkeypatch):
+    # Through the input context Cocoa swallows Ctrl-Q (its "insert the next key
+    # literally") and turns an unbound chord into a bare control character; a
+    # terminal widget lost both (xefm#900). A Ctrl chord outside a composition
+    # goes straight to a KEY event instead.
+    from AppKit import NSEventModifierFlagControl
+    view, got, interpreted = _key_view(monkeypatch)
+    view.keyDown_(_key("\x11", "q", NSEventModifierFlagControl, 12))
+    view.keyDown_(_key("\x03", "c", NSEventModifierFlagControl, 8))
+    assert interpreted == []
+    assert [(e.key, e.modifiers) for e in got] == [
+        ("q", frozenset({"ctrl"})), ("c", frozenset({"ctrl"}))]
+
+
+def test_a_ctrl_chord_during_a_composition_stays_the_imes(monkeypatch):
+    # A Japanese IME converts with Ctrl-J / K / L while composing.
+    from AppKit import NSEventModifierFlagControl
+    view, got, interpreted = _key_view(monkeypatch)
+    view._ensure_ime_state()
+    view.marked_text = "にほんご"
+    view.keyDown_(_key("\x0a", "j", NSEventModifierFlagControl, 38))
+    assert got == [] and len(interpreted) == 1
+
+
+def test_plain_typing_in_text_input_still_goes_through_the_input_context(monkeypatch):
+    view, got, interpreted = _key_view(monkeypatch)
+    view.keyDown_(_key("a", "a", 0, 0))
+    assert got == [] and len(interpreted) == 1
