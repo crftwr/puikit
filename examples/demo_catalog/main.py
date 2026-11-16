@@ -2476,6 +2476,50 @@ def build_timers_page(panel: Panel) -> VSplit:
     )
 
 
+_TERMINAL = None  # one session for the whole run: leaving the page keeps it
+
+
+class _TerminalStats(Widget):
+    """One status line under the terminal: title, cwd and the redraw cost the
+    prototype is meant to measure (rows rebuilt from libghostty, ms)."""
+
+    def __init__(self, term) -> None:
+        self.term = term
+
+    def draw(self, ctx) -> None:
+        theme = ctx.theme
+        muted = theme.muted_text if theme else None
+        st = self.term.stats
+        size = (f"{self.term._term.cols}x{self.term._term.rows}"
+                if self.term._term is not None else "-")
+        text = (f"{size} · rows rebuilt {st['rows_rebuilt']:>3} · "
+                f"update {st['last_update_ms']:5.1f} ms · draw {st['last_draw_ms']:5.1f} ms"
+                f" · {self.term.title or '-'}")
+        ctx.draw_text(0, 0, text[: ctx.width], Style(fg=muted, attr=TextAttribute.DIM))
+
+
+def build_terminal_page(panel: Panel) -> VSplit:
+    # Prototype for xefm#900: libghostty-vt does the emulation, a pty runs the
+    # shell, and TerminalView draws the cells through the ordinary DrawContext.
+    global _TERMINAL
+    from puikit.widgets.terminal_view import TerminalView, available
+    if _TERMINAL is None:
+        _TERMINAL = TerminalView(cwd=os.path.expanduser("~"))
+    why = available()
+    intro = Label(
+        "Embedded terminal (libghostty-vt + pty) - Tab here or click to type; "
+        "Tab stays in the shell, click the list to leave. Cmd-Q quits."
+        if why is None else f"Unavailable: {why}",
+        DIM,
+    )
+    return VSplit(
+        Item(intro, size="content"),
+        Item(_TERMINAL, weight=1, hints={"surface": "content"}),
+        Item(_TerminalStats(_TERMINAL), size=1),
+        gap=1,
+    )
+
+
 # Each nav entry carries an emoji prefix: the same intent renders as a
 # full-color glyph on GUI and as a (wide) text glyph on TUI — the shared
 # wide-character accounting (puikit.text) keeps the labels column-aligned on
@@ -2499,6 +2543,7 @@ PAGES = [
     ("🚪 Drawer", build_drawer_page),
     ("🫳 Drag", build_drag_page),
     ("⏱️ Timers", build_timers_page),
+    ("🖥️ Terminal", build_terminal_page),
     ("🎬 Animation", build_animation_page),
     ("🗂️ Layering", build_layer_page),
     ("📐 Layout", build_layout_page),
