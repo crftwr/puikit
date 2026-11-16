@@ -120,8 +120,10 @@ not (macOS Terminal.app) abandons the whole sequence at the first colon and
 loses the pen with it (`vt_backend._supports_underline_color`, overridable with
 `PUIKIT_UNDERLINE_COLOR`). On Windows the bytes pass through ConPTY first, so
 there only Windows Terminal — which ships a current ConPTY of its own — is
-recognized; WezTerm, which draws the rule natively elsewhere, lost it behind
-its bundled one (xefm#629). `MacOSBackend` and `WindowsBackend` honor it
+recognized, and PuiKit's own `TerminalView` (`PUIKIT_TERMINAL`, set by `_pty`
+beside the app's own `TERM_PROGRAM`), whose system ConPTY forwards the colon
+form; WezTerm, which draws the
+rule natively elsewhere, lost it behind its bundled one (xefm#629). `MacOSBackend` and `WindowsBackend` honor it
 natively; the curses and web backends ignore it. Read only when an underline
 attribute is set.
 

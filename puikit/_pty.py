@@ -76,10 +76,28 @@ _HOST_TERMINAL_VARS = (
 )
 
 
-def _child_env(env: dict[str, str] | None) -> dict[str, str]:
+#: Set in the child to PuiKit's version: the terminal is PuiKit's TerminalView
+#: (libghostty), whatever the app calls it in ``TERM_PROGRAM`` - the marker an
+#: emulator sets beside its name (``WT_SESSION``, ``KITTY_WINDOW_ID``), which
+#: PuiKit's own VT backend reads to know what draws its output.
+TERMINAL_MARKER = "PUIKIT_TERMINAL"
+
+
+def _child_env(env: dict[str, str] | None,
+               term_program: tuple[str, str] | None = None) -> dict[str, str]:
+    """``env`` (default: ours) for a child of this terminal. ``term_program``
+    is the ``(name, version)`` it is known by - the app embedding it, as VS
+    Code names its terminal ``vscode`` rather than the library drawing it;
+    PuiKit's own when the app gives none."""
+    from . import __version__
     env = dict(os.environ if env is None else env)
     for name in _HOST_TERMINAL_VARS:
         env.pop(name, None)
+    # In their place, this terminal's own name, as every emulator gives it.
+    name, version = term_program or ("PuiKit", __version__)
+    env["TERM_PROGRAM"] = name
+    env["TERM_PROGRAM_VERSION"] = version
+    env[TERMINAL_MARKER] = __version__
     env.setdefault("TERM", "xterm-256color")
     env.setdefault("COLORTERM", "truecolor")
     # A GUI app launched from Finder has no locale; a shell without one reads
@@ -325,6 +343,8 @@ class _ConPty:
     #: program may clean up on CTRL_CLOSE_EVENT, and one still starting up when
     #: the console closed may never receive it.
     HANGUP_GRACE_SECONDS = 2.0
+    #: Two of conhost's 60 Hz repaints (PtyProcess.sync_settle_seconds).
+    SYNC_SETTLE_SECONDS = 0.034
 
     def __init__(self, argv: list[str], *, cols: int, rows: int,
                  cwd: str | None, env: dict[str, str],
@@ -512,14 +532,26 @@ class PtyProcess:
 
     def __init__(self, argv: list[str], *, cols: int, rows: int,
                  cwd: str | None = None, env: dict[str, str] | None = None,
+                 term_program: tuple[str, str] | None = None,
                  on_output: Callable[[bytes], None],
                  on_exit: Callable[[int | None], None]) -> None:
         if not SUPPORTED:
             raise OSError(f"PtyProcess: {UNSUPPORTED_REASON}")
         impl = _ConPty if WINDOWS else _PosixPty
-        self._impl = impl(argv, cols=cols, rows=rows, cwd=cwd, env=_child_env(env),
+        self._impl = impl(argv, cols=cols, rows=rows, cwd=cwd,
+                          env=_child_env(env, term_program),
                           on_output=on_output, on_exit=on_exit)
         self.pid = self._impl.pid
+
+    @property
+    def sync_settle_seconds(self) -> float:
+        """How long after a synchronized update (mode 2026) ends the frame may
+        still be arriving. Zero on POSIX, where the program's bytes come
+        through as written. ConPTY passes the program's 2026 marks through out
+        of step with its own repaints - eosh's prompt redraw came 17-40 ms
+        after the end mark, behind a frame of the cleared line - so a viewer
+        keeps the held frame until the next output, or this long without."""
+        return _ConPty.SYNC_SETTLE_SECONDS if WINDOWS else 0.0
 
     @property
     def returncode(self) -> int | None:

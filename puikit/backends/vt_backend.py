@@ -283,13 +283,19 @@ def _supports_underline_color(env: dict[str, str] | None = None,
     the brackets that replace it (xefm#629). So on Windows only Windows
     Terminal is trusted, and only when no other host has named itself in
     TERM_PROGRAM, since a host started from a Windows Terminal tab inherits its
-    WT_SESSION.
+    WT_SESSION - and PuiKit's own TerminalView (``PUIKIT_TERMINAL`` set), which
+    runs on the system's ConPTY, seen to forward the colon form.
     """
     env = os.environ if env is None else env
     override = (env.get("PUIKIT_UNDERLINE_COLOR") or "").strip().lower()
     if override in ("0", "off", "none", "no"):
         return False
     if override in ("1", "on", "yes"):
+        return True
+    # PuiKit's own TerminalView (libghostty), whatever the app embedding it
+    # calls it in TERM_PROGRAM; on Windows behind the system ConPTY, which
+    # forwards the colon form _underline_code writes (Windows 11).
+    if env.get("PUIKIT_TERMINAL"):
         return True
     if windows:
         return bool(env.get("WT_SESSION")) and not env.get("TERM_PROGRAM")
