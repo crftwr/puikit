@@ -414,9 +414,17 @@ def test_animate_gated_by_capability():
     backend = MemoryBackend(width=20, height=10, capabilities=PROFILE_GUI_DESKTOP)
     panel = Panel(backend)
     panel.animate(widget, hints={"transition": "fade", "duration_ms": 200})
-    assert backend.animate_calls == [
+    assert _callers_hints(backend) == [
         (widget, {"transition": "fade", "duration_ms": 200})
     ]
+
+
+def _callers_hints(backend):
+    """What the backend was asked to play, without the completion hook the
+    Panel adds to every moving transition (it ends the motion, see
+    Panel._transition_done)."""
+    return [(w, {k: v for k, v in h.items() if k != "on_complete"})
+            for w, h in backend.animate_calls]
 
 
 class SizeProbe(Widget):
@@ -506,7 +514,7 @@ def test_slide_on_compositing_backend_goes_to_backend():
     probe = SizeProbe()
     panel.add(probe, x=0, y=0, w=20, h=10)
     panel.animate(probe, hints={"transition": "slide", "from_dx": -8})
-    assert backend.animate_calls == [(probe, {"transition": "slide", "from_dx": -8})]
+    assert _callers_hints(backend) == [(probe, {"transition": "slide", "from_dx": -8})]
     assert probe not in panel._size_anims
 
 
