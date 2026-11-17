@@ -2271,6 +2271,11 @@ class Panel:
             self.render()
 
     def _render_impl(self) -> None:
+        # What shows where nothing is drawn is the theme's page, not the
+        # backend's dark default: a crossfade lets it through, and on a light
+        # theme a dark one read as the screen dimming.
+        theme = self.theme
+        self.backend.set_clear_color(theme.surface_bg("content") if theme is not None else None)
         self._pointer_regions = []
         self._motion_targets = []
         self._drawing_layer = None

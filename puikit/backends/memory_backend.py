@@ -703,6 +703,11 @@ class MemoryBackend(Backend):
     def image_formats(self) -> frozenset[str]:
         return self.supported_image_formats
 
+    def set_clear_color(self, color) -> None:
+        """Recorded for tests: what the Panel last asked the window be cleared
+        to (a grid has no clear of its own to recolor)."""
+        self.clear_color = color
+
     def present(self) -> None:
         self.present_count += 1
 

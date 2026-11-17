@@ -960,6 +960,17 @@ class Backend(ABC):
         call is always safe. A backend that implements it keeps a shader running
         and re-fits the background across window resizes on its own."""
 
+    def set_clear_color(self, color: "Color | None") -> None:
+        """The color the window is cleared to before anything is drawn, for the
+        window being drawn (the main one, or the one a Panel bound to another
+        is rendering into). The Panel sets it on every render from its theme's
+        page (``content``) surface, so whatever no widget covers - normally
+        nothing, but a transition fading two screens across each other shows
+        it - is the theme's background rather than a fixed dark default. A
+        background naming its own ``backdrop`` (a shader, a wallpaper) still
+        wins. ``None`` goes back to the backend default. A character grid has
+        no clear of its own to recolor, so the default no-ops."""
+
     def set_surface_opacity(self, opacity: float) -> None:
         """Opacity of the UI's *surface* fills (pane / row backgrounds), ``0``..``1``.
         ``1`` (the default) keeps the UI fully opaque; lower values composite the

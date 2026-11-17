@@ -1348,6 +1348,8 @@ class WindowsBackend(Backend):
         self._mark_brush: Any = None
         self._hwnd_windows: dict[int, WinWindowHandle] = {}
         self._active_win: WinWindowHandle | None = None
+        # set_clear_color, per window (None: the main window).
+        self._clear_colors: dict = {}
         self._fonts: dict[TextAttribute, Any] = {}
         # Per-Style text formats cached by (Font, bold, italic).
         self._style_fonts: dict[tuple, Any] = {}
@@ -2589,6 +2591,10 @@ class WindowsBackend(Backend):
     # --- background behind the UI (set_background) ---------------------------
 
     @_holds_render_lock
+    def set_clear_color(self, color: Any | None) -> None:
+        # Set by the Panel on every render; a change repaints with that frame.
+        self._clear_colors[self._active_win] = tuple(color[:3]) if color else None
+
     def set_background(self, background: Any | None) -> None:
         """Set the background behind the display list (see ``Backend.set_background``):
         a ``Shader`` (GPU), a ``Wallpaper`` (static image), or ``None`` (solid).
@@ -3285,7 +3291,9 @@ class WindowsBackend(Backend):
         # Clear to the background's backdrop when it names one, so the opacity-
         # dissolved surface fills (and bare gaps) fall back to that color instead of
         # the neutral dark default — matching MacOSBackend._render_into_view.
-        clear = _DEFAULT_BG
+        # The theme's page, as the Panel set it for this window
+        # (set_clear_color), else the neutral dark default.
+        clear = self._clear_colors.get(self._active_win) or _DEFAULT_BG
         if self._background is not None and getattr(self._background, "backdrop", None) is not None:
             clear = self._background.backdrop
         native.rt_clear(rt, native.D2D1_COLOR_F(clear[0] / 255, clear[1] / 255, clear[2] / 255, 1.0))
