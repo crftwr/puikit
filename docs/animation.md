@@ -135,12 +135,33 @@ needs an offscreen pass, and how each backend supplies it is the subject of
 
 **A cover layer in motion.** A layer pushed with `"cover": True` (a full-window
 viewer) normally replaces everything beneath it: the Panel skips the base UI and
-the lower layers. While a `slide`, `scale` or `fade` runs on it, it does not:
-the part of the window it does not cover yet shows the UI beneath it instead
-of an empty frame. The Panel marks the widget as moving for the transition's
-`duration_ms` (`_mark_moving`), and once it settles it renders again so the
-cover goes back to replacing what is beneath. On a terminal the stepped
-geometry animation counts as moving until its frame at rest.
+the lower layers. That holds while the layer animates on its own, too: a viewer
+materializing over the screen replaces it from its first frame. Only when the
+app animates *the screen beneath* as well does that screen keep drawing while a
+`slide`, `scale` or `fade` runs on the cover, so the two can cross. The screen
+beneath is the next cover layer down, or `panel.base` (below) when there is
+none; `panel.beneath(layer)` returns it together with every layer between,
+bottom first, which is what an app animates with the cover:
+
+```python
+# opening: what was on screen fades out quickly, the viewer fades in
+panel.push_layer(viewer, z=80, hints={..., "cover": True})
+panel.animate(viewer, {"transition": "fade", "duration_ms": 180})
+for w in panel.beneath(viewer):
+    panel.animate(w, {"transition": "fade", "out": True, "duration_ms": 70})
+# closing: the reverse, the layer removed once it has faded
+for w in panel.beneath(viewer):
+    panel.animate(w, {"transition": "fade", "duration_ms": 180})
+panel.animate(viewer, {"transition": "fade", "out": True, "duration_ms": 70,
+                       "on_complete": lambda: panel.remove_layer(viewer)})
+```
+
+The Panel marks each widget as moving for its transition's `duration_ms`
+(`_mark_moving`), and once the cover settles it renders again so the cover goes
+back to replacing what is beneath. On a terminal the stepped geometry animation
+counts as moving until its frame at rest. Whatever went out beneath a layer is
+brought back when that layer is removed, even by a close that played no
+transition.
 
 **Going out.** `"out": True` plays a transition backwards, from rest to its
 from-state: a `slide` leaves toward its offset (a drawer closing), a `fade`

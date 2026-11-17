@@ -1975,9 +1975,8 @@ class Panel:
     def pop_layer(self) -> Any | None:
         if not self._layers:
             return None
-        widget = self._layers.pop().widget
-        self._forget_gone(widget)
-        return widget
+        self._forget_gone(len(self._layers) - 1)
+        return self._layers.pop().widget
 
     def remove_layer(self, widget: Any) -> bool:
         """Remove the layer holding ``widget``, wherever it sits in the stack;
@@ -1990,8 +1989,8 @@ class Panel:
         used to skip the pop and stay on screen forever (xefm#333)."""
         for i, slot in enumerate(self._layers):
             if slot.widget is widget:
+                self._forget_gone(i)
                 del self._layers[i]
-                self._forget_gone(widget)
                 return True
         return False
 
@@ -2311,14 +2310,21 @@ class Panel:
         # background (see _render_layer) — the wallpaper shows through it just as it
         # does through the file manager. A partial overlay (dialog / menu) carries
         # no such hint, so the base still draws around it.
-        # A cover layer only replaces what is beneath once it is at rest: while it
-        # slides, scales or fades in (or out), the part of the window it does not
-        # yet cover shows the UI beneath, not an empty frame.
-        cover_ix = max(
-            (i for i, s in enumerate(self._layers)
-             if s.hints.get("cover") and not self._layer_moving(s.widget)),
-            default=-1,
-        )
+        # A cover layer moving while the screen beneath it animates too (the app
+        # crossing the two: a viewer fading in as what it covers fades away) lets
+        # that screen draw until it settles. "The screen beneath" is the next
+        # cover down, or the base when there is none (see beneath()). A cover
+        # moving on its own still replaces everything beneath from its first
+        # frame, as it always has.
+        cover_ix = -1
+        covers = [i for i, s in enumerate(self._layers) if s.hints.get("cover")]
+        for pos in range(len(covers) - 1, -1, -1):
+            widget = self._layers[covers[pos]].widget
+            below = self._layers[covers[pos - 1]].widget if pos > 0 else self.base
+            if self._layer_moving(widget) and self._animating(below):
+                continue
+            cover_ix = covers[pos]
+            break
         size_before = self.backend.size_units
         if cover_ix < 0 and not self._is_gone(self.base):
             base_group = self.base in self._moving or self.base in self._effect_anims
@@ -2877,12 +2883,13 @@ class Panel:
         over with ``call_on_main_thread(lambda: panel.call_later(...))``."""
         return self.backend.call_later(delay_seconds, callback)
 
-    def _forget_gone(self, widget: Any) -> None:
-        """A layer is leaving: forget it went out, and bring the base back if it
-        went out for a layer and nothing has brought it back (a close that
-        played no transition)."""
-        self._gone.discard(widget)
+    def _forget_gone(self, index: int) -> None:
+        """The layer at ``index`` is leaving: forget that it went out, and bring
+        back everything beneath it that went out for it and that nothing has
+        brought back (a close that played no transition)."""
         self._gone.discard(self.base)
+        for slot in self._layers[:index + 1]:
+            self._gone.discard(slot.widget)
 
     def _is_gone(self, widget: Any) -> bool:
         """Whether ``widget`` has gone out (see _went_out). On a stepped backend
@@ -2917,6 +2924,26 @@ class Panel:
                 self.render()
 
         self.call_later(duration, settle)
+
+    def _animating(self, widget: Any) -> bool:
+        """Whether ``widget`` (a layer, or ``panel.base``) is mid-transition, on
+        either playback path."""
+        return (widget in self._moving or widget in self._size_anims
+                or widget in self._effect_anims)
+
+    def beneath(self, widget: Any) -> list[Any]:
+        """What the cover layer ``widget`` covers - what was on screen before it
+        came up and comes back when it leaves - bottom first: the next cover
+        layer down, or ``panel.base`` when there is none, then every layer
+        between it and ``widget``. An app crossing a full-window layer with the
+        screen it replaces animates these together; a ``widget`` not in the
+        stack is taken as about to be pushed on top."""
+        idx = next((i for i, s in enumerate(self._layers) if s.widget is widget),
+                   len(self._layers))
+        lower = [i for i in range(idx) if self._layers[i].hints.get("cover")]
+        if lower:
+            return [s.widget for s in self._layers[lower[-1]:idx]]
+        return [self.base] + [s.widget for s in self._layers[:idx]]
 
     def _layer_moving(self, widget: Any) -> bool:
         """Whether ``widget``'s layer is mid-transition (see _mark_moving): a
