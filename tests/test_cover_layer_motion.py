@@ -1,6 +1,7 @@
-"""A cover layer replaces the UI beneath it only once it is at rest: while it
-slides, scales or fades, the part of the window it does not cover yet shows
-that UI (xefm#900 - XeFM's terminal slides up over the panes)."""
+"""A cover layer moving while ``panel.base`` animates too lets the UI beneath
+it draw until it settles (xefm#900: XeFM's terminal fades in as the screen
+zooms away). A cover moving on its own still replaces that UI from its first
+frame, as it always has."""
 
 import pytest
 
@@ -20,6 +21,12 @@ def _setup(profile):
     return backend, panel, view
 
 
+def _base_too(panel, ms=150):
+    """The app moves the base along with the cover (a plain fade in, so the
+    base is never gone in these tests)."""
+    panel.animate(panel.base, hints={"transition": "fade", "duration_ms": ms})
+
+
 def _rows(panel, backend):
     backend.clear()
     panel.render()
@@ -34,6 +41,7 @@ def _rows(panel, backend):
 def test_a_composited_cover_shows_the_base_until_it_settles(transition):
     backend, panel, view = _setup(PROFILE_GUI_DESKTOP)
     assert panel.animate(view, hints={**transition, "duration_ms": 150})
+    _base_too(panel)
     assert "BASE" in _rows(panel, backend)[0]
     backend.fire_timers()  # the transition's length has passed
     assert "BASE" not in _rows(panel, backend)[0]
@@ -42,6 +50,7 @@ def test_a_composited_cover_shows_the_base_until_it_settles(transition):
 def test_settling_renders_the_cover_at_rest():
     backend, panel, view = _setup(PROFILE_GUI_DESKTOP)
     panel.animate(view, hints={"transition": "slide", "from_dy": 6, "duration_ms": 150})
+    _base_too(panel)
     panel.render()
     backend.clear()
     backend.fire_timers()  # renders by itself: no caller does after a slide-in
@@ -54,6 +63,7 @@ def test_a_cover_sliding_out_shows_the_base_until_it_is_gone():
     gone = []
     panel.animate(view, hints={"transition": "slide", "from_dy": 6, "out": True,
                                "duration_ms": 150, "on_complete": lambda: gone.append(1)})
+    _base_too(panel)
     assert "BASE" in _rows(panel, backend)[0]
 
 
@@ -63,6 +73,7 @@ def test_a_later_transition_outlives_the_earlier_settle():
     first = backend.later_timers.pop(0)
     panel.animate(view, hints={"transition": "slide", "from_dy": 6, "out": True,
                                "duration_ms": 150})
+    _base_too(panel)
     first[1]()  # the first slide's settle fires while the second still runs
     assert "BASE" in _rows(panel, backend)[0]
 
@@ -70,19 +81,35 @@ def test_a_later_transition_outlives_the_earlier_settle():
 def test_a_stepped_cover_shows_the_base_while_it_moves():
     backend, panel, view = _setup(PROFILE_TUI)
     panel.animate(view, hints={"transition": "slide", "from_dy": 6, "duration_ms": 1})
+    _base_too(panel, 1)
     assert "BASE" in _rows(panel, backend)[0]
     backend.fire_timers()
     for _ in range(4):  # the 2-frame step, then the frame at rest
-        if not panel._size_anims:
+        if not (panel._size_anims or panel._effect_anims):
             break
         backend.run_animation_ticks()
     assert not panel._size_anims
-    assert "BASE" not in backend.snapshot()[0]
+    assert "BASE" not in _rows(panel, backend)[0]
+
+
+@pytest.mark.parametrize("profile", [PROFILE_GUI_DESKTOP, PROFILE_TUI], ids=["gui", "tui"])
+@pytest.mark.parametrize("transition", [
+    {"transition": "slide", "from_dy": 6},
+    {"transition": "scale", "from_scale": 0.92, "fade": True},
+    {"transition": "fade"},
+])
+def test_a_cover_moving_on_its_own_still_hides_the_base(profile, transition):
+    # The behavior every app had before panel.base: a viewer materializing
+    # over the screen replaces it from its first frame.
+    backend, panel, view = _setup(profile)
+    assert panel.animate(view, hints={**transition, "duration_ms": 150})
+    assert "BASE" not in _rows(panel, backend)[0]
 
 
 def test_color_and_highlight_do_not_reveal_the_base():
     backend, panel, view = _setup(PROFILE_GUI_DESKTOP)
     panel.animate(view, hints={"transition": "highlight", "duration_ms": 150})
+    _base_too(panel)
     assert "BASE" not in _rows(panel, backend)[0]
 
 
@@ -179,3 +206,55 @@ def test_on_a_stepped_backend_the_base_does_not_move_but_still_completes(transit
     assert done == [1]
     if transition["transition"] == "scale":
         assert "BASE" not in _rows(panel, backend)[0]
+
+
+# --- the screen beneath a cover ------------------------------------------------
+
+def _stack(profile=PROFILE_GUI_DESKTOP):
+    """BASE, then a dialog, then a lower viewer (cover), then a dialog over it,
+    then the top viewer (cover), each on its own row."""
+    backend = MemoryBackend(width=20, height=6, capabilities=profile)
+    panel = Panel(backend)
+    panel.add(Label("BASE"), x=0, y=0, w=6, h=1)
+    dlg = Label("DLG")
+    lower = Label("LOWER")
+    box = Label("BOX")
+    top = Label("TOP")
+    panel.push_layer(dlg, z=10, hints={"x": 0, "y": 1, "w": 4, "h": 1})
+    panel.push_layer(lower, z=80, hints={"x": 0, "y": 2, "w": 6, "h": 1, "cover": True})
+    panel.push_layer(box, z=85, hints={"x": 0, "y": 3, "w": 4, "h": 1})
+    panel.push_layer(top, z=90, hints={"x": 0, "y": 4, "w": 4, "h": 1, "cover": True})
+    return backend, panel, dlg, lower, box, top
+
+
+def test_beneath_is_the_next_cover_down_and_what_sits_on_it():
+    backend, panel, dlg, lower, box, top = _stack()
+    assert panel.beneath(top) == [lower, box]
+    assert panel.beneath(lower) == [panel.base, dlg]
+    assert panel.beneath(object()) == [top]  # about to be pushed on top
+
+
+def test_a_viewer_crosses_a_lower_viewer_animating_with_it():
+    backend, panel, dlg, lower, box, top = _stack()
+    panel.animate(top, hints={"transition": "fade", "duration_ms": 180})
+    rows = _rows(panel, backend)
+    assert "LOWER" not in rows[2]  # moving alone: replaces it as before
+    for w in panel.beneath(top):
+        panel.animate(w, hints={"transition": "fade", "out": True, "duration_ms": 70})
+    rows = _rows(panel, backend)
+    assert "LOWER" in rows[2] and "BOX" in rows[3] and "TOP" in rows[4]
+    assert "BASE" not in rows[0] and "DLG" not in rows[1]  # still under LOWER
+    backend.run_animation_ticks()  # the quick fades end: what they faded is gone
+    rows = _rows(panel, backend)
+    assert "LOWER" not in rows[2] and "BOX" not in rows[3] and "TOP" in rows[4]
+
+
+def test_a_close_without_motion_brings_back_what_went_out_beneath():
+    backend, panel, dlg, lower, box, top = _stack()
+    for w in panel.beneath(top):
+        panel.animate(w, hints={"transition": "fade", "out": True, "duration_ms": 70})
+    backend.run_animation_ticks()
+    assert lower in panel._gone and box in panel._gone
+    panel.remove_layer(top)
+    rows = _rows(panel, backend)
+    assert "LOWER" in rows[2] and "BOX" in rows[3]
