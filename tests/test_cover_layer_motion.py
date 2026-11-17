@@ -258,3 +258,34 @@ def test_a_close_without_motion_brings_back_what_went_out_beneath():
     panel.remove_layer(top)
     rows = _rows(panel, backend)
     assert "LOWER" in rows[2] and "BOX" in rows[3]
+
+
+def test_a_settle_timer_racing_the_completion_never_hides_the_screen():
+    # The dark flash on closing XeFM's terminal (30-50% of closes): the Panel
+    # settled a fading cover by a timer of the transition's length, which could
+    # fire before the backend's completion; for that frame the nearly invisible
+    # cover hid the screen fading in beneath it. Now the completion ends the
+    # motion, and a timer due by the transition's length leaves it alone.
+    backend, panel, view = _setup(PROFILE_GUI_DESKTOP)
+    panel.animate(panel.base, hints={"transition": "fade", "duration_ms": 220})
+    panel.animate(view, hints={"transition": "fade", "out": True, "duration_ms": 220,
+                               "on_complete": lambda: panel.remove_layer(view)})
+    for timer in [t for t in backend.later_timers if t[0] <= 0.22]:
+        backend.later_timers.remove(timer)
+        timer[1]()
+    assert "BASE" in _rows(panel, backend)[0]
+    backend.run_animation_ticks()  # the backend reports both done
+    assert not panel._layers and not panel._moving
+    assert "BASE" in _rows(panel, backend)[0]
+
+
+def test_a_transition_whose_completion_never_comes_settles_by_the_fallback():
+    backend, panel, view = _setup(PROFILE_GUI_DESKTOP)
+    panel.animate(view, hints={"transition": "fade", "duration_ms": 150})
+    _base_too(panel)
+    backend._pending_completes.clear()  # a backend that never reports
+    [delay] = [t[0] for t in backend.later_timers if t[0] > 0.15][:1]
+    assert delay > 0.15
+    backend.fire_timers()
+    assert not panel._moving
+    assert "BASE" not in _rows(panel, backend)[0]  # the cover at rest again

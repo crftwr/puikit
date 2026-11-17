@@ -2546,7 +2546,7 @@ class Panel:
         # it at once when nothing will animate.
         hints = hints or {}
         # Any transition, even one that will not play, starts from rest: a
-        # widget that went out (see _went_out) is drawn again.
+        # widget that went out (see _transition_done) is drawn again.
         self._gone.discard(widget)
         caps = self.backend.capabilities
         transition = hints.get("transition")
@@ -2561,12 +2561,17 @@ class Panel:
             # once rather than wait on a transition that will never tick.
             return False
 
-        if transition in ("fade", "scale") and hints.get("out"):
-            # Going out ends with the widget gone, not back at rest: hide it when
-            # the transition completes, before the caller's own hook runs.
-            hints = {**hints, "on_complete": self._went_out(widget, hints.get("on_complete"))}
         if transition in ("slide", "scale", "fade"):
-            self._mark_moving(widget, hints.get("duration_ms", 200) / 1000.0)
+            # The transition's own completion ends its motion - whoever plays
+            # it says when it is done, so nothing is drawn at rest while it is
+            # still on screen (a timer racing the backend's last frames let a
+            # fading cover hide the screen beneath it for a frame). Going out
+            # (fade / scale) ends with the widget gone, not back at rest; both
+            # happen before the caller's own hook runs.
+            token = self._mark_moving(widget, hints.get("duration_ms", 200) / 1000.0)
+            out = transition in ("fade", "scale") and bool(hints.get("out"))
+            hints = {**hints, "on_complete": self._transition_done(
+                widget, token, out, hints.get("on_complete"))}
         if transition == "color":
             self._start_color_animation(widget, hints, stepped)
         elif transition == "size":
@@ -2892,7 +2897,7 @@ class Panel:
             self._gone.discard(slot.widget)
 
     def _is_gone(self, widget: Any) -> bool:
-        """Whether ``widget`` has gone out (see _went_out). On a stepped backend
+        """Whether ``widget`` has gone out (see _transition_done). On a stepped backend
         the frame at the end of a fade "out" is already its gone frame: the
         2-frame policy's target is the end state, which for going out is absent."""
         if widget in self._gone:
@@ -2901,29 +2906,44 @@ class Panel:
         return (eff is not None and bool(eff.hints.get("out"))
                 and not eff.active(time.monotonic()))
 
-    def _went_out(self, widget: Any, then: Any) -> Callable[[], None]:
+    def _transition_done(self, widget: Any, token: object, out: bool,
+                         then: Any) -> Callable[[], None]:
+        """The completion hook a moving transition is played with: it ends the
+        motion (unless a later transition on the widget owns it now), leaves a
+        widget that went out gone, runs the caller's hook, and renders the
+        widget at rest - a cover layer replacing what is beneath it again."""
         def done() -> None:
-            self._gone.add(widget)
+            if self._moving.get(widget) is token:
+                del self._moving[widget]
+            if out:
+                self._gone.add(widget)
             if then is not None:
                 then()
             self.render()
         return done
 
-    def _mark_moving(self, widget: Any, duration: float) -> None:
-        """Note that ``widget``'s layer is in motion for ``duration`` seconds,
-        and render once it settles, so a cover layer goes back to replacing
-        what is beneath it (the frames in flight drew that too)."""
+    #: How long past its length a transition may run before the Panel stops
+    #: waiting for its completion and treats it as settled: only a backend that
+    #: never reports one (or a transition replaced before it ended) needs it.
+    _SETTLE_GRACE = 0.5
+
+    def _mark_moving(self, widget: Any, duration: float) -> object:
+        """Note that ``widget``'s layer is in motion, until its completion hook
+        (see _transition_done) says otherwise; return the token that hook
+        checks. A fallback timer settles it well after ``duration`` should the
+        hook never come."""
         token = object()
         self._moving[widget] = token
 
         def settle() -> None:
             if self._moving.get(widget) is not token:
-                return  # a later transition on it owns the settle now
+                return  # completed already, or a later transition owns it
             del self._moving[widget]
             if widget is self.base or any(s.widget is widget for s in self._layers):
                 self.render()
 
-        self.call_later(duration, settle)
+        self.call_later(duration + self._SETTLE_GRACE, settle)
+        return token
 
     def _animating(self, widget: Any) -> bool:
         """Whether ``widget`` (a layer, or ``panel.base``) is mid-transition, on

@@ -156,9 +156,13 @@ panel.animate(viewer, {"transition": "fade", "out": True, "duration_ms": 70,
                        "on_complete": lambda: panel.remove_layer(viewer)})
 ```
 
-The Panel marks each widget as moving for its transition's `duration_ms`
-(`_mark_moving`), and once the cover settles it renders again so the cover goes
-back to replacing what is beneath. On a terminal the stepped geometry animation
+The Panel marks each widget as moving (`_mark_moving`) until its transition's
+own completion says it is done (the backend's, or the Panel's on a stepped
+backend), then renders again so the cover goes back to replacing what is
+beneath. It does not settle it by a timer of `duration_ms`: such a timer can
+fire before the backend's last frames, and a fading cover would hide the screen
+beneath it for a frame (a dark flash). A fallback timer half a second past the
+length settles a transition whose completion never comes. On a terminal the stepped geometry animation
 counts as moving until its frame at rest. Whatever went out beneath a layer is
 brought back when that layer is removed, even by a close that played no
 transition.
