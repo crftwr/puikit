@@ -1763,6 +1763,15 @@ class _EffectAnimation:
         return self.progress(now) < 1.0
 
 
+class _BaseLayout:
+    """The key that stands for a Panel's base layout - every slot added with
+    ``add`` plus the dividers, without the layers - as one widget for
+    ``Panel.animate`` (see ``Panel.base``)."""
+
+    def __repr__(self) -> str:
+        return "<Panel.base>"
+
+
 class Panel:
     """Owns widget layout, layers, focus, and event routing for one screen."""
 
@@ -1797,6 +1806,21 @@ class Panel:
         self._text_input_on = False
         self._layout: Any | None = None
         self._size_anims: dict[Any, _GeometryAnimation] = {}
+        # Widgets in a transition that moves or fades their whole layer (slide,
+        # scale, fade), keyed to a token so a later transition on the same widget
+        # outlives an earlier one's settle timer. A "cover" layer among them does
+        # not hide what is beneath it until it settles (see render).
+        self._moving: dict[Any, object] = {}
+        #: The base layout as one animatable widget: ``panel.animate(panel.base,
+        #: hints)`` zooms or fades the whole screen beneath the layers together
+        #: (a full-window layer arriving from "behind" it). While it animates the
+        #: base draws inside one group of the window's size; otherwise it draws
+        #: as before, with no group around it.
+        self.base = _BaseLayout()
+        # Widgets whose fade / scale "out" has played to its end: they stay
+        # undrawn (the end state of going out) until animated again, so a backend
+        # drawing its last frame at rest cannot flash them back for a frame.
+        self._gone: set[Any] = set()
         # Running color tweens keyed by (widget, key); the widget reads the
         # current value via DrawContext.animated_color (see _ColorAnimation).
         self._color_anims: dict[tuple[Any, Any], _ColorAnimation] = {}
@@ -1951,7 +1975,9 @@ class Panel:
     def pop_layer(self) -> Any | None:
         if not self._layers:
             return None
-        return self._layers.pop().widget
+        widget = self._layers.pop().widget
+        self._forget_gone(widget)
+        return widget
 
     def remove_layer(self, widget: Any) -> bool:
         """Remove the layer holding ``widget``, wherever it sits in the stack;
@@ -1965,6 +1991,7 @@ class Panel:
         for i, slot in enumerate(self._layers):
             if slot.widget is widget:
                 del self._layers[i]
+                self._forget_gone(widget)
                 return True
         return False
 
@@ -2284,24 +2311,41 @@ class Panel:
         # background (see _render_layer) — the wallpaper shows through it just as it
         # does through the file manager. A partial overlay (dialog / menu) carries
         # no such hint, so the base still draws around it.
+        # A cover layer only replaces what is beneath once it is at rest: while it
+        # slides, scales or fades in (or out), the part of the window it does not
+        # yet cover shows the UI beneath, not an empty frame.
         cover_ix = max(
-            (i for i, s in enumerate(self._layers) if s.hints.get("cover")),
+            (i for i, s in enumerate(self._layers)
+             if s.hints.get("cover") and not self._layer_moving(s.widget)),
             default=-1,
         )
         size_before = self.backend.size_units
-        if cover_ix < 0:
+        if cover_ix < 0 and not self._is_gone(self.base):
+            base_group = self.base in self._moving or self.base in self._effect_anims
+            if base_group:
+                sw, sh = self.backend.size_units
+                base_rect = Rect(0, 0, sw, sh)
+                self.backend.begin_group(self.base, base_rect)
             for slot in self._children:
                 self._draw_slot(slot)
             if self._layout is not None and self.backend.size_units != size_before:
                 self._apply_layout()
                 self.backend.clear()
                 self._pointer_shape = None
+                if base_group:
+                    # clear() dropped the group marker with everything else.
+                    self.backend.begin_group(self.base, base_rect)
                 for slot in self._children:
                     self._draw_slot(slot)
             for divider in self._dividers:
                 self._draw_divider(divider)
+            if base_group:
+                self._apply_group_effect(self.base, base_rect)
+                self.backend.end_group(self.base)
         for i in range(max(cover_ix, 0), len(self._layers)):
             slot = self._layers[i]
+            if self._is_gone(slot.widget):
+                continue
             # The topmost layer is modal — it owns events exclusively (see
             # dispatch_event), so it must own the pointer shape too. Discard any
             # cursor a widget *beneath* it requested right before it draws, so a
@@ -2495,6 +2539,9 @@ class Panel:
         # once it has slid out, via an ``on_complete`` hint) can fall back to doing
         # it at once when nothing will animate.
         hints = hints or {}
+        # Any transition, even one that will not play, starts from rest: a
+        # widget that went out (see _went_out) is drawn again.
+        self._gone.discard(widget)
         caps = self.backend.capabilities
         transition = hints.get("transition")
         smooth = caps.supports("animation")
@@ -2508,6 +2555,12 @@ class Panel:
             # once rather than wait on a transition that will never tick.
             return False
 
+        if transition in ("fade", "scale") and hints.get("out"):
+            # Going out ends with the widget gone, not back at rest: hide it when
+            # the transition completes, before the caller's own hook runs.
+            hints = {**hints, "on_complete": self._went_out(widget, hints.get("on_complete"))}
+        if transition in ("slide", "scale", "fade"):
+            self._mark_moving(widget, hints.get("duration_ms", 200) / 1000.0)
         if transition == "color":
             self._start_color_animation(widget, hints, stepped)
         elif transition == "size":
@@ -2824,6 +2877,52 @@ class Panel:
         over with ``call_on_main_thread(lambda: panel.call_later(...))``."""
         return self.backend.call_later(delay_seconds, callback)
 
+    def _forget_gone(self, widget: Any) -> None:
+        """A layer is leaving: forget it went out, and bring the base back if it
+        went out for a layer and nothing has brought it back (a close that
+        played no transition)."""
+        self._gone.discard(widget)
+        self._gone.discard(self.base)
+
+    def _is_gone(self, widget: Any) -> bool:
+        """Whether ``widget`` has gone out (see _went_out). On a stepped backend
+        the frame at the end of a fade "out" is already its gone frame: the
+        2-frame policy's target is the end state, which for going out is absent."""
+        if widget in self._gone:
+            return True
+        eff = self._effect_anims.get(widget)
+        return (eff is not None and bool(eff.hints.get("out"))
+                and not eff.active(time.monotonic()))
+
+    def _went_out(self, widget: Any, then: Any) -> Callable[[], None]:
+        def done() -> None:
+            self._gone.add(widget)
+            if then is not None:
+                then()
+            self.render()
+        return done
+
+    def _mark_moving(self, widget: Any, duration: float) -> None:
+        """Note that ``widget``'s layer is in motion for ``duration`` seconds,
+        and render once it settles, so a cover layer goes back to replacing
+        what is beneath it (the frames in flight drew that too)."""
+        token = object()
+        self._moving[widget] = token
+
+        def settle() -> None:
+            if self._moving.get(widget) is not token:
+                return  # a later transition on it owns the settle now
+            del self._moving[widget]
+            if widget is self.base or any(s.widget is widget for s in self._layers):
+                self.render()
+
+        self.call_later(duration, settle)
+
+    def _layer_moving(self, widget: Any) -> bool:
+        """Whether ``widget``'s layer is mid-transition (see _mark_moving): a
+        Panel-driven geometry step on a terminal, or a composited one on GUI."""
+        return widget in self._moving or widget in self._size_anims
+
     def _start_geometry_animation(
         self, widget: Any, hints: dict[str, Any], stepped: bool
     ) -> None:
@@ -2931,6 +3030,11 @@ class Panel:
         ]
         for w, _a in finished:
             del self._size_anims[w]
+        # A cover layer that just came to rest drew its last frame over the UI
+        # beneath (see _layer_moving); draw it once more, replacing that UI.
+        settled = {w for w, _a in finished if w not in self._moving}
+        if any(s.widget in settled and s.hints.get("cover") for s in self._layers):
+            self.render()
         # Fire each geometry animation's completion hook last — a slide-out close
         # pops its layer here, having already rendered its final (off-edge) frame,
         # then re-renders the page without it.
@@ -2939,8 +3043,15 @@ class Panel:
                 a.on_complete()
         for k in [k for k, a in self._color_anims.items() if a.progress(now) >= 1.0]:
             del self._color_anims[k]
-        for w in [w for w, a in self._effect_anims.items() if a.progress(now) >= 1.0]:
+        done_effects = [(w, a) for w, a in self._effect_anims.items()
+                        if a.progress(now) >= 1.0]
+        for w, _a in done_effects:
             del self._effect_anims[w]
+        # A fade-out close (a layer leaving) removes it here, as a slide-out does.
+        for _w, a in done_effects:
+            on_complete = a.hints.get("on_complete")
+            if on_complete is not None:
+                on_complete()
         self._text_anims_done(now)
         if not (self._text_anims or self._text_key_anims):
             self._prefix_cache.clear()  # nothing in flight: drop the measurements
