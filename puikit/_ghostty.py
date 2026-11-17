@@ -7,10 +7,13 @@ the first and ``TerminalView`` the second.
 
 The library is optional. :func:`load` finds it, in order, at:
 
-1. ``$PUIKIT_LIBGHOSTTY`` (a path to the shared library);
-2. the per-user cache ``scripts/fetch_libghostty.py`` fills
-   (``~/.cache/puikit/libghostty/``);
-3. the system's library path (``ctypes.util.find_library``).
+1. ``_bin/`` inside the puikit package, where an application bundle puts the
+   copy it ships (and ``scripts/fetch_libghostty.py`` puts one for a
+   development checkout);
+2. the system's library path (``ctypes.util.find_library``).
+
+Nothing per-user is searched, and no environment variable redirects it: the
+library is the one the app shipped, or one installed on the system.
 
 and returns None when none of them has it, so a caller can show a hint
 instead of failing. Only the calls ``TerminalView`` needs are bound; every
@@ -379,6 +382,37 @@ def cell_layout(lib) -> CellLayout | None:
 
 
 # --- loading ----------------------------------------------------------------------
+#: The libghostty-vt release this binding is written against. A library loads
+#: when it keeps upstream's compatibility promise for it (version.h): the same
+#: major version, and at least this new. An application bundle ships exactly
+#: this release; scripts/fetch_libghostty.py and XeFM's bundle tool read this
+#: line (without importing PuiKit) and refuse to fetch any other.
+LIBGHOSTTY_VERSION = "1.0.1"
+
+
+def _version_tuple(text: str) -> tuple[int, int, int] | None:
+    """``"1.2.3"`` (or ``"1.2.3-dev+abc"``) as numbers; None if it is not one."""
+    core = text.split("-", 1)[0].split("+", 1)[0]
+    parts = core.split(".")
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        return None
+    return int(parts[0]), int(parts[1]), int(parts[2])
+
+
+def compatible(found: str, wanted: str = LIBGHOSTTY_VERSION) -> bool:
+    """Whether a library reporting ``found`` serves a binding written for
+    ``wanted``: same major version, and not older."""
+    f, w = _version_tuple(found), _version_tuple(wanted)
+    return f is not None and w is not None and f[0] == w[0] and f >= w
+
+
+def _library_version(lib) -> str:
+    fn = lib.ghostty_version  # AttributeError: a library older than 1.0
+    fn.restype = C.c_char_p
+    fn.argtypes = []
+    return (fn() or b"").decode("utf-8", "replace")
+
+
 def _lib_names() -> list[str]:
     if sys.platform == "darwin":
         return ["libghostty-vt.dylib"]
@@ -387,9 +421,9 @@ def _lib_names() -> list[str]:
     return ["libghostty-vt.so.1", "libghostty-vt.so"]
 
 
-def cache_dir() -> str:
-    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
-    return os.path.join(base, "puikit", "libghostty")
+def bundled_dir() -> str:
+    """``_bin/`` beside this module: where a bundled copy of the library sits."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "_bin")
 
 
 _lib = None
@@ -401,11 +435,7 @@ def load():
     global _lib, _load_error
     if _lib is not None or _load_error is not None:
         return _lib
-    candidates: list[str] = []
-    env = os.environ.get("PUIKIT_LIBGHOSTTY")
-    if env:
-        candidates.append(env)
-    candidates += [os.path.join(cache_dir(), n) for n in _lib_names()]
+    candidates = [os.path.join(bundled_dir(), n) for n in _lib_names()]
     found = ctypes.util.find_library("ghostty-vt")
     if found:
         candidates.append(found)
@@ -415,16 +445,22 @@ def load():
             continue
         try:
             lib = C.CDLL(path)
+            version = _library_version(lib)
+            if not compatible(version):
+                errors.append(f"{path}: libghostty-vt {version or '?'}, but this PuiKit "
+                              f"needs {LIBGHOSTTY_VERSION.split('.')[0]}.x, "
+                              f"{LIBGHOSTTY_VERSION} or newer")
+                continue
             _bind(lib)
         except (OSError, AttributeError) as exc:
             errors.append(f"{path}: {exc}")
             continue
-        log.info("libghostty-vt loaded from %s", path)
+        log.info("libghostty-vt %s loaded from %s", version, path)
         _lib = lib
         return _lib
     _load_error = "; ".join(errors) or (
-        "libghostty-vt not found (set PUIKIT_LIBGHOSTTY or run "
-        "scripts/fetch_libghostty.py)")
+        "libghostty-vt not found (not in puikit/_bin/ nor on the system's "
+        "library path)")
     return None
 
 

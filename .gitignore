@@ -26,3 +26,7 @@ puikit/fonts/*.ttf
 puikit/fonts/*.otf
 puikit/fonts/OFL.txt
 puikit/fonts/OFL-CJK.txt
+
+# libghostty-vt fetched into a development checkout (scripts/fetch_libghostty.py);
+# an application bundle ships its own copy here. Never committed or packaged.
+puikit/_bin/

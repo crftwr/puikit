@@ -61,13 +61,29 @@ VENV_STAMP := $(VENV)/.installed
 # stamp depends on this so `make venv` / any run target populates the fonts.
 FONTS := puikit/fonts/NotoSans-Regular.ttf
 
-.PHONY: help venv install test fonts banner hello demo demo-vt demo-curses layout bg3d hello-gui demo-gui layout-gui bg3d-gui hello-web demo-web build publish-testpypi tag release-github release-whl release-status clean
+# libghostty-vt for TerminalView, fetched into puikit/_bin/ (gitignored, never
+# packaged) on the platforms with a prebuilt library: the exact release
+# puikit/_ghostty.py declares, checked against its pinned hash. Linux has none
+# and a TUI does not need it. The venv needs it only to exist (order-only, so
+# touching it never rebuilds the venv); after a version bump `make libghostty`
+# fetches the new one, and leaves a matching library alone otherwise. A
+# mismatched one is refused at load with the reason, not used.
+ifeq ($(IS_WINDOWS),1)
+    GHOSTTY_LIB := puikit/_bin/ghostty-vt.dll
+else ifeq ($(UNAME_S),Darwin)
+    GHOSTTY_LIB := puikit/_bin/libghostty-vt.dylib
+else
+    GHOSTTY_LIB :=
+endif
+
+.PHONY: help venv install test fonts libghostty banner hello demo demo-vt demo-curses layout bg3d hello-gui demo-gui layout-gui bg3d-gui hello-web demo-web build publish-testpypi tag release-github release-whl release-status clean
 
 help:
 	@echo "PuiKit utility commands:"
 	@echo "  make venv      - create the virtualenv and install puikit ($(VENV)/, $(PYTHON))"
 	@echo "  make install   - (re)install puikit into the venv (editable, with dev deps)"
 	@echo "  make fonts     - download the bundled default fonts into puikit/fonts/"
+	@echo "  make libghostty - fetch libghostty-vt into puikit/_bin/ (macOS, Windows)"
 	@echo "  make test      - run the test suite"
 	@echo "  make hello     - run the hello_world example (TUI)"
 	@echo "  make demo      - run the demo_catalog example (TUI: VT on Windows, curses elsewhere)"
@@ -97,7 +113,7 @@ help:
 	@echo "  Run/test targets create the venv and install puikit automatically"
 	@echo "  if needed. GUI targets accept FONT_SIZE, e.g. make demo-gui FONT_SIZE=18"
 
-$(VENV_STAMP): pyproject.toml $(FONTS)
+$(VENV_STAMP): pyproject.toml $(FONTS) | $(GHOSTTY_LIB)
 	$(PYTHON) -m venv $(VENV)
 	$(VENV_PIP) install -e ".[$(EXTRAS)]"
 	@touch $(VENV_STAMP)
@@ -106,6 +122,14 @@ $(FONTS): scripts/fetch_fonts.py
 	$(PYTHON) scripts/fetch_fonts.py
 
 fonts: $(FONTS)
+
+ifneq ($(GHOSTTY_LIB),)
+$(GHOSTTY_LIB):
+	$(PYTHON) scripts/fetch_libghostty.py
+endif
+
+libghostty:
+	$(PYTHON) scripts/fetch_libghostty.py
 
 # GitHub Pages banner.  docs/images/banner.svg is the source; link previews
 # ignore SVG in og:image, so the site serves JPEGs rendered from it (headless
