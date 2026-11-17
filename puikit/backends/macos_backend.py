@@ -3736,6 +3736,10 @@ class MacOSBackend(Backend):
             return (None, rect, False, False)
         cg = NSGraphicsContext.currentContext().CGContext()
         eased = animation.eased(now)
+        if animation.hints.get("out") and animation.kind in ("fade", "scale"):
+            # Played backwards: from rest to the transition's from-state (a layer
+            # fading away, the base zooming up as it fades) - see Panel.animate.
+            eased = 1.0 - eased
         if animation.kind == "fade":
             CGContextSaveGState(cg)
             CGContextSetAlpha(cg, eased)

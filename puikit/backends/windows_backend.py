@@ -4389,6 +4389,11 @@ class WindowsBackend(Backend):
         if animation is None:
             return (None, rect, None)
         eased = animation.eased(now)
+        if animation.hints.get("out") and animation.kind in ("fade", "scale"):
+            # Played backwards: from rest to the transition's from-state (a layer
+            # fading away, the base zooming up as it fades) - see Panel.animate.
+            # Matches the macOS backend.
+            eased = 1.0 - eased
         if animation.kind == "fade":
             # Offscreen compositing (the Direct2D analog of macOS's
             # CGContextBeginTransparencyLayer + CGContextSetAlpha): render the
@@ -4446,10 +4451,11 @@ class WindowsBackend(Backend):
                     # untransformed space — the plain widget rect. That is the
                     # right bound for a grow-into-place scale (from_scale < 1),
                     # where the content is inset toward the center and always
-                    # inside the rect. A from_scale ABOVE 1 would start larger
-                    # than the rect and be clipped to it on the way in; no caller
-                    # does that today, and a shrink-into-place entrance would need
-                    # these bounds widened by from_scale first.
+                    # inside the rect. A from_scale ABOVE 1 is clipped to the
+                    # rect: right for ``Panel.base`` (the window itself, zooming
+                    # up as a layer arrives from behind it), but a smaller widget
+                    # shrinking into place would need these bounds widened by
+                    # from_scale first.
                     contentBounds=self._unit_rect(rect.x, rect.y, rect.w, rect.h),
                     geometricMask=None,
                     maskAntialiasMode=native.D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,

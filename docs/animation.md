@@ -133,6 +133,102 @@ use transforms / an overlay fill, no offscreen surface. `fade` is the one that
 needs an offscreen pass, and how each backend supplies it is the subject of
 §4–§6.
 
+**A cover layer in motion.** A layer pushed with `"cover": True` (a full-window
+viewer) normally replaces everything beneath it: the Panel skips the base UI and
+the lower layers. While a `slide`, `scale` or `fade` runs on it, it does not:
+the part of the window it does not cover yet shows the UI beneath it instead
+of an empty frame. The Panel marks the widget as moving for the transition's
+`duration_ms` (`_mark_moving`), and once it settles it renders again so the
+cover goes back to replacing what is beneath. On a terminal the stepped
+geometry animation counts as moving until its frame at rest.
+
+**Going out.** `"out": True` plays a transition backwards, from rest to its
+from-state: a `slide` leaves toward its offset (a drawer closing), a `fade`
+goes to transparent, a `scale` goes to `from_scale` (fading out too with
+`"fade": True`). A `fade` or `scale` that went out ends with the widget *gone*,
+not back at rest: the Panel stops drawing it when the transition completes,
+before the caller's `on_complete` runs, so a backend's last frame at rest
+cannot flash it back, until the next `animate` on it. On a stepped backend a
+`fade` out calls `on_complete` too, after its frame at the end.
+
+**The base as one widget.** `panel.base` stands for the base layout, every slot
+from `add` plus the dividers. `panel.animate(panel.base, hints)` moves the whole
+screen beneath the layers together. While it animates, the base draws inside one
+group the size of the window. A full-window layer that seems to have been behind
+the screen all along is two transitions of one length:
+
+```python
+# arriving: the screen zooms up and fades away as the layer fades in
+panel.animate(panel.base, {"transition": "scale", "from_scale": 1.08,
+                           "fade": True, "out": True, "duration_ms": 220})
+panel.animate(layer, {"transition": "fade", "duration_ms": 220})
+# leaving: the screen settles back as the layer fades away
+panel.animate(panel.base, {"transition": "scale", "from_scale": 1.08,
+                           "fade": True, "duration_ms": 220})
+panel.animate(layer, {"transition": "fade", "out": True, "duration_ms": 220,
+                      "on_complete": lambda: panel.remove_layer(layer)})
+```
+
+**What `panel.base` can play, by backend.** The base is a key, not a widget and
+not a slot of the layout. Every transition that is realized on the *group*
+works on it; one that is realized on the widget's own drawing or on its slot's
+rect does not. Today:
+
+| transition | compositing (macOS, Windows) | stepped (VT, curses, web) |
+|---|---|---|
+| `fade` | real alpha | one dim frame (the stepped stand-in) |
+| `scale` (with or without `fade`) | real zoom about the center | **no motion** |
+| `slide` | real offset | **no motion** |
+| `highlight` | real tint | one flash frame |
+| `color` | no effect | no effect |
+| `size` | no effect | no effect |
+
+Where nothing moves, `animate` still returns True and the transition still
+runs its length: `on_complete` fires, and a `fade` or `scale` with `out` leaves
+the base gone, so
+an app's code after the transition is the same on every backend. It only
+misses the motion.
+
+The gaps are of three kinds.
+
+*Could be built when needed.*
+
+- **`slide` on a stepped backend.** For a widget the Panel moves the slot's
+  rect (`_interpolate_rect`); the base has no rect of its own. The base pass in
+  `render` could apply the same interpolated offset to every base slot and
+  divider, clipped to the window, and the 2-frame policy would then move the
+  whole screen in whole cells.
+- **`scale` on a stepped backend, as the stand-in a widget gets.** For a widget
+  a stepped `scale` is a rect *inset*: one frame drawn smaller about the center,
+  then full size. The base could do the same by laying itself out into the
+  inset rect for that frame (`_apply_layout` against a smaller size). That
+  stands in for shrinking into place (`from_scale < 1`) only; see below for
+  zooming up.
+- **Composited transitions on the web backend.** It declares `animation: False`
+  until it implements `animate()` (see `PROFILE_WEB`), so it plays the stepped
+  stand-ins today. The browser can composite (canvas `globalAlpha` and
+  transforms), so a real `animate()` there would give the base, and every other
+  widget, the compositing column of the table.
+- **`size` on the base.** It means laying the whole base out again at an
+  interpolated window size every frame, which `_apply_layout` can do. Possible,
+  but every frame relays the whole screen, so measure it before using it.
+
+*Not applicable.*
+
+- **`color`.** A color tween is a value the widget reads back while drawing
+  (`DrawContext.animated_color`) to tint its own pixels. The base draws nothing
+  itself; it has no color to tween. Tinting the whole screen is a different
+  feature (a theme-color tween, or a `highlight`).
+
+*Not possible on a character grid.*
+
+- **Real zoom and real alpha.** A terminal draws whole cells in a fixed font. It
+  cannot draw text larger or smaller, place it between cells, or blend two
+  frames. So a `scale` above 1 (the screen zooming up toward the viewer) has no
+  grid equivalent: laying out into a *larger* rect shows more columns, not
+  bigger text. A grid `fade` can never be more than the one-frame stand-in.
+  This is the limit the 2-frame policy (§0) is built around, not a gap to fill.
+
 ---
 
 ## 3. The alpha-blending math (why fade is special)
