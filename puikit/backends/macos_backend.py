@@ -1938,6 +1938,8 @@ class MacOSBackend(Backend):
         # the display-list/size properties to that window's state. Must be set
         # before the _front/_back property assignments below.
         self._active_win: MacWindowHandle | None = None
+        # set_clear_color, per window (None: the main window).
+        self._clear_colors: dict = {}
         self._secondary_windows: list[MacWindowHandle] = []
         #: Live screen marks, so close() can find them and a backend
         #: shutdown can take them off the screen.
@@ -3413,12 +3415,14 @@ class MacOSBackend(Backend):
 
     def _render_frame(self) -> None:
         frame_start = time.perf_counter() if _BG_PROFILE else 0.0
-        # Clear the frame. When the background names a backdrop, the opacity-dissolved
-        # surface fills (and any bare gaps) fall back to *that* color instead of the
-        # neutral dark default — so a light-theme app stays light where dissolved and
-        # a dark scene line reads against it, rather than muddying toward near-black.
-        # No effect when no background / no backdrop.
-        clear = _DEFAULT_BG
+        # Clear the frame, to the theme's page as the Panel set it for this window
+        # (set_clear_color), else the neutral dark default - what shows where no
+        # widget draws, as when a crossfade lets both screens through. When the
+        # background names a backdrop, that wins: the opacity-dissolved surface
+        # fills (and any bare gaps) fall back to *it*, so a light-theme app stays
+        # light where dissolved and a dark scene line reads against it. A shader
+        # clears to transparent below and uses neither.
+        clear = self._clear_colors.get(self._active_win) or _DEFAULT_BG
         # Backgrounds (wallpaper/shader) and post effects composite on the
         # main window only; a secondary window renders its display list over
         # the plain clear color.
@@ -4646,6 +4650,10 @@ class MacOSBackend(Backend):
         self._post_effect = None if (effect is None or effect.is_noop) else effect
         self._drop_shadow_obj = None  # rebuilt lazily for the new effect
         self._apply_post_effect()
+
+    def set_clear_color(self, color: Any | None) -> None:
+        # Set by the Panel on every render; a change repaints with that frame.
+        self._clear_colors[self._active_win] = tuple(color[:3]) if color else None
 
     def set_background(self, background: Any | None) -> None:
         """Set the background behind the display list (see ``Backend.set_background``):
