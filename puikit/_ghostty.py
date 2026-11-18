@@ -50,6 +50,16 @@ OPT_COLOR_FOREGROUND = 12
 OPT_COLOR_BACKGROUND = 13
 OPT_PWD_CHANGED = 26
 OPT_RENDER_HOLD = 42
+OPT_DESKTOP_NOTIFICATION = 30
+OPT_PROGRESS_REPORT = 31
+OPT_SEMANTIC_PROMPT = 43
+DATA_CURSOR_AT_PROMPT = 39
+# Shell integration (OSC 133): the step of a command a semantic prompt event
+# reports (GhosttySemanticPromptKind).
+PROMPT_START, INPUT_START, OUTPUT_START, COMMAND_END = 1, 2, 3, 4
+# Progress reports (OSC 9;4, GhosttyTerminalProgressState).
+PROGRESS_REMOVE, PROGRESS_SET, PROGRESS_ERROR, PROGRESS_INDETERMINATE, PROGRESS_PAUSE = \
+    0, 1, 2, 3, 4
 OPT_SELECTION = 22
 DATA_SCROLLBAR = 9
 DATA_SELECTION = 31
@@ -176,6 +186,27 @@ class GString(C.Structure):
     _fields_ = [("ptr", C.POINTER(C.c_uint8)), ("len", C.c_size_t)]
 
 
+class SemanticPrompt(C.Structure):
+    """GhosttyTerminalSemanticPrompt (frozen layout, 48 bytes on 64-bit)."""
+    _fields_ = [("kind", C.c_int), ("prompt_kind", C.c_int),
+                ("has_exit_code", C.c_bool), ("exit_code", C.c_int32),
+                ("command", GString), ("error", GString)]
+
+
+class DesktopNotification(C.Structure):
+    """GhosttyTerminalDesktopNotification (OSC 9 / OSC 777; frozen, 32 bytes)."""
+    _fields_ = [("title", GString), ("body", GString)]
+
+
+class ProgressReport(C.Structure):
+    """GhosttyTerminalProgressReport (OSC 9;4; frozen, 8 bytes)."""
+    _fields_ = [("state", C.c_int), ("progress", C.c_int8)]
+
+
+def _text(s: GString) -> str:
+    return C.string_at(s.ptr, s.len).decode("utf-8", "replace") if s.ptr and s.len else ""
+
+
 class GBuffer(C.Structure):
     _fields_ = [("ptr", C.POINTER(C.c_uint8)), ("cap", C.c_size_t), ("len", C.c_size_t)]
 
@@ -264,6 +295,9 @@ _H = C.c_void_p  # every handle is an opaque pointer
 WritePtyFn = C.CFUNCTYPE(None, _H, C.c_void_p, C.POINTER(C.c_uint8), C.c_size_t)
 SimpleFn = C.CFUNCTYPE(None, _H, C.c_void_p)
 HoldFn = C.CFUNCTYPE(None, _H, C.c_void_p, C.c_bool)
+SemanticPromptFn = C.CFUNCTYPE(None, _H, C.c_void_p, C.POINTER(SemanticPrompt))
+NotificationFn = C.CFUNCTYPE(None, _H, C.c_void_p, C.POINTER(DesktopNotification))
+ProgressFn = C.CFUNCTYPE(None, _H, C.c_void_p, C.POINTER(ProgressReport))
 
 
 def _sig(lib, name, res, *args):
@@ -493,6 +527,9 @@ class Terminal:
                  on_pwd: Callable[[str], None] | None = None,
                  on_bell: Callable[[], None] | None = None,
                  on_render_hold: Callable[[bool], None] | None = None,
+                 on_semantic_prompt: Callable[[int, int | None, str], None] | None = None,
+                 on_notification: Callable[[str, str], None] | None = None,
+                 on_progress: Callable[[int, int | None], None] | None = None,
                  fg: tuple[int, int, int] | None = None,
                  bg: tuple[int, int, int] | None = None) -> None:
         lib = load()
@@ -543,6 +580,28 @@ class Terminal:
         # half-drawn state is shown; the owner holds its frames in between.
         self._cb_hold = HoldFn(lambda _t, _u, held: on_render_hold and on_render_hold(bool(held)))
         lib.ghostty_terminal_set(self._h, OPT_RENDER_HOLD, C.cast(self._cb_hold, C.c_void_p))
+        # Shell integration (OSC 133): (kind, exit code or None, command line).
+        def _prompt(_t, _u, ev):
+            if on_semantic_prompt is not None and ev:
+                e = ev.contents
+                on_semantic_prompt(e.kind, e.exit_code if e.has_exit_code else None,
+                                   _text(e.command))
+        self._cb_prompt = SemanticPromptFn(_prompt)
+        lib.ghostty_terminal_set(self._h, OPT_SEMANTIC_PROMPT, C.cast(self._cb_prompt, C.c_void_p))
+        # OSC 9 / OSC 777 notifications: (title, body).
+        def _notify(_t, _u, n):
+            if on_notification is not None and n:
+                on_notification(_text(n.contents.title), _text(n.contents.body))
+        self._cb_notify = NotificationFn(_notify)
+        lib.ghostty_terminal_set(self._h, OPT_DESKTOP_NOTIFICATION,
+                                 C.cast(self._cb_notify, C.c_void_p))
+        # OSC 9;4 progress: (state, percent or None).
+        def _progress(_t, _u, r):
+            if on_progress is not None and r:
+                pct = r.contents.progress
+                on_progress(r.contents.state, pct if pct >= 0 else None)
+        self._cb_progress = ProgressFn(_progress)
+        lib.ghostty_terminal_set(self._h, OPT_PROGRESS_REPORT, C.cast(self._cb_progress, C.c_void_p))
         if fg is not None:
             lib.ghostty_terminal_set(self._h, OPT_COLOR_FOREGROUND, C.byref(Rgb(*fg)))
         if bg is not None:
@@ -726,6 +785,15 @@ class Terminal:
         sv.tag = SCROLL_ROW
         sv.value.row = max(0, row)
         self._lib.ghostty_terminal_scroll_viewport(self._h, sv)
+
+    def at_prompt(self) -> bool:
+        """Whether the cursor is at the shell's prompt or command line: known
+        only through shell integration marks (OSC 133), and False on the
+        alternate screen."""
+        v = C.c_bool()
+        if self._lib.ghostty_terminal_get(self._h, DATA_CURSOR_AT_PROMPT, C.byref(v)) != SUCCESS:
+            return False
+        return bool(v.value)
 
     def mouse_tracking(self) -> bool:
         v = C.c_bool()
