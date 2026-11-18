@@ -1600,6 +1600,14 @@ class MacWindowHandle(WindowHandle):
         # Panel alive (Keyhac #325: 3 MB per window, forever).
         self.view.pk_window = None
         self._delegate.handle = None
+        # The backend's per-window records are keyed by this handle, which is
+        # an ordinary strong reference: left in place, each one keeps the
+        # handle - and through its on_event/on_close the app's whole window
+        # object - alive for good (Keyhac #377).
+        self._backend._clear_colors.pop(self, None)
+        self._backend._pointer_cursors.pop(self, None)
+        if self._backend._cursor_window is self:
+            self._backend._cursor_window = _NO_CURSOR_WINDOW
 
     def set_title(self, title: str) -> None:
         self.nswindow.setTitle_(title)
