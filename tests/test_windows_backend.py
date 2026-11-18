@@ -1796,6 +1796,25 @@ def _secondary(backend, w=30, h=5, **kw):
     return win, Panel(backend, window=win)
 
 
+def test_closing_a_window_drops_its_clear_color():
+    # The clear color is recorded per window on every render, keyed by the
+    # handle. Left behind, it keeps the handle - and through on_event the app's
+    # window object - alive after the close (Keyhac #377).
+    from puikit.widgets import Label
+    from puikit.layout import VSplit, Item
+    backend = WindowsBackend(width=20, height=6, title="puikit-mw-clear")
+    backend.open()
+    try:
+        win, panel = _secondary(backend)
+        panel.set_layout(VSplit(Item(Label("x"), weight=1)))
+        panel.render()
+        assert win in backend._clear_colors
+        win.close()
+        assert win not in backend._clear_colors
+    finally:
+        backend.close()
+
+
 def test_multi_window_capability_declared():
     assert WindowsBackend.PROFILE.supports("multi_window")
 

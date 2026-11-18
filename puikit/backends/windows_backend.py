@@ -5089,6 +5089,9 @@ class WindowsBackend(Backend):
             self._hwnd_windows.pop(handle.hwnd, None)
         if handle in self._secondary_windows:
             self._secondary_windows.remove(handle)
+        # Keyed by the handle, a strong reference: left in place it keeps the
+        # handle and the app's window object behind it alive (Keyhac #377).
+        self._clear_colors.pop(handle, None)
         if self._active_win is handle:
             self._active_win = None
 
