@@ -68,6 +68,9 @@ class TerminalView(Widget):
                  on_title: Callable[[str], None] | None = None,
                  on_pwd: Callable[[str], None] | None = None,
                  on_exit: Callable[[int | None], None] | None = None,
+                 on_prompt: Callable[[int, int | None, str], None] | None = None,
+                 on_notification: Callable[[str, str], None] | None = None,
+                 on_progress: Callable[[int, int | None], None] | None = None,
                  padding_px: float = 0.0, anchor: str = "auto",
                  term_program: tuple[str, str] | None = None) -> None:
         self.argv = argv or default_shell()
@@ -80,6 +83,19 @@ class TerminalView(Widget):
         self.on_title = on_title
         self.on_pwd = on_pwd
         self.on_exit = on_exit
+        #: Shell integration (OSC 133): ``on_prompt(kind, exit_code, command)``
+        #: for each step of a command - ``puikit._ghostty.PROMPT_START``,
+        #: ``INPUT_START``, ``OUTPUT_START`` (``command`` is the command line
+        #: when the shell sends it) and ``COMMAND_END`` (``exit_code`` when it
+        #: reports one, else None). Only shells with integration send these.
+        self.on_prompt = on_prompt
+        #: ``on_notification(title, body)``: the program asked for a desktop
+        #: notification (OSC 9 / OSC 777); the title may be empty.
+        self.on_notification = on_notification
+        #: ``on_progress(state, percent)``: the program reports progress (OSC
+        #: 9;4); ``state`` is one of ``puikit._ghostty.PROGRESS_*``, ``percent``
+        #: None when it gave none.
+        self.on_progress = on_progress
         #: Inset of the grid from the widget's edges, in device pixels, on pixel
         #: backends (a character grid has no sub-cell and stays flush) - the
         #: breathing room a host gives its other panes.
@@ -138,7 +154,10 @@ class TerminalView(Widget):
         self._term = G.Terminal(cols, rows, write_pty=self._write_pty,
                                 on_title=self._title_changed,
                                 on_pwd=self._pwd_changed, fg=fg, bg=bg,
-                                on_render_hold=self._render_hold)
+                                on_render_hold=self._render_hold,
+                                on_semantic_prompt=self._prompt_event,
+                                on_notification=self._notification,
+                                on_progress=self._progress)
         # Probe once, on the UI thread: a backend without main-thread dispatch
         # gets its pty output drained on the animation tick instead.
         self._use_ticks = not ctx.panel.call_on_main_thread(lambda: None)
@@ -274,6 +293,29 @@ class TerminalView(Widget):
         self.pwd = pwd
         if self.on_pwd:
             self.on_pwd(pwd)
+
+    def _prompt_event(self, kind: int, exit_code: int | None, command: str) -> None:
+        if self.on_prompt:
+            self.on_prompt(kind, exit_code, command)
+
+    def _notification(self, title: str, body: str) -> None:
+        if self.on_notification:
+            self.on_notification(title, body)
+
+    def _progress(self, state: int, percent: int | None) -> None:
+        if self.on_progress:
+            self.on_progress(state, percent)
+
+    @property
+    def at_prompt(self) -> bool:
+        """Whether the program is a shell idle at its prompt, the cursor on
+        its command line - so text sent now becomes part of the next command
+        rather than input to something running. Known only from shell
+        integration marks (OSC 133); False without them, on the alternate
+        screen, and once the child has exited."""
+        if self._term is None or self._exited is not False:
+            return False
+        return self._term.at_prompt()
 
     def send(self, data: bytes | str) -> None:
         """Type ``data`` into the terminal as if the user had."""
