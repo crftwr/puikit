@@ -104,3 +104,32 @@ def test_missing_program_raises_on_windows():
     with pytest.raises(FileNotFoundError):
         _pty.PtyProcess(["no-such-program-xyz"], cols=80, rows=24,
                         on_output=lambda b: None, on_exit=lambda c: None)
+
+
+@pytest.mark.skipif(WINDOWS, reason="ConPTY has no foreground process group")
+def test_child_in_foreground_tells_an_idle_shell_from_a_running_job():
+    import time
+    done = threading.Event()
+    proc = _pty.PtyProcess(["/bin/sh", "-i"], cols=80, rows=24,
+                           env={"PATH": os.environ.get("PATH", ""), "PS1": "$ "},
+                           on_output=lambda b: None, on_exit=lambda c: done.set())
+
+    def settles(want, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if proc.child_in_foreground() is want:
+                return True
+            time.sleep(0.02)
+        return False
+
+    try:
+        assert settles(True)  # waiting at its prompt
+        proc.write(b"sleep 3\n")
+        assert settles(False)  # sleep holds the foreground
+        proc.write(b"\x03")
+        assert settles(True)
+        proc.write(b"exit\n")
+        assert done.wait(10)
+        assert proc.child_in_foreground() is None
+    finally:
+        proc.close()
