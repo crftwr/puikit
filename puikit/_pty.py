@@ -154,6 +154,18 @@ class _PosixPty:
             pass
         self._on_exit(self.returncode)
 
+    def child_in_foreground(self) -> bool | None:
+        """Whether the child itself holds the terminal's foreground: a shell
+        waiting at its prompt does, one running a job does not (the job's
+        process group does). None once it has exited or when the pty cannot
+        say."""
+        if self.returncode is not None:
+            return None
+        try:
+            return os.tcgetpgrp(self.fd) == self.pid
+        except OSError:
+            return None
+
     def write(self, data: bytes) -> None:
         view = memoryview(data)
         while view:
@@ -556,6 +568,15 @@ class PtyProcess:
     @property
     def returncode(self) -> int | None:
         return self._impl.returncode
+
+    def child_in_foreground(self) -> bool | None:
+        """Whether the child process itself is in the pty's foreground - for a
+        shell, whether it waits at its prompt rather than running a job. POSIX
+        only (the foreground process group); None on Windows, where ConPTY
+        has no such notion, once the child has exited, or when it cannot be
+        read."""
+        probe = getattr(self._impl, "child_in_foreground", None)
+        return probe() if probe is not None else None
 
     def write(self, data: bytes) -> None:
         self._impl.write(data)

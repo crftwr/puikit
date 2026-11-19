@@ -317,6 +317,16 @@ class TerminalView(Widget):
             return False
         return self._term.at_prompt()
 
+    @property
+    def child_in_foreground(self) -> bool | None:
+        """Whether the program it started holds the terminal's foreground: a
+        shell at its prompt does, a shell running a command does not. Unlike
+        :attr:`at_prompt` this needs no shell integration, but only POSIX can
+        tell; None on Windows, before the program starts and after it exits."""
+        if self._proc is None or self._exited is not False:
+            return None
+        return self._proc.child_in_foreground()
+
     def send(self, data: bytes | str) -> None:
         """Type ``data`` into the terminal as if the user had."""
         if isinstance(data, str):
