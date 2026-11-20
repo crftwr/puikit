@@ -2091,9 +2091,20 @@ class Panel:
             raise ValueError(f"set_layer_hidden: {widget!r} is not a layer")
         if slot.hidden == bool(hidden):
             return
+        if hidden:
+            # Leaving the screen as a removal would: what went out for it
+            # comes back (see _forget_gone).
+            shown = [i for i, s in enumerate(self._layers) if self._descends(s, slot)]
+            if shown:
+                self._forget_gone(shown[0])
+            if self._press_slot is not None and self._descends(self._press_slot, slot):
+                self._press_slot = None
+        else:
+            # Coming back: a layer that faded out on its way into hiding is
+            # drawn again, unless a transition plays it in.
+            for s in self._walk([slot]):
+                self._gone.discard(s.widget)
         slot.hidden = bool(hidden)
-        if hidden and self._press_slot is not None and self._descends(self._press_slot, slot):
-            self._press_slot = None
         self._relayer()
 
     def set_default_layer_parent(self, parent: Any) -> None:

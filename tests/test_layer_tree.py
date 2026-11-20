@@ -165,3 +165,16 @@ def test_hidden_layers_do_not_draw():
     panel.set_layer_hidden(group, True)
     panel.render()
     assert not backend.snapshot()[0].startswith("SHOWN")
+
+
+def test_hiding_brings_back_what_went_out_beneath_and_showing_what_went_out():
+    panel = _panel()
+    term = panel.push_layer_group(z=10)
+    tv = Recorder("tv")
+    panel.push_layer(tv, z=1, parent=term)
+    panel._gone.add(panel.base)  # the panes faded out as the terminal came up
+    panel.set_layer_hidden(term, True)
+    assert panel.base not in panel._gone
+    panel._gone.add(tv)  # it faded out on its way into hiding
+    panel.set_layer_hidden(term, False)
+    assert tv not in panel._gone
