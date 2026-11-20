@@ -353,12 +353,44 @@ DrawContext    text:      draw_text, draw_text_baseline,
                           animated, native_menus,
                           images, colored_underlines  (the §5 fidelity reading)
 
+Panel layers   push_layer(widget, z, hints, reflow, interactive, parent),
+(puikit.panel)            push_layer_group, remove_layer, pop_layer,
+                          set_layer_hidden, set_default_layer_parent,
+                          shown_layers, top_layer, layer_parent, layer_children,
+                          has_layer, is_layer_shown   (the layer tree, below)
+
 Backend        core:      clear, draw_text, draw_box, dim_rect, draw_scrollbar,
 (puikit.backend)          fill_rect, push_clip, pop_clip, present, + measurement
                extended:  draw_round_rect, draw_check, draw_chevron (vector_shapes);
                           draw_icon (icons); draw_image (images);
                           draw_shadow (shadow); animate (animation); …
 ```
+
+### The layer tree
+
+Layers pushed over the base form a tree (#233). `push_layer(widget, z, hints,
+..., parent=None)` places a layer under `parent` - a layer already pushed, or a
+`LayerGroup` from `push_layer_group()`, a node with nothing to draw:
+
+- A child is drawn above its parent and everything under it; `z` orders it
+  among its siblings only (equal z: the later one on top). So a dialog opened
+  over a viewer passes `parent=viewer` instead of computing a z above it.
+- `set_layer_hidden(layer, True)` hides a layer and its subtree: not drawn, no
+  input, never the modal. It stays where it is and keeps its state, and it can
+  still remove itself while hidden.
+- Removing a layer (`remove_layer`, `pop_layer`) removes its subtree.
+- `parent=None` means the default parent, which is the top level until the app
+  names a group with `set_default_layer_parent(group)`; `parent=TOP_LEVEL`
+  always means the top level. An app that keeps several screens makes each a
+  group, hides all but the one shown and names that one the default parent, so
+  dialogs opened by code that knows nothing of screens land on it.
+- Without parents, the tree is one level deep and behaves as the flat stack
+  ordered by z always did.
+
+Reading it: `shown_layers(under=None)` (what draws, bottom first),
+`top_layer(under=None)`, `has_layer`, `is_layer_shown`, `layer_parent`,
+`layer_children`. The modal is still the topmost interactive layer that is
+shown.
 
 ### Frames skipped under input
 

@@ -110,6 +110,35 @@ def _child_env(env: dict[str, str] | None,
     return env
 
 
+def _process_name(pid: int) -> str | None:
+    """A process's executable name: /proc on Linux, libproc on macOS; None
+    elsewhere or when the process is gone."""
+    global _libproc
+    if pid <= 0:
+        return None
+    if sys.platform.startswith("linux"):
+        try:
+            with open(f"/proc/{pid}/comm", encoding="utf-8", errors="replace") as f:
+                return f.read().strip() or None
+        except OSError:
+            return None
+    if sys.platform == "darwin":
+        try:
+            import ctypes
+            import ctypes.util
+            if _libproc is None:
+                _libproc = ctypes.CDLL(ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib")
+            buf = ctypes.create_string_buffer(256)
+            n = _libproc.proc_name(int(pid), buf, ctypes.c_uint32(len(buf)))
+            return buf.value.decode("utf-8", "replace") if n > 0 else None
+        except (OSError, AttributeError):
+            return None
+    return None
+
+
+_libproc = None
+
+
 class _PosixPty:
     def __init__(self, argv: list[str], *, cols: int, rows: int,
                  cwd: str | None, env: dict[str, str],
@@ -165,6 +194,17 @@ class _PosixPty:
             return os.tcgetpgrp(self.fd) == self.pid
         except OSError:
             return None
+
+    def foreground_name(self) -> str | None:
+        """The name of the program in the terminal's foreground (the process
+        group leader's executable name), or None when it cannot be read."""
+        if self.returncode is not None:
+            return None
+        try:
+            pgid = os.tcgetpgrp(self.fd)
+        except OSError:
+            return None
+        return _process_name(pgid)
 
     def write(self, data: bytes) -> None:
         view = memoryview(data)
@@ -576,6 +616,13 @@ class PtyProcess:
         has no such notion, once the child has exited, or when it cannot be
         read."""
         probe = getattr(self._impl, "child_in_foreground", None)
+        return probe() if probe is not None else None
+
+    def foreground_name(self) -> str | None:
+        """The name of the program in the pty's foreground: the shell itself
+        at its prompt, else the job it runs. POSIX only; None on Windows, once
+        the child has exited, or when it cannot be read."""
+        probe = getattr(self._impl, "foreground_name", None)
         return probe() if probe is not None else None
 
     def write(self, data: bytes) -> None:

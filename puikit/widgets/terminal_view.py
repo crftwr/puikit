@@ -327,6 +327,18 @@ class TerminalView(Widget):
             return None
         return self._proc.child_in_foreground()
 
+    @property
+    def foreground_program(self) -> str | None:
+        """The name of the program in the terminal's foreground - the shell at
+        its prompt, else what it runs (``vim``) - without shell integration.
+        POSIX only; None on Windows, before the program starts and after it
+        exits. The command line, arguments included, comes with the OSC 133
+        output-start mark instead (``on_prompt``)."""
+        if self._proc is None or self._exited is not False:
+            return None
+        probe = getattr(self._proc, "foreground_name", None)
+        return probe() if probe is not None else None
+
     def send(self, data: bytes | str) -> None:
         """Type ``data`` into the terminal as if the user had."""
         if isinstance(data, str):

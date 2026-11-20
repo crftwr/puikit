@@ -1625,6 +1625,34 @@ class _Slot:
     # (by its z) but is transparent to events and focus — e.g. a completion popup
     # that must sit above its dialog visually while the dialog keeps the keyboard.
     interactive: bool = True
+    # The layer tree (layers only; the base's slots leave these alone). A layer
+    # pushed with a parent is drawn above that parent and everything under it,
+    # its z orders it among its siblings only, it is hidden with it and it goes
+    # with it. ``seq`` keeps siblings of equal z in the order they were pushed.
+    parent: "_Slot | None" = None
+    children: list = field(default_factory=list)
+    hidden: bool = False
+    seq: int = 0
+
+
+class LayerGroup:
+    """A node of the layer tree with nothing of its own to draw: what
+    :meth:`Panel.push_layer_group` returns, to push layers under
+    (``push_layer(..., parent=group)``) and to hide, show or remove together.
+    An app groups the layers of one screen this way."""
+
+    __slots__ = ("name",)
+
+    def __init__(self, name: str = "") -> None:
+        self.name = name
+
+    def __repr__(self) -> str:
+        return f"LayerGroup({self.name!r})"
+
+
+#: ``push_layer(parent=TOP_LEVEL)`` pushes at the top level of the layer tree
+#: even while :meth:`Panel.set_default_layer_parent` names a group.
+TOP_LEVEL = object()
 
 
 # A non-compositing backend (a terminal) cannot draw a smooth transition, so the
@@ -1798,7 +1826,14 @@ class Panel:
         # and docs/color_system.md.
         self.auto_ink: bool = False
         self._children: list[_Slot] = []
+        # The layers that are shown, in drawing order (bottom first): the layer
+        # tree flattened, hidden subtrees and group nodes left out. Everything
+        # that draws or routes events reads this; _relayer() rebuilds it from
+        # _layer_roots whenever the tree changes.
         self._layers: list[_Slot] = []
+        self._layer_roots: list[_Slot] = []
+        self._layer_seq = 0
+        self._default_parent: Any = None
         self._dividers: list[Any] = []
         self._focused: Any | None = None
         # Tracks whether the backend's text-input system is currently engaged, so
@@ -1917,13 +1952,18 @@ class Panel:
 
     def remove(self, widget: Any) -> None:
         self._children = [s for s in self._children if s.widget is not widget]
-        self._layers = [s for s in self._layers if s.widget is not widget]
+        slot = self._find_layer(widget)
+        if slot is not None:
+            self._detach(slot)
+            self._relayer()
         if self._focused is widget:
             self._focused = None
 
     def clear(self) -> None:
         self._children.clear()
         self._layers.clear()
+        self._layer_roots.clear()
+        self._default_parent = None
         self._dividers.clear()
         self._focused = None
         self._layout = None
@@ -1966,33 +2006,205 @@ class Panel:
         hints: dict[str, Any] | None = None,
         reflow: Any | None = None,
         interactive: bool = True,
+        parent: Any = None,
     ) -> None:
+        """Push ``widget`` as a layer over the base.
+
+        Layers form a tree. ``parent`` is a layer already pushed (its widget, or
+        a :class:`LayerGroup`): the new layer is drawn above it and everything
+        under it, ``z`` orders it among the parent's other children only (equal
+        z: the later one on top), it is hidden when the parent is
+        (:meth:`set_layer_hidden`) and removed with it. ``parent=None`` pushes
+        under the default parent (:meth:`set_default_layer_parent`), which is
+        the top level unless the app named a group; :data:`TOP_LEVEL` pushes at
+        the top level regardless. At the top level ``z`` orders the layer among
+        every other top-level one, as a flat stack of layers always has."""
         hints = hints or {}
+        if parent is None:
+            parent = self._default_parent
+        if parent is TOP_LEVEL:
+            parent = None
+        parent_slot = None
+        if parent is not None:
+            parent_slot = self._find_layer(parent)
+            if parent_slot is None:
+                raise ValueError(f"push_layer: parent {parent!r} is not a layer")
         rect = self._layer_rect(hints)
-        self._layers.append(_Slot(widget, rect, hints, z, reflow=reflow, interactive=interactive))
-        self._layers.sort(key=lambda s: s.z)
+        self._layer_seq += 1
+        slot = _Slot(widget, rect, hints, z, reflow=reflow, interactive=interactive,
+                     parent=parent_slot, seq=self._layer_seq)
+        (parent_slot.children if parent_slot is not None else self._layer_roots).append(slot)
+        self._relayer()
+
+    def push_layer_group(self, z: int = 0, parent: Any = None,
+                         name: str = "") -> LayerGroup:
+        """A new :class:`LayerGroup` node in the layer tree, placed like a
+        layer (``z``, ``parent``: see :meth:`push_layer`). It draws nothing;
+        push layers under it, and hide, show or remove them together through
+        it."""
+        group = LayerGroup(name)
+        self.push_layer(group, z=z, parent=parent, interactive=False)
+        return group
 
     def pop_layer(self) -> Any | None:
+        """Remove the topmost layer that is shown, with whatever is under it in
+        the tree; return its widget."""
         if not self._layers:
             return None
+        slot = self._layers[-1]
         self._forget_gone(len(self._layers) - 1)
-        return self._layers.pop().widget
+        self._detach(slot)
+        self._relayer()
+        return slot.widget
 
     def remove_layer(self, widget: Any) -> bool:
-        """Remove the layer holding ``widget``, wherever it sits in the stack;
-        return whether one was removed.
+        """Remove the layer holding ``widget`` (or a :class:`LayerGroup`),
+        wherever it sits in the tree, shown or hidden, together with the layers
+        under it; return whether one was removed.
 
         ``pop_layer`` removes whatever is topmost — right for a caller that
         knows it is on top, wrong for one that may have been covered since it
         was pushed. A dialog closing *itself* should use this: a progress
         dialog torn down while its own confirm box was still open above it
         used to skip the pop and stay on screen forever (xefm#333)."""
-        for i, slot in enumerate(self._layers):
-            if slot.widget is widget:
-                self._forget_gone(i)
-                del self._layers[i]
+        slot = self._find_layer(widget)
+        if slot is None:
+            return False
+        index = next((i for i, s in enumerate(self._layers) if s is slot), None)
+        if index is None:
+            # A group node, or a hidden layer: forget it as at its place.
+            shown = [i for i, s in enumerate(self._layers) if self._descends(s, slot)]
+            index = shown[0] if shown else None
+        if index is not None:
+            self._forget_gone(index)
+        self._detach(slot)
+        self._relayer()
+        return True
+
+    def set_layer_hidden(self, widget: Any, hidden: bool) -> None:
+        """Hide or show the layer holding ``widget`` (or a :class:`LayerGroup`)
+        and everything under it. A hidden layer stays where it is in the tree
+        and keeps its state; it is not drawn, takes no input and is not the
+        modal. Removing it while hidden works as for any layer."""
+        slot = self._find_layer(widget)
+        if slot is None:
+            raise ValueError(f"set_layer_hidden: {widget!r} is not a layer")
+        if slot.hidden == bool(hidden):
+            return
+        slot.hidden = bool(hidden)
+        if hidden and self._press_slot is not None and self._descends(self._press_slot, slot):
+            self._press_slot = None
+        self._relayer()
+
+    def set_default_layer_parent(self, parent: Any) -> None:
+        """Where ``push_layer(parent=None)`` puts a layer from now on: under
+        ``parent`` (a layer's widget or a :class:`LayerGroup`), or at the top
+        level for None. An app that keeps several screens, each a group, names
+        the one shown, so dialogs and popups opened by code that knows nothing
+        of screens land on it."""
+        if parent is not None and parent is not TOP_LEVEL and self._find_layer(parent) is None:
+            raise ValueError(f"set_default_layer_parent: {parent!r} is not a layer")
+        self._default_parent = None if parent is TOP_LEVEL else parent
+
+    @property
+    def default_layer_parent(self) -> Any:
+        """What :meth:`set_default_layer_parent` named, or None."""
+        return self._default_parent
+
+    def has_layer(self, widget: Any) -> bool:
+        """Whether ``widget`` (or a :class:`LayerGroup`) is in the layer tree,
+        shown or not."""
+        return self._find_layer(widget) is not None
+
+    def is_layer_shown(self, widget: Any) -> bool:
+        """Whether ``widget``'s layer is in the tree with neither it nor any
+        layer above it in the tree hidden."""
+        slot = self._find_layer(widget)
+        if slot is None:
+            return False
+        while slot is not None:
+            if slot.hidden:
+                return False
+            slot = slot.parent
+        return True
+
+    def layer_parent(self, widget: Any) -> Any:
+        """The widget (or :class:`LayerGroup`) ``widget``'s layer was pushed
+        under, or None at the top level or when it is not a layer."""
+        slot = self._find_layer(widget)
+        return slot.parent.widget if slot is not None and slot.parent is not None else None
+
+    def layer_children(self, widget: Any = None) -> list[Any]:
+        """The layers pushed directly under ``widget`` (the top level for
+        None), hidden ones too, bottom first."""
+        if widget is None:
+            slots = self._layer_roots
+        else:
+            slot = self._find_layer(widget)
+            slots = slot.children if slot is not None else []
+        return [s.widget for s in sorted(slots, key=lambda s: (s.z, s.seq))]
+
+    def shown_layers(self, under: Any = None) -> list[Any]:
+        """The layers that are shown, bottom first (what draws, in the order it
+        draws), group nodes left out; only those under ``under`` when given."""
+        if under is None:
+            return [s.widget for s in self._layers]
+        top = self._find_layer(under)
+        if top is None:
+            return []
+        return [s.widget for s in self._layers if s is not top and self._descends(s, top)]
+
+    def top_layer(self, under: Any = None) -> Any:
+        """The topmost shown layer (under ``under`` when given), or None."""
+        layers = self.shown_layers(under)
+        return layers[-1] if layers else None
+
+    # The tree's bookkeeping.
+
+    def _walk(self, slots: list) -> Any:
+        for slot in slots:
+            yield slot
+            yield from self._walk(slot.children)
+
+    def _find_layer(self, widget: Any) -> "_Slot | None":
+        return next((s for s in self._walk(self._layer_roots) if s.widget is widget), None)
+
+    @staticmethod
+    def _descends(slot: "_Slot", ancestor: "_Slot") -> bool:
+        while slot is not None:
+            if slot is ancestor:
                 return True
+            slot = slot.parent
         return False
+
+    def _detach(self, slot: "_Slot") -> None:
+        siblings = slot.parent.children if slot.parent is not None else self._layer_roots
+        if slot in siblings:
+            siblings.remove(slot)
+        if self._default_parent is not None:
+            default = self._find_layer(self._default_parent)
+            if default is None or self._descends(default, slot):
+                self._default_parent = None
+        if self._press_slot is not None and self._descends(self._press_slot, slot):
+            self._press_slot = None
+        gone = [s.widget for s in self._walk([slot])]
+        for w in gone:
+            self._gone.discard(w)
+
+    def _relayer(self) -> None:
+        """Flatten the tree into _layers: shown layers in drawing order."""
+        out: list[_Slot] = []
+
+        def visit(slots: list) -> None:
+            for slot in sorted(slots, key=lambda s: (s.z, s.seq)):
+                if slot.hidden:
+                    continue
+                if not isinstance(slot.widget, LayerGroup):
+                    out.append(slot)
+                visit(slot.children)
+
+        visit(self._layer_roots)
+        self._layers = out
 
     def _top_interactive_slot(self) -> "_Slot | None":
         """The top-most layer that participates in the modal event/focus stack —

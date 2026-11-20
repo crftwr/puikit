@@ -24,7 +24,7 @@ from .font import Font, FontSlant, FontWeight
 from .background import Pass, Shader, ShaderTexture, Target, Wallpaper
 from .layout import HSplit, Item, VSplit
 from .menu import SEPARATOR, Menu, MenuItem, MenuSeparator
-from .panel import DrawContext, Panel, Rect
+from .panel import TOP_LEVEL, DrawContext, LayerGroup, Panel, Rect
 from .posteffect import CRT, PRESETS, PostEffect
 from .theme import THEME_GUI, THEME_TUI, Theme, derive_theme, lift, mix, theme_for
 
@@ -56,6 +56,7 @@ __all__ = [
     "FontWeight",
     "HSplit",
     "Item",
+    "LayerGroup",
     "Menu",
     "MenuItem",
     "MenuSeparator",
@@ -68,6 +69,7 @@ __all__ = [
     "PROFILE_GUI_WEB",
     "PROFILE_MOBILE",
     "PROFILE_TUI",
+    "TOP_LEVEL",
     "Rect",
     "SEPARATOR",
     "Style",
