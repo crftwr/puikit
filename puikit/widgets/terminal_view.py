@@ -766,12 +766,17 @@ class TerminalView(Widget):
             return
         tracking = term.mouse_tracking()
         if event.type is EventType.MOUSE_SCROLL:
-            if event.scroll:
-                rows = 3 * event.scroll
-            else:
-                self._scroll_acc += float(event.hints.get("scroll_units", 0.0)) / self._pitch
+            units = event.hints.get("scroll_units")
+            if units is not None:
+                # A trackpad or a smooth wheel: many small events, each also
+                # carrying a ``scroll`` of +-1 for widgets that only take
+                # notches. Follow the distance, not the count of events - three
+                # rows each scrolled several screens for one swipe.
+                self._scroll_acc += float(units) / self._pitch
                 rows = int(self._scroll_acc)
                 self._scroll_acc -= rows
+            else:
+                rows = 3 * event.scroll  # a wheel notch: three rows, as terminals do
             if not rows:
                 return
             if not tracking:
