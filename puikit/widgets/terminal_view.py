@@ -26,6 +26,7 @@ import os
 import threading
 import time
 from collections.abc import Callable
+from typing import Any
 
 from .. import _ghostty as G
 from .. import _pty
@@ -146,8 +147,28 @@ class TerminalView(Widget):
                       "last_draw_ms": 0.0, "bytes": 0}
 
     # --- lifecycle ---------------------------------------------------------------
+    def start(self, panel: Any) -> None:
+        """Start the program now, before the view is first drawn - for a view
+        pushed hidden (a session started out of view), which draws nothing
+        until it is shown. The grid is guessed from the window size; the
+        first draw resizes it to the view's own. Does nothing once started,
+        or where the terminal is unavailable."""
+        if self._term is not None or self._exited is not False or available() is not None:
+            return
+        self._panel = panel
+        lc = panel.layout_context()
+        mono = Style(font=_MONO)
+        pitch = lc.measure_line_height(mono) or 1.0
+        cw = (lc.measure_text("M" * 16, mono) / 16) or 1.0
+        sw, sh = panel.backend.size_units
+        cols = max(2, int(sw / cw + 1e-6))
+        rows = max(2, int(sh / pitch + 1e-6))
+        self._start_on(panel, panel.theme, cols, rows)
+
     def _start(self, ctx: DrawContext, cols: int, rows: int) -> None:
-        theme = ctx.theme
+        self._start_on(ctx.panel, ctx.theme, cols, rows)
+
+    def _start_on(self, panel: Any, theme: Any, cols: int, rows: int) -> None:
         fg = tuple(theme.text[:3]) if theme else None
         bg_c = theme.surfaces.get("content") if theme else None
         bg = tuple(bg_c[:3]) if bg_c else None
@@ -160,7 +181,7 @@ class TerminalView(Widget):
                                 on_progress=self._progress)
         # Probe once, on the UI thread: a backend without main-thread dispatch
         # gets its pty output drained on the animation tick instead.
-        self._use_ticks = not ctx.panel.call_on_main_thread(lambda: None)
+        self._use_ticks = not panel.call_on_main_thread(lambda: None)
         self._exited = False
         self._gen += 1
         gen = self._gen
@@ -326,6 +347,18 @@ class TerminalView(Widget):
         if self._proc is None or self._exited is not False:
             return None
         return self._proc.child_in_foreground()
+
+    @property
+    def foreground_program(self) -> str | None:
+        """The name of the program in the terminal's foreground - the shell at
+        its prompt, else what it runs (``vim``) - without shell integration.
+        POSIX only; None on Windows, before the program starts and after it
+        exits. The command line, arguments included, comes with the OSC 133
+        output-start mark instead (``on_prompt``)."""
+        if self._proc is None or self._exited is not False:
+            return None
+        probe = getattr(self._proc, "foreground_name", None)
+        return probe() if probe is not None else None
 
     def send(self, data: bytes | str) -> None:
         """Type ``data`` into the terminal as if the user had."""

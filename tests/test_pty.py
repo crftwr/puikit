@@ -133,3 +133,33 @@ def test_child_in_foreground_tells_an_idle_shell_from_a_running_job():
         assert proc.child_in_foreground() is None
     finally:
         proc.close()
+
+
+@pytest.mark.skipif(sys.platform not in ("darwin",) and not sys.platform.startswith("linux"),
+                    reason="the foreground program's name is read on Linux and macOS")
+def test_foreground_name_names_the_shell_then_its_job():
+    import time
+    done = threading.Event()
+    proc = _pty.PtyProcess(["/bin/sh", "-i"], cols=80, rows=24,
+                           env={"PATH": os.environ.get("PATH", ""), "PS1": "$ "},
+                           on_output=lambda b: None, on_exit=lambda c: done.set())
+
+    def settles(pred, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if pred(proc.foreground_name()):
+                return True
+            time.sleep(0.02)
+        return False
+
+    try:
+        assert settles(lambda n: n is not None and "sleep" not in n)
+        proc.write(b"sleep 3\n")
+        assert settles(lambda n: n == "sleep")
+        proc.write(b"\x03")
+        assert settles(lambda n: n is not None and n != "sleep")
+        proc.write(b"exit\n")
+        assert done.wait(10)
+        assert proc.foreground_name() is None
+    finally:
+        proc.close()
