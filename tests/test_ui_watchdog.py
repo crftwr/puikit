@@ -176,11 +176,13 @@ def test_every_backend_open_notes_the_ui_thread():
     this checks the source of every open() we can import here."""
     import inspect
 
-    from puikit.backends.curses_backend import CursesBackend
     from puikit.backends.vt_backend import VTBackend
     from puikit.backends.web_backend import WebBackend
 
-    backends = [VTBackend, CursesBackend, WebBackend, MemoryBackend]
+    backends = [VTBackend, WebBackend, MemoryBackend]
+    if sys.platform != "win32":  # _curses is missing on Windows
+        from puikit.backends.curses_backend import CursesBackend
+        backends.append(CursesBackend)
     if sys.platform == "darwin":
         from puikit.backends.macos_backend import MacOSBackend
         backends.append(MacOSBackend)

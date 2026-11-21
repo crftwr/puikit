@@ -4,12 +4,12 @@ These exercise the pure translation logic without opening a real terminal
 (constructing CursesBackend does not touch curses).
 """
 
-import curses
-
 import pytest
 
-from puikit.backends import curses_backend
-from puikit.backends.curses_backend import (
+curses = pytest.importorskip("curses")  # missing on Windows
+
+from puikit.backends import curses_backend  # noqa: E402
+from puikit.backends.curses_backend import (  # noqa: E402
     CursesBackend,
     _csi_modifiers,
     _escape_complete,

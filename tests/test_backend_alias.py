@@ -5,7 +5,6 @@ import sys
 import pytest
 
 from puikit.backends import create_backend
-from puikit.backends.curses_backend import CursesBackend
 from puikit.backends.vt_backend import VTBackend
 
 
@@ -22,7 +21,8 @@ def test_tui_is_the_vt_backend_everywhere(monkeypatch, platform):
 def test_curses_stays_reachable_as_the_escape_hatch_until_2_0(monkeypatch):
     # For the terminals the VT console's xterm-dialect assumption mishandles
     # (TERM=linux consoles, serial lines) -- deprecated, naming the VT backend
-    # and the release that removes it.
+    # and the release that removes it. Needs _curses, which Windows lacks.
+    CursesBackend = pytest.importorskip("puikit.backends.curses_backend").CursesBackend
     monkeypatch.setattr("sys.platform", "linux")
     with pytest.warns(DeprecationWarning, match=r'curses backend.*PuiKit 2\.0.*"tui"'):
         assert isinstance(create_backend("curses"), CursesBackend)

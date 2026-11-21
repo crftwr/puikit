@@ -13,7 +13,6 @@ import pytest
 
 from puikit import Style
 from puikit.backends._textgrid import LOWER_BLOCKS, SUBCELL, vbar_cells
-from puikit.backends.curses_backend import _vbar_cells
 from puikit.backends.vt_backend import VTBackend, _StreamConsole
 
 
@@ -36,6 +35,8 @@ def backend():
 def test_matches_the_curses_decomposition(h, pos, ratio):
     # The helper was lifted out of the curses backend, so it must decompose a bar
     # identically — otherwise the two backends disagree about where the thumb is.
+    # Needs _curses, which Windows lacks.
+    _vbar_cells = pytest.importorskip("puikit.backends.curses_backend")._vbar_cells
     assert list(vbar_cells(h, pos, ratio)) == list(_vbar_cells(h, pos, ratio))
 
 
