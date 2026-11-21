@@ -43,7 +43,7 @@ from typing import Any
 
 from . import _screen_mark, _win32_dragdrop, _win32_ime
 from . import _win32_native as native
-from ._win32_keys import chord_glyph
+from ._win32_keys import chord_glyph, chord_vk
 from ._bg_seed import SceneSeed
 from ._d3d_shader import HAVE_D3D_SHADER, D3DShaderBackground
 from ..background import Shader, Wallpaper
@@ -509,6 +509,16 @@ def _discard_queued_char(hwnd: int | None, code: int) -> None:
         return
     native.user32.PeekMessageW(ctypes.byref(msg), hwnd, native.WM_CHAR,
                                native.WM_CHAR, native.PM_REMOVE)
+
+
+def _scan_vk(lparam: int) -> int:
+    """The virtual key the keydown's scan code stands for under the current
+    layout, or 0 when it maps to none."""
+    scan = (lparam >> 16) & 0xFF
+    if lparam & (1 << 24):  # extended key
+        scan |= 0xE000
+    return native.user32.MapVirtualKeyExW(scan, native.MAPVK_VSC_TO_VK_EX,
+                                          native.user32.GetKeyboardLayout(0))
 
 
 def _typed_text(vk: int, lparam: int, strip: bool) -> str | None:
@@ -5270,6 +5280,9 @@ class WindowsBackend(Backend):
         # Ctrl/Alt+punctuation: the queued char is a control code or nothing
         # (Ctrl+- is 0x1F, Ctrl+= types none), so report the glyph the key
         # types without them, as macOS reports Cmd+- (see _win32_keys).
+        # Ctrl+` on the Japanese layout arrives as the IME's 半角/全角 key;
+        # chord_vk reads it as the key it physically is.
+        vk = chord_vk(vk, mods, lambda: _scan_vk(lparam))
         if vk in _VK_NOT_A_GLYPH or vk in _VK_LETTER_RANGE or vk in _VK_DIGIT_RANGE:
             return
         glyph = chord_glyph(mods, lambda strip: _typed_text(vk, lparam, strip))

@@ -290,9 +290,36 @@ def test_what_is_not_a_punctuation_chord(mods, plain):
     assert chord_glyph(mods, _layout(plain)) is None
 
 
-def _win_chord(vk, mods, queued, typed):
+# The Japanese layout on a US keyboard reports Ctrl+` / Alt+` as the IME's
+# 半角/全角 key (VK_OEM_AUTO / VK_OEM_ENLW, alternately), which types nothing;
+# the scan code still says which key it is.
+VK_OEM_3, VK_OEM_AUTO, VK_OEM_ENLW = 0xC0, 0xF3, 0xF4
+
+
+@pytest.mark.parametrize("vk", [VK_OEM_AUTO, VK_OEM_ENLW])
+@pytest.mark.parametrize("mods", [CTRL, ALT, CTRL_SHIFT])
+def test_ime_toggle_chord_is_read_as_its_physical_key(vk, mods):
+    from puikit.backends._win32_keys import chord_vk
+    assert chord_vk(vk, mods, lambda: VK_OEM_3) == VK_OEM_3
+
+
+@pytest.mark.parametrize("vk, mods, scan_vk", [
+    (VK_OEM_AUTO, NONE, VK_OEM_3),            # no chord: the toggle is the toggle
+    (VK_OEM_AUTO, CTRL, VK_OEM_AUTO),         # JIS: the key *is* 半角/全角
+    (VK_OEM_ENLW, CTRL, VK_OEM_AUTO),
+    (VK_OEM_AUTO, CTRL, 0),                   # the scan code maps to nothing
+    (VK_OEM_3, CTRL, 0xDB),                   # an ordinary key is never remapped
+])
+def test_what_is_not_an_ime_toggle_chord(vk, mods, scan_vk):
+    from puikit.backends._win32_keys import chord_vk
+    assert chord_vk(vk, mods, lambda: scan_vk) == vk
+
+
+def _win_chord(vk, mods, queued, typed, scan_vk=None):
     """Drive one keydown through a real WindowsBackend with ``queued`` posted
-    first, as TranslateMessage does, and ToUnicodeEx answered by ``typed``."""
+    first, as TranslateMessage does, and ToUnicodeEx answered by ``typed``
+    (``typed(strip)``, or ``typed(vk, strip)`` when ``scan_vk`` stands in for
+    MapVirtualKeyEx, so the answer can depend on which key is asked about)."""
     if sys.platform != "win32":
         pytest.skip("Windows GUI: needs a real window and message queue")
     import ctypes
@@ -304,7 +331,11 @@ def _win_chord(vk, mods, queued, typed):
 
     patch = pytest.MonkeyPatch()
     patch.setattr(windows_backend, "_key_modifiers", lambda: mods)
-    patch.setattr(windows_backend, "_typed_text", lambda vk, lparam, strip: typed(strip))
+    if scan_vk is None:
+        patch.setattr(windows_backend, "_typed_text", lambda vk, lparam, strip: typed(strip))
+    else:
+        patch.setattr(windows_backend, "_typed_text", lambda vk, lparam, strip: typed(vk, strip))
+        patch.setattr(windows_backend, "_scan_vk", lambda lparam: scan_vk)
     backend = WindowsBackend(width=40, height=12, title="puikit-conformance")
     backend.open()
     events = []
@@ -340,6 +371,15 @@ def test_win_ctrl_minus_is_one_event_and_its_control_code_is_dropped():
     events, left = _win_chord(VK_OEM_MINUS, CTRL, [(native.WM_CHAR, 0x1F)],
                               _layout("-"))
     assert events == [("-", "-", CTRL)] and left == []
+
+
+@_needs_windows
+@pytest.mark.parametrize("vk", [VK_OEM_AUTO, VK_OEM_ENLW])
+def test_win_ctrl_backquote_on_the_japanese_layout_is_ctrl_backquote(vk):
+    def typed(key, strip):
+        return "`" if key == VK_OEM_3 and strip else None
+    events, _left = _win_chord(vk, CTRL, [], typed, scan_vk=VK_OEM_3)
+    assert events == [("`", "`", CTRL)]
 
 
 @_needs_windows

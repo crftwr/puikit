@@ -7,7 +7,8 @@ VENV := .venv
 # "Built for x86_64-pc-cygwin" silently drops it). Native-Windows GNU Make
 # ports without `uname` fall back to checking `$(OS)` directly.
 UNAME_S := $(shell uname -s 2>/dev/null)
-ifneq (,$(findstring MINGW,$(UNAME_S))$(findstring MSYS,$(UNAME_S))$(findstring CYGWIN,$(UNAME_S)))
+MSYS_SHELL := $(findstring MINGW,$(UNAME_S))$(findstring MSYS,$(UNAME_S))
+ifneq (,$(MSYS_SHELL)$(findstring CYGWIN,$(UNAME_S)))
     IS_WINDOWS := 1
 else ifeq ($(OS),Windows_NT)
     IS_WINDOWS := 1
@@ -28,6 +29,18 @@ ifeq ($(IS_WINDOWS),1)
         PYTHON := python3.14
     else
         PYTHON := py
+        # `py` from the Python install manager is a Store app execution alias
+        # (WindowsApps\py.exe). MSYS2 cannot tell when a program started through
+        # such an alias has exited: the command prints its output and the
+        # recipe then hangs for good (seen on Windows on ARM64; `make venv` stuck
+        # after fetch_fonts.py). Started from cmd.exe it returns normally, so ask
+        # it once, that way, for the real interpreter and run that instead.
+        ifneq ($(MSYS_SHELL),)
+            PY_REAL := $(shell cmd.exe //c py -c "import sys;print(sys.executable)" 2>/dev/null | tr -d '\r' | tr '\\' '/')
+            ifneq ($(strip $(PY_REAL)),)
+                PYTHON := "$(PY_REAL)"
+            endif
+        endif
     endif
     VENV_PYTHON := $(VENV)/Scripts/python.exe
     VENV_PIP := $(VENV)/Scripts/pip.exe
