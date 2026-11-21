@@ -337,7 +337,7 @@ def test_curses_declines_images_on_windows(monkeypatch):
     # escape to a screen buffer nobody is looking at, so the pixels never appear
     # (xefm#306). Advertising the capability would replace the Panel's alt glyph
     # — which at least shows something — with nothing.
-    from puikit.backends.curses_backend import CursesBackend
+    CursesBackend = pytest.importorskip("puikit.backends.curses_backend").CursesBackend
 
     monkeypatch.delenv("PUIKIT_TERM_GRAPHICS", raising=False)
     monkeypatch.setattr(_terminal_graphics, "detect_protocol", lambda *a, **k: "sixel")
@@ -350,7 +350,7 @@ def test_curses_declines_images_on_windows(monkeypatch):
 def test_an_explicit_override_still_wins_on_windows(monkeypatch):
     # The suppression above is for AUTO-detection. Naming a protocol is a
     # deliberate opt-in and stays reachable, so the path can still be exercised.
-    from puikit.backends.curses_backend import CursesBackend
+    CursesBackend = pytest.importorskip("puikit.backends.curses_backend").CursesBackend
 
     monkeypatch.setenv("PUIKIT_TERM_GRAPHICS", "kitty")
     monkeypatch.setattr(_terminal_graphics, "detect_protocol", lambda *a, **k: "kitty")
@@ -360,7 +360,7 @@ def test_an_explicit_override_still_wins_on_windows(monkeypatch):
 
 
 def test_curses_still_takes_images_off_windows(monkeypatch):
-    from puikit.backends.curses_backend import CursesBackend
+    CursesBackend = pytest.importorskip("puikit.backends.curses_backend").CursesBackend
 
     monkeypatch.setattr(_terminal_graphics, "detect_protocol", lambda *a, **k: "kitty")
     monkeypatch.setattr("sys.platform", "linux")

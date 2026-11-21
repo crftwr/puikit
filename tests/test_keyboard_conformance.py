@@ -28,7 +28,6 @@ import sys
 import pytest
 
 from puikit.backends._vt_input import parse_vt_input
-from puikit.backends.curses_backend import CursesBackend
 from puikit.backends.vt_backend import VTBackend, _StreamConsole, _win_key_record
 from puikit.backends.web_backend import translate_key as web_translate_key
 
@@ -147,8 +146,13 @@ def _posix(raw):
     return _through_vt_engine(records)
 
 
+def _curses_backend():
+    """CursesBackend, or a skip where _curses is missing (Windows)."""
+    return pytest.importorskip("puikit.backends.curses_backend").CursesBackend
+
+
 def _curses(raw):
-    return [CursesBackend()._translate_char(raw)]
+    return [_curses_backend()()._translate_char(raw)]
 
 
 def _web(raw):
@@ -222,7 +226,8 @@ def test_ctrl_letter_keys_capability_matches_the_table():
     terminal = _Console()
     terminal.ctrl_letters = True   # what _WindowsConsole sets under Windows Terminal
     assert VTBackend(console=terminal).capabilities.supports("ctrl_letter_keys")
-    assert not CursesBackend().capabilities.supports("ctrl_letter_keys")
+    if sys.platform != "win32":
+        assert not _curses_backend()().capabilities.supports("ctrl_letter_keys")
     if sys.platform == "win32":
         from puikit.backends.windows_backend import WindowsBackend
         assert WindowsBackend.PROFILE.supports("ctrl_letter_keys")
