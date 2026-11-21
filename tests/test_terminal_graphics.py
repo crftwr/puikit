@@ -303,7 +303,7 @@ class _FakeScreen:
 @pytest.fixture
 def kitty_backend(monkeypatch):
     monkeypatch.setenv("PUIKIT_TERM_GRAPHICS", "kitty")
-    from puikit.backends.curses_backend import CursesBackend
+    CursesBackend = pytest.importorskip("puikit.backends.curses_backend").CursesBackend
 
     backend = CursesBackend()
     backend._stdscr = _FakeScreen()
@@ -408,7 +408,7 @@ def test_object_fits_resolve_distinctly_on_the_terminal(kitty_backend, tmp_path)
 def test_crop_src_narrows_an_existing_window():
     # Clipping composes with a pan/zoom crop: the fraction is of the current
     # window, not the whole image.
-    from puikit.backends.curses_backend import CursesBackend
+    CursesBackend = pytest.importorskip("puikit.backends.curses_backend").CursesBackend
 
     assert CursesBackend._crop_src(None, 0.25, 0.0, 0.5, 1.0) == (0.25, 0.0, 0.5, 1.0)
     # Within a window already covering the middle half, take its right half.
@@ -417,7 +417,7 @@ def test_crop_src_narrows_an_existing_window():
 
 def test_curses_without_a_protocol_keeps_images_off(monkeypatch):
     monkeypatch.setenv("PUIKIT_TERM_GRAPHICS", "none")
-    from puikit.backends.curses_backend import CursesBackend
+    CursesBackend = pytest.importorskip("puikit.backends.curses_backend").CursesBackend
 
     backend = CursesBackend()
     assert backend._term_graphics is None
@@ -434,7 +434,7 @@ def test_images_go_to_the_real_terminal_not_a_redirected_stdout(monkeypatch, qua
     import sys
 
     monkeypatch.setenv("PUIKIT_TERM_GRAPHICS", "iterm2")
-    from puikit.backends.curses_backend import CursesBackend
+    CursesBackend = pytest.importorskip("puikit.backends.curses_backend").CursesBackend
 
     backend = CursesBackend()
     assert backend._raw_out is (sys.__stdout__ or sys.stdout)  # the original stream
@@ -473,7 +473,7 @@ def test_iterm2_resize_reemits_every_image_not_just_the_changed_one(monkeypatch,
     import io
 
     monkeypatch.setenv("PUIKIT_TERM_GRAPHICS", "iterm2")
-    from puikit.backends.curses_backend import CursesBackend
+    CursesBackend = pytest.importorskip("puikit.backends.curses_backend").CursesBackend
 
     backend = CursesBackend()
     backend._stdscr = _FakeScreen()
@@ -504,7 +504,7 @@ def test_emission_brackets_images_in_save_restore_cursor(monkeypatch, quadrants)
     # bracketed by DECSC (\x1b7) / DECRC (\x1b8) so that drift can't scroll the
     # alternate screen out from under curses.
     monkeypatch.setenv("PUIKIT_TERM_GRAPHICS", "iterm2")
-    from puikit.backends.curses_backend import CursesBackend
+    CursesBackend = pytest.importorskip("puikit.backends.curses_backend").CursesBackend
 
     backend = CursesBackend()
     backend._stdscr = _FakeScreen()
