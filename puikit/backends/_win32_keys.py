@@ -18,6 +18,27 @@ from __future__ import annotations
 from collections.abc import Callable
 
 
+#: VK_OEM_AUTO / VK_OEM_ENLW: the Japanese IME's 半角/全角 toggle.
+_IME_MODE_VKS = frozenset({0xF3, 0xF4})
+
+
+def chord_vk(vk: int, mods: frozenset[str], scan_vk: Callable[[], int]) -> int:
+    """The virtual key to read a Ctrl / Alt chord as.
+
+    The Japanese layout on a US (101) keyboard reports Ctrl+` and Alt+` not as
+    VK_OEM_3 but as the IME's 半角/全角 toggle (VK_OEM_AUTO and VK_OEM_ENLW,
+    alternately), which types nothing, so the chord was lost. ``scan_vk()``
+    returns the virtual key the physical key's scan code stands for under the
+    layout (MapVirtualKeyEx); when that is a different, ordinary key, the chord
+    is that key's. On a JIS keyboard the scan code *is* 半角/全角, so it maps
+    back to the toggle and the key is left alone.
+    """
+    if vk not in _IME_MODE_VKS or not {"ctrl", "alt"} & mods:
+        return vk
+    real = scan_vk()
+    return real if real and real not in _IME_MODE_VKS else vk
+
+
 def chord_glyph(mods: frozenset[str],
                 translate: Callable[[bool], str | None]) -> str | None:
     """The glyph to report for a keydown held with ``mods``, or None to leave

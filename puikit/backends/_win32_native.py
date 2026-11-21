@@ -2326,6 +2326,11 @@ VK_LMENU = 0xA4
 VK_RMENU = 0xA5
 VK_PROCESSKEY = 0xE5  # a key the IME is taking
 VK_PACKET = 0xE7      # a character injected by SendInput, not a key
+VK_OEM_AUTO = 0xF3    # Japanese IME: 半角/全角, reported alternately with ENLW
+VK_OEM_ENLW = 0xF4
+
+# MapVirtualKeyEx: scan code -> virtual key, telling left and right apart.
+MAPVK_VSC_TO_VK_EX = 3
 
 # ToUnicodeEx flag (Windows 10 1607+): translate without changing the
 # keyboard's state, so a dead key half-typed is not consumed by the lookup.
@@ -2432,6 +2437,8 @@ user32.GetKeyboardState.restype = wintypes.BOOL
 user32.GetKeyboardState.argtypes = [ctypes.POINTER(ctypes.c_ubyte)]
 user32.GetKeyboardLayout.restype = ctypes.c_void_p
 user32.GetKeyboardLayout.argtypes = [wintypes.DWORD]
+user32.MapVirtualKeyExW.restype = ctypes.c_uint
+user32.MapVirtualKeyExW.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p]
 user32.ToUnicodeEx.restype = ctypes.c_int
 user32.ToUnicodeEx.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.POINTER(ctypes.c_ubyte),
                                ctypes.c_wchar_p, ctypes.c_int, ctypes.c_uint,
