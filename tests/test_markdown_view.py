@@ -1853,3 +1853,97 @@ def test_focus_stop_kinds_names_links_and_copy_buttons():
     assert MarkdownView("```\nx\n```", code_copy=True).focus_stop_kinds == {"copy"}
     both = MarkdownView("[a](u:1)\n\n```\nx\n```", code_copy=True)
     assert both.focus_stop_kinds == {"link", "copy"}
+
+
+# --- sliced layout ------------------------------------------------------------
+#
+# A long document is laid out a slice per frame on animation ticks, so opening
+# it never stalls the UI thread for the whole layout. A zero slice makes each
+# frame lay out only what it must show, which keeps these tests deterministic.
+
+_LONG_DOC = "\n\n".join(
+    f"## Section {i}\n\nParagraph {i} with enough words to wrap across a line or two."
+    for i in range(200)
+)
+
+
+def _sliced_view(monkeypatch, profile=PROFILE_GUI_DESKTOP, source=_LONG_DOC):
+    from puikit.widgets import markdown_view
+    monkeypatch.setattr(markdown_view, "_LAYOUT_SLICE", 0.0)
+    backend = MemoryBackend(width=30, height=10, capabilities=profile)
+    panel = Panel(backend)
+    view = MarkdownView(source)
+    panel.add(view, x=0, y=0, w=30, h=10)
+    panel.render()
+    return backend, panel, view
+
+
+def _whole_layout(profile=PROFILE_GUI_DESKTOP, source=_LONG_DOC):
+    backend = MemoryBackend(width=30, height=10, capabilities=profile)
+    panel = Panel(backend)
+    view = MarkdownView(source)
+    panel.add(view, x=0, y=0, w=30, h=10)
+    panel.render()
+    view._extend_layout()  # whatever the first frame's slice left
+    return view
+
+
+@pytest.mark.parametrize("profile", [PROFILE_TUI, PROFILE_GUI_DESKTOP])
+def test_long_document_lays_out_over_ticks(monkeypatch, profile):
+    backend, _panel, view = _sliced_view(monkeypatch, profile)
+    # The first frame lays out the visible rows, not the whole document.
+    assert not view._layout_done
+    assert view._row_tops[-1] >= 10
+    assert "Section 0" in "\n".join(backend.snapshot())
+    first = len(view._rows)
+    for _ in range(10_000):
+        if not backend.tick_callbacks:
+            break
+        backend.run_animation_ticks()
+    assert view._layout_done
+    assert len(view._rows) > first
+    # Built in slices, it is the same layout built at once.
+    whole = _whole_layout(profile)
+    assert view._row_tops == whole._row_tops
+    assert view._anchors == whole._anchors
+
+
+def test_short_document_lays_out_in_its_first_frame(monkeypatch):
+    backend, _panel, view = _sliced_view(monkeypatch, source="# Title\n\nshort")
+    assert view._layout_done
+    assert not backend.tick_callbacks
+
+
+def test_still_backend_finishes_the_layout_in_one_frame(monkeypatch):
+    still = CapabilityProfile(PROFILE_TUI, animation_ticks=False)
+    backend, _panel, view = _sliced_view(monkeypatch, still)
+    assert view._layout_done
+    assert view._row_tops == _whole_layout(still)._row_tops
+
+
+def test_end_key_finishes_a_partial_layout(monkeypatch):
+    _backend, _panel, view = _sliced_view(monkeypatch)
+    assert view._handle_key("end")
+    assert view._layout_done
+    assert view.offset == pytest.approx(view._row_tops[-1] - view._view_h)
+
+
+def test_scrolling_lays_out_the_rows_scrolled_to(monkeypatch):
+    _backend, _panel, view = _sliced_view(monkeypatch)
+    view.scroll_by(40.0)
+    assert view.offset == pytest.approx(40.0)
+    assert view._row_tops[-1] >= 40.0 + view._view_h
+
+
+def test_search_sees_rows_not_yet_laid_out(monkeypatch):
+    _backend, _panel, view = _sliced_view(monkeypatch)
+    view.search_begin()
+    assert view.search_set("Section 199") == 1
+    assert view._layout_done
+
+
+def test_heading_jump_reaches_a_heading_not_yet_laid_out(monkeypatch):
+    _backend, _panel, view = _sliced_view(monkeypatch)
+    view.follow_link("#section-150")
+    assert view._layout_done
+    assert view.offset > 0
