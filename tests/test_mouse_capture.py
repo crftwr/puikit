@@ -101,6 +101,20 @@ def test_container_click_still_fires_when_released_over_the_pressed_child(backen
     assert child.types() == ["MOUSE_DOWN", "MOUSE_DRAG", "MOUSE_UP", "MOUSE_CLICK"]
 
 
+def test_a_release_with_no_captured_press_is_not_a_click(backend):
+    # Windows: the right button's press is an atomic click, and its release
+    # still comes as a MOUSE_UP. It used to become a second right-click (the
+    # terminal pasted twice).
+    panel = Panel(backend)
+    child = Spy("only")
+    panel.add(child, x=0, y=0, w=20, h=10)
+    panel.render()
+
+    panel.dispatch_event(Event(type=EventType.MOUSE_CLICK, x=2, y=2, button="right"))
+    panel.dispatch_event(Event(type=EventType.MOUSE_UP, x=2, y=2, button="right"))
+    assert child.types() == ["MOUSE_CLICK", "MOUSE_UP"]
+
+
 def test_layout_view_drag_stays_with_the_pressed_child(backend):
     panel = Panel(backend)
     body, footer = Spy("body"), Spy("footer")

@@ -16,13 +16,23 @@ Redraw cost: every frame draws the cached runs of every row, but a row is
 rebuilt from libghostty (one ctypes walk over its cells) only when its dirty
 flag says it changed. ``stats`` reports both.
 
-Not in the prototype: selection and copy, mouse reporting to the program,
-bracketed paste through libghostty's paste encoder.
+Clipboard: copy takes the selection, and only when there is one, so the same
+key still reaches the program otherwise (Ctrl+C interrupts). Copy is
+Ctrl+Shift+C, Ctrl+Insert, Cmd+C on macOS; paste is Ctrl+Shift+V,
+Shift+Insert, Cmd+V. On Windows plain Ctrl+C copies a selection and Ctrl+V
+pastes too, as Windows Terminal does (``ctrl_clipboard`` turns that on or
+off; Windows-only by default). A right-click copies the selection
+(and clears it), or pastes when there is none, as Windows Terminal and the
+console do; a program tracking the mouse gets the right-click instead,
+unless Shift is held, as for a selection drag.
+
+Not in the prototype: bracketed paste through libghostty's paste encoder.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -73,8 +83,16 @@ class TerminalView(Widget):
                  on_notification: Callable[[str, str], None] | None = None,
                  on_progress: Callable[[int, int | None], None] | None = None,
                  padding_px: float = 0.0, anchor: str = "auto",
-                 term_program: tuple[str, str] | None = None) -> None:
+                 term_program: tuple[str, str] | None = None,
+                 ctrl_clipboard: bool | None = None) -> None:
         self.argv = argv or default_shell()
+        #: Plain Ctrl+C copies a selection and Ctrl+V pastes, as in Windows
+        #: Terminal. None (the default) turns it on for Windows only:
+        #: elsewhere Ctrl+V is the program's (a shell's literal-next, vim's
+        #: block selection) and terminals use Ctrl+Shift for the clipboard.
+        #: False leaves both keys to the program on Windows too.
+        self.ctrl_clipboard = (sys.platform == "win32" if ctrl_clipboard is None
+                               else bool(ctrl_clipboard))
         self.cwd = cwd
         self.env = env
         #: ``(name, version)`` the programs in here see as ``TERM_PROGRAM`` /
@@ -728,30 +746,31 @@ class TerminalView(Widget):
                 self.restart()
                 return True
             return False
-        mods = event.modifiers
-        # Copy: Cmd-C (macOS), Ctrl+Shift+C elsewhere - only with a selection,
-        # so Ctrl+C still interrupts and an unused Cmd-C stays the app's.
-        if event.key == "c" and ("cmd" in mods or {"ctrl", "shift"} <= mods):
-            if self.copy_selection():
-                return True
-        if event.key == "v" and ("cmd" in mods or {"ctrl", "shift"} <= mods) \
-                and self._panel is not None:
-            # Paste: Cmd-V (macOS), Ctrl+Shift+V elsewhere.
-            text = self._panel.get_clipboard()
-            if text:
-                self.send(text.replace("\r\n", "\r").replace("\n", "\r"))
+        if self._clipboard_key(event):
             return True
-        if "cmd" in mods:
-            if event.key == "v" and self._panel is not None:
-                text = self._panel.get_clipboard()
-                if text:
-                    self.send(text.replace("\r\n", "\r").replace("\n", "\r"))
-                return True
+        if "cmd" in event.modifiers:
             return False  # Cmd chords stay the app's
         data = self._encode(event)
         if data:
             self.send(data)
         return True
+
+    def _clipboard_key(self, event: Event) -> bool:
+        """Copy or paste for a clipboard key; False for any other key, and
+        for a copy key with nothing selected, which the program then gets."""
+        key, mods = event.key, event.modifiers
+        chord = "cmd" in mods or {"ctrl", "shift"} <= mods  # Cmd (macOS), Ctrl+Shift
+        ctrl = mods == {"ctrl"}
+        if (key == "c" and (chord or (ctrl and self.ctrl_clipboard))) \
+                or (key == "insert" and ctrl):
+            # A plain Ctrl copy clears the selection, so the next Ctrl+C
+            # interrupts again.
+            return self.copy_selection(clear=ctrl)
+        if (key == "v" and (chord or (ctrl and self.ctrl_clipboard))) \
+                or (key == "insert" and mods == {"shift"}):
+            self.paste()
+            return True
+        return False
 
     _BUTTONS = {"left": G.MOUSE_LEFT, "right": G.MOUSE_RIGHT, "middle": G.MOUSE_MIDDLE}
 
@@ -788,6 +807,14 @@ class TerminalView(Widget):
                             for _ in range(min(abs(rows), 10)))
             if data:
                 self.send_raw(data)
+            return
+        if event.type is EventType.MOUSE_CLICK and event.button == "right" \
+                and (not tracking or "shift" in event.modifiers):
+            # As Windows Terminal and the console: copy the selection, else
+            # paste. A program tracking the mouse gets the click (below);
+            # Shift takes it back, as it does a drag.
+            if not self.copy_selection(clear=True):
+                self.paste()
             return
         # Selection: the plain drag of a program that does not track the mouse
         # (a shell), Shift+drag over one that does (the usual terminal escape),
@@ -900,14 +927,28 @@ class TerminalView(Widget):
         row = max(0.0, ((event.y or 0.0) - self._oy) / self._pitch)
         return col, row
 
-    def copy_selection(self) -> bool:
-        """Put the selected text on the clipboard; False when nothing is
-        selected (so the key can mean something else)."""
+    def copy_selection(self, *, clear: bool = False) -> bool:
+        """Put the selected text on the clipboard, and with ``clear`` drop the
+        selection; False when nothing is selected (so the key can mean
+        something else)."""
         if self._term is None or self._panel is None or not self._term.has_selection():
             return False
         text = self._term.selection_text()
         if text:
             self._panel.set_clipboard(text)
+        if clear:
+            self._term.clear_selection()
+        return True
+
+    def paste(self) -> bool:
+        """Type the clipboard's text into the terminal, each line break as
+        Enter; False when the clipboard holds no text."""
+        if self._panel is None:
+            return False
+        text = self._panel.get_clipboard()
+        if not text:
+            return False
+        self.send(text.replace("\r\n", "\r").replace("\n", "\r"))
         return True
 
     def send_raw(self, data: bytes) -> None:
