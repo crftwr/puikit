@@ -78,6 +78,7 @@ import bisect
 import copy
 import os
 import re
+import time
 from dataclasses import dataclass, field, replace
 from html import escape as _html_escape
 from typing import Callable
@@ -123,6 +124,12 @@ DEFAULT_CODE_FONT = Font(monospace=True)
 # Keeps a position taken at the bottom of the viewport inside the last visible
 # row rather than on the boundary of the next one.
 _EDGE_INSET = 1e-3
+
+# How long one frame may spend laying the document out (seconds). A long
+# document is wrapped a slice per frame on animation ticks rather than all at
+# once in its first draw, so opening it never stalls the UI thread for the
+# whole layout; the first frame still lays out at least the visible rows.
+_LAYOUT_SLICE = 0.008
 
 # Heading sizes per level, as MULTIPLES of the body font size (## smaller than
 # #, down to 1.0 = body size at level 6). Kept relative, not absolute points, so
@@ -1057,6 +1064,27 @@ def _natural_width(px_w: float, lc: LayoutContext) -> float:
     return px_w / max(1e-6, pbw)
 
 
+class _LayoutJob:
+    """A layout at one wrap width, built a block at a time so it can stop and
+    resume across frames. ``next_sem`` is the first semantic line not yet laid
+    out; ``rows`` / ``tops`` grow together (``tops[-1]`` is the height laid out
+    so far)."""
+
+    __slots__ = ("width", "next_sem", "rows", "tops", "anchors", "code_index",
+                 "pitch", "body_size", "lh_cache")
+
+    def __init__(self, width: float):
+        self.width = width
+        self.next_sem = 0
+        self.rows: list[_Row] = []
+        self.tops: list[float] = [0.0]
+        self.anchors: list[tuple[str, int]] = []  # (slug, first row) per heading
+        self.code_index = 0
+        self.pitch = 1.0
+        self.body_size = 0.0
+        self.lh_cache: dict[Font | None, float] = {}
+
+
 class MarkdownView(Widget):
     focusable = True
 
@@ -1125,6 +1153,18 @@ class MarkdownView(Widget):
         self._layout_cache: dict[
             float, tuple[list[_Row], list[float], dict[str, float], float]
         ] = {}
+        # Layouts still being built, per wrap width (see ``_LayoutJob``): a
+        # long document is laid out a slice per frame. ``_layout_done`` says
+        # whether the current ``_rows`` are the whole document; ``_layout_lc`` /
+        # ``_layout_theme`` are the last draw's, so a call that needs every row
+        # (search, select-all, End, a ``#slug`` jump) can finish the layout
+        # outside a draw. ``_layout_ticking`` keeps the tick registration single.
+        self._layout_jobs: dict[float, _LayoutJob] = {}
+        self._layout_done = True
+        self._layout_lc: LayoutContext | None = None
+        self._layout_theme: Theme | None = None
+        self._layout_ticking = False
+        self._drawn = False
 
         # Click targets from the last draw: (x0, y0, x1, y1, url) in widget-local
         # base units, one per visible link span. The Panel is kept to open a URL.
@@ -1142,6 +1182,7 @@ class MarkdownView(Widget):
         # links there are or their order.
         self._links: list[list[tuple[int, int, int, int]]] = []
         self._links_rows: list[_Row] | None = None
+        self._links_count = 0  # len(_links_rows) then: a sliced layout grows in place
         self._link_focus: int = -1
 
         # Incremental search (driven by a host viewer's search bar; see the
@@ -1241,6 +1282,7 @@ class MarkdownView(Widget):
         self._rows = None
         self._wrap_width = -1.0
         self._layout_cache.clear()
+        self._layout_jobs.clear()
         self._links, self._links_rows, self._link_focus = [], None, -1
         self.clear_search()
         self.clear_selection()
@@ -1283,6 +1325,7 @@ class MarkdownView(Widget):
         self._rows = None
         self._wrap_width = -1.0
         self._layout_cache.clear()
+        self._layout_jobs.clear()
 
     def _remote_refresh(self) -> None:
         """UI-thread rebuild after a download settled: invalidate and repaint."""
@@ -1320,27 +1363,80 @@ class MarkdownView(Widget):
             return SizeRequest()
         probe = copy.copy(self)
         probe._layout_cache = {}
+        probe._layout_jobs = {}
         # Colors do not move anything, so the default theme lays out the same.
         probe._layout(available, ctx, DEFAULT_THEME)
         h = probe._row_tops[-1]
         return SizeRequest(min=min(h, probe._line_pitch), preferred=h, max=h)
 
-    def _layout(self, width: float, lc: LayoutContext, theme: Theme) -> list[_Row]:
-        """Wrap every semantic line to ``width`` base units, returning the flat
-        list of ``_Row`` and rebuilding the cumulative ``_row_tops`` index.
-        Wrapping and every row height go through ``lc`` so a proportional / sized
-        face measures and spaces correctly, and an image is sized to its aspect
-        ratio. Rebuilt only when the width or the source changes."""
+    def _layout(
+        self,
+        width: float,
+        lc: LayoutContext,
+        theme: Theme,
+        *,
+        deadline: float | None = None,
+        min_h: float = 0.0,
+        max_h: float = float("inf"),
+    ) -> bool:
+        """Wrap the semantic lines to ``width`` base units into the flat list of
+        ``_Row`` (``self._rows``) with its cumulative ``_row_tops`` index, and
+        return whether that layout is the whole document. Wrapping and every row
+        height go through ``lc`` so a proportional / sized face measures and
+        spaces correctly, and an image is sized to its aspect ratio. A finished
+        layout is memoized per width; rebuilt only when the width or the source
+        changes.
+
+        With no ``deadline`` the layout runs to the end. With one (a
+        ``time.perf_counter`` value) it stops once that time has passed and at
+        least ``min_h`` is laid out, and the next call at the same width resumes
+        where it stopped. It also stops as soon as more than ``max_h`` is laid
+        out — all ``draw`` needs to learn that a width overflows the view."""
         cached = self._layout_cache.get(width)
         if cached is not None:
             self._rows, self._row_tops, self._anchors, self._line_pitch = cached
             self._wrap_width = width
-            return self._rows
+            self._layout_done = True
+            return True
+        job = self._layout_jobs.get(width)
+        if job is None:
+            job = _LayoutJob(width)
+            # Bounded like the cache: a live resize starts a job per width.
+            if len(self._layout_jobs) >= 4:
+                self._layout_jobs.pop(next(iter(self._layout_jobs)))
+            self._layout_jobs[width] = job
+        done = self._run_layout(job, lc, theme, deadline, min_h, max_h)
+        self._rows, self._row_tops, self._line_pitch = job.rows, job.tops, job.pitch
+        self._anchors = {slug: job.tops[idx] for slug, idx in job.anchors if slug}
+        self._wrap_width = width
+        self._layout_done = done
+        if done:
+            del self._layout_jobs[width]
+            # Memoize per width. Steady state holds just the two probe widths;
+            # extra entries accrue only mid resize, so evict the oldest to keep
+            # the dict bounded.
+            if len(self._layout_cache) >= 4:
+                self._layout_cache.pop(next(iter(self._layout_cache)))
+            self._layout_cache[width] = (job.rows, job.tops, self._anchors, job.pitch)
+        return done
+
+    def _run_layout(
+        self,
+        job: _LayoutJob,
+        lc: LayoutContext,
+        theme: Theme,
+        deadline: float | None,
+        min_h: float,
+        max_h: float,
+    ) -> bool:
+        """Lay out ``job``'s remaining semantic lines until the document ends
+        (True) or a stop condition of :meth:`_layout` holds (False)."""
+        width = job.width
         measure = lc.measure_text
         # Row height is the line height of the row's font(s); cache per font so a
         # long document does not re-resolve the same face per row. The grid font
         # reports 1.0, so a terminal stays one unit per row.
-        lh_cache: dict[Font | None, float] = {}
+        lh_cache = job.lh_cache
 
         def line_height(style: Style) -> float:
             font = style.font
@@ -1348,134 +1444,153 @@ class MarkdownView(Widget):
                 lh_cache[font] = lc.measure_line_height(style)
             return lh_cache[font]
 
-        self._line_pitch = line_height(Style(font=self.text_font))
-        # Body face point size, the size headings scale off of. The backend owns
-        # the absolute value (the base size when text_font names none); the
-        # widget keeps only the per-level ratio (DEFAULT_HEADING_SCALES).
-        body_size = lc.measure_font_size(Style(font=self.text_font))
-        rows: list[_Row] = []
-        anchors: list[tuple[str, int]] = []  # (slug, first row index) per heading
-        code_index = 0
-        for sem in self._sems:
-            qd = sem.quote_depth
-            qind = qd * _QUOTE_INDENT
-            if sem.block == "blank":
-                rows.append(_Row(0.0, [], self._line_pitch, quote=qd))
-                continue
-            if sem.block == "rule":
-                # A hairline on GUI, a ─ run on grid — resolved by draw_hairline
-                # in draw(); the layout just marks the row.
-                rows.append(_Row(0.0, [], self._line_pitch, rule=True, quote=qd))
-                continue
-            if sem.block == "code":
-                if self.code_copy:
-                    rows.append(self._copy_row(code_index, width, measure, line_height,
-                                               theme, qd))
-                code_index += 1
-                rows.extend(self._layout_code(sem, width, measure, line_height, theme, qd))
-                continue
-            if sem.block == "table" and sem.table is not None:
-                # A vector backend overlaps real strokes, so its border rows need
-                # no grid cell of their own (near-zero height keeps the vertical
-                # bars of adjacent text rows touching the horizontals); a grid
-                # backend gives each border its own one-cell row for the glyphs.
-                bh = max(1, lc.base_h)
-                border_h = (1.0 / bh) if lc.vector_shapes else self._line_pitch
-                # A small inner top/bottom margin so cell text does not sit flush
-                # against the rules on GUI. The grid keeps borders in their own
-                # rows (natural gap) and must stay integer-aligned, so 0 there.
-                cell_pad_v = max(2.0 / bh, 0.1 * self._line_pitch) if lc.vector_shapes else 0.0
+        if job.next_sem == 0:
+            job.pitch = line_height(Style(font=self.text_font))
+            # Body face point size, the size headings scale off of. The backend
+            # owns the absolute value (the base size when text_font names none);
+            # the widget keeps only the per-level ratio (DEFAULT_HEADING_SCALES).
+            job.body_size = lc.measure_font_size(Style(font=self.text_font))
+        self._line_pitch = job.pitch
+        body_size = job.body_size
+        rows = job.rows
+        tops = job.tops
+        sems = self._sems
+        start = job.next_sem
+        while job.next_sem < len(sems):
+            if tops[-1] > max_h:
+                return False
+            # A sliced call always lays out at least one block, so a run of
+            # ticks finishes the document even when every slice is overrun.
+            if (deadline is not None and job.next_sem > start and tops[-1] >= min_h
+                    and time.perf_counter() >= deadline):
+                return False
+            sem = sems[job.next_sem]
+            job.next_sem += 1
+            first_new = len(rows)
+            self._layout_sem(sem, job, width, lc, theme, measure, line_height, body_size)
+            for row in rows[first_new:]:
+                tops.append(tops[-1] + row.height)
+        return True
 
-                rows.extend(
-                    self._layout_table(
-                        sem.table, width - qind, measure, theme, qd, border_h,
-                        cell_pad_v, lc.vector_shapes, lc,
-                    )
+    def _layout_sem(
+        self,
+        sem: _SemLine,
+        job: _LayoutJob,
+        width: float,
+        lc: LayoutContext,
+        theme: Theme,
+        measure: Callable[..., float],
+        line_height: Callable[[Style], float],
+        body_size: float,
+    ) -> None:
+        """Append the rows of one semantic line to ``job.rows``."""
+        rows = job.rows
+        anchors = job.anchors
+        qd = sem.quote_depth
+        qind = qd * _QUOTE_INDENT
+        if sem.block == "blank":
+            rows.append(_Row(0.0, [], job.pitch, quote=qd))
+            return
+        if sem.block == "rule":
+            # A hairline on GUI, a ─ run on grid — resolved by draw_hairline
+            # in draw(); the layout just marks the row.
+            rows.append(_Row(0.0, [], job.pitch, rule=True, quote=qd))
+            return
+        if sem.block == "code":
+            if self.code_copy:
+                rows.append(self._copy_row(job.code_index, width, measure, line_height,
+                                           theme, qd))
+            job.code_index += 1
+            rows.extend(self._layout_code(sem, width, measure, line_height, theme, qd))
+            return
+        if sem.block == "table" and sem.table is not None:
+            # A vector backend overlaps real strokes, so its border rows need
+            # no grid cell of their own (near-zero height keeps the vertical
+            # bars of adjacent text rows touching the horizontals); a grid
+            # backend gives each border its own one-cell row for the glyphs.
+            bh = max(1, lc.base_h)
+            border_h = (1.0 / bh) if lc.vector_shapes else job.pitch
+            # A small inner top/bottom margin so cell text does not sit flush
+            # against the rules on GUI. The grid keeps borders in their own
+            # rows (natural gap) and must stay integer-aligned, so 0 there.
+            cell_pad_v = max(2.0 / bh, 0.1 * job.pitch) if lc.vector_shapes else 0.0
+
+            rows.extend(
+                self._layout_table(
+                    sem.table, width - qind, measure, theme, qd, border_h,
+                    cell_pad_v, lc.vector_shapes, lc,
                 )
-                continue
-            if sem.block == "image":
-                src = self._resolve_src(sem.data) if sem.data else None
-                size = lc.measure_image(src) if src else None
-                alt = sem.runs[0][0] if sem.runs else None
-                if src and size and size[0] > 0 and size[1] > 0 and not lc.images:
-                    # No picture will be drawn, only the alt glyph: one line for
-                    # it, not a box of blank rows the picture would have filled.
-                    rows.append(_Row(qind, [], self._line_pitch,
-                                     image=(src, alt, width - qind, self._line_pitch),
-                                     quote=qd))
-                elif src and size and size[0] > 0 and size[1] > 0:
-                    # As a browser lays an image out: its own size, shrunk to
-                    # the width when wider, never enlarged; its height follows
-                    # the aspect, however tall, and the document scrolls. Sized
-                    # in the base unit's *physical* pixels (pixel_base): on a
-                    # character grid base_w/base_h are (1, 1) while a cell is
-                    # about twice as tall as wide.
-                    pbw, pbh = lc.pixel_base
-                    w = min(max(1.0, width - qind), _natural_width(size[0], lc))
-                    h = aspect_extent(w, True, size[0], size[1], pbw, pbh)
-                    rows.append(_Row(qind, [], h, image=(src, alt, w, h), quote=qd))
-                elif src:
-                    # A real path we cannot size (unreadable / unknown format):
-                    # reserve one line and let the backend draw the alt glyph
-                    # (TUI) or its own missing-image treatment.
-                    rows.append(_Row(0.0, [], self._line_pitch,
-                                     image=(src, alt, width, self._line_pitch), quote=qd))
-                else:
-                    # A remote image still downloading (or failed for good):
-                    # show the alt text as a muted line, the way a browser does,
-                    # and let a completed fetch re-layout it into the real image.
-                    st = replace(Style(fg=self.style.fg, bg=self.style.bg,
-                                       font=self.text_font), fg=theme.muted_text)
-                    rows.append(_Row(qind, [(alt or "", st, None)],
-                                     self._line_pitch, quote=qd))
-                continue
-            base = _block_style(
-                sem.block, sem.level, self.style, theme,
-                self.text_font, self.code_font, self.heading_scales, body_size,
             )
-            # Quoted text reads muted (a GitHub blockquote), so recolor the base
-            # for every run that doesn't set its own color (a link keeps accent).
-            if qd:
-                base = replace(base, fg=theme.muted_text)
-            if sem.block == "heading":
-                plain = "".join(t for t, _, _ in sem.runs)
-                anchors.append((_slug(plain), len(rows)))
-            spans = [
-                (text, _run_style(roles, base, theme, self.code_font), href)
-                for text, roles, href in sem.runs
-            ]
-            prefix_w = measure(sem.prefix, base) if sem.prefix else 0.0
-            avail = max(1.0, width - qind - prefix_w)
-            wrapped = _wrap_spans(spans, avail, measure, word=sem.wrap)
-            # A list marker / task box stays a text cell on the first row; a
-            # block quote's ``│`` bars are strokes drawn by draw() from the row's
-            # quote depth, so the content simply hangs at qind (+ prefix width).
-            for k, row in enumerate(wrapped):
-                if k == 0 and sem.prefix:
-                    cells = [(sem.prefix, base, None)] + row
-                    x0 = qind
-                else:
-                    # Continuation rows hang under the text, indented by the
-                    # measured prefix width (exact on every backend).
-                    cells = row
-                    x0 = qind + prefix_w
-                height = max((line_height(st) for _, st, _ in cells), default=line_height(base))
-                hlevel = sem.level if sem.block == "heading" else 0
-                rows.append(_Row(x0, cells, height, quote=qd, heading=hlevel))
-        self._rows = rows
-        tops = [0.0]
-        for row in rows:
-            tops.append(tops[-1] + row.height)
-        self._row_tops = tops
-        self._anchors = {slug: tops[idx] for slug, idx in anchors if slug}
-        self._wrap_width = width
-        # Memoize per width. Steady
-        # state holds just the two probe widths; extra entries accrue only mid
-        # resize, so evict the oldest to keep the dict bounded.
-        if len(self._layout_cache) >= 4:
-            self._layout_cache.pop(next(iter(self._layout_cache)))
-        self._layout_cache[width] = (rows, tops, self._anchors, self._line_pitch)
-        return rows
+            return
+        if sem.block == "image":
+            src = self._resolve_src(sem.data) if sem.data else None
+            size = lc.measure_image(src) if src else None
+            alt = sem.runs[0][0] if sem.runs else None
+            if src and size and size[0] > 0 and size[1] > 0 and not lc.images:
+                # No picture will be drawn, only the alt glyph: one line for
+                # it, not a box of blank rows the picture would have filled.
+                rows.append(_Row(qind, [], job.pitch,
+                                 image=(src, alt, width - qind, job.pitch),
+                                 quote=qd))
+            elif src and size and size[0] > 0 and size[1] > 0:
+                # As a browser lays an image out: its own size, shrunk to
+                # the width when wider, never enlarged; its height follows
+                # the aspect, however tall, and the document scrolls. Sized
+                # in the base unit's *physical* pixels (pixel_base): on a
+                # character grid base_w/base_h are (1, 1) while a cell is
+                # about twice as tall as wide.
+                pbw, pbh = lc.pixel_base
+                w = min(max(1.0, width - qind), _natural_width(size[0], lc))
+                h = aspect_extent(w, True, size[0], size[1], pbw, pbh)
+                rows.append(_Row(qind, [], h, image=(src, alt, w, h), quote=qd))
+            elif src:
+                # A real path we cannot size (unreadable / unknown format):
+                # reserve one line and let the backend draw the alt glyph
+                # (TUI) or its own missing-image treatment.
+                rows.append(_Row(0.0, [], job.pitch,
+                                 image=(src, alt, width, job.pitch), quote=qd))
+            else:
+                # A remote image still downloading (or failed for good):
+                # show the alt text as a muted line, the way a browser does,
+                # and let a completed fetch re-layout it into the real image.
+                st = replace(Style(fg=self.style.fg, bg=self.style.bg,
+                                   font=self.text_font), fg=theme.muted_text)
+                rows.append(_Row(qind, [(alt or "", st, None)],
+                                 job.pitch, quote=qd))
+            return
+        base = _block_style(
+            sem.block, sem.level, self.style, theme,
+            self.text_font, self.code_font, self.heading_scales, body_size,
+        )
+        # Quoted text reads muted (a GitHub blockquote), so recolor the base
+        # for every run that doesn't set its own color (a link keeps accent).
+        if qd:
+            base = replace(base, fg=theme.muted_text)
+        if sem.block == "heading":
+            plain = "".join(t for t, _, _ in sem.runs)
+            anchors.append((_slug(plain), len(rows)))
+        spans = [
+            (text, _run_style(roles, base, theme, self.code_font), href)
+            for text, roles, href in sem.runs
+        ]
+        prefix_w = measure(sem.prefix, base) if sem.prefix else 0.0
+        avail = max(1.0, width - qind - prefix_w)
+        wrapped = _wrap_spans(spans, avail, measure, word=sem.wrap)
+        # A list marker / task box stays a text cell on the first row; a
+        # block quote's ``│`` bars are strokes drawn by draw() from the row's
+        # quote depth, so the content simply hangs at qind (+ prefix width).
+        for k, row in enumerate(wrapped):
+            if k == 0 and sem.prefix:
+                cells = [(sem.prefix, base, None)] + row
+                x0 = qind
+            else:
+                # Continuation rows hang under the text, indented by the
+                # measured prefix width (exact on every backend).
+                cells = row
+                x0 = qind + prefix_w
+            height = max((line_height(st) for _, st, _ in cells), default=line_height(base))
+            hlevel = sem.level if sem.block == "heading" else 0
+            rows.append(_Row(x0, cells, height, quote=qd, heading=hlevel))
 
     def _layout_code(
         self, sem: _SemLine, width: float, measure, line_height, theme: Theme, qd: int
@@ -1697,16 +1812,32 @@ class MarkdownView(Widget):
             self._remote_invalidate()
 
         # Whether the bar shows depends on the content height, which depends on
-        # the wrap width, which depends on whether the bar shows. Lay out once at
-        # the full width to learn if the content overflows, then (only if it
-        # does) re-lay-out one base unit narrower to make room for the bar.
+        # the wrap width, which depends on whether the bar shows. Lay out at the
+        # full width only until the content overflows, then (only if it does)
+        # lay out one base unit narrower to make room for the bar.
         lc = ctx.layout_context()
-        rows = self._layout(full_w, lc, theme)
-        content_h = self._row_tops[-1]
-        show_bar = content_h > view_h
+        self._layout_lc, self._layout_theme = lc, theme
+        self._drawn = True
+        self._layout(full_w, lc, theme, max_h=view_h)
+        show_bar = self._row_tops[-1] > view_h
         if show_bar:
-            rows = self._layout(full_w - 1.0, lc, theme)
-            content_h = self._row_tops[-1]
+            # A long document is laid out a slice per frame: this frame lays out
+            # what is on screen (and a little more, until the slice runs out),
+            # the ticks below the rest. An open search or link focus works on
+            # every row, so it finishes the layout here instead.
+            sliced = not self._search_pattern and self._link_focus < 0
+            deadline = time.perf_counter() + _LAYOUT_SLICE if sliced else None
+            done = self._layout(full_w - 1.0, lc, theme, deadline=deadline,
+                                min_h=self.offset + view_h)
+            if not done and not self._layout_ticking:
+                panel = ctx.panel
+                self._layout_ticking = bool(
+                    panel is not None and panel.request_animation_ticks(self._layout_tick))
+                if not self._layout_ticking:
+                    # A still backend renders only on demand: finish now.
+                    self._layout(full_w - 1.0, lc, theme)
+        rows = self._rows or []
+        content_h = self._row_tops[-1]
         self._clamp(content_h)
 
         # Downloads in flight on a backend without main-thread dispatch: ride
@@ -1794,6 +1925,9 @@ class MarkdownView(Widget):
                 ctx.set_cursor("pointer")
 
         if show_bar:
+            # While the layout is still growing, size the thumb from the height
+            # the whole document is likely to take, not what is laid out so far.
+            content_h = max(content_h, self._estimated_content_h())
             ratio = view_h / content_h
             denom = content_h - view_h
             pos = self.offset / denom if denom > 0 else 0.0
@@ -2293,6 +2427,7 @@ class MarkdownView(Widget):
         return (row_i, cell, line, 0), (row_i, cell, line, len(self._sub_glyphs(pos)))
 
     def _select_all(self) -> None:
+        self._extend_layout()
         rows = self._rows or []
         if not rows:
             return
@@ -2498,7 +2633,45 @@ class MarkdownView(Widget):
 
     def scroll_by(self, amount: float) -> None:
         self.offset += amount
+        # Scrolling ahead of a layout still in progress lays out just far
+        # enough to show the rows scrolled to.
+        self._extend_layout(self.offset + self._view_h)
         self._clamp(self._content_h())
+
+    # --- sliced layout --------------------------------------------------------
+
+    def _layout_tick(self) -> bool:
+        """Per-frame tick while a long document is still being laid out: repaint,
+        and the draw lays out the next slice. Stops once the layout is whole or
+        the view is no longer drawn (a later draw re-registers)."""
+        if self._layout_done or self._panel is None or not self._drawn:
+            self._layout_ticking = False
+            return False
+        self._drawn = False
+        self._panel.render()
+        return True
+
+    def _extend_layout(self, min_h: float = float("inf")) -> None:
+        """Continue a layout still in progress, outside a draw, until at least
+        ``min_h`` is laid out or the document ends (the default: all of it). For
+        what needs rows not yet laid out — every row for a search, select-all, a
+        heading jump, End; the next screenful for a scroll."""
+        if self._layout_done or self._layout_lc is None or self._layout_theme is None:
+            return
+        if self._row_tops[-1] >= min_h:
+            return
+        self._layout(self._wrap_width, self._layout_lc, self._layout_theme,
+                     deadline=0.0, min_h=min_h)
+
+    def _estimated_content_h(self) -> float:
+        """The whole document's height at the current width: exact once laid
+        out, else what is laid out so far scaled by the share of the source it
+        covers."""
+        laid = self._row_tops[-1]
+        job = self._layout_jobs.get(self._wrap_width)
+        if self._layout_done or job is None or job.next_sem <= 0:
+            return laid
+        return laid * len(self._sems) / job.next_sem
 
     # --- incremental search ---------------------------------------------------
     #
@@ -2572,6 +2745,7 @@ class MarkdownView(Widget):
         current viewport top, and return the number of matching rows. With no
         match, restore the pre-search scroll (mirrors the text viewer)."""
         self._search_pattern = pattern
+        self._extend_layout()
         self._recompute_search_rows()
         if self._search_rows:
             self._search_pos = next(
@@ -2673,6 +2847,7 @@ class MarkdownView(Widget):
         if self.on_link is not None and self.on_link(url):
             return
         if url.startswith("#"):
+            self._extend_layout()
             top = self._anchors.get(_slug(url[1:]))
             if top is not None:
                 self.offset = top
@@ -2699,7 +2874,7 @@ class MarkdownView(Widget):
         is one stop, and any span without that href — a space, other text —
         ends it. Cached per layout."""
         rows = self._rows
-        if rows is self._links_rows:
+        if rows is self._links_rows and len(rows or ()) == self._links_count:
             return self._links
         links: list[list[tuple[int, int, int, int]]] = []
         prev: str | None = None
@@ -2734,6 +2909,7 @@ class MarkdownView(Widget):
                 if text:
                     visit((r, -1, -1, si), href)
         self._links, self._links_rows = links, rows
+        self._links_count = len(rows or ())
         if self._link_focus >= len(links):
             self._link_focus = -1
         return links
@@ -2800,6 +2976,7 @@ class MarkdownView(Widget):
         — the same contract as :meth:`FocusContainer.focus_advance`, which is
         how the Panel's Tab traversal reaches links at all."""
         self._copied_block = -1
+        self._extend_layout()
         links = self._collect_links()
         if not links:
             return False
@@ -2856,6 +3033,7 @@ class MarkdownView(Widget):
         elif key == "home":
             self.offset = 0.0
         elif key == "end":
+            self._extend_layout()
             self.offset = max(0.0, self._content_h() - self._view_h)
         else:
             return False

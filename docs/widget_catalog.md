@@ -196,7 +196,12 @@ Inline mixed styles, links, flowing content.
   `base_dir` — `from_file` defaults it to the document's directory — and an
   `http(s)://` source is fetched once into a temp cache by a background thread,
   the alt text standing in until the view re-renders; see
-  [`images.md`](images.md) §7). Inline runs cover bold / italic / **strikethrough** (`~~…~~`, a real
+  [`images.md`](images.md) §7). A long document is **laid out a slice per
+  frame** on animation ticks (about 8 ms each): the first frame lays out what it
+  shows, the scrollbar sizes itself from an estimate meanwhile, and whatever
+  needs every row — search, select-all, End, a `#heading` jump, Tab through
+  links — finishes the layout on demand; a backend without ticks lays it out at
+  once. Inline runs cover bold / italic / **strikethrough** (`~~…~~`, a real
   `TextAttribute.STRIKETHROUGH`) / code / links, including `<autolinks>`, bare
   URLs, and `[text][ref]` reference links; blocks cover ATX **and setext**
   headings, **hard line breaks**, and **nested / reflowed block quotes**.
