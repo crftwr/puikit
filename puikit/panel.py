@@ -3672,13 +3672,18 @@ class Panel:
             # (and clears on drag-off), so the frame needs a redraw regardless.
             return handled or self._press_down is not None
         if event.type is EventType.MOUSE_UP:
+            # A release completes a press only if one was captured. Windows
+            # reports the right button's release although its press came as
+            # an atomic MOUSE_CLICK; made a click too, it was a second
+            # right-click (a terminal pasted twice).
+            pressed = self._press_slot is not None
             self._press_down = None
             self._press_slot = None
             self._press_is_layer = False
             self._deliver(slot, event, clamp=clamp)
             # Fire the click only if the pointer is still over the press slot (a
             # modal layer always owns it); otherwise the gesture was cancelled.
-            over = is_layer or self._over_slot(slot, event)
+            over = pressed and (is_layer or self._over_slot(slot, event))
             if over:
                 click = replace(event, type=EventType.MOUSE_CLICK)
                 self._deliver(slot, click, clamp=clamp)
