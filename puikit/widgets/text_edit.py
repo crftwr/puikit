@@ -52,8 +52,14 @@ class TextEdit(Widget):
         right_pad: int = 0,
         style: Style = DEFAULT_STYLE,
         mask: str | None = None,
+        placeholder: str = "",
     ):
         self.text = text
+        # Muted text shown while the field is empty (no text, no composition),
+        # saying what to type there: "Type a request, or pick one below". It
+        # is drawn only, never part of ``self.text``, so it is not copied,
+        # submitted or reported through ``on_change``.
+        self.placeholder = placeholder
         self.on_change = on_change
         self.on_submit = on_submit
         self.width = width
@@ -238,6 +244,8 @@ class TextEdit(Widget):
             ctx.draw_text(1 + col, ty, ch, Style(fg=fg, bg=cell_bg, attr=attr))
             prefix += ch
             col = nxt
+        if not disp and self.placeholder:
+            self._draw_placeholder(ctx, theme, field_w, bg, ty)
         if caret_col is None:  # caret sits at/after the last visible glyph
             caret_col = col
         if anchor_col is None:  # anchor sits at/after the last visible glyph
@@ -266,6 +274,20 @@ class TextEdit(Widget):
         # right_pad reserve (e.g. a combo chevron) keeps the ``]`` clear of it.
         if ctx.focused:
             ctx.draw_focus_brackets(field_full_w, field_h, theme, bg=bg)
+
+    def _draw_placeholder(self, ctx, theme, field_w, bg, ty) -> None:
+        """The placeholder, dimmed and clipped to the field. Dimmed, not only
+        muted: auto-ink lifts a plain run to body contrast, which would draw
+        the muted color as bright as typed text; ``DIM`` holds it to the faint
+        floor (and is the terminal's own dim on a grid). The
+        caret draws over its start (a grid's caret is the terminal's own
+        cursor, which sits on the first cell the same way)."""
+        text = self.placeholder
+        while text and ctx.measure_text(text) > field_w:
+            text = text[:-1]
+        if text:
+            ctx.draw_text(1, ty, text,
+                          Style(fg=theme.muted_text, bg=bg, attr=TextAttribute.DIM))
 
     def _draw_caret(self, ctx, theme, disp, caret, caret_col, field_w, bg, ty) -> None:
         if 0 <= caret_col < field_w:

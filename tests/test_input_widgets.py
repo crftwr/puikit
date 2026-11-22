@@ -1441,3 +1441,36 @@ def test_caret_is_inked_against_its_field():
     assert abs(apca_lc(on_white, white_field)) >= LC_BODY - 0.5
     assert sum(on_white) < sum(light_text)
     assert caret_color(dark_field) == light_text
+
+
+def test_textedit_placeholder_shows_only_while_empty(backend):
+    # The placeholder is drawn in an empty field and is never part of the text;
+    # typing (or composing) replaces it.
+    panel = Panel(backend)
+    field = TextEdit("", width=20, placeholder="Type here")
+    panel.add(field, x=0, y=0, w=20, h=1)
+    panel.render()
+    row = backend.snapshot()[0]
+    assert "Type here" in row
+    col = "".join(row).index("Type here")
+    assert backend.style_at(col, 0).attr & TextAttribute.DIM, "drawn dimmed"
+    assert field.text == ""
+    panel.dispatch_event(_key("x", char="x"))
+    panel.render()
+    assert "Type here" not in backend.snapshot()[0]
+    assert field.text == "x"
+    panel.dispatch_event(_key("backspace"))
+    panel.dispatch_event(
+        Event(type=EventType.IME_COMPOSITION, hints={"preedit": "に", "caret": 1})
+    )
+    panel.render()
+    assert "Type here" not in backend.snapshot()[0]
+
+
+def test_textedit_placeholder_clips_to_field(backend):
+    panel = Panel(backend)
+    field = TextEdit("", width=8, placeholder="A very long placeholder")
+    panel.add(field, x=0, y=0, w=8, h=1)
+    panel.render()
+    assert "A very" in backend.snapshot()[0]
+    assert "long" not in backend.snapshot()[0]
