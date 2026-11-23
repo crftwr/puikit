@@ -1947,3 +1947,76 @@ def test_heading_jump_reaches_a_heading_not_yet_laid_out(monkeypatch):
     view.follow_link("#section-150")
     assert view._layout_done
     assert view.offset > 0
+
+
+# --- update_source: a document that grows while it is read --------------------
+
+
+def _md_panel(backend, source, **kw):
+    panel = Panel(backend)
+    view = MarkdownView(source, **kw)
+    panel.add(view, x=0, y=0, w=24, h=8)
+    panel.render()
+    return panel, view
+
+
+def test_update_source_reuses_the_unchanged_lines(backend):
+    paras = "\n\n".join(f"para {i}" for i in range(20))
+    panel, view = _md_panel(backend, paras)
+    view._extend_layout()
+    kept = list(view._rows[:4])
+    view.update_source(paras + " more")
+    panel.render()
+    view._extend_layout()
+    # The rows of the lines before the change are the very same objects.
+    assert view._rows[:4] == kept
+    assert all(a is b for a, b in zip(view._rows[:4], kept))
+    assert any("more" in "".join(t for t, _s, _h in r.spans) for r in view._rows)
+
+
+def test_update_source_keeps_the_scroll_position(backend):
+    paras = "\n\n".join(f"para {i}" for i in range(30))
+    panel, view = _md_panel(backend, paras)
+    view.scroll_by(5)
+    offset = view.offset
+    view.update_source(paras + "\n\nnew")
+    panel.render()
+    assert view.offset == offset
+
+
+def test_follow_end_keeps_showing_the_end(backend):
+    panel, view = _md_panel(backend, "start")
+    view.follow_end = True
+    text = "start"
+    for i in range(30):
+        text += f"\n\nline {i}"
+        view.update_source(text)
+        panel.render()
+    assert view.offset > 0
+    assert view.offset + view._view_h >= view._row_tops[-1] - 1e-3
+    assert any("line 29" in row for row in ("".join(r) for r in backend.snapshot()))
+
+
+def test_follow_end_lets_the_reader_scroll_away(backend):
+    text = "\n\n".join(f"line {i}" for i in range(30))
+    panel, view = _md_panel(backend, text)
+    view.follow_end = True
+    view.update_source(text + "\n\nx")
+    panel.render()
+    view.scroll_by(-4)
+    offset = view.offset
+    view.update_source(text + "\n\nxy")
+    panel.render()
+    assert view.offset == offset
+
+
+def test_update_source_keeps_a_selection_before_the_change(backend):
+    text = "alpha beta\n\ngamma"
+    panel, view = _md_panel(backend, text, selectable=True)
+    view._sel_anchor, view._sel_cursor = (0, 0, 0, 0), (0, 0, 0, 5)
+    view.update_source(text + " delta")
+    panel.render()
+    assert view.selection_text() == "alpha"
+    view.update_source("changed")
+    panel.render()
+    assert view.selection_text() == ""

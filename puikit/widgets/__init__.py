@@ -27,6 +27,7 @@ from .splitter import Splitter
 from .table_view import TableView
 from .tabs import Tabs
 from .text_block import TextBlock
+from .text_area import TextArea
 from .text_edit import TextEdit
 from .tree import TreeNode, TreeView
 
@@ -57,6 +58,7 @@ __all__ = [
     "TableView",
     "Tabs",
     "TextBlock",
+    "TextArea",
     "TextEdit",
     "TreeNode",
     "TreeView",

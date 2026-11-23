@@ -1071,7 +1071,7 @@ class _LayoutJob:
     so far)."""
 
     __slots__ = ("width", "next_sem", "rows", "tops", "anchors", "code_index",
-                 "pitch", "body_size", "lh_cache")
+                 "pitch", "body_size", "lh_cache", "marks")
 
     def __init__(self, width: float):
         self.width = width
@@ -1083,6 +1083,23 @@ class _LayoutJob:
         self.pitch = 1.0
         self.body_size = 0.0
         self.lh_cache: dict[Font | None, float] = {}
+        # Where each semantic line laid out so far began: (rows, anchors,
+        # code_index) before it, so ``update_source`` can cut the layout back
+        # to the lines that did not change and resume from there.
+        self.marks: list[tuple[int, int, int]] = []
+
+    def cut(self, sem: int) -> None:
+        """Forget every semantic line from ``sem`` on: the layout resumes
+        there."""
+        if sem >= self.next_sem:
+            return
+        rows, anchors, code_index = self.marks[sem]
+        self.rows = self.rows[:rows]
+        self.tops = self.tops[:rows + 1]
+        self.anchors = self.anchors[:anchors]
+        self.code_index = code_index
+        self.marks = self.marks[:sem]
+        self.next_sem = sem
 
 
 class MarkdownView(Widget):
@@ -1151,8 +1168,16 @@ class MarkdownView(Widget):
         # source changes; bounded so a live resize
         # (a stream of new widths) can't grow it without limit.
         self._layout_cache: dict[
-            float, tuple[list[_Row], list[float], dict[str, float], float]
+            float, tuple[list[_Row], list[float], dict[str, float], float, _LayoutJob]
         ] = {}
+        #: Keep showing the end of the document as it grows: after
+        #: :meth:`update_source`, a view that showed its end (or was never
+        #: drawn) shows the new end. A view scrolled away from it stays put.
+        #: For a log or a conversation that is appended to while it is read.
+        self.follow_end = False
+        # Set by update_source: the next draw lays out to the end and scrolls
+        # there (follow_end, and the view was at its end).
+        self._pin_end = False
         # Layouts still being built, per wrap width (see ``_LayoutJob``): a
         # long document is laid out a slice per frame. ``_layout_done`` says
         # whether the current ``_rows`` are the whole document; ``_layout_lc`` /
@@ -1287,6 +1312,50 @@ class MarkdownView(Widget):
         self.clear_search()
         self.clear_selection()
 
+    def update_source(self, source: str) -> None:
+        """Replace the document with ``source``, keeping what can be kept: the
+        scroll position (or the end, with :attr:`follow_end`), a selection in
+        the part that did not change, and the layout of the semantic lines
+        before the first one that changed - so a document that grows at its
+        end (a reply being streamed in) re-wraps only its last lines, not the
+        whole of it. :meth:`set_source` starts afresh instead (back to the
+        top, nothing selected)."""
+        sems = parse_markdown(source)
+        old = self._sems
+        same = 0
+        limit = min(len(old), len(sems))
+        while same < limit and old[same] == sems[same]:
+            same += 1
+        at_end = self.follow_end and (
+            self._pin_end or self._rows is None
+            or (self._layout_done
+                and self.offset + self._view_h >= self._row_tops[-1] - 1e-3))
+        kept_rows = None  # rows still valid at the current width
+        jobs: dict[float, _LayoutJob] = {}
+        for width, entry in self._layout_cache.items():
+            jobs[width] = entry[4]
+        for width, job in self._layout_jobs.items():
+            jobs.setdefault(width, job)
+        for width, job in jobs.items():
+            job.cut(same)
+            if width == self._wrap_width:
+                kept_rows = len(job.rows)
+        self._sems = sems
+        self._code_texts = _code_texts(sems)
+        self._copied_block = -1
+        self._layout_cache.clear()
+        self._layout_jobs = dict(list(jobs.items())[-4:])
+        self._rows = None
+        self._wrap_width = -1.0
+        self._links, self._links_rows, self._link_focus = [], None, -1
+        self.clear_search()
+        sel = (self._sel_anchor, self._sel_cursor)
+        if None not in sel and (kept_rows is None
+                                or max(sel)[0] >= kept_rows):
+            self.clear_selection()
+        if at_end:
+            self._pin_end = True
+
     # --- image sources --------------------------------------------------------
 
     def _resolve_src(self, src: str) -> str | None:
@@ -1394,7 +1463,7 @@ class MarkdownView(Widget):
         out — all ``draw`` needs to learn that a width overflows the view."""
         cached = self._layout_cache.get(width)
         if cached is not None:
-            self._rows, self._row_tops, self._anchors, self._line_pitch = cached
+            self._rows, self._row_tops, self._anchors, self._line_pitch = cached[:4]
             self._wrap_width = width
             self._layout_done = True
             return True
@@ -1417,7 +1486,7 @@ class MarkdownView(Widget):
             # the dict bounded.
             if len(self._layout_cache) >= 4:
                 self._layout_cache.pop(next(iter(self._layout_cache)))
-            self._layout_cache[width] = (job.rows, job.tops, self._anchors, job.pitch)
+            self._layout_cache[width] = (job.rows, job.tops, self._anchors, job.pitch, job)
         return done
 
     def _run_layout(
@@ -1465,6 +1534,7 @@ class MarkdownView(Widget):
                     and time.perf_counter() >= deadline):
                 return False
             sem = sems[job.next_sem]
+            job.marks.append((len(rows), len(job.anchors), job.code_index))
             job.next_sem += 1
             first_new = len(rows)
             self._layout_sem(sem, job, width, lc, theme, measure, line_height, body_size)
@@ -1825,7 +1895,7 @@ class MarkdownView(Widget):
             # what is on screen (and a little more, until the slice runs out),
             # the ticks below the rest. An open search or link focus works on
             # every row, so it finishes the layout here instead.
-            sliced = not self._search_pattern and self._link_focus < 0
+            sliced = not self._search_pattern and self._link_focus < 0 and not self._pin_end
             deadline = time.perf_counter() + _LAYOUT_SLICE if sliced else None
             done = self._layout(full_w - 1.0, lc, theme, deadline=deadline,
                                 min_h=self.offset + view_h)
@@ -1838,6 +1908,9 @@ class MarkdownView(Widget):
                     self._layout(full_w - 1.0, lc, theme)
         rows = self._rows or []
         content_h = self._row_tops[-1]
+        if self._pin_end and self._layout_done:
+            self.offset = max(0.0, content_h - view_h)
+            self._pin_end = False
         self._clamp(content_h)
 
         # Downloads in flight on a backend without main-thread dispatch: ride
