@@ -1825,6 +1825,26 @@ def test_a_bullet_dots_its_first_row():
     assert backend.style_at(0, 0).fg == (241, 76, 76)
 
 
+def test_bullets_in_a_row_are_joined_by_a_timeline():
+    doc = ("::: bullet success\none\n\ntwo\n:::\n\n::: bullet\nthree\n:::\n\n"
+           "::: box\nyou\n:::\n\n::: bullet\nfour\n:::")
+    backend, _p, view = _shown(doc, width=30, height=20)
+    lines = backend.snapshot()
+    dots = [i for i, line in enumerate(lines) if line.startswith("●")]
+    assert len(dots) == 3
+    # From under the first dot down to the second: a bar in the gutter.
+    assert all(lines[y].startswith("│") for y in range(dots[0] + 1, dots[1]))
+    # The user's box breaks it: nothing between the second dot and the third.
+    assert not any(lines[y].startswith("│") for y in range(dots[1] + 1, dots[2]))
+    assert len(view._timeline(view._rows)) == 1
+
+
+def test_plain_text_between_bullets_breaks_the_timeline():
+    _b, _p, view = _shown("::: bullet\na\n:::\n\nplain\n\n::: bullet\nb\n:::",
+                          width=30, height=10)
+    assert view._timeline(view._rows) == []
+
+
 def test_the_copy_buttons_are_tab_stops_and_enter_copies_the_block():
     seen = []
     _b, panel, view = _shown(_CODE_DOC, height=20, code_copy=True,

@@ -211,7 +211,8 @@ Inline mixed styles, links, flowing content.
   on a vector backend and a plain fill on a grid; an indent moves its content
   right; a bullet indents too and puts a dot beside its first line, colored by
   its role (`success`, `error`, `warning`, `accent`, else muted) - a timeline of
-  steps; an unknown name keeps its content as is. `pad_x` pads the content on
+  steps, a thin line joining the dots of bullets that follow one another (a
+  box or plain text between them breaks it); an unknown name keeps its content as is. `pad_x` pads the content on
   both sides inside the view, its scrollbar staying at the edge.
   Virtualized over variable row heights.
   **`measure(lc, "y", width)`** reports the document's laid-out height at a

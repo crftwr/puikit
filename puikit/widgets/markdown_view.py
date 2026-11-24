@@ -162,7 +162,8 @@ _QUOTE_INDENT = 2.0
 # _BOX_PAD_Y (of a line) band above and below on a vector backend.
 _DIV_INDENT = 2.0
 # A ``::: bullet <role>`` block indents like ``indent`` and marks its first row
-# with a dot in the gutter, colored by the role (a step in a timeline).
+# with a dot in the gutter, colored by the role (a step in a timeline); a
+# thin line joins the dots of bullets that follow one another (_timeline).
 _DOT_COLORS = {"success": (115, 201, 145), "error": (241, 76, 76),
                "warning": (204, 167, 0)}
 # A vector backend's band above and below a code block's lines (a fraction of
@@ -1280,6 +1281,10 @@ class MarkdownView(Widget):
         # (in base units); _row_tops[-1] is the total content height. Valid only
         # at _wrap_width; rebuilt on a resize.
         self._rows: list[_Row] | None = None
+        # The timeline joins of the rows last asked about (_timeline): kept
+        # with the list itself, so a new layout is never mistaken for it.
+        self._timeline_rows: tuple[list[_Row] | None, int] = (None, 0)
+        self._timeline_cache: list[tuple[int, int, float]] = []
         self._row_tops: list[float] = [0.0]
         self._wrap_width: float = -1.0
         self._view_h: float = 1.0
@@ -2111,6 +2116,7 @@ class MarkdownView(Widget):
         first = max(0, bisect.bisect_right(self._row_tops, self.offset) - 1)
         box_bg = theme.button_secondary_bg
         boxes_drawn: set[int] = set()
+        self._draw_timeline(ctx, rows, view_h)
         for index in range(first, len(rows)):
             row = rows[index]
             y = self._row_tops[index] - self.offset
@@ -2226,6 +2232,56 @@ class MarkdownView(Widget):
         # pointer_in also tells the panel to redraw when the pointer
         # crosses the block's edge.
         return ctx.pointer_in(0.0, top, self._wrap_width, bottom - top)
+
+    def _timeline(self, rows: list[_Row]) -> list[tuple[int, int, float]]:
+        """The lines joining the dots of bullets that follow one another:
+        (row of a dot, row of the next dot, the gutter's x). A line runs only
+        while what lies between is inside a bullet at that gutter (or
+        deeper) or blank; a box (a user's message) or plain text breaks it."""
+        held, n = self._timeline_rows
+        if held is rows and n == len(rows):
+            return self._timeline_cache
+        out: list[tuple[int, int, float]] = []
+        last: tuple[int, float] | None = None
+        for i, row in enumerate(rows):
+            if row.dot is not None:
+                x = row.dot[1]
+                if last is not None and abs(last[1] - x) < 1e-6:
+                    out.append((last[0], i, x))
+                last = (i, x)
+                continue
+            if last is None:
+                continue
+            blank = (row.image is None and row.table is None and not row.rule
+                     and row.code_bg is None and row.copy_block < 0
+                     and not any(t.strip() for t, _st, _h in row.spans))
+            if row.box is not None or (not blank and row.inset < last[1] + _DIV_INDENT - 1e-6):
+                last = None
+        self._timeline_rows, self._timeline_cache = (rows, len(rows)), out
+        return out
+
+    def _draw_timeline(self, ctx: DrawContext, rows: list[_Row], view_h: float) -> None:
+        """The timeline lines on screen, from under one dot to over the next."""
+        joins = self._timeline(rows)
+        if not joins:
+            return
+        tops = self._row_tops
+        vector = ctx.vector_shapes
+        line = ctx.line_height()
+        gap = 0.36 * line / 2.0 + 0.15
+        for i, j, x in joins:
+            if vector:
+                y0 = tops[i] + min(rows[i].height, line) / 2.0 + gap
+                y1 = tops[j] + min(rows[j].height, line) / 2.0 - gap
+                cx = x + _DIV_INDENT / 2.0 - 0.25
+            else:
+                y0, y1, cx = tops[i + 1], tops[j], x + 0.5
+            y0 -= self.offset
+            y1 -= self.offset
+            if y1 <= 0 or y0 >= view_h or y1 <= y0:
+                continue
+            y0, y1 = max(0.0, y0), min(view_h, y1)
+            ctx.draw_hairline(cx, y0, y1 - y0, vertical=True)
 
     def _draw_dot(self, ctx: DrawContext, row: _Row, y: float, theme: Theme) -> None:
         """A bullet's dot, centered in its gutter beside the row."""
