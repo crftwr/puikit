@@ -6,8 +6,9 @@ drop shadow over a dimmed page and TUI falls back to draw order — one modal,
 every backend. The box shows an icon, a title, a (multi-line) message, and a
 row of buttons; left/right or tab move between buttons, enter/space activates
 the focused one, escape picks the cancel button (or does nothing when the
-box is not ``dismissable``), and a click activates a button directly. It pops itself and reports the chosen label through
-``on_result``.
+box is not ``dismissable``), and a click activates a button directly. With
+``default=None`` no button is focused until a key puts the focus on one. It pops
+itself and reports the chosen label through ``on_result``.
 """
 
 from __future__ import annotations
@@ -52,7 +53,7 @@ class MessageBox:
         title: str = "",
         buttons: Sequence[str] = ("OK",),
         icon: str = "info",
-        default: int = 0,
+        default: int | None = 0,
         cancel: int | None = None,
         on_result: Callable[[str], None] | None = None,
         markdown: bool = False,
@@ -70,8 +71,12 @@ class MessageBox:
         self._md: MarkdownView | None = None
         # The default button (initially focused, so the one a bare Enter
         # presses) and the one escape chooses (defaults to the last button, the
-        # conventional Cancel slot).
-        self.default = max(0, min(default, len(self.buttons) - 1))
+        # conventional Cancel slot). None for a box that may appear while the
+        # user is typing: no button is focused, so an Enter or a Space meant for
+        # something else presses nothing, until an arrow or Tab focuses one.
+        self.default = (
+            None if default is None else max(0, min(default, len(self.buttons) - 1))
+        )
         self.focused = self.default
         self.cancel = cancel if cancel is not None else len(self.buttons) - 1
         # False for a question that must be answered: every button is an
@@ -82,11 +87,11 @@ class MessageBox:
         # The row of buttons rendered as real Button widgets, so the message box
         # shares the regular button's flat fill, focus ring, and hover/pressed
         # cues on every backend instead of hand-painting its own. Every button is
-        # a neutral "secondary": Enter presses the *focused* button, and focus
-        # always sits on one, so the focus ring already says what Enter does.
-        # An accent fill pinned to the default would only repeat that while
-        # focus is still there, and once focus moves it would mark a second
-        # button that Enter no longer presses.
+        # a neutral "secondary": Enter presses the *focused* button, and with
+        # none focused it presses nothing, so the focus ring already says what
+        # Enter does. An accent fill pinned to the default would only repeat
+        # that while focus is still there, and once focus moves it would mark a
+        # second button that Enter no longer presses.
         self._widgets = [
             Button(
                 label,
@@ -255,13 +260,14 @@ class MessageBox:
         if event.type is EventType.KEY:
             n = len(self._widgets)
             if event.key in ("left", "up"):
-                self.focused = (self.focused - 1) % n
+                # From no focus, the end the key points to.
+                self.focused = 0 if self.focused is None else (self.focused - 1) % n
             elif event.key in ("right", "down", "tab"):
-                self.focused = (self.focused + 1) % n
+                self.focused = n - 1 if self.focused is None else (self.focused + 1) % n
             elif event.key == "escape":
                 if self.dismissable:
                     self._close(self.cancel)
-            else:
+            elif self.focused is not None:
                 # enter / space activate the focused button — delegated so the
                 # same on_click path a mouse takes fires (one activation seam).
                 self._widgets[self.focused].handle_event(event)
@@ -288,7 +294,7 @@ def show_message_box(
     title: str = "",
     buttons: Sequence[str] = ("OK",),
     icon: str = "info",
-    default: int = 0,
+    default: int | None = 0,
     cancel: int | None = None,
     on_result: Callable[[str], None] | None = None,
     z: int = 70,
@@ -313,7 +319,13 @@ def show_message_box(
     fold into one wrapped paragraph.
 
     Pass ``dismissable=False`` for a question that must be answered: escape
-    then does nothing, and only a button closes the box."""
+    then does nothing, and only a button closes the box.
+
+    Pass ``default=None`` for a question that can come up on its own, over what
+    the user is typing: no button starts focused, and enter and space do nothing
+    until one is. Left focuses the leftmost button and right (or tab) the
+    rightmost; from there the keys work as usual. Escape and clicks are not
+    affected."""
     box = MessageBox(
         message, title=title, buttons=buttons, icon=icon,
         default=default, cancel=cancel, on_result=on_result, markdown=markdown,

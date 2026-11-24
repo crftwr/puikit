@@ -173,9 +173,12 @@ fill is neutral. A bare-icon tile is always neutral; an explicit `style=` fill
 overrides both.
 
 **A dialog whose Enter follows focus has no primary button.** `MessageBox`
-(and any dialog built the same way) presses the *focused* button on Enter, and
-its focus always rests on a button — so the focus ring alone says what Enter
-does, and the default is expressed by where focus *starts*. An accent fill
+(and any dialog built the same way) presses the *focused* button on Enter, so the
+focus ring alone says what Enter does, and the default is expressed by where
+focus *starts*. `default=None` starts it nowhere: no ring, and Enter and Space do
+nothing until a key puts it on a button (left the leftmost, right or Tab the
+rightmost). That is for a question that comes up on its own while the user may be
+typing, where a stray Enter should be neither a yes nor a no. An accent fill
 pinned to the default would repeat the ring until focus moves, and from then on
 mark a button Enter no longer presses: two highlighted buttons, the wrong one
 louder. Its buttons are all `secondary`. `primary` is for a standalone action

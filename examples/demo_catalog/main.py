@@ -1973,6 +1973,12 @@ def build_messagebox_page(panel: Panel) -> VSplit:
                 buttons=("Save", "Don't Save", "Cancel"),
                 icon="warning", on_result=result("Choice"),
             )
+        elif label.startswith("No default"):
+            show_message_box(
+                panel, "Let the agent run this command?", title="Permission",
+                buttons=("Allow", "Deny"), icon="warning", default=None,
+                on_result=result("No default"),
+            )
         else:
             show_message_box(
                 panel, "Could not open the file.\nCheck that it still exists.",
@@ -1980,7 +1986,7 @@ def build_messagebox_page(panel: Panel) -> VSplit:
             )
 
     listview = ListView(
-        ["Alert (1 button)", "Confirm (2 buttons)", "Three buttons", "Error"],
+        ["Alert (1 button)", "Confirm (2 buttons)", "Three buttons", "No default", "Error"],
         on_select=show,
     )
     explainer = TextBlock(
@@ -1988,6 +1994,7 @@ def build_messagebox_page(panel: Panel) -> VSplit:
         "\n"
         "  · ←/→ or tab move between buttons\n"
         "  · enter / space activate the focused button\n"
+        "  · with no default they do nothing until a button is focused\n"
         "  · escape picks the cancel (last) button\n"
         "  · a click activates a button directly\n"
         "\n"
