@@ -1318,6 +1318,9 @@ class MarkdownView(Widget):
         self._layout_done = True
         self._layout_lc: LayoutContext | None = None
         self._layout_theme: Theme | None = None
+        # The theme and ``style`` the memoized layout was made under: its spans
+        # carry their colors, so a change of either lays it out again.
+        self._styled_with: tuple[Theme | None, Style | None] = (None, None)
         self._layout_ticking = False
         self._drawn = False
 
@@ -1542,6 +1545,16 @@ class MarkdownView(Widget):
         self._wrap_width = -1.0
         self._layout_cache.clear()
         self._layout_jobs.clear()
+
+    def _restyle(self) -> None:
+        """Drop the memoized layout after the theme or ``style`` changed (the
+        app switched themes): the rows hold the old colors. The source, the
+        scroll offset and the selection stay."""
+        self._rows = None
+        self._wrap_width = -1.0
+        self._layout_cache.clear()
+        self._layout_jobs.clear()
+        self._links_rows = None
 
     def _remote_refresh(self) -> None:
         """UI-thread rebuild after a download settled: invalidate and repaint."""
@@ -2068,6 +2081,11 @@ class MarkdownView(Widget):
         # full width only until the content overflows, then (only if it does)
         # lay out one base unit narrower to make room for the bar.
         lc = ctx.layout_context()
+        last_theme, last_style = self._styled_with
+        if (last_theme is not theme and last_theme != theme) or last_style != self.style:
+            if last_theme is not None:
+                self._restyle()
+            self._styled_with = (theme, self.style)
         self._layout_lc, self._layout_theme = lc, theme
         self._drawn = True
         self._layout(full_w, lc, theme, max_h=view_h)
