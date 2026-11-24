@@ -18,14 +18,16 @@ Two kinds of consumer, two shapes of result:
 
 The curses path only ever sees sequences ncurses did NOT pre-assemble into
 keycodes, so the F-key and Shift+Tab entries below are additive there; on the
-POSIX console they are the only way those keys exist at all.
+POSIX console they are the only way those keys exist at all. Both also read
+``CSI <code> ; <mod> u`` (:func:`_parse_csi_u`), the form some terminals send
+for a chord the legacy bytes cannot carry (Ctrl+` from Ghostty).
 """
 
 from __future__ import annotations
 
 import re
 
-from ..event import Event, EventType
+from ..event import Event, EventType, char_key_event, is_typed_char
 
 # --- key tables ---------------------------------------------------------------
 #
@@ -102,6 +104,8 @@ def _parse_csi_key(seq: str) -> "Event | None":
     body = seq[1:]
     if not body:
         return None
+    if seq[0] == "[" and body[-1] == "u":
+        return _parse_csi_u(body[:-1])
     final = body[-1]
     params = body[:-1].split(";") if body[:-1] else []
     mod = int(params[1]) if len(params) >= 2 and params[1].isdigit() else 1
@@ -120,6 +124,45 @@ def _parse_csi_key(seq: str) -> "Event | None":
         if name is not None:
             return Event(type=EventType.KEY, key=name, modifiers=modifiers)
     return None
+
+
+#: The keys a ``CSI <code> u`` names by a control code rather than a glyph.
+_CSI_U_KEYS = {9: "tab", 13: "enter", 27: "escape", 127: "backspace", 8: "backspace"}
+
+
+def _parse_csi_u(params: str) -> "Event | None":
+    """A ``CSI <code>[:alternates] [; <modifiers>[:event]] u`` key - the form
+    (fixterms / the kitty keyboard protocol) a terminal such as Ghostty,
+    kitty or WezTerm sends for a chord the legacy bytes cannot carry:
+    Ctrl+` is ``[96;5u``. ``code`` is the key's Unicode code point. A
+    printable comes out as it does from a GUI backend (Ctrl+` is key "`"
+    with ctrl); None for what is not a key press (a release report)."""
+    fields = params.split(";")
+    code_s = fields[0].split(":")[0]
+    if not code_s.isdigit():
+        return None
+    code = int(code_s)
+    mod, event_type = 1, 1
+    if len(fields) >= 2 and fields[1]:
+        parts = fields[1].split(":")
+        if parts[0].isdigit():
+            mod = int(parts[0])
+        if len(parts) >= 2 and parts[1].isdigit():
+            event_type = int(parts[1])
+    if event_type == 3:
+        return None  # a key release
+    modifiers = _csi_modifiers(mod)
+    name = _CSI_U_KEYS.get(code)
+    if name is not None:
+        return Event(type=EventType.KEY, key=name, modifiers=modifiers)
+    if code < 32 or code > 0x10FFFF or 0xD800 <= code <= 0xDFFF:
+        return None
+    char = chr(code)
+    if char.isalpha() and "shift" in modifiers:
+        char = char.upper()
+    if not is_typed_char(char):
+        return None
+    return char_key_event(char, modifiers)
 
 
 def _meta_char_event(ch: str) -> "Event | None":

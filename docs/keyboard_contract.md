@@ -131,6 +131,14 @@ their modified forms are decoded on every backend.
 > chords (Alt+b / Alt+f / Alt+d / Alt+Backspace); any other ESC-prefixed
 > letter falls back to the Escape key, agreeing with curses.
 
+> **CSI u keys.** Some terminals (Ghostty, kitty, WezTerm, and others with the
+> fixterms / kitty keyboard encoding) send a chord the legacy bytes cannot
+> carry as `ESC [ <code point> ; <mod> u` - Ctrl+` is `ESC [ 96 ; 5 u`. The
+> POSIX VT and curses backends decode it to the event a GUI backend gives
+> (`key="`"`, `{"ctrl"}`), so such a binding works in those terminals. A
+> terminal that sends nothing for the chord (or uses it itself) still cannot
+> deliver it.
+
 ## 5a. Modified cursor & editing keys — word granularity
 
 The named cursor/edit keys `left`, `right`, `backspace`, `delete` carry a word

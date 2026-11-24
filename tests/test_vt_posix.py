@@ -81,6 +81,22 @@ def test_csi_arrows_and_modifiers():
     assert ctrl_left["mods"] == frozenset({"ctrl"})
 
 
+def test_csi_u_chords_a_legacy_byte_cannot_carry():
+    # Ghostty / kitty / WezTerm send Ctrl+` as CSI 96;5u: once dropped as an
+    # unknown CSI, it is now the same key a GUI backend reports.
+    ctrl_grave = one("\x1b[96;5u")
+    assert (ctrl_grave["name"], ctrl_grave["mods"]) == ("`", frozenset({"ctrl"}))
+    assert (one("\x1b[32;5u")["name"], one("\x1b[32;5u")["mods"]) == (
+        "space", frozenset({"ctrl"}))
+    shift_enter = one("\x1b[13;2u")
+    assert (shift_enter["name"], shift_enter["mods"]) == ("enter", frozenset({"shift"}))
+    assert one("\x1b[27u")["name"] == "escape"
+    ctrl_shift_a = one("\x1b[97;6u")
+    assert ctrl_shift_a["name"] == "a" and ctrl_shift_a["mods"] == frozenset({"ctrl", "shift"})
+    assert one("\x1b[96:126;5u")["name"] == "`"   # alternate keys after a colon
+    assert records("\x1b[96;5:3u") == []          # a release report is not a press
+
+
 def test_ss3_arrows_and_function_keys():
     # Application-cursor mode (what an interactive shell usually leaves on).
     assert one("\x1bOC")["name"] == "right"
@@ -237,18 +253,19 @@ def test_parsed_records_drive_the_engine():
     con = Scripted()
     be = VTBackend(console=con)
     be.open()
-    con.queue.append(records("\x1b[<0;5;3M\x1b[<32;9;3M\x1b[<0;9;3mq\x1b[1;5D"))
+    con.queue.append(records("\x1b[<0;5;3M\x1b[<32;9;3M\x1b[<0;9;3mq\x1b[1;5D\x1b[96;5u"))
     events = []
     for _ in range(10):
         be.run_event_loop_iteration(events.append, 0)
     be.close()
     assert [e.type for e in events] == [
         EventType.MOUSE_DOWN, EventType.MOUSE_DRAG, EventType.MOUSE_UP,
-        EventType.KEY, EventType.KEY,
+        EventType.KEY, EventType.KEY, EventType.KEY,
     ]
     assert events[1].x == 8.0
     assert events[3].key == "q"
     assert (events[4].key, events[4].modifiers) == ("left", frozenset({"ctrl"}))
+    assert (events[5].key, events[5].modifiers) == ("`", frozenset({"ctrl"}))
 
 
 def _scripted_events(raw: str, reports_hover: bool = True):
