@@ -182,3 +182,60 @@ def test_message_box_marks_its_default_by_focus_alone(backend):
     box = panel._layers[-1].widget
     assert [b.variant for b in box._widgets] == ["secondary", "secondary"]
     assert box.focused == 1
+
+
+_CMD = "```\n" + "xefmctl state --json 2>/dev/null || xefmctl help " * 3 + "\n```"
+
+
+class _TallCodeBackend(MemoryBackend):
+    """Code lines taller than a base unit, as on a desktop backend whose
+    monospace face has a taller line box than the UI font."""
+
+    def measure_line_height(self, style=None):
+        font = getattr(style, "font", None)
+        return 1.4 if font is not None and font.monospace else 1.0
+
+
+class _TallCodeVectorBackend(_TallCodeBackend):
+    """The same on a vector backend (the base MemoryBackend forces
+    ``vector_shapes`` off), where the box is sized to the measured rhythm."""
+
+    @property
+    def capabilities(self):
+        return self._capabilities
+
+    @property
+    def base_size(self):
+        return (8, 16)
+
+
+@pytest.mark.parametrize("make", [
+    lambda: _TallCodeBackend(width=60, height=20, capabilities=PROFILE_TUI),
+    lambda: _TallCodeVectorBackend(width=60, height=20, capabilities=PROFILE_GUI_DESKTOP),
+], ids=["tui", "vector"])
+def test_a_markdown_message_with_a_wrapping_code_block_is_not_cut_short(make):
+    panel = Panel(make())
+    msg = "**Claude Code** wants to use **Bash**.\n\nGet detailed state\n\n" + _CMD
+    box = show_message_box(panel, msg, buttons=["Allow", "Deny"], markdown=True)
+    panel.render()
+    x0, y0, x1, y1 = box._md_rect
+    md = box._md
+    assert md._row_tops[-1] <= (y1 - y0) + 1e-6  # all of it fits: nothing hidden
+    assert md.offset == 0
+
+
+def test_a_message_taller_than_the_screen_scrolls(backend):
+    panel = Panel(backend)
+    msg = "\n\n".join(f"line {n}" for n in range(60))
+    box = show_message_box(panel, msg, buttons=["OK"], markdown=True)
+    panel.render()
+    _w, h = panel.backend.size_units
+    md = box._md
+    assert md._row_tops[-1] > box._md_rect[3] - box._md_rect[1]
+    panel.dispatch_event(Event(type=EventType.KEY, key="pagedown"))
+    panel.render()
+    assert md.offset > 0
+    x0, y0, _x1, _y1 = box._md_rect
+    top = md.offset
+    box.handle_event(Event(type=EventType.MOUSE_SCROLL, x=x0 + 1, y=y0 + 1, scroll=3))
+    assert md.offset < top

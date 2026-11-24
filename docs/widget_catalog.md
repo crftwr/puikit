@@ -29,12 +29,13 @@ One implementation each, running unchanged on every backend.
 | `DropDown` | `dropdown.py` | Read-only selection; list opens as a `push_layer` popup |
 | `ComboBox` | `combo_box.py` | Editable drop-down: type-to-filter list + free text |
 | `TextEdit` | `text_edit.py` | Single-line editable text; full IME/composition, mouse + keyboard selection, word-wise caret move/delete (Ctrl / Alt-Option), Cmd-Left/Right to the line ends and Cmd-Backspace deleting back to the start, clipboard copy/cut/paste. Scrolls horizontally keeping a few columns of text visible past the caret on either side, and pulls hidden text back in when an edit shortens the line. `mask="•"` makes it a password field (glyphs shown masked; copy/cut disabled); `placeholder="…"` shows muted text while the field is empty |
+| `TextArea` | `text_area.py` | Multi-line editable text: `TextEdit`'s editing (IME, selection, word motion, clipboard) over lines that soft-wrap at the field's width (at a space where one fits). Up/Down move by visual row keeping the column, and are left unhandled on the first/last row so a host can recall history; Home/End go to the row's ends, Ctrl+Home/End (Cmd+Up/Down) to the text's. Enter breaks the line, or with `submit_on_enter` submits - a line break is then Shift/Alt/Ctrl+Enter or Ctrl+J (a terminal's Ctrl+J arrives as Enter with `char="\n"`). Measures as tall as its wrapped text between `min_rows` and `max_rows`, then scrolls with a scrollbar; paste keeps line breaks |
 | `ProgressBar` | `progress_bar.py` | Read-only determinate ratio bar |
 | `BusyIndicator` | `busy_indicator.py` | Indeterminate activity spinner (`animation` fallback) |
 | `Splitter` | `splitter.py` | Two panes with a draggable divider (drag to resize) |
 | `ListView` | `list.py` | Scrollable selectable rows; text by default (over-long rows clip, or elide with `ellipsis`/`elide_where`), or a widget per row via `row_factory`; `allow_no_selection` permits `selected == -1`, drawn with no highlight at all |
 | `LogView` | `log_view.py` | Virtualized append-only stream; per-line color, wrap, drag-select + copy (a drag held past an edge keeps scrolling, so a selection runs past one screenful), tail-follow |
-| `MarkdownView` | `markdown_view.py` | Scrolling read-only Markdown viewer; proportional prose + monospace/sized headings, clickable links (Tab / Enter from the keyboard; per-view `on_link` handler for any scheme), images; opt-in `selectable` (drag-select + copy as plain **and** rich HTML; a drag held past an edge keeps scrolling); opt-in `code_copy` (a Copy button above each fenced code block, a Tab stop); `focus_stop_kinds` says which stops a document has (`link`, `copy`), for a host's key hint |
+| `MarkdownView` | `markdown_view.py` | Scrolling read-only Markdown viewer; proportional prose + monospace/sized headings, clickable links (Tab / Enter from the keyboard; per-view `on_link` handler for any scheme), images; opt-in `selectable` (drag-select + copy as plain **and** rich HTML; a drag held past an edge keeps scrolling); opt-in `code_copy` (a Copy button at the end of each fenced code block's first line, a Tab stop; on hover on a vector backend); `focus_stop_kinds` says which stops a document has (`link`, `copy`), for a host's key hint; `update_source` replaces a document that grows (a streamed reply, a log) keeping the scroll, a selection in the unchanged part and the layout of the lines before the change, and with `follow_end` keeps showing the end while the reader stays there |
 | `TreeView` / `TreeNode` | `tree.py` | Expandable hierarchical rows with indentation |
 | `Tabs` | `tabs.py` | Title strip swapping a content pane |
 | `MenuBar` / `MenuPopup` | `menu.py` | Widget-rendered menu fallback (non-`native_menus` backends) |
@@ -204,7 +205,15 @@ Inline mixed styles, links, flowing content.
   once. Inline runs cover bold / italic / **strikethrough** (`~~…~~`, a real
   `TextAttribute.STRIKETHROUGH`) / code / links, including `<autolinks>`, bare
   URLs, and `[text][ref]` reference links; blocks cover ATX **and setext**
-  headings, **hard line breaks**, and **nested / reflowed block quotes**.
+  headings, **hard line breaks**, **nested / reflowed block quotes**, and
+  **fenced containers** (`::: box` / `::: indent` / `::: bullet <role>` ...
+  `:::`, the Pandoc and markdown-it syntax): a box is a rounded, outlined panel
+  on a vector backend and a plain fill on a grid; an indent moves its content
+  right; a bullet indents too and puts a dot beside its first line, colored by
+  its role (`success`, `error`, `warning`, `accent`, else muted) - a timeline of
+  steps, a thin line joining the dots of bullets that follow one another (a
+  box or plain text between them breaks it); an unknown name keeps its content as is. `pad_x` pads the content on
+  both sides inside the view, its scrollbar staying at the edge.
   Virtualized over variable row heights.
   **`measure(lc, "y", width)`** reports the document's laid-out height at a
   width — the same layout `draw` runs (which now takes a `LayoutContext`), on a
@@ -216,17 +225,20 @@ Inline mixed styles, links, flowing content.
   `TextBlock` opt in, rather than duplicating it.
 
 ##### Code-block Copy button — **shipped**
-`MarkdownView(..., code_copy=True)` puts a **Copy** button above every fenced
-code block, on a row of its own, right-aligned on the block's fill — the one
-GitHub and VS Code show. It rides the link machinery rather than adding a
-second focus model: the button is a span carrying a private href (a NUL-prefixed
+`MarkdownView(..., code_copy=True)` puts a **Copy** button at the right end of
+every fenced code block's first line, which wraps short of it, so no row is
+spent on it. A vector backend shows it while the pointer is over the block (as
+GitHub and VS Code do; thin bands above and below the lines replace the row it
+used to take); a grid always shows it. It rides the link machinery rather than
+adding a second focus model: the button carries a private href (a NUL-prefixed
 `\x00code-copy:<n>` no real link can spell), so it is a Tab / Shift+Tab stop in
 document order beside the links, Enter or a click activates it, and
 `follow_link` intercepts it before `on_link` sees anything. The block's source
 text goes to `Panel.set_clipboard` (OSC 52 / the OS clipboard, per backend), and
 the label reads *Copied* — the same width in the code face — until the keyboard
-focus moves. The row is chrome: `selection_text` / `selection_html` skip it and a
-search never matches it. Off by default (additive), so an existing view lays out
+focus moves; a focused button shows on a vector backend too. The button and
+the bands are chrome: `selection_text` / `selection_html` skip them and a search
+never matches them. Off by default (additive), so an existing view lays out
 unchanged.
 
 ##### Selection + copy — **shipped**

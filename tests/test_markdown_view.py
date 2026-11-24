@@ -1777,14 +1777,72 @@ def test_code_copy_is_off_by_default():
     assert not view.focus_advance(1)
 
 
-def test_code_copy_puts_a_button_above_each_block():
+def test_code_copy_puts_the_button_on_each_blocks_first_row():
     backend, _p, view = _shown(_CODE_DOC, height=20, code_copy=True)
-    buttons = [(i, row) for i, row in enumerate(view._rows) if row.copy_block >= 0]
-    assert [row.copy_block for _, row in buttons] == [0, 1]
-    for i, row in buttons:
-        # Right-aligned, on its own row, directly above the block's first line.
-        assert _row_text(backend, i).rstrip().endswith("Copy")
-        assert view._rows[i + 1].code_bg is not None and view._rows[i + 1].copy_block < 0
+    firsts = [(i, row) for i, row in enumerate(view._rows) if row.copy_label >= 0]
+    assert [row.copy_label for _, row in firsts] == [0, 1]
+    for i, row in firsts:
+        # Right-aligned at the end of the block's first line: no row of its own.
+        text = _row_text(backend, i).rstrip()
+        assert text.endswith("Copy") and row.spans and row.code_bg is not None
+    assert not any(r.copy_block >= 0 for r in view._rows)  # no bands on a grid
+
+
+def test_a_long_first_line_wraps_short_of_the_button():
+    backend, _p, view = _shown("```\n" + "x" * 60 + "\n```", width=40, height=6,
+                               code_copy=True)
+    first = next(i for i, r in enumerate(view._rows) if r.copy_label >= 0)
+    line = _row_text(backend, first)
+    assert line.rstrip().endswith("Copy") and "x Copy" not in line
+    assert line.count("x") < 40 - 6
+
+
+def test_on_a_vector_backend_copy_shows_on_hover_over_bands():
+    backend = _VectorBackend(width=40, height=10)
+    panel = Panel(backend)
+    view = MarkdownView("```\nabc\n```", code_copy=True)
+    panel.add(view, x=0, y=0, w=40, h=10)
+    panel.render()
+    rows = view._rows
+    # Thin bands above and below the line, chrome to a selection.
+    assert rows[0].copy_block >= 0 and rows[-1].copy_block >= 0
+    assert 0 < rows[0].height < 1
+    first = next(i for i, r in enumerate(rows) if r.copy_label >= 0)
+    assert view._link_hits == []  # no pointer over it: no button
+    panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=5, y=1))  # over the block
+    panel.render()
+    assert any(h[4].startswith("\x00code-copy:") for h in view._link_hits)
+    assert first == 1
+
+
+def test_a_bullet_dots_its_first_row():
+    sems = parse_markdown("::: bullet success\nhello\n\nmore\n:::\n\n::: bullet\nx\n:::")
+    dotted = [s for s in sems if s.dot is not None]
+    assert [d.dot for d in dotted] == [("success", 0.0), ("", 0.0)]
+    assert all(s.inset == 2.0 for s in sems if s.runs)
+    backend, _p, view = _shown("::: bullet error\nhello\n:::", width=30)
+    assert backend.snapshot()[0].startswith("●")
+    assert backend.style_at(0, 0).fg == (241, 76, 76)
+
+
+def test_bullets_in_a_row_are_joined_by_a_timeline():
+    doc = ("::: bullet success\none\n\ntwo\n:::\n\n::: bullet\nthree\n:::\n\n"
+           "::: box\nyou\n:::\n\n::: bullet\nfour\n:::")
+    backend, _p, view = _shown(doc, width=30, height=20)
+    lines = backend.snapshot()
+    dots = [i for i, line in enumerate(lines) if line.startswith("●")]
+    assert len(dots) == 3
+    # From under the first dot down to the second: a bar in the gutter.
+    assert all(lines[y].startswith("│") for y in range(dots[0] + 1, dots[1]))
+    # The user's box breaks it: nothing between the second dot and the third.
+    assert not any(lines[y].startswith("│") for y in range(dots[1] + 1, dots[2]))
+    assert len(view._timeline(view._rows)) == 1
+
+
+def test_plain_text_between_bullets_breaks_the_timeline():
+    _b, _p, view = _shown("::: bullet\na\n:::\n\nplain\n\n::: bullet\nb\n:::",
+                          width=30, height=10)
+    assert view._timeline(view._rows) == []
 
 
 def test_the_copy_buttons_are_tab_stops_and_enter_copies_the_block():
@@ -1947,3 +2005,154 @@ def test_heading_jump_reaches_a_heading_not_yet_laid_out(monkeypatch):
     view.follow_link("#section-150")
     assert view._layout_done
     assert view.offset > 0
+
+
+# --- update_source: a document that grows while it is read --------------------
+
+
+def _md_panel(backend, source, **kw):
+    panel = Panel(backend)
+    view = MarkdownView(source, **kw)
+    panel.add(view, x=0, y=0, w=24, h=8)
+    panel.render()
+    return panel, view
+
+
+def test_update_source_reuses_the_unchanged_lines(backend):
+    paras = "\n\n".join(f"para {i}" for i in range(20))
+    panel, view = _md_panel(backend, paras)
+    view._extend_layout()
+    kept = list(view._rows[:4])
+    view.update_source(paras + " more")
+    panel.render()
+    view._extend_layout()
+    # The rows of the lines before the change are the very same objects.
+    assert view._rows[:4] == kept
+    assert all(a is b for a, b in zip(view._rows[:4], kept))
+    assert any("more" in "".join(t for t, _s, _h in r.spans) for r in view._rows)
+
+
+def test_update_source_keeps_the_scroll_position(backend):
+    paras = "\n\n".join(f"para {i}" for i in range(30))
+    panel, view = _md_panel(backend, paras)
+    view.scroll_by(5)
+    offset = view.offset
+    view.update_source(paras + "\n\nnew")
+    panel.render()
+    assert view.offset == offset
+
+
+def test_follow_end_keeps_showing_the_end(backend):
+    panel, view = _md_panel(backend, "start")
+    view.follow_end = True
+    text = "start"
+    for i in range(30):
+        text += f"\n\nline {i}"
+        view.update_source(text)
+        panel.render()
+    assert view.offset > 0
+    assert view.offset + view._view_h >= view._row_tops[-1] - 1e-3
+    assert any("line 29" in row for row in ("".join(r) for r in backend.snapshot()))
+
+
+def test_follow_end_lets_the_reader_scroll_away(backend):
+    text = "\n\n".join(f"line {i}" for i in range(30))
+    panel, view = _md_panel(backend, text)
+    view.follow_end = True
+    view.update_source(text + "\n\nx")
+    panel.render()
+    view.scroll_by(-4)
+    offset = view.offset
+    view.update_source(text + "\n\nxy")
+    panel.render()
+    assert view.offset == offset
+
+
+def test_update_source_keeps_a_selection_before_the_change(backend):
+    text = "alpha beta\n\ngamma"
+    panel, view = _md_panel(backend, text, selectable=True)
+    view._sel_anchor, view._sel_cursor = (0, 0, 0, 0), (0, 0, 0, 5)
+    view.update_source(text + " delta")
+    panel.render()
+    assert view.selection_text() == "alpha"
+    view.update_source("changed")
+    panel.render()
+    assert view.selection_text() == ""
+
+
+# --- fenced containers (::: box / ::: indent) ----------------------------------
+
+
+def test_fenced_containers_parse_into_insets_and_boxes():
+    src = ("before\n\n::: box\nmine\n\n```\n:::\n```\n:::\n\n::: indent\nreply\n:::\n\n"
+           "::: unknown\nplain\n:::\n\n::: box\nsecond\n:::")
+    sems = parse_markdown(src)
+    by = {"".join(t for t, _, _ in s.runs): s for s in sems if s.runs}
+    assert by["before"].inset == 0 and by["before"].box is None
+    mine = by["mine"]
+    assert mine.box == (0, 0.0, 0.0) and mine.inset > 0 and mine.inset_r > 0
+    code = [s for s in sems if s.block == "code"][0]
+    assert code.box == mine.box  # a ':::' line in a code block is code
+    assert [t for t, _, _ in code.runs] == [":::"]
+    assert by["reply"].inset > 0 and by["reply"].box is None
+    assert by["plain"].inset == 0  # an unknown name keeps its content as is
+    assert by["second"].box[0] == 1  # boxes count in document order
+    # The panel's bands above and below its content.
+    assert sum(1 for s in sems if s.block == "pad") == 4
+
+
+def test_a_box_in_an_indent_moves_with_it():
+    sems = parse_markdown("::: indent\n::: box\nx\n:::\n:::")
+    [x] = [s for s in sems if s.runs]
+    assert x.box[1] > 0 and x.inset > x.box[1]
+
+
+def test_a_box_fills_its_rows_on_tui():
+    backend, _p, view = _shown("top\n\n::: box\nhello\n:::\n\nafter", width=30)
+    row = next(y for y in range(8) if "hello" in backend.snapshot()[y])
+    x = backend.snapshot()[row].index("hello")
+    assert x > 0  # inside the panel's side padding
+    bg = DEFAULT_THEME.button_secondary_bg
+    assert backend.style_at(0, row).bg == bg  # the panel spans the row
+    assert backend.style_at(x, row).bg == bg  # the text sits on it
+    assert backend.style_at(0, 0).bg != bg
+
+
+def test_a_box_is_one_rounded_panel_on_gui():
+    backend = _VectorBackend(width=30, height=10)
+    rects = []
+    orig = backend.draw_round_rect
+
+    def spy(x, y, w, h, radius, style, hints):
+        rects.append((x, y, w, h, style))
+        return orig(x, y, w, h, radius, style, hints)
+
+    backend.draw_round_rect = spy
+    panel = Panel(backend)
+    panel.add(MarkdownView("::: box\none\n\ntwo\n:::"), x=0, y=0, w=30, h=10)
+    panel.render()
+    [(x, y, w, h, style)] = rects  # one panel for all its rows
+    assert style.bg == DEFAULT_THEME.button_secondary_bg and h > 3
+
+
+def test_selection_skips_container_fences():
+    _b, panel, view = _shown("::: box\nhello\n:::\n\n::: indent\nworld\n:::", width=30)
+    view._select_all()
+    panel.render()
+    text = view.selection_text()
+    assert "hello" in text and "world" in text and ":::" not in text
+
+
+def test_pad_x_narrows_the_column_and_keeps_the_bar_at_the_edge():
+    src = "\n\n".join(f"word {n} " * 6 for n in range(30))
+    backend, panel, view = _shown(src, width=40, height=8)
+    view.pad_x = 5
+    panel.render()
+    snap = backend.snapshot()
+    assert all(line[:5].strip() == "" for line in snap)  # blank on the left
+    rows_x = [r.x0 for r in view._rows if r.spans]
+    assert min(rows_x) == 5
+    # The scrollbar still draws in the view's last column, past the padding.
+    assert any(line[39] != " " or backend.style_at(39, y) != backend.style_at(38, y)
+               for y, line in enumerate(snap))
+    assert all(line[34:39].strip() == "" for line in snap)

@@ -239,6 +239,19 @@ class MessageBox:
             self.on_result(self.buttons[index])
 
     def handle_event(self, event: Event) -> bool:
+        # A message too tall for the box scrolls: the wheel over it, and the
+        # keys a viewer scrolls with (the arrows stay with the buttons).
+        if self._md is not None:
+            if event.type is EventType.MOUSE_SCROLL and self._md_rect is not None \
+                    and event.x is not None and event.y is not None:
+                x0, y0, x1, y1 = self._md_rect
+                if x0 <= event.x < x1 and y0 <= event.y < y1:
+                    self._md.handle_event(event.translated(-x0, -y0))
+                return True
+            if event.type is EventType.KEY and event.key in ("pageup", "pagedown",
+                                                             "home", "end"):
+                self._md.handle_event(event)
+                return True
         if event.type is EventType.KEY:
             n = len(self._widgets)
             if event.key in ("left", "up"):
@@ -319,7 +332,7 @@ def show_message_box(
         # run in the monospace face it draws in, so a code chip is not under-boxed
         # against the narrower proportional font. Spans are reused below to count
         # wrapped rows at the final width.
-        from .markdown_view import DEFAULT_CODE_FONT, DEFAULT_TEXT_FONT, _wrap_spans, parse_markdown
+        from .markdown_view import _CODE_PAD, DEFAULT_CODE_FONT, DEFAULT_TEXT_FONT, parse_markdown
 
         sems = parse_markdown(message)
 
@@ -333,6 +346,11 @@ def show_message_box(
             return mt(sem.prefix, prop) if sem.prefix else 0.0
 
         def _sem_w(sem: Any) -> float:
+            if sem.block == "code":
+                # One run per source line, drawn in the code face inside the
+                # block's side padding: the widest line, not their sum.
+                code = Style(font=DEFAULT_CODE_FONT)
+                return max((mt(t, code) for t, _, _ in sem.runs), default=0.0) + 2 * _CODE_PAD
             # The widest hard-break segment, not the whole flow's sum: a literal
             # "\n" run (a trailing-backslash / two-trailing-space break) starts a
             # fresh row, so a hard-broken paragraph sizes to its longest line —
@@ -363,29 +381,26 @@ def show_message_box(
     )
     w = max(28, min(math.ceil(content_w) + 4, panel.backend.size_units[0]))
     if markdown:
-        # Count the *wrapped* display rows the MarkdownView will actually draw at
-        # the final content width (w - 4, matching draw()'s region), using the
-        # same wrap the widget uses — so a long line that wraps to several rows
-        # (a path wider than the box) grows the box instead of being clipped or
-        # scrolled inside a one-row region.
+        # The height the MarkdownView lays the message out to at the final
+        # content width (w - 4, matching draw()'s region) - its own layout, so
+        # a wrapped path, a code block's padding and taller code lines all
+        # count, and the box is not cut short.
         avail = max(1.0, float(w) - 4.0)
-        n_rows = max(
-            1,
-            sum(
-                len(_wrap_spans(_sem_spans(s), max(1.0, avail - _sem_prefix_w(s)), mt, word=s.wrap))
-                for s in sems
-            ),
-        )
+        n_rows = max(1.0, MarkdownView(message).measure(lc, "y", avail).preferred)
     # Header + message + button row + borders. On a grid these are whole rows
     # (message top-anchored, buttons bottom-anchored, slack between them). On a
     # vector backend the box is sized to the measured rhythm draw() lays out so
     # the three gaps come out equal: title bar, gap, message, gap, buttons, gap —
     # i.e. h = title_bar + n_rows + button_h + 3·gap (plus a hair for the frame).
     if caps.supports("vector_shapes"):
-        title_bar = _gui_title_bar_h(panel.backend.measure_line_height(prop_bold)) if title else 0.0
+        # draw() reserves the title bar with or without a title.
+        title_bar = _gui_title_bar_h(panel.backend.measure_line_height(prop_bold))
         h = title_bar + n_rows + btn_h + 3.0 * _GUI_GAP
     else:
         h = n_rows + 7
+    # Never taller than the screen: a long message scrolls inside the box
+    # (wheel, PageUp/PageDown) instead of running off it.
+    h = min(h, panel.backend.size_units[1] - 2.0)
     box._panel = panel
     panel.push_layer(
         box, z=z, hints={"shadow": True, "dim_below": dim_below, "w": float(w), "h": float(h)}
