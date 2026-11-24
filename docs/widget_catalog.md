@@ -205,7 +205,11 @@ Inline mixed styles, links, flowing content.
   once. Inline runs cover bold / italic / **strikethrough** (`~~…~~`, a real
   `TextAttribute.STRIKETHROUGH`) / code / links, including `<autolinks>`, bare
   URLs, and `[text][ref]` reference links; blocks cover ATX **and setext**
-  headings, **hard line breaks**, and **nested / reflowed block quotes**.
+  headings, **hard line breaks**, **nested / reflowed block quotes**, and
+  **fenced containers** (`::: box` / `::: indent` ... `:::`, the Pandoc and
+  markdown-it syntax): a box is a rounded, outlined panel on a vector backend
+  and a plain fill on a grid; an indent moves its content right; an unknown
+  name keeps its content as is.
   Virtualized over variable row heights.
   **`measure(lc, "y", width)`** reports the document's laid-out height at a
   width — the same layout `draw` runs (which now takes a `LayoutContext`), on a

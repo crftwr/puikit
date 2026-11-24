@@ -43,7 +43,8 @@ paragraphs with hard line breaks (two trailing spaces or a backslash),
 ``-``/``*``/``+`` and ordered list items (nested by indentation) including
 ``[ ]`` / ``[x]`` task items, ``>`` block quotes (nested and multi-line,
 reflowed), ``` ``` ``` /
-``~~~`` fenced code, ``---`` horizontal rules, GFM pipe ``| tables |`` (a cell
+``~~~`` fenced code, ``::: box`` / ``::: indent`` fenced containers (a
+rounded panel; an indented block), ``---`` horizontal rules, GFM pipe ``| tables |`` (a cell
 that is exactly one image renders it, sized to its column), block images —
 relative paths resolving against ``base_dir``, and ``http(s)://`` sources
 fetched once into a cache by a background thread, the view re-rendering when
@@ -155,6 +156,13 @@ _CODE_FG = (206, 145, 120)
 # Left indent reserved per block-quote nesting level, in base units: one column
 # for the vertical bar plus a space of gutter before the quoted content.
 _QUOTE_INDENT = 2.0
+# Fenced containers (``::: name`` ... ``:::``, the Pandoc / markdown-it
+# syntax): ``indent`` moves its content right by _DIV_INDENT; ``box`` draws it
+# on a rounded, filled panel, _BOX_PAD_X inside the panel's sides, with a
+# _BOX_PAD_Y (of a line) band above and below on a vector backend.
+_DIV_INDENT = 2.0
+_BOX_PAD_X = 1.5
+_BOX_PAD_Y = 0.45
 # Horizontal padding inside a table cell, and the width reserved for each
 # vertical border column, both in base units (a border is one grid column so the
 # ``│`` has a cell of its own and never lands on top of text).
@@ -251,6 +259,8 @@ _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _HRULE_RE = re.compile(r"^(?:-{3,}|\*{3,}|_{3,})$")
 _LIST_RE = re.compile(r"^(\s*)([-*+]|\d+[.)])\s+(.*)$")
 _FENCE_RE = re.compile(r"^\s*(```+|~~~+)")
+# A fenced container's line: three or more colons, then a name when it opens.
+_DIV_RE = re.compile(r"^\s*(:{3,})\s*([A-Za-z][\w-]*)?\s*$")
 _LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)\s]*)(?:\s+\"[^\"]*\")?\)")
 # A standalone image line: ![alt](path). Rendered as its own block, sized to
 # the image's aspect ratio (the inline form mid-paragraph is intentionally not
@@ -327,6 +337,13 @@ class _SemLine:
     checked: bool | None = None
     quote_depth: int = 0
     table: _Table | None = None
+    # Fenced containers around the line: extra left / right inset (base
+    # units), and the ``box`` it sits in as (ordinal, panel left, panel right
+    # margin) - the ordinal counts boxes in document order, so an unchanged
+    # prefix parses equal (update_source keeps its layout).
+    inset: float = 0.0
+    inset_r: float = 0.0
+    box: tuple[int, float, float] | None = None
 
 
 @dataclass
@@ -363,6 +380,11 @@ class _Row:
     # search never sees it.
     copy_block: int = -1
     fill_x: float | None = None
+    # The containers the row sits in (see _SemLine): its left inset (where a
+    # quote's bars start), the right margin a code fill stops at, the box.
+    inset: float = 0.0
+    fill_r: float = 0.0
+    box: tuple[int, float, float] | None = None
 
 
 @dataclass
@@ -591,7 +613,39 @@ def _is_block_break(line: str) -> bool:
         or s.startswith(">")
         or bool(_LIST_RE.match(line))
         or bool(_FENCE_RE.match(line))
+        or bool(_DIV_RE.match(line))
     )
+
+
+def _fence_closing(opening: str) -> "re.Pattern[str]":
+    """CommonMark's closing fence for ``opening``: the same character, at
+    least as many of it, and nothing after but spaces."""
+    return re.compile(r"^\s*" + re.escape(opening[0]) + "{" + str(len(opening)) + r",}\s*$")
+
+
+def _contain(name: str | None, sems: list[_SemLine], boxes: list[int]) -> None:
+    """Apply a fenced container named ``name`` to its parsed lines. An
+    unknown name leaves them as they are (Pandoc keeps the content too)."""
+    if name == "indent":
+        left, right = _DIV_INDENT, 0.0
+    elif name == "box":
+        left = right = _BOX_PAD_X
+        ordinal = boxes[0]
+        boxes[0] += 1
+        sems.insert(0, _SemLine("pad", 0, "", [], wrap=False))
+        sems.append(_SemLine("pad", 0, "", [], wrap=False))
+    else:
+        return
+    for sem in sems:
+        if sem.box is not None:
+            # An inner container's box moves with this one's inset (a box in
+            # a box draws the inner one only).
+            o, bl, br = sem.box
+            sem.box = (o, bl + left, br + right)
+        elif name == "box":
+            sem.box = (ordinal, sem.inset, sem.inset_r)
+        sem.inset += left
+        sem.inset_r += right
 
 
 def _hard_break(raw: str) -> bool:
@@ -714,16 +768,57 @@ def parse_markdown(src: str) -> list[_SemLine]:
     return _parse_lines(lines, refs)
 
 
-def _parse_lines(lines: list[str], refs: dict[str, str]) -> list[_SemLine]:
+def _parse_lines(lines: list[str], refs: dict[str, str],
+                 boxes: list[int] | None = None) -> list[_SemLine]:
     """The block loop, over a (ref-stripped) line list. Split from
     ``parse_markdown`` so a block quote can re-parse its inner lines recursively
     (nested quotes, lists in quotes, reflowed multi-line quotes) with the same
     reference definitions in scope."""
     out: list[_SemLine] = []
+    if boxes is None:
+        boxes = [0]
     i, n = 0, len(lines)
     while i < n:
         raw = lines[i]
         stripped = raw.strip()
+
+        div = _DIV_RE.match(raw)
+        if div:
+            i += 1
+            if not div.group(2):
+                continue  # a stray closing fence
+            # Gather to the matching close: a nested container opens and
+            # closes its own, and a code block is taken whole (a ``:::`` line
+            # in it is code).
+            width, inner, depth = len(div.group(1)), [], 0
+            while i < n:
+                ln = lines[i]
+                f = _FENCE_RE.match(ln)
+                if f:
+                    closing = _fence_closing(f.group(1))
+                    inner.append(ln)
+                    i += 1
+                    while i < n and not closing.match(lines[i]):
+                        inner.append(lines[i])
+                        i += 1
+                    if i < n:
+                        inner.append(lines[i])
+                        i += 1
+                    continue
+                d = _DIV_RE.match(ln)
+                i += 1
+                if d:
+                    if d.group(2):
+                        depth += 1
+                    elif depth:
+                        depth -= 1
+                    elif len(d.group(1)) >= width:
+                        break
+                inner.append(ln)
+            sems = _parse_lines(inner, refs, boxes)
+            _contain(div.group(2), sems, boxes)
+            out.extend(sems)
+            continue
 
         fence = _FENCE_RE.match(raw)
         if fence:
@@ -736,7 +831,7 @@ def _parse_lines(lines: list[str], refs: dict[str, str]) -> list[_SemLine]:
             # of it as opened the block, and nothing after but spaces. So a
             # block opened with four backticks can hold a line of three — how a
             # writer embeds text that itself contains a fence.
-            closing = re.compile(r"^\s*" + re.escape(opening[0]) + "{" + str(len(opening)) + r",}\s*$")
+            closing = _fence_closing(opening)
             i += 1
             code_lines: list[str] = []
             while i < n and not closing.match(lines[i]):
@@ -789,7 +884,7 @@ def _parse_lines(lines: list[str], refs: dict[str, str]) -> list[_SemLine]:
                 else:
                     inner.append(ln.strip())
                 i += 1
-            for sem in _parse_lines(inner, refs):
+            for sem in _parse_lines(inner, refs, boxes):
                 sem.quote_depth += 1
                 out.append(sem)
             continue
@@ -1542,7 +1637,25 @@ class MarkdownView(Widget):
                 tops.append(tops[-1] + row.height)
         return True
 
-    def _layout_sem(
+    def _layout_sem(self, sem: _SemLine, job: _LayoutJob, width: float, lc: LayoutContext,
+                    theme: Theme, measure, line_height, body_size: float) -> None:
+        """Append the rows of one semantic line to ``job.rows``, inside the
+        containers around it."""
+        start = len(job.rows)
+        self._layout_sem_rows(sem, job, width - sem.inset_r, lc, theme, measure,
+                              line_height, body_size)
+        if not (sem.inset or sem.inset_r or sem.box):
+            return
+        box_bg = theme.button_secondary_bg
+        for row in job.rows[start:]:
+            row.inset, row.fill_r, row.box = sem.inset, sem.inset_r, sem.box
+            if sem.box is not None and row.spans:
+                # Text on the panel: its own fill, so a grid cell keeps it.
+                row.spans = [(t, replace(st, bg=box_bg)
+                              if st.bg is None or st.bg == self.style.bg else st, h)
+                             for t, st, h in row.spans]
+
+    def _layout_sem_rows(
         self,
         sem: _SemLine,
         job: _LayoutJob,
@@ -1557,7 +1670,13 @@ class MarkdownView(Widget):
         rows = job.rows
         anchors = job.anchors
         qd = sem.quote_depth
-        qind = qd * _QUOTE_INDENT
+        qind = qd * _QUOTE_INDENT + sem.inset
+        if sem.block == "pad":
+            # The band above / below a box's content: a fraction of a line on
+            # a vector backend; a grid spends no rows on it.
+            if lc.vector_shapes:
+                rows.append(_Row(0.0, [], _BOX_PAD_Y * job.pitch))
+            return
         if sem.block == "blank":
             rows.append(_Row(0.0, [], job.pitch, quote=qd))
             return
@@ -1569,7 +1688,7 @@ class MarkdownView(Widget):
         if sem.block == "code":
             if self.code_copy:
                 rows.append(self._copy_row(job.code_index, width, measure, line_height,
-                                           theme, qd))
+                                           theme, qd, sem.inset))
             job.code_index += 1
             rows.extend(self._layout_code(sem, width, measure, line_height, theme, qd))
             return
@@ -1588,7 +1707,7 @@ class MarkdownView(Widget):
             rows.extend(
                 self._layout_table(
                     sem.table, width - qind, measure, theme, qd, border_h,
-                    cell_pad_v, lc.vector_shapes, lc,
+                    cell_pad_v, lc.vector_shapes, lc, inset=sem.inset,
                 )
             )
             return
@@ -1669,7 +1788,7 @@ class MarkdownView(Widget):
         each carrying a ``code_bg`` so ``draw`` paints a continuous block-wide
         background. When Pygments is present and the fence named a language, runs
         are colored per token; otherwise the whole block is the flat code color."""
-        qind = qd * _QUOTE_INDENT
+        qind = qd * _QUOTE_INDENT + sem.inset
         left = qind + _CODE_PAD
         avail = max(1.0, width - qind - 2 * _CODE_PAD)
         code_lines = [t for t, _, _ in sem.runs]
@@ -1694,13 +1813,14 @@ class MarkdownView(Widget):
         return rows
 
     def _copy_row(
-        self, index: int, width: float, measure, line_height, theme: Theme, qd: int
+        self, index: int, width: float, measure, line_height, theme: Theme, qd: int,
+        inset: float = 0.0,
     ) -> _Row:
         """The row above code block ``index`` holding its Copy button: on the
         block's own fill, so it reads as the block's header, with the button
         right-aligned in the muted text color and the code face (whose fixed
         advance keeps "Copy" and "Copied" the same width)."""
-        qind = qd * _QUOTE_INDENT
+        qind = qd * _QUOTE_INDENT + inset
         style = Style(fg=theme.muted_text, bg=theme.control_bg, font=self.code_font)
         label_w = measure(_COPY_LABEL, style)
         x0 = max(qind, width - _CODE_PAD - label_w)
@@ -1711,7 +1831,7 @@ class MarkdownView(Widget):
     def _layout_table(
         self, tbl: _Table, width: float, measure, theme: Theme, qd: int,
         border_h: float, cell_pad_v: float, vector: bool,
-        lc: LayoutContext | None = None,
+        lc: LayoutContext | None = None, inset: float = 0.0,
     ) -> list[_Row]:
         """Lay a GFM table out as one ``_Row`` per grid row. Columns take their
         natural content width, scaled down proportionally (with a floor) when the
@@ -1727,7 +1847,7 @@ class MarkdownView(Widget):
         ncol = len(tbl.aligns)
         if ncol == 0:
             return []
-        qind = qd * _QUOTE_INDENT
+        qind = qd * _QUOTE_INDENT + inset
         base = Style(fg=self.style.fg, bg=self.style.bg, font=self.text_font)
         if qd:
             base = replace(base, fg=theme.muted_text)
@@ -1932,24 +2052,30 @@ class MarkdownView(Widget):
         # below the viewport top, then draw down until a row starts past the
         # bottom edge (the clip trims the partial rows at either end).
         first = max(0, bisect.bisect_right(self._row_tops, self.offset) - 1)
+        box_bg = theme.button_secondary_bg
+        boxes_drawn: set[int] = set()
         for index in range(first, len(rows)):
             row = rows[index]
             y = self._row_tops[index] - self.offset
             if y >= view_h:
                 break
+            if row.box is not None and row.box[0] not in boxes_drawn:
+                boxes_drawn.add(row.box[0])
+                self._draw_box(ctx, rows, index, box_bg, theme)
             if row.image is not None:
                 path, alt, w, h = row.image
                 ctx.draw_image(row.x0, y, path, hints={"w": w, "h": h, "fit": "contain", "alt": alt})
                 continue
             if row.rule:
                 # A full-width horizontal rule centered in the row.
-                ctx.draw_hairline(0.0, y + row.height / 2.0, self._wrap_width,
+                ctx.draw_hairline(row.inset, y + row.height / 2.0,
+                                  self._wrap_width - row.inset - row.fill_r,
                                   style=Style(fg=theme.muted_text))
                 continue
             for d in range(row.quote):
                 # One vertical bar per block-quote nesting level, each in its own
                 # reserved left column (centerline at that column's center).
-                ctx.draw_hairline(d * _QUOTE_INDENT + 0.5, y, row.height, vertical=True,
+                ctx.draw_hairline(row.inset + d * _QUOTE_INDENT + 0.5, y, row.height, vertical=True,
                                   style=Style(fg=theme.muted_text))
             if row.table is not None:
                 self._draw_table_row(ctx, y, row.height, row.table, theme,
@@ -1963,7 +2089,7 @@ class MarkdownView(Widget):
                 # A continuous fill across the whole block width behind the code,
                 # so consecutive rows read as one panel (not a ragged per-glyph bg).
                 fx = row.fill_x if row.fill_x is not None else row.x0 - _CODE_PAD
-                ctx.fill_rect(fx, y, max(0.0, self._wrap_width - fx), row.height,
+                ctx.fill_rect(fx, y, max(0.0, self._wrap_width - row.fill_r - fx), row.height,
                               Style(bg=row.code_bg))
             x = row.x0
             for si, (text, style, href) in enumerate(row.spans):
@@ -1977,7 +2103,8 @@ class MarkdownView(Widget):
                 # A code row's panel is already filled across the block: the run
                 # must not lay a second coat of it behind its own glyphs.
                 ctx.draw_text(x, y, text, style,
-                              over_fill=row.code_bg is not None and style.bg == row.code_bg)
+                              over_fill=(row.code_bg is not None and style.bg == row.code_bg)
+                              or (row.box is not None and style.bg == box_bg))
                 if href:
                     self._link_hits.append((x, y, x + w, y + row.height, href))
                 x += w
@@ -2009,6 +2136,25 @@ class MarkdownView(Widget):
             ctx.draw_scrollbar(
                 ctx.size_units[0] - 1, 0, view_h, max(0.0, min(1.0, pos)), ratio, self.style
             )
+
+    def _draw_box(self, ctx: DrawContext, rows: list[_Row], index: int, bg: Color,
+                  theme: Theme) -> None:
+        """The panel of the box row ``index`` sits in, from its first row to
+        its last (either may be off screen): rounded and outlined on a vector
+        backend, a plain fill on a grid."""
+        ordinal, left, right = rows[index].box
+        j0 = index
+        while j0 > 0 and rows[j0 - 1].box is not None and rows[j0 - 1].box[0] == ordinal:
+            j0 -= 1
+        j1 = index
+        while j1 + 1 < len(rows) and rows[j1 + 1].box is not None \
+                and rows[j1 + 1].box[0] == ordinal:
+            j1 += 1
+        top = self._row_tops[j0] - self.offset
+        bottom = self._row_tops[j1 + 1] - self.offset
+        style = Style(bg=bg, fg=theme.control_border if ctx.vector_shapes else None)
+        ctx.round_rect(left, top, max(0.0, self._wrap_width - left - right), bottom - top,
+                       style, radius=8.0, hints={"fill": True})
 
     def _draw_table_row(
         self, ctx: DrawContext, y: float, height: float, tr: _TableRow, theme: Theme,

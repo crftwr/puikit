@@ -2020,3 +2020,66 @@ def test_update_source_keeps_a_selection_before_the_change(backend):
     view.update_source("changed")
     panel.render()
     assert view.selection_text() == ""
+
+
+# --- fenced containers (::: box / ::: indent) ----------------------------------
+
+
+def test_fenced_containers_parse_into_insets_and_boxes():
+    src = ("before\n\n::: box\nmine\n\n```\n:::\n```\n:::\n\n::: indent\nreply\n:::\n\n"
+           "::: unknown\nplain\n:::\n\n::: box\nsecond\n:::")
+    sems = parse_markdown(src)
+    by = {"".join(t for t, _, _ in s.runs): s for s in sems if s.runs}
+    assert by["before"].inset == 0 and by["before"].box is None
+    mine = by["mine"]
+    assert mine.box == (0, 0.0, 0.0) and mine.inset > 0 and mine.inset_r > 0
+    code = [s for s in sems if s.block == "code"][0]
+    assert code.box == mine.box  # a ':::' line in a code block is code
+    assert [t for t, _, _ in code.runs] == [":::"]
+    assert by["reply"].inset > 0 and by["reply"].box is None
+    assert by["plain"].inset == 0  # an unknown name keeps its content as is
+    assert by["second"].box[0] == 1  # boxes count in document order
+    # The panel's bands above and below its content.
+    assert sum(1 for s in sems if s.block == "pad") == 4
+
+
+def test_a_box_in_an_indent_moves_with_it():
+    sems = parse_markdown("::: indent\n::: box\nx\n:::\n:::")
+    [x] = [s for s in sems if s.runs]
+    assert x.box[1] > 0 and x.inset > x.box[1]
+
+
+def test_a_box_fills_its_rows_on_tui():
+    backend, _p, view = _shown("top\n\n::: box\nhello\n:::\n\nafter", width=30)
+    row = next(y for y in range(8) if "hello" in backend.snapshot()[y])
+    x = backend.snapshot()[row].index("hello")
+    assert x > 0  # inside the panel's side padding
+    bg = DEFAULT_THEME.button_secondary_bg
+    assert backend.style_at(0, row).bg == bg  # the panel spans the row
+    assert backend.style_at(x, row).bg == bg  # the text sits on it
+    assert backend.style_at(0, 0).bg != bg
+
+
+def test_a_box_is_one_rounded_panel_on_gui():
+    backend = _VectorBackend(width=30, height=10)
+    rects = []
+    orig = backend.draw_round_rect
+
+    def spy(x, y, w, h, radius, style, hints):
+        rects.append((x, y, w, h, style))
+        return orig(x, y, w, h, radius, style, hints)
+
+    backend.draw_round_rect = spy
+    panel = Panel(backend)
+    panel.add(MarkdownView("::: box\none\n\ntwo\n:::"), x=0, y=0, w=30, h=10)
+    panel.render()
+    [(x, y, w, h, style)] = rects  # one panel for all its rows
+    assert style.bg == DEFAULT_THEME.button_secondary_bg and h > 3
+
+
+def test_selection_skips_container_fences():
+    _b, panel, view = _shown("::: box\nhello\n:::\n\n::: indent\nworld\n:::", width=30)
+    view._select_all()
+    panel.render()
+    text = view.selection_text()
+    assert "hello" in text and "world" in text and ":::" not in text
