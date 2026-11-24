@@ -43,8 +43,8 @@ paragraphs with hard line breaks (two trailing spaces or a backslash),
 ``-``/``*``/``+`` and ordered list items (nested by indentation) including
 ``[ ]`` / ``[x]`` task items, ``>`` block quotes (nested and multi-line,
 reflowed), ``` ``` ``` /
-``~~~`` fenced code, ``::: box`` / ``::: indent`` fenced containers (a
-rounded panel; an indented block), ``---`` horizontal rules, GFM pipe ``| tables |`` (a cell
+``~~~`` fenced code, ``::: box`` / ``::: indent`` / ``::: bullet <role>``
+fenced containers (a rounded panel; an indented block; one with a colored dot), ``---`` horizontal rules, GFM pipe ``| tables |`` (a cell
 that is exactly one image renders it, sized to its column), block images —
 relative paths resolving against ``base_dir``, and ``http(s)://`` sources
 fetched once into a cache by a background thread, the view re-rendering when
@@ -62,9 +62,9 @@ every href first, whatever its scheme, and declines what it does not handle;
 the built-in behavior (``#slug`` scrolls, anything else goes to
 ``Panel.open_url``) then applies.
 
-With ``code_copy=True`` every fenced code block gets a **Copy** button on a row
-of its own above the block, right-aligned on the block's fill — the one GitHub
-and VS Code put on theirs. It is a stop in the same Tab order as the links, so
+With ``code_copy=True`` every fenced code block gets a **Copy** button at the
+right end of its first line (which wraps short of it) — on a vector backend
+while the pointer is over the block, as GitHub and VS Code show theirs. It is a stop in the same Tab order as the links, so
 Enter copies the block from the keyboard (a terminal has no hover to reveal it),
 and a click copies it too; the block's text goes to ``Panel.set_clipboard``
 exactly as written in the source, and the button reads *Copied* until the focus
@@ -161,6 +161,13 @@ _QUOTE_INDENT = 2.0
 # on a rounded, filled panel, _BOX_PAD_X inside the panel's sides, with a
 # _BOX_PAD_Y (of a line) band above and below on a vector backend.
 _DIV_INDENT = 2.0
+# A ``::: bullet <role>`` block indents like ``indent`` and marks its first row
+# with a dot in the gutter, colored by the role (a step in a timeline).
+_DOT_COLORS = {"success": (115, 201, 145), "error": (241, 76, 76),
+               "warning": (204, 167, 0)}
+# A vector backend's band above and below a code block's lines (a fraction of
+# a line), so the panel does not hug its first and last row.
+_CODE_PAD_Y = 0.3
 _BOX_PAD_X = 1.5
 _BOX_PAD_Y = 0.45
 # Horizontal padding inside a table cell, and the width reserved for each
@@ -260,7 +267,7 @@ _HRULE_RE = re.compile(r"^(?:-{3,}|\*{3,}|_{3,})$")
 _LIST_RE = re.compile(r"^(\s*)([-*+]|\d+[.)])\s+(.*)$")
 _FENCE_RE = re.compile(r"^\s*(```+|~~~+)")
 # A fenced container's line: three or more colons, then a name when it opens.
-_DIV_RE = re.compile(r"^\s*(:{3,})\s*([A-Za-z][\w-]*)?\s*$")
+_DIV_RE = re.compile(r"^\s*(:{3,})\s*([A-Za-z][\w-]*)?(?:\s+([\w-]+))?\s*$")
 _LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)\s]*)(?:\s+\"[^\"]*\")?\)")
 # A standalone image line: ![alt](path). Rendered as its own block, sized to
 # the image's aspect ratio (the inline form mid-paragraph is intentionally not
@@ -344,6 +351,8 @@ class _SemLine:
     inset: float = 0.0
     inset_r: float = 0.0
     box: tuple[int, float, float] | None = None
+    # A bullet's dot on this line: (role, x of the bullet's gutter).
+    dot: tuple[str, float] | None = None
 
 
 @dataclass
@@ -374,10 +383,9 @@ class _Row:
     # Carried so a rich (HTML) copy of a selection can wrap the row in <h1>..<h6>
     # rather than losing the heading to a flat bold line.
     heading: int = 0
-    # The ordinal of the code block whose Copy button this row carries
-    # (``code_copy``), else -1. Its fill starts at ``fill_x`` rather than at
-    # the right-aligned button, and it is chrome, not text: a selection or a
-    # search never sees it.
+    # Chrome, not text, when >= 0: a code block's band above / below its lines
+    # (a vector backend). A selection or a search never sees it. ``fill_x``
+    # overrides where a code row's fill starts.
     copy_block: int = -1
     fill_x: float | None = None
     # The containers the row sits in (see _SemLine): its left inset (where a
@@ -385,6 +393,11 @@ class _Row:
     inset: float = 0.0
     fill_r: float = 0.0
     box: tuple[int, float, float] | None = None
+    dot: tuple[str, float] | None = None
+    # The first row of a code block carries its Copy button at its right end
+    # (``copy_x`` is the button's right edge): the ordinal of the block, else -1.
+    copy_label: int = -1
+    copy_x: float = 0.0
 
 
 @dataclass
@@ -623,11 +636,25 @@ def _fence_closing(opening: str) -> "re.Pattern[str]":
     return re.compile(r"^\s*" + re.escape(opening[0]) + "{" + str(len(opening)) + r",}\s*$")
 
 
-def _contain(name: str | None, sems: list[_SemLine], boxes: list[int]) -> None:
+def _contain(name: str | None, sems: list[_SemLine], boxes: list[int],
+             arg: str | None = None) -> None:
     """Apply a fenced container named ``name`` to its parsed lines. An
     unknown name leaves them as they are (Pandoc keeps the content too)."""
-    if name == "indent":
+    if name in ("indent", "bullet"):
         left, right = _DIV_INDENT, 0.0
+        if name == "bullet":
+            first = next((m for m in sems if m.block not in ("blank", "pad")), None)
+            if first is not None and first.dot is None:
+                first.dot = (arg or "", first.inset)
+                for m in sems:
+                    if m.dot is not None and m is not first:
+                        m.dot = (m.dot[0], m.dot[1] + left)
+                for m in sems:
+                    if m.box is not None:
+                        o, bl, br = m.box
+                        m.box = (o, bl + left, br + right)
+                    m.inset += left
+                return
     elif name == "box":
         left = right = _BOX_PAD_X
         ordinal = boxes[0]
@@ -637,6 +664,8 @@ def _contain(name: str | None, sems: list[_SemLine], boxes: list[int]) -> None:
     else:
         return
     for sem in sems:
+        if sem.dot is not None:
+            sem.dot = (sem.dot[0], sem.dot[1] + left)
         if sem.box is not None:
             # An inner container's box moves with this one's inset (a box in
             # a box draws the inner one only).
@@ -816,7 +845,7 @@ def _parse_lines(lines: list[str], refs: dict[str, str],
                         break
                 inner.append(ln)
             sems = _parse_lines(inner, refs, boxes)
-            _contain(div.group(2), sems, boxes)
+            _contain(div.group(2), sems, boxes, div.group(3))
             out.extend(sems)
             continue
 
@@ -1662,11 +1691,14 @@ class MarkdownView(Widget):
         start = len(job.rows)
         pad = self._pad_x
         if pad:
-            box = sem.box
+            box, dot = sem.box, sem.dot
             sem = replace(sem, inset=sem.inset + pad, inset_r=sem.inset_r + pad,
-                          box=None if box is None else (box[0], box[1] + pad, box[2] + pad))
+                          box=None if box is None else (box[0], box[1] + pad, box[2] + pad),
+                          dot=None if dot is None else (dot[0], dot[1] + pad))
         self._layout_sem_rows(sem, job, width - sem.inset_r, lc, theme, measure,
                               line_height, body_size)
+        if sem.dot is not None and len(job.rows) > start:
+            job.rows[start].dot = sem.dot
         if not (sem.inset or sem.inset_r or sem.box):
             return
         box_bg = theme.button_secondary_bg
@@ -1709,11 +1741,11 @@ class MarkdownView(Widget):
             rows.append(_Row(0.0, [], job.pitch, rule=True, quote=qd))
             return
         if sem.block == "code":
-            if self.code_copy:
-                rows.append(self._copy_row(job.code_index, width, measure, line_height,
-                                           theme, qd, sem.inset))
+            index = job.code_index if self.code_copy else -1
             job.code_index += 1
-            rows.extend(self._layout_code(sem, width, measure, line_height, theme, qd))
+            rows.extend(self._layout_code(
+                sem, width, measure, line_height, theme, qd, copy_index=index,
+                pad_y=_CODE_PAD_Y * job.pitch if lc.vector_shapes else 0.0))
             return
         if sem.block == "table" and sem.table is not None:
             # A vector backend overlaps real strokes, so its border rows need
@@ -1805,7 +1837,8 @@ class MarkdownView(Widget):
             rows.append(_Row(x0, cells, height, quote=qd, heading=hlevel))
 
     def _layout_code(
-        self, sem: _SemLine, width: float, measure, line_height, theme: Theme, qd: int
+        self, sem: _SemLine, width: float, measure, line_height, theme: Theme, qd: int,
+        copy_index: int = -1, pad_y: float = 0.0,
     ) -> list[_Row]:
         """Lay out a fenced code block: one row per (char-wrapped) source line,
         each carrying a ``code_bg`` so ``draw`` paints a continuous block-wide
@@ -1827,29 +1860,30 @@ class MarkdownView(Widget):
         base = style_for(None)
         h = line_height(base)
         rows: list[_Row] = []
+        # The Copy button sits at the right end of the first row, which wraps
+        # short of it, so no row of its own is spent on it.
+        label_w = 0.0
+        if copy_index >= 0:
+            label_style = Style(fg=theme.muted_text, bg=bg, font=self.code_font)
+            label_w = max(measure(_COPY_LABEL, label_style),
+                          measure(_COPIED_LABEL, label_style)) + 1.0
         segments = highlighted if highlighted is not None else [[(ln, None)] for ln in code_lines]
-        for segs in segments:
+        for k, segs in enumerate(segments):
             spans = [(text, style_for(color), None) for text, color in segs if text]
-            wrapped = _wrap_spans(spans or [("", base, None)], avail, measure, word=False)
+            row_avail = max(1.0, avail - (label_w if k == 0 else 0.0))
+            wrapped = _wrap_spans(spans or [("", base, None)], row_avail, measure, word=False)
             for row in wrapped:
                 rows.append(_Row(left, row, h, quote=qd, code_bg=bg))
+        if copy_index >= 0 and rows:
+            rows[0].copy_label = copy_index
+            rows[0].copy_x = width - _CODE_PAD
+        if pad_y and rows:
+            # Bands above and below the lines: chrome (copy_block), so a
+            # selection or a search never sees them.
+            chrome = max(copy_index, 0)
+            rows.insert(0, _Row(left, [], pad_y, quote=qd, code_bg=bg, copy_block=chrome))
+            rows.append(_Row(left, [], pad_y, quote=qd, code_bg=bg, copy_block=chrome))
         return rows
-
-    def _copy_row(
-        self, index: int, width: float, measure, line_height, theme: Theme, qd: int,
-        inset: float = 0.0,
-    ) -> _Row:
-        """The row above code block ``index`` holding its Copy button: on the
-        block's own fill, so it reads as the block's header, with the button
-        right-aligned in the muted text color and the code face (whose fixed
-        advance keeps "Copy" and "Copied" the same width)."""
-        qind = qd * _QUOTE_INDENT + inset
-        style = Style(fg=theme.muted_text, bg=theme.control_bg, font=self.code_font)
-        label_w = measure(_COPY_LABEL, style)
-        x0 = max(qind, width - _CODE_PAD - label_w)
-        return _Row(x0, [(_COPY_LABEL, style, f"{_COPY_HREF}{index}")],
-                    line_height(style), quote=qd, code_bg=theme.control_bg,
-                    copy_block=index, fill_x=qind)
 
     def _layout_table(
         self, tbl: _Table, width: float, measure, theme: Theme, qd: int,
@@ -2085,6 +2119,8 @@ class MarkdownView(Widget):
             if row.box is not None and row.box[0] not in boxes_drawn:
                 boxes_drawn.add(row.box[0])
                 self._draw_box(ctx, rows, index, box_bg, theme)
+            if row.dot is not None:
+                self._draw_dot(ctx, row, y, theme)
             if row.image is not None:
                 path, alt, w, h = row.image
                 ctx.draw_image(row.x0, y, path, hints={"w": w, "h": h, "fit": "contain", "alt": alt})
@@ -2131,6 +2167,18 @@ class MarkdownView(Widget):
                 if href:
                     self._link_hits.append((x, y, x + w, y + row.height, href))
                 x += w
+            focused_copy = (index, -1, -1, -2) in focus_parts
+            if row.copy_label >= 0 and (focused_copy or self._copy_shown(ctx, rows, index)):
+                copied = row.copy_label == self._copied_block
+                text = _COPIED_LABEL if copied else _COPY_LABEL
+                style = Style(fg=theme.muted_text, bg=row.code_bg, font=self.code_font)
+                w = ctx.measure_text(text, style)
+                lx = row.copy_x - w
+                if focused_copy:
+                    style = self._focus_link_style(ctx, lx, y, w, row.height, style, theme)
+                ctx.draw_text(lx, y, text, style, over_fill=True)
+                self._link_hits.append((lx, y, lx + w, y + row.height,
+                                        f"{_COPY_HREF}{row.copy_label}"))
             if self._search_pattern and row.spans:
                 self._draw_search_row(ctx, y, row, index == current_match, theme)
             if self.selectable:
@@ -2159,6 +2207,42 @@ class MarkdownView(Widget):
             ctx.draw_scrollbar(
                 ctx.size_units[0] - 1, 0, view_h, max(0.0, min(1.0, pos)), ratio, self.style
             )
+
+    def _copy_shown(self, ctx: DrawContext, rows: list[_Row], index: int) -> bool:
+        """Whether the Copy button of the code block starting at row ``index``
+        shows: always on a grid (no hover there), just copied, or while the
+        pointer is over the block on a vector backend."""
+        if not ctx.vector_shapes or rows[index].copy_label == self._copied_block:
+            return True
+        j0 = index - 1 if index > 0 and rows[index - 1].copy_block >= 0 else index
+        j1 = index
+        while j1 + 1 < len(rows) and rows[j1 + 1].code_bg is not None \
+                and rows[j1 + 1].copy_label < 0:
+            j1 += 1
+            if rows[j1].copy_block >= 0:
+                break  # the band below the block
+        top = self._row_tops[j0] - self.offset
+        bottom = self._row_tops[j1 + 1] - self.offset
+        # pointer_in also tells the panel to redraw when the pointer
+        # crosses the block's edge.
+        return ctx.pointer_in(0.0, top, self._wrap_width, bottom - top)
+
+    def _draw_dot(self, ctx: DrawContext, row: _Row, y: float, theme: Theme) -> None:
+        """A bullet's dot, centered in its gutter beside the row."""
+        role, x = row.dot
+        color = _DOT_COLORS.get(role)
+        if color is None:
+            color = theme.accent if role == "accent" else theme.muted_text
+        if not ctx.vector_shapes:
+            ctx.draw_text(x, y, "●", Style(fg=color))
+            return
+        pbw, pbh = ctx.layout_context().pixel_base
+        line = min(row.height, ctx.line_height())
+        dh = 0.36 * line
+        dw = dh * pbh / pbw if pbw else dh
+        cx = x + _DIV_INDENT / 2.0 - 0.25
+        ctx.round_rect(cx - dw / 2.0, y + (line - dh) / 2.0, dw, dh, Style(bg=color),
+                       radius=None, hints={"fill": True})
 
     def _draw_box(self, ctx: DrawContext, rows: list[_Row], index: int, bg: Color,
                   theme: Theme) -> None:
@@ -3147,6 +3231,11 @@ class MarkdownView(Widget):
             if row.image is not None or row.rule:
                 prev = None
                 continue
+            if row.copy_label >= 0:
+                # The Copy button at the end of a code block's first row: a
+                # stop of its own (si -2 marks it), before the code's text.
+                prev = None
+                links.append([(r, -1, -1, -2)])
             for si, (text, _st, href) in enumerate(row.spans):
                 if text:
                     visit((r, -1, -1, si), href)
@@ -3205,6 +3294,8 @@ class MarkdownView(Widget):
             return None
         r, ci, li, si = links[self._link_focus][0]
         row = self._rows[r]
+        if si == -2:
+            return f"{_COPY_HREF}{row.copy_label}"
         if ci < 0:
             return row.spans[si][2]
         return row.table.cells[ci][3][li][si][2]

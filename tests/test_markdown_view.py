@@ -1777,14 +1777,52 @@ def test_code_copy_is_off_by_default():
     assert not view.focus_advance(1)
 
 
-def test_code_copy_puts_a_button_above_each_block():
+def test_code_copy_puts_the_button_on_each_blocks_first_row():
     backend, _p, view = _shown(_CODE_DOC, height=20, code_copy=True)
-    buttons = [(i, row) for i, row in enumerate(view._rows) if row.copy_block >= 0]
-    assert [row.copy_block for _, row in buttons] == [0, 1]
-    for i, row in buttons:
-        # Right-aligned, on its own row, directly above the block's first line.
-        assert _row_text(backend, i).rstrip().endswith("Copy")
-        assert view._rows[i + 1].code_bg is not None and view._rows[i + 1].copy_block < 0
+    firsts = [(i, row) for i, row in enumerate(view._rows) if row.copy_label >= 0]
+    assert [row.copy_label for _, row in firsts] == [0, 1]
+    for i, row in firsts:
+        # Right-aligned at the end of the block's first line: no row of its own.
+        text = _row_text(backend, i).rstrip()
+        assert text.endswith("Copy") and row.spans and row.code_bg is not None
+    assert not any(r.copy_block >= 0 for r in view._rows)  # no bands on a grid
+
+
+def test_a_long_first_line_wraps_short_of_the_button():
+    backend, _p, view = _shown("```\n" + "x" * 60 + "\n```", width=40, height=6,
+                               code_copy=True)
+    first = next(i for i, r in enumerate(view._rows) if r.copy_label >= 0)
+    line = _row_text(backend, first)
+    assert line.rstrip().endswith("Copy") and "x Copy" not in line
+    assert line.count("x") < 40 - 6
+
+
+def test_on_a_vector_backend_copy_shows_on_hover_over_bands():
+    backend = _VectorBackend(width=40, height=10)
+    panel = Panel(backend)
+    view = MarkdownView("```\nabc\n```", code_copy=True)
+    panel.add(view, x=0, y=0, w=40, h=10)
+    panel.render()
+    rows = view._rows
+    # Thin bands above and below the line, chrome to a selection.
+    assert rows[0].copy_block >= 0 and rows[-1].copy_block >= 0
+    assert 0 < rows[0].height < 1
+    first = next(i for i, r in enumerate(rows) if r.copy_label >= 0)
+    assert view._link_hits == []  # no pointer over it: no button
+    panel.dispatch_event(Event(type=EventType.MOUSE_MOVE, x=5, y=1))  # over the block
+    panel.render()
+    assert any(h[4].startswith("\x00code-copy:") for h in view._link_hits)
+    assert first == 1
+
+
+def test_a_bullet_dots_its_first_row():
+    sems = parse_markdown("::: bullet success\nhello\n\nmore\n:::\n\n::: bullet\nx\n:::")
+    dotted = [s for s in sems if s.dot is not None]
+    assert [d.dot for d in dotted] == [("success", 0.0), ("", 0.0)]
+    assert all(s.inset == 2.0 for s in sems if s.runs)
+    backend, _p, view = _shown("::: bullet error\nhello\n:::", width=30)
+    assert backend.snapshot()[0].startswith("●")
+    assert backend.style_at(0, 0).fg == (241, 76, 76)
 
 
 def test_the_copy_buttons_are_tab_stops_and_enter_copies_the_block():

@@ -35,7 +35,7 @@ One implementation each, running unchanged on every backend.
 | `Splitter` | `splitter.py` | Two panes with a draggable divider (drag to resize) |
 | `ListView` | `list.py` | Scrollable selectable rows; text by default (over-long rows clip, or elide with `ellipsis`/`elide_where`), or a widget per row via `row_factory`; `allow_no_selection` permits `selected == -1`, drawn with no highlight at all |
 | `LogView` | `log_view.py` | Virtualized append-only stream; per-line color, wrap, drag-select + copy (a drag held past an edge keeps scrolling, so a selection runs past one screenful), tail-follow |
-| `MarkdownView` | `markdown_view.py` | Scrolling read-only Markdown viewer; proportional prose + monospace/sized headings, clickable links (Tab / Enter from the keyboard; per-view `on_link` handler for any scheme), images; opt-in `selectable` (drag-select + copy as plain **and** rich HTML; a drag held past an edge keeps scrolling); opt-in `code_copy` (a Copy button above each fenced code block, a Tab stop); `focus_stop_kinds` says which stops a document has (`link`, `copy`), for a host's key hint; `update_source` replaces a document that grows (a streamed reply, a log) keeping the scroll, a selection in the unchanged part and the layout of the lines before the change, and with `follow_end` keeps showing the end while the reader stays there |
+| `MarkdownView` | `markdown_view.py` | Scrolling read-only Markdown viewer; proportional prose + monospace/sized headings, clickable links (Tab / Enter from the keyboard; per-view `on_link` handler for any scheme), images; opt-in `selectable` (drag-select + copy as plain **and** rich HTML; a drag held past an edge keeps scrolling); opt-in `code_copy` (a Copy button at the end of each fenced code block's first line, a Tab stop; on hover on a vector backend); `focus_stop_kinds` says which stops a document has (`link`, `copy`), for a host's key hint; `update_source` replaces a document that grows (a streamed reply, a log) keeping the scroll, a selection in the unchanged part and the layout of the lines before the change, and with `follow_end` keeps showing the end while the reader stays there |
 | `TreeView` / `TreeNode` | `tree.py` | Expandable hierarchical rows with indentation |
 | `Tabs` | `tabs.py` | Title strip swapping a content pane |
 | `MenuBar` / `MenuPopup` | `menu.py` | Widget-rendered menu fallback (non-`native_menus` backends) |
@@ -206,10 +206,13 @@ Inline mixed styles, links, flowing content.
   `TextAttribute.STRIKETHROUGH`) / code / links, including `<autolinks>`, bare
   URLs, and `[text][ref]` reference links; blocks cover ATX **and setext**
   headings, **hard line breaks**, **nested / reflowed block quotes**, and
-  **fenced containers** (`::: box` / `::: indent` ... `:::`, the Pandoc and
-  markdown-it syntax): a box is a rounded, outlined panel on a vector backend
-  and a plain fill on a grid; an indent moves its content right; an unknown
-  name keeps its content as is.
+  **fenced containers** (`::: box` / `::: indent` / `::: bullet <role>` ...
+  `:::`, the Pandoc and markdown-it syntax): a box is a rounded, outlined panel
+  on a vector backend and a plain fill on a grid; an indent moves its content
+  right; a bullet indents too and puts a dot beside its first line, colored by
+  its role (`success`, `error`, `warning`, `accent`, else muted) - a timeline of
+  steps; an unknown name keeps its content as is. `pad_x` pads the content on
+  both sides inside the view, its scrollbar staying at the edge.
   Virtualized over variable row heights.
   **`measure(lc, "y", width)`** reports the document's laid-out height at a
   width — the same layout `draw` runs (which now takes a `LayoutContext`), on a
@@ -221,17 +224,20 @@ Inline mixed styles, links, flowing content.
   `TextBlock` opt in, rather than duplicating it.
 
 ##### Code-block Copy button — **shipped**
-`MarkdownView(..., code_copy=True)` puts a **Copy** button above every fenced
-code block, on a row of its own, right-aligned on the block's fill — the one
-GitHub and VS Code show. It rides the link machinery rather than adding a
-second focus model: the button is a span carrying a private href (a NUL-prefixed
+`MarkdownView(..., code_copy=True)` puts a **Copy** button at the right end of
+every fenced code block's first line, which wraps short of it, so no row is
+spent on it. A vector backend shows it while the pointer is over the block (as
+GitHub and VS Code do; thin bands above and below the lines replace the row it
+used to take); a grid always shows it. It rides the link machinery rather than
+adding a second focus model: the button carries a private href (a NUL-prefixed
 `\x00code-copy:<n>` no real link can spell), so it is a Tab / Shift+Tab stop in
 document order beside the links, Enter or a click activates it, and
 `follow_link` intercepts it before `on_link` sees anything. The block's source
 text goes to `Panel.set_clipboard` (OSC 52 / the OS clipboard, per backend), and
 the label reads *Copied* — the same width in the code face — until the keyboard
-focus moves. The row is chrome: `selection_text` / `selection_html` skip it and a
-search never matches it. Off by default (additive), so an existing view lays out
+focus moves; a focused button shows on a vector backend too. The button and
+the bands are chrome: `selection_text` / `selection_html` skip them and a search
+never matches them. Off by default (additive), so an existing view lays out
 unchanged.
 
 ##### Selection + copy — **shipped**
