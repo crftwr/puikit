@@ -1845,6 +1845,22 @@ def test_plain_text_between_bullets_breaks_the_timeline():
     assert view._timeline(view._rows) == []
 
 
+def test_a_theme_switch_lays_the_text_out_in_the_new_colors():
+    from dataclasses import replace as _replace
+    backend, panel, view = _shown("::: box\nyou\n:::\n\nplain", width=30, height=6)
+    x = next(i for i, ch in enumerate(backend.snapshot()[0]) if ch == "y")
+    before = backend.style_at(x, 0).bg
+    assert before == panel.theme.button_secondary_bg
+    panel.theme = _replace(panel.theme, button_secondary_bg=(10, 200, 30))
+    panel.render()
+    assert backend.style_at(x, 0).bg == (10, 200, 30)
+    # The view's own style (an app setting its colors from the theme) too.
+    view.style = Style(fg=(1, 2, 3))
+    panel.render()
+    row = next(i for i, line in enumerate(backend.snapshot()) if line.startswith("plain"))
+    assert backend.style_at(0, row).fg == (1, 2, 3)
+
+
 def test_the_copy_buttons_are_tab_stops_and_enter_copies_the_block():
     seen = []
     _b, panel, view = _shown(_CODE_DOC, height=20, code_copy=True,
