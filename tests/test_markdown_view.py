@@ -2083,3 +2083,18 @@ def test_selection_skips_container_fences():
     panel.render()
     text = view.selection_text()
     assert "hello" in text and "world" in text and ":::" not in text
+
+
+def test_pad_x_narrows_the_column_and_keeps_the_bar_at_the_edge():
+    src = "\n\n".join(f"word {n} " * 6 for n in range(30))
+    backend, panel, view = _shown(src, width=40, height=8)
+    view.pad_x = 5
+    panel.render()
+    snap = backend.snapshot()
+    assert all(line[:5].strip() == "" for line in snap)  # blank on the left
+    rows_x = [r.x0 for r in view._rows if r.spans]
+    assert min(rows_x) == 5
+    # The scrollbar still draws in the view's last column, past the padding.
+    assert any(line[39] != " " or backend.style_at(39, y) != backend.style_at(38, y)
+               for y, line in enumerate(snap))
+    assert all(line[34:39].strip() == "" for line in snap)

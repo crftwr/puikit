@@ -1270,6 +1270,7 @@ class MarkdownView(Widget):
         #: drawn) shows the new end. A view scrolled away from it stays put.
         #: For a log or a conversation that is appended to while it is read.
         self.follow_end = False
+        self._pad_x = 0.0
         # Set by update_source: the next draw lays out to the end and scrolls
         # there (follow_end, and the view was at its end).
         self._pin_end = False
@@ -1393,6 +1394,23 @@ class MarkdownView(Widget):
                 selectable=selectable,
                 base_dir=base_dir or os.path.dirname(os.path.abspath(path)),
             )
+
+    @property
+    def pad_x(self) -> float:
+        """Blank space (base units) on each side of the content, inside the
+        view: the text column narrows, the scrollbar stays at the view's
+        right edge - a reading column in a wide pane, its bar at the edge."""
+        return self._pad_x
+
+    @pad_x.setter
+    def pad_x(self, value: float) -> None:
+        value = max(0.0, float(value))
+        if value != self._pad_x:
+            self._pad_x = value
+            self._layout_cache.clear()
+            self._layout_jobs = {}
+            self._rows = None
+            self._wrap_width = -1.0
 
     def set_source(self, source: str) -> None:
         self._sems = parse_markdown(source)
@@ -1642,6 +1660,11 @@ class MarkdownView(Widget):
         """Append the rows of one semantic line to ``job.rows``, inside the
         containers around it."""
         start = len(job.rows)
+        pad = self._pad_x
+        if pad:
+            box = sem.box
+            sem = replace(sem, inset=sem.inset + pad, inset_r=sem.inset_r + pad,
+                          box=None if box is None else (box[0], box[1] + pad, box[2] + pad))
         self._layout_sem_rows(sem, job, width - sem.inset_r, lc, theme, measure,
                               line_height, body_size)
         if not (sem.inset or sem.inset_r or sem.box):
