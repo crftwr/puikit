@@ -14,33 +14,47 @@ else ifeq ($(OS),Windows_NT)
     IS_WINDOWS := 1
 endif
 
+# --- Windows: stop when the Windows environment did not reach make ------------
+# Git Bash (Git for Windows' own msys) starting MSYS2's make hands it almost
+# none of the Windows environment. Two programs then take the current directory
+# for the folder a variable should have named: gh writes .local/, and `py`
+# (%LocalAppData%\Python) installs a whole Python into the checkout and points
+# the user's registry entries and Start menu at it, dropping the others'
+# (it happened in puikit on 2026-11-24).
+ifeq ($(IS_WINDOWS),1)
+ifeq ($(LOCALAPPDATA),)
+$(error On Windows, run make from PowerShell, cmd or an MSYS2 shell, not from Git Bash. The Windows environment did not reach make (LOCALAPPDATA is empty))
+endif
+endif
+
+# `py` never downloads a Python for a make target: not having one is an error.
+export PYTHON_MANAGER_AUTOMATIC_INSTALL := false
+
 ifeq ($(IS_WINDOWS),1)
     # Windows: venv scripts live in Scripts/, executables end in .exe. Prefer
     # python3.14 if it's on PATH; otherwise fall back to the `py` launcher.
     # `where.exe` cannot be used for this check: it's a native Windows tool
     # that reads PATH in Windows (semicolon) format, but the shell make spawns
-    # here exports a POSIX-style PATH — `where` always finds nothing and silently
-    # falls back to `py`, which (confirmed) auto-downloads a fresh Python install
-    # into the current directory (a stray `Python/` folder) instead of using the
-    # one already on PATH. `command -v` is a shell builtin, so it searches the
-    # shell's own PATH correctly instead of re-parsing it as a native Win32 tool.
+    # here exports a POSIX-style PATH — `where` always finds nothing.
+    # `command -v` is a shell builtin, so it searches the shell's own PATH
+    # correctly instead of re-parsing it as a native Win32 tool.
     PY_ON_PATH := $(shell command -v python3.14 2>/dev/null)
     ifneq ($(strip $(PY_ON_PATH)),)
         PYTHON := python3.14
-    else
-        PYTHON := py
+    else ifneq ($(MSYS_SHELL),)
         # `py` from the Python install manager is a Store app execution alias
         # (WindowsApps\py.exe). MSYS2 cannot tell when a program started through
         # such an alias has exited: the command prints its output and the
         # recipe then hangs for good (seen on Windows on ARM64; `make venv` stuck
         # after fetch_fonts.py). Started from cmd.exe it returns normally, so ask
-        # it once, that way, for the real interpreter and run that instead.
-        ifneq ($(MSYS_SHELL),)
-            PY_REAL := $(shell cmd.exe //c py -c "import sys;print(sys.executable)" 2>/dev/null | tr -d '\r' | tr '\\' '/')
-            ifneq ($(strip $(PY_REAL)),)
-                PYTHON := "$(PY_REAL)"
-            endif
-        endif
+        # it that way for the real interpreter and run that instead. Deferred
+        # ("="), so that only a recipe that needs a Python outside the venv
+        # asks: `py` used to run for every target, `make -n` included. (The
+        # setting is passed by hand: make before 4.4 does not export to $$(shell).)
+        PY_REAL = $(shell PYTHON_MANAGER_AUTOMATIC_INSTALL=false cmd.exe //c py -c "import sys;print(sys.executable)" 2>/dev/null | tr -d '\r' | tr '\\' '/')
+        PYTHON = "$(or $(PY_REAL),$(error no Python found: neither python3.14 on PATH nor 'py' gave one. Install one first))"
+    else
+        PYTHON := py
     endif
     VENV_PYTHON := $(VENV)/Scripts/python.exe
     VENV_PIP := $(VENV)/Scripts/pip.exe
@@ -93,7 +107,7 @@ endif
 
 help:
 	@echo "PuiKit utility commands:"
-	@echo "  make venv      - create the virtualenv and install puikit ($(VENV)/, $(PYTHON))"
+	@echo "  make venv      - create the virtualenv and install puikit ($(VENV)/)"
 	@echo "  make install   - (re)install puikit into the venv (editable, with dev deps)"
 	@echo "  make fonts     - download the bundled default fonts into puikit/fonts/"
 	@echo "  make libghostty - fetch libghostty-vt into puikit/_bin/ (macOS, Windows)"
