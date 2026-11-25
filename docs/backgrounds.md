@@ -101,6 +101,7 @@ client does not set the seed uniforms yet (they read 0).
 | `textures` | Images the scene samples (§3.1). A plain path is shorthand for `ShaderTexture(path)`. |
 | `frame_rate` | The most frames a second the scene is rendered at; `0` = every frame (§3.3). |
 | `pixel_density` | Render pixels per point, at most the display's own; `0` (default) leaves the scale to `resolution_scale`. `resolution_scale` is a fraction of the *display's* pixels, so a half-scale scene renders twice as coarsely on a standard display as on Retina; a density renders it the same wherever the display can show it (`1.0` = half scale on Retina, full on a standard display). |
+| `label` | The scene's name for diagnostics: a GPU failure report names it. Never drawn. |
 | `targets` | Offscreen textures the passes write and read (§3.2). |
 | `passes` | The scene as a sequence of draws (§3.2). Empty = the single-pass form. |
 
@@ -316,8 +317,19 @@ add nothing. On a failure, pull the report out with:
 log show --last 30m --predicate 'eventMessage CONTAINS "[puikit]"'
 ```
 
-The watch only reports. It does not yet stop drawing or fall back to the
-backdrop when frames fail. That waits on what the reports show.
+The report also names the GPU and the scene (`Shader.label`). A buffer macOS
+aborted has no GPU time (`GPUEndTime` is left at the largest tick count), so it
+reads `n/a (aborted)`.
+
+**A scene the GPU failed on stops (macOS).** A hang, a page fault, refused
+submissions, a removed device or a shader stack overflow stops the scene at
+once; any other failure stops it after three in a row, since a single "victim
+of GPU error/recovery" can be another process's hang. The backend then drops
+the GPU layer and paints the plain backdrop, says so on stderr and in the
+unified log, and stops the animation tick. It submits nothing more, because
+going on after a hang is what makes macOS refuse the process for good. Setting
+the same scene again does not bring it back; setting a different one does, and
+if macOS refuses the process by then, that one stops too.
 
 ### 4.1 Idle parking, and `idle`
 

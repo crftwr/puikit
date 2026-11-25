@@ -166,7 +166,7 @@ class TestDescriptor:
         assert {f.name for f in dataclasses.fields(Shader)} == {
             "source", "speed", "opacity", "ink", "backdrop", "resolution_scale",
             "source_hlsl", "source_glsl", "idle", "textures", "frame_rate", "targets", "passes",
-            "pixel_density"}
+            "pixel_density", "label"}
 
     def test_resolution_scale_is_clamped_above_zero(self):
         # Zero would ask for a zero-sized drawable, which is an error rather than

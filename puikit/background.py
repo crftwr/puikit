@@ -523,6 +523,8 @@ class Shader:
     #: render the same wherever the display can show it: ``1.0`` is what half
     #: scale gives on Retina, and on a standard display it means full scale.
     pixel_density: float = 0.0
+    #: The scene's name for diagnostics: a GPU failure report names it. Never drawn.
+    label: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "frame_rate", max(0.0, float(self.frame_rate or 0.0)))

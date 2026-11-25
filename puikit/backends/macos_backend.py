@@ -4682,11 +4682,12 @@ class MacOSBackend(Backend):
             self._bg_seeds.background_set()
             self._bg_park_retries = 0
             self._bg_running = False
-            self._ensure_background_ticker()
         # A shader draws on the GPU into its own layer beneath the UI, so it needs
         # that layer attached (and the UI view made transparent so it shows
         # through); anything else needs it gone so the UI is opaque again.
         self._sync_shader_layer()
+        # After the sync: a new scene clears the stop a failed one left behind.
+        self._ensure_background_ticker()
         if self._view is not None:
             self._view.setNeedsDisplay_(True)
 
@@ -4701,20 +4702,14 @@ class MacOSBackend(Backend):
         """
         shader = self._background if isinstance(self._background, Shader) else None
         if shader is None:
-            if self._metal_layer is not None:
-                self._metal_layer.removeFromSuperlayer()
-                self._metal_layer = None
-                # Also give up layer backing. Hosting the GPU layer requires it,
-                # but leaving it on afterwards makes every *other* background pay
-                # whatever it costs for the rest of the session — and quietly
-                # skews any before/after comparison between kinds.
-                if self._container is not None:
-                    self._container.setWantsLayer_(False)
+            self._drop_shader_layer()
             return
         if not _HAS_METAL:
             return
         if self._metal is None:
             self._metal = MetalBackground()
+            self._metal.gpu_watch.on_stop = (
+                lambda: self.call_on_main_thread(self._shader_stopped_drawing))
             if not self._metal.available:
                 return
         if not self._metal.set_shader(shader):
@@ -4725,6 +4720,9 @@ class MacOSBackend(Backend):
             if self._metal_layer is not None:
                 self._metal_layer.removeFromSuperlayer()
                 self._metal_layer = None
+            return
+        if self._shader_stopped:
+            self._drop_shader_layer()      # the same scene set again: still failed
             return
         if self._metal_layer is None and self._container is not None:
             layer = CAMetalLayer.layer()
@@ -4754,6 +4752,35 @@ class MacOSBackend(Backend):
             self._container.layer().setBackgroundColor_(
                 NSColor.colorWithSRGBRed_green_blue_alpha_(r, g, b, 1.0).CGColor())
         self._fit_shader_layer()
+
+    def _drop_shader_layer(self) -> None:
+        """Detach the GPU layer, so the frame paints its own opaque backdrop."""
+        if self._metal_layer is None:
+            return
+        self._metal_layer.removeFromSuperlayer()
+        self._metal_layer = None
+        # Also give up layer backing. Hosting the GPU layer requires it,
+        # but leaving it on afterwards makes every *other* background pay
+        # whatever it costs for the rest of the session — and quietly
+        # skews any before/after comparison between kinds.
+        if self._container is not None:
+            self._container.setWantsLayer_(False)
+
+    @property
+    def _shader_stopped(self) -> bool:
+        """Whether the active scene failed on the GPU and must not draw again."""
+        return self._metal is not None and self._metal.gpu_watch.stopped is not None
+
+    def _shader_stopped_drawing(self) -> None:
+        """The scene failed on the GPU (``GpuWatch.on_stop``, hopped to the main
+        thread): show the plain backdrop instead of a frozen or garbage frame. The
+        tick parks itself on its next turn. A new scene set by the time this runs
+        has cleared the stop and keeps its layer."""
+        if not self._shader_stopped:
+            return
+        self._drop_shader_layer()
+        if self._view is not None:
+            self._view.setNeedsDisplay_(True)
 
     def _fit_shader_layer(self) -> None:
         """Match the GPU layer to the container's size in *pixels* (the layer is
@@ -4812,7 +4839,7 @@ class MacOSBackend(Backend):
         does not itself trigger a repaint — see _on_animation_tick — so it must ask).
         A static wallpaper never registers this, so it does not spin the timer."""
         background = self._background
-        if not isinstance(background, Shader):
+        if not isinstance(background, Shader) or self._shader_stopped:
             self._bg_running = False
             return False
         now = time.monotonic()
@@ -4959,7 +4986,8 @@ class MacOSBackend(Backend):
     def _ensure_background_ticker(self) -> None:
         """Re-arm the background tick if it parked itself while idle. Cheap to call
         on every input: returns immediately once running."""
-        if self._bg_running or not isinstance(self._background, Shader):
+        if (self._bg_running or not isinstance(self._background, Shader)
+                or self._shader_stopped):
             return
         self._bg_running = True
         # Reset the tick baseline, or the first dt would be the whole idle stretch.
