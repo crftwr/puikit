@@ -80,6 +80,93 @@ def test_a_question_that_must_be_answered_ignores_escape(backend):
     assert panel._layers == []
 
 
+@pytest.mark.parametrize("stray", [_key("enter"), _key("space", " "), _key("y", "y")],
+                         ids=["enter", "space", "letter"])
+def test_with_no_default_a_stray_key_presses_nothing(backend, stray):
+    results = []
+    panel = Panel(backend)
+    box = show_message_box(
+        panel, "Allow?", buttons=("Allow", "Always", "Deny"), default=None,
+        on_result=results.append,
+    )
+    panel.render()
+    assert box.default is None and box.focused is None
+    panel.dispatch_event(stray)
+    panel.render()
+    assert results == [] and box.focused is None
+    assert [slot.widget for slot in panel._layers] == [box]
+
+
+@pytest.mark.parametrize("keys, chosen", [
+    (["left"], "Allow"),
+    (["up"], "Allow"),
+    (["right"], "Deny"),
+    (["down"], "Deny"),
+    (["tab"], "Deny"),
+    (["left", "right"], "Always"),
+    (["right", "left"], "Always"),
+])
+def test_with_no_default_the_first_arrow_takes_the_end_it_points_to(backend, keys, chosen):
+    results = []
+    panel = Panel(backend)
+    show_message_box(
+        panel, "Allow?", buttons=("Allow", "Always", "Deny"), default=None,
+        on_result=results.append,
+    )
+    panel.render()
+    for key in keys:
+        panel.dispatch_event(_key(key))
+        panel.render()
+    panel.dispatch_event(_key("enter"))
+    assert results == [chosen]
+    assert panel._layers == []
+
+
+@pytest.mark.parametrize("act, chosen", [("escape", "No"), ("click", "Yes")])
+def test_with_no_default_escape_and_a_click_work_at_once(backend, act, chosen):
+    results = []
+    panel = Panel(backend)
+    box = show_message_box(
+        panel, "Go?", buttons=("Yes", "No"), default=None, on_result=results.append,
+    )
+    panel.render()
+    if act == "escape":
+        panel.dispatch_event(_key("escape"))
+    else:
+        rect = panel._layers[0].rect
+        x0, _x1, y0, _y1 = box._button_x[0]
+        panel.dispatch_event(Event(
+            type=EventType.MOUSE_CLICK, x=rect.x + x0, y=rect.y + y0, button="left",
+        ))
+    assert results == [chosen]
+    assert panel._layers == []
+
+
+def test_with_no_default_no_button_is_marked():
+    backend = MemoryBackend(width=60, height=20, capabilities=PROFILE_TUI)
+    panel = Panel(backend)
+    show_message_box(panel, "Go?", buttons=("Yes", "No"), default=None)
+    panel.render()
+    assert not any("[" in row for row in backend.snapshot())
+    panel.dispatch_event(_key("right"))
+    panel.render()
+    row = next(r for r in backend.snapshot() if "[" in r)
+    assert row.index("Yes") < row.index("[") < row.index("No")
+
+
+def test_the_focus_of_an_open_box_can_be_taken_away(backend):
+    results = []
+    panel = Panel(backend)
+    box = show_message_box(panel, "Go?", buttons=("Yes", "No"), on_result=results.append)
+    box.default = box.focused = None
+    panel.render()
+    panel.dispatch_event(_key("enter"))
+    assert results == []
+    panel.dispatch_event(_key("left"))
+    panel.dispatch_event(_key("enter"))
+    assert results == ["Yes"]
+
+
 def test_message_box_focus_brackets_symmetric_on_tui():
     # An odd-width box (sized to its message) centering an even-width button row
     # gives the row a half-unit origin; a whole-unit backend rounds each draw
@@ -174,9 +261,9 @@ def test_message_box_close_removes_itself_not_the_topmost_layer(backend):
 
 
 def test_message_box_marks_its_default_by_focus_alone(backend):
-    """Enter presses the focused button and focus always rests on one, so no
-    button wears the accent fill: the focus ring is the one cue, and the
-    default is simply where focus starts."""
+    """Enter presses the focused button, so no button wears the accent fill:
+    the focus ring is the one cue, and the default is simply where focus
+    starts."""
     panel = Panel(backend)
     show_message_box(panel, "Delete?", buttons=("Delete", "Cancel"), default=1)
     box = panel._layers[-1].widget
