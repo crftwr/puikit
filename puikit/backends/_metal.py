@@ -103,6 +103,21 @@ GPU_HISTORY = 30
 #: refuses a process's submissions every later buffer fails too (xefm#892).
 GPU_REPORT_LIMIT = 3
 
+#: ``MTLCommandBufferError`` codes after which this process must not submit the
+#: scene again: a hang (2, "timeout", which is also what macOS calls a GPU hang),
+#: a page fault (3), submissions refused (4), the device removed (11), the shader
+#: stack overflowed (12). Drawing on after a hang is what makes macOS refuse the
+#: process for good.
+_STOP_CODES = frozenset((2, 3, 4, 11, 12))
+
+#: Any other failure stops the scene only when this many come in a row: one "victim
+#: of GPU error/recovery" can be another process's hang.
+_STOP_AFTER = 3
+
+#: A GPU time longer than this is not one. macOS leaves ``GPUEndTime`` at the
+#: largest tick count for a buffer it aborted, which read as 6147620589388 ms.
+_MAX_GPU_SECONDS = 3600.0
+
 
 class GpuWatch:
     """Watches every command buffer this renderer commits (xefm#892).
@@ -115,15 +130,36 @@ class GpuWatch:
     frames before it. The report goes to stderr and to the unified log (NSLog),
     which survives a GUI app launched without a terminal.
 
+    It also decides when drawing has to stop: :attr:`stopped` becomes the reason
+    once a buffer fails in a way that must not be repeated (``_STOP_CODES``), or
+    several fail in a row, and ``on_stop`` is called once. :meth:`reset` clears it
+    for a new scene; a buffer of the scene before then no longer counts.
+
     The handler runs on a Metal thread, so it only appends and formats; nothing
-    here touches the renderer's state.
+    here touches the renderer's state, and ``on_stop`` must not either (the
+    backend's hops to the main thread).
     """
 
     def __init__(self, sink: Any = None) -> None:
         self._history: "collections.deque[float]" = collections.deque(maxlen=GPU_HISTORY)
         self._lock = threading.Lock()
+        self._generation = 0
+        self._in_a_row = 0
         self.failures = 0
+        self.stopped: str | None = None
+        self.on_stop: Any = None
+        #: Repeated in every report: the GPU and the scene's label.
+        self.gpu = ""
+        self.scene = ""
         self._sink = sink if sink is not None else _report
+
+    def reset(self, scene: str = "") -> None:
+        """Forget the failures of the scene before: a new one is about to draw."""
+        with self._lock:
+            self._generation += 1
+            self._in_a_row = 0
+            self.stopped = None
+            self.scene = scene
 
     def command_buffer(self, queue: Any, label: str, **context: Any) -> Any:
         """A new command buffer from ``queue`` named ``label``, with per-encoder
@@ -133,30 +169,56 @@ class GpuWatch:
         desc.setErrorOptions_(Metal.MTLCommandBufferErrorOptionEncoderExecutionStatus)
         command = queue.commandBufferWithDescriptor_(desc)
         command.setLabel_(label)
-        command.addCompletedHandler_(lambda done: self.completed(done, context))
+        generation = self._generation
+        command.addCompletedHandler_(
+            lambda done: self.completed(done, context, generation))
         return command
 
-    def completed(self, command: Any, context: "dict[str, Any]") -> None:
-        """The completion handler: record the GPU time, report a failure."""
-        start, end = command.GPUStartTime(), command.GPUEndTime()
-        gpu_ms = (end - start) * 1000.0 if end > start else 0.0
+    def completed(self, command: Any, context: "dict[str, Any]",
+                  generation: "int | None" = None) -> None:
+        """The completion handler: record the GPU time, report a failure, and stop
+        the scene over one that must not be repeated. ``generation`` is the one
+        the buffer was made in (the current one by default)."""
+        seconds = command.GPUEndTime() - command.GPUStartTime()
+        timed = 0.0 < seconds < _MAX_GPU_SECONDS
         if command.status() != Metal.MTLCommandBufferStatusError:
             with self._lock:               # list(self._history) below copies it
-                self._history.append(gpu_ms)
+                self._history.append(seconds * 1000.0 if timed else 0.0)
+                if generation is None or generation == self._generation:
+                    self._in_a_row = 0
             return
+        error = command.error()
+        code = _error_code(error)
+        stop = None
         with self._lock:
             self.failures += 1
             count = self.failures
             history = list(self._history)
-        if count > GPU_REPORT_LIMIT:
-            return
+            scene = self.scene
+            if generation is None or generation == self._generation:
+                self._in_a_row += 1
+                if self.stopped is None and (code in _STOP_CODES
+                                             or self._in_a_row >= _STOP_AFTER):
+                    stop = self.stopped = _describe_error(error)
+        if count <= GPU_REPORT_LIMIT:
+            self._write(command, error, context, count, scene, history,
+                        f"{seconds * 1000.0:.1f}" if timed else "n/a (aborted)")
+        if stop is not None:
+            self._sink([f"background scene {scene or '(unnamed)'} stopped after a GPU "
+                        f"failure; the plain backdrop is shown instead ({stop})"])
+            if self.on_stop is not None:
+                self.on_stop()
+
+    def _write(self, command: Any, error: Any, context: "dict[str, Any]", count: int,
+               scene: str, history: "list[float]", gpu_ms: str) -> None:
         lines = [f"GPU command buffer failed #{count} ({command.label()}): "
-                 + _describe_error(command.error())]
+                 + _describe_error(error)]
+        lines.append(f"  scene: {scene or '(unnamed)'}, GPU: {self.gpu or '(unknown)'}")
         if context:
             lines.append("  frame: " + ", ".join(f"{k}={_short(v)}"
                                                  for k, v in context.items()))
-        lines.append(f"  GPU ms of this buffer: {gpu_ms:.1f}")
-        for info in _encoder_infos(command.error()):
+        lines.append(f"  GPU ms of this buffer: {gpu_ms}")
+        for info in _encoder_infos(error):
             lines.append(f"  pass {info[0]!r}: {info[1]}")
         lines.append("  GPU ms of the frames before: "
                      + (" ".join(f"{ms:.1f}" for ms in history) or "(none)"))
@@ -167,6 +229,14 @@ class GpuWatch:
 
 def _short(value: Any) -> str:
     return f"{value:.2f}" if isinstance(value, float) else str(value)
+
+
+def _error_code(error: Any) -> int:
+    """The ``MTLCommandBufferError`` code, or 0 when there is none to read."""
+    try:
+        return int(error.code())
+    except Exception:  # noqa: BLE001 - a report must never raise
+        return 0
 
 
 def _describe_error(error: Any) -> str:
@@ -230,6 +300,8 @@ class MetalBackground:
         self._device = Metal.MTLCreateSystemDefaultDevice() if HAVE_METAL else None
         self._queue = self._device.newCommandQueue() if self._device is not None else None
         self.gpu_watch = GpuWatch()
+        if self._device is not None:
+            self.gpu_watch.gpu = str(self._device.name())
         self._shader = None
         self._error: str | None = None
         # The resolved graph and a pipeline per (entry, output format); None
@@ -278,7 +350,8 @@ class MetalBackground:
         typo, or a graph that does not hold together, costs a blank background
         and an error string, not a crash. Re-setting the same source and graph
         is a no-op (baked targets included), so a theme switch that keeps the
-        background does not recompile.
+        background does not recompile -- and does not bring back a scene the GPU
+        failed on (``gpu_watch.stopped``); a different one gets a new chance.
         """
         if not self.available or shader is None:
             self._plan = None
@@ -290,6 +363,7 @@ class MetalBackground:
             self._sync_textures(shader)
             return True
         self._shader = shader
+        self.gpu_watch.reset(getattr(shader, "label", ""))
         self._plan = None
         self._pipes = {}
         self._fixed, self._sized, self._sized_for = {}, {}, (0, 0)
@@ -572,7 +646,7 @@ class MetalBackground:
         Animation transaction that is resizing the window instead of arriving a
         beat after it. The default is the ordinary asynchronous present.
         """
-        if self._plan is None or not self.available:
+        if self._plan is None or not self.available or self.gpu_watch.stopped is not None:
             return False
         if self._too_soon(fade):
             return True                    # the layer still shows the last frame
