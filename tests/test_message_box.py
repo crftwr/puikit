@@ -326,3 +326,23 @@ def test_a_message_taller_than_the_screen_scrolls(backend):
     top = md.offset
     box.handle_event(Event(type=EventType.MOUSE_SCROLL, x=x0 + 1, y=y0 + 1, scroll=3))
     assert md.offset < top
+
+
+def test_a_plain_line_wider_than_the_screen_wraps(backend):
+    """A long path is shown whole, broken at the box's width, not cut off at
+    the frame - what the user cannot see they cannot agree to."""
+    panel = Panel(backend)
+    path = "/Users/someone/projects/" + "/".join(f"folder{i:02d}" for i in range(12)) + "/end.txt"
+    box = show_message_box(panel, f"Read {path}?", buttons=("Allow", "Deny"))
+    panel.render()
+    rows = box._lines()
+    assert len(rows) > 1 and "".join(rows).replace(" ", "") == f"Read{path}?"
+    text = "".join(backend.snapshot())
+    assert "end.txt?" in text and "folder11" in text
+
+
+def test_a_plain_message_that_fits_is_left_as_written(backend):
+    panel = Panel(backend)
+    box = show_message_box(panel, "One line.\nAnother.", buttons=("OK",))
+    assert box._lines() == ["One line.", "Another."]
+
