@@ -22,6 +22,7 @@ from ..event import Event, EventType
 from ..font import Font
 from ..layout import LayoutContext
 from ..panel import DrawContext
+from ..text import wrap_text
 from .button import Button
 from .markdown_view import MarkdownView
 
@@ -107,11 +108,16 @@ class MessageBox:
         # a click on the message can be routed to the MarkdownView — the view
         # owns the link hit-testing that makes a link in the message clickable.
         self._md_rect: tuple[float, float, float, float] | None = None
+        # A plain message broken at the box's width (show_message_box), so a
+        # line wider than the screen - a long path - is not cut off: what the
+        # user cannot see they cannot agree to.
+        self._rows: list[str] | None = None
 
     # --- drawing -------------------------------------------------------------
 
     def _lines(self) -> list[str]:
-        return self.message.split("\n")
+        # The rows show_message_box wrapped the message to, where it did.
+        return self._rows if self._rows is not None else self.message.split("\n")
 
     def _row_metrics(self, lc: LayoutContext) -> tuple[list[float], float]:
         """Per-button widths and the shared row height, each button measuring
@@ -392,6 +398,13 @@ def show_message_box(
         label_w + 4,
     )
     w = max(28, min(math.ceil(content_w) + 4, panel.backend.size_units[0]))
+    if not markdown:
+        # The width draw() writes in (from x=2 to the frame): a line wider
+        # than that wraps instead of running under the frame.
+        avail = max(1.0, float(w) - 4.0)
+        box._rows = [row for line in lines
+                     for row in wrap_text(line, avail, lambda t: mt(t, prop))]
+        n_rows = len(box._rows)
     if markdown:
         # The height the MarkdownView lays the message out to at the final
         # content width (w - 4, matching draw()'s region) - its own layout, so
